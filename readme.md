@@ -6,6 +6,8 @@
 
 [linux1.0](linux1.0/mynotes/mynotes.ipynb)
 
+[linux4.4](linux4.4/notes/notes4.4.ipynb)
+
 Ref:
 
 [linux0.01 commentary](refs/The_Linux_Kernel_0.01_Commentary.pdf)
