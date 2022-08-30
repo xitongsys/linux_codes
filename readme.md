@@ -1,12 +1,12 @@
 # my notes on reading the linux kernel codes
 
-[linux0.01](linux0.01/mynotes/notes.ipynb)
+[linux0.01](notes/notes0.01/notes.ipynb)
 
-[linux0.97](linux0.97/mynotes/mynotes.ipynb)
+[linux0.97](notes/notes0.97/mynotes.ipynb)
 
-[linux1.0](linux1.0/mynotes/mynotes.ipynb)
+[linux1.0](notes/notes1.0/mynotes.ipynb)
 
-[linux4.4](linux4.4/notes/notes4.4.ipynb)
+[linux4.4](notes/notes4.4/notes4.4.ipynb)
 
 Ref:
 
