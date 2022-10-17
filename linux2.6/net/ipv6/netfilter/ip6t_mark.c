@@ -1,4 +1,13 @@
 /* Kernel module to match NFMARK values. */
+
+/* (C) 1999-2001 Marc Boucher <marc@mbsi.ca>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+
 #include <linux/module.h>
 #include <linux/skbuff.h>
 
@@ -15,8 +24,7 @@ match(const struct sk_buff *skb,
       const struct net_device *out,
       const void *matchinfo,
       int offset,
-      const void *hdr,
-      u_int16_t datalen,
+      unsigned int protoff,
       int *hotdrop)
 {
 	const struct ip6t_mark_info *info = matchinfo;

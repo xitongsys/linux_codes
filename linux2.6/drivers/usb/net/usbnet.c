@@ -31,6 +31,7 @@
  *	- GeneSys GL620USB-A
  *	- NetChip 1080 (interoperates with NetChip Win32 drivers)
  *	- Prolific PL-2301/2302 (replaces "plusb" driver)
+ *	- KC Technology KC2190
  *
  *   + Smart USB devices can support such links directly, using Internet
  *     standard protocols instead of proprietary host-to-device links.
@@ -104,10 +105,19 @@
  * 		disconnect; other cleanups. (db)  Flush net1080 fifos
  * 		after several sequential framing errors. (Johannes Erdfelt)
  * 22-aug-2003	AX8817X support (Dave Hollis).
+ * 14-jun-2004  Trivial patch for AX8817X based Buffalo LUA-U2-KTX in Japan
+ *		(Neil Bortnak)
+ * 03-nov-2004	Trivial patch for KC2190 (KC-190) chip. (Jonathan McDowell)
  *
  *-------------------------------------------------------------------------*/
 
+// #define	DEBUG			// error path messages, extra info
+// #define	VERBOSE			// more; success messages
+
 #include <linux/config.h>
+#ifdef	CONFIG_USB_DEBUG
+#   define DEBUG
+#endif
 #include <linux/module.h>
 #include <linux/kmod.h>
 #include <linux/sched.h>
@@ -120,24 +130,14 @@
 #include <linux/mii.h>
 #include <asm/uaccess.h>
 #include <asm/unaligned.h>
-
-
-// #define	DEBUG			// error path messages, extra info
-// #define	VERBOSE			// more; success messages
-#define	REALLY_QUEUE
-
-#if !defined (DEBUG) && defined (CONFIG_USB_DEBUG)
-#   define DEBUG
-#endif
 #include <linux/usb.h>
-
 #include <asm/io.h>
 #include <asm/scatterlist.h>
 #include <linux/mm.h>
 #include <linux/dma-mapping.h>
 
+#define DRIVER_VERSION		"03-Nov-2004"
 
-#define DRIVER_VERSION		"25-Aug-2003"
 
 /*-------------------------------------------------------------------------*/
 
@@ -148,13 +148,8 @@
  * For high speed, each frame comfortably fits almost 36 max size
  * Ethernet packets (so queues should be bigger).
  */
-#ifdef REALLY_QUEUE
 #define	RX_QLEN(dev) (((dev)->udev->speed == USB_SPEED_HIGH) ? 60 : 4)
 #define	TX_QLEN(dev) (((dev)->udev->speed == USB_SPEED_HIGH) ? 60 : 4)
-#else
-#define	RX_QLEN(dev)		1
-#define	TX_QLEN(dev)		1
-#endif
 
 // packets are always ethernet inside
 // ... except they can be bigger (limit of 64K with NetChip framing)
@@ -173,7 +168,7 @@
 #define CONTROL_TIMEOUT_JIFFIES ((CONTROL_TIMEOUT_MS * HZ)/1000)
 
 // between wakeups
-#define UNLINK_TIMEOUT_JIFFIES ((3  /*ms*/ * HZ)/1000)
+#define UNLINK_TIMEOUT_MS	3
 
 /*-------------------------------------------------------------------------*/
 
@@ -222,6 +217,7 @@ struct driver_info {
 #define FLAG_FRAMING_NC	0x0001		/* guard against device dropouts */ 
 #define FLAG_FRAMING_GL	0x0002		/* genelink batches packets */
 #define FLAG_FRAMING_Z	0x0004		/* zaurus adds a trailer */
+#define FLAG_FRAMING_RN	0x0008		/* RNDIS batches, plus huge header */
 
 #define FLAG_NO_SETINT	0x0010		/* device can't set_interface() */
 #define FLAG_ETHER	0x0020		/* maybe use "eth%d" names */
@@ -274,7 +270,7 @@ static const char driver_name [] = "usbnet";
 
 /* use ethtool to change the level for any given device */
 static int msg_level = 1;
-MODULE_PARM (msg_level, "i");
+module_param (msg_level, int, 0);
 MODULE_PARM_DESC (msg_level, "Initial message level (default = 1)");
 
 
@@ -300,8 +296,10 @@ MODULE_PARM_DESC (msg_level, "Initial message level (default = 1)");
 
 /*-------------------------------------------------------------------------*/
 
-static struct ethtool_ops usbnet_ethtool_ops;
 static void usbnet_get_drvinfo (struct net_device *, struct ethtool_drvinfo *);
+static u32 usbnet_get_link (struct net_device *);
+static u32 usbnet_get_msglevel (struct net_device *);
+static void usbnet_set_msglevel (struct net_device *, u32);
 
 /* mostly for PDA style devices, which are always connected if present */
 static int always_connected (struct usbnet *dev)
@@ -320,7 +318,7 @@ get_endpoints (struct usbnet *dev, struct usb_interface *intf)
 	for (tmp = 0; tmp < intf->num_altsetting; tmp++) {
 		unsigned	ep;
 
-		in = out = 0;
+		in = out = NULL;
 		alt = intf->altsetting + tmp;
 
 		/* take the first altsetting with in-bulk + out-bulk;
@@ -360,6 +358,42 @@ found:
 			out->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
 	return 0;
 }
+
+static void skb_return (struct usbnet *dev, struct sk_buff *skb)
+{
+	int	status;
+
+	skb->dev = dev->net;
+	skb->protocol = eth_type_trans (skb, dev->net);
+	dev->stats.rx_packets++;
+	dev->stats.rx_bytes += skb->len;
+
+#ifdef	VERBOSE
+	devdbg (dev, "< rx, len %d, type 0x%x",
+		skb->len + sizeof (struct ethhdr), skb->protocol);
+#endif
+	memset (skb->cb, 0, sizeof (struct skb_data));
+	status = netif_rx (skb);
+	if (status != NET_RX_SUCCESS)
+		devdbg (dev, "netif_rx status %d", status);
+}
+
+
+#ifdef	CONFIG_USB_ALI_M5632
+#define	HAVE_HARDWARE
+
+/*-------------------------------------------------------------------------
+ *
+ * ALi M5632 driver ... does high speed
+ *
+ *-------------------------------------------------------------------------*/
+
+static const struct driver_info	ali_m5632_info = {
+	.description =	"ALi M5632",
+};
+
+
+#endif
 
 
 #ifdef	CONFIG_USB_AN2720
@@ -422,6 +456,15 @@ static const struct driver_info	an2720_info = {
 #define AX_MCAST_FILTER_SIZE		8
 #define AX_MAX_MCAST			64
 
+#define AX_INTERRUPT_BUFSIZE		8
+
+/* This structure cannot exceed sizeof(unsigned long [5]) AKA 20 bytes */
+struct ax8817x_data {
+	u8 multi_filter[AX_MCAST_FILTER_SIZE];
+	struct urb *int_urb;
+	u8 *int_buf;
+};
+
 static int ax8817x_read_cmd(struct usbnet *dev, u8 cmd, u16 value, u16 index,
 			    u16 size, void *data)
 {
@@ -464,6 +507,30 @@ static void ax8817x_async_cmd_callback(struct urb *urb, struct pt_regs *regs)
 	usb_free_urb(urb);
 }
 
+static void ax8817x_interrupt_complete(struct urb *urb, struct pt_regs *regs)
+{
+	struct usbnet *dev = (struct usbnet *)urb->context;
+	struct ax8817x_data *data = (struct ax8817x_data *)&dev->data;
+	int link;
+
+	if (urb->status < 0) {
+		printk(KERN_DEBUG "ax8817x_interrupt_complete() failed with %d",
+			urb->status);
+	} else {
+		if (data->int_buf[5] == 0x90) {
+			link = data->int_buf[2] & 0x01;
+			if (netif_carrier_ok(dev->net) != link) {
+				if (link)
+					netif_carrier_on(dev->net);
+				else
+					netif_carrier_off(dev->net);
+				devdbg(dev, "ax8817x - Link Status is: %d", link);
+			}
+		}
+		usb_submit_urb(data->int_urb, GFP_ATOMIC);
+	}
+}
+
 static void ax8817x_write_cmd_async(struct usbnet *dev, u8 cmd, u16 value, u16 index,
 				    u16 size, void *data)
 {
@@ -502,7 +569,8 @@ static void ax8817x_write_cmd_async(struct usbnet *dev, u8 cmd, u16 value, u16 i
 
 static void ax8817x_set_multicast(struct net_device *net)
 {
-	struct usbnet *dev = (struct usbnet *) net->priv;
+	struct usbnet *dev = netdev_priv(net);
+	struct ax8817x_data *data = (struct ax8817x_data *)&dev->data;
 	u8 rx_ctl = 0x8c;
 
 	if (net->flags & IFF_PROMISC) {
@@ -517,25 +585,24 @@ static void ax8817x_set_multicast(struct net_device *net)
 		 * for our 8 byte filter buffer
 		 * to avoid allocating memory that
 		 * is tricky to free later */
-		u8 *multi_filter = (u8 *)&dev->data;
 		struct dev_mc_list *mc_list = net->mc_list;
 		u32 crc_bits;
 		int i;
 
-		memset(multi_filter, 0, AX_MCAST_FILTER_SIZE);
+		memset(data->multi_filter, 0, AX_MCAST_FILTER_SIZE);
 
 		/* Build the multicast hash filter. */
 		for (i = 0; i < net->mc_count; i++) {
 			crc_bits =
 			    ether_crc(ETH_ALEN,
 				      mc_list->dmi_addr) >> 26;
-			multi_filter[crc_bits >> 3] |=
+			data->multi_filter[crc_bits >> 3] |=
 			    1 << (crc_bits & 7);
 			mc_list = mc_list->next;
 		}
 
 		ax8817x_write_cmd_async(dev, AX_CMD_WRITE_MULTI_FILTER, 0, 0,
-				   AX_MCAST_FILTER_SIZE, multi_filter);
+				   AX_MCAST_FILTER_SIZE, data->multi_filter);
 
 		rx_ctl |= 0x10;
 	}
@@ -545,7 +612,7 @@ static void ax8817x_set_multicast(struct net_device *net)
 
 static int ax8817x_mdio_read(struct net_device *netdev, int phy_id, int loc)
 {
-	struct usbnet *dev = netdev->priv;
+	struct usbnet *dev = netdev_priv(netdev);
 	u16 res;
 	u8 buf[1];
 
@@ -558,7 +625,7 @@ static int ax8817x_mdio_read(struct net_device *netdev, int phy_id, int loc)
 
 static void ax8817x_mdio_write(struct net_device *netdev, int phy_id, int loc, int val)
 {
-	struct usbnet *dev = netdev->priv;
+	struct usbnet *dev = netdev_priv(netdev);
 	u16 res = val;
 	u8 buf[1];
 
@@ -567,9 +634,9 @@ static void ax8817x_mdio_write(struct net_device *netdev, int phy_id, int loc, i
 	ax8817x_write_cmd(dev, AX_CMD_SET_HW_MII, 0, 0, 0, &buf);
 }
 
-void ax8817x_get_wol(struct net_device *net, struct ethtool_wolinfo *wolinfo)
+static void ax8817x_get_wol(struct net_device *net, struct ethtool_wolinfo *wolinfo)
 {
-	struct usbnet *dev = (struct usbnet *)net->priv;
+	struct usbnet *dev = netdev_priv(net);
 	u8 opt;
 
 	if (ax8817x_read_cmd(dev, AX_CMD_READ_MONITOR_MODE, 0, 0, 1, &opt) < 0) {
@@ -587,9 +654,9 @@ void ax8817x_get_wol(struct net_device *net, struct ethtool_wolinfo *wolinfo)
 	}
 }
 
-int ax8817x_set_wol(struct net_device *net, struct ethtool_wolinfo *wolinfo)
+static int ax8817x_set_wol(struct net_device *net, struct ethtool_wolinfo *wolinfo)
 {
-	struct usbnet *dev = (struct usbnet *)net->priv;
+	struct usbnet *dev = netdev_priv(net);
 	u8 opt = 0;
 	u8 buf[1];
 
@@ -607,10 +674,10 @@ int ax8817x_set_wol(struct net_device *net, struct ethtool_wolinfo *wolinfo)
 	return 0;
 }
 
-int ax8817x_get_eeprom(struct net_device *net, 
-		       struct ethtool_eeprom *eeprom, u8 *data)
+static int ax8817x_get_eeprom(struct net_device *net,
+			      struct ethtool_eeprom *eeprom, u8 *data)
 {
-	struct usbnet *dev = (struct usbnet *)net->priv;
+	struct usbnet *dev = netdev_priv(net);
 	u16 *ebuf = (u16 *)data;
 	int i;
 
@@ -637,16 +704,66 @@ static void ax8817x_get_drvinfo (struct net_device *net,
 	info->eedump_len = 0x3e;
 }
 
+static int ax8817x_get_settings(struct net_device *net, struct ethtool_cmd *cmd)
+{
+	struct usbnet *dev = netdev_priv(net);
+
+	return mii_ethtool_gset(&dev->mii,cmd);
+}
+
+static int ax8817x_set_settings(struct net_device *net, struct ethtool_cmd *cmd)
+{
+	struct usbnet *dev = netdev_priv(net);
+
+	return mii_ethtool_sset(&dev->mii,cmd);
+}
+
+/* We need to override some ethtool_ops so we require our
+   own structure so we don't interfere with other usbnet
+   devices that may be connected at the same time. */
+static struct ethtool_ops ax8817x_ethtool_ops = {
+	.get_drvinfo		= ax8817x_get_drvinfo,
+	.get_link		= ethtool_op_get_link,
+	.get_msglevel		= usbnet_get_msglevel,
+	.set_msglevel		= usbnet_set_msglevel,
+	.get_wol		= ax8817x_get_wol,
+	.set_wol		= ax8817x_set_wol,
+	.get_eeprom		= ax8817x_get_eeprom,
+	.get_settings		= ax8817x_get_settings,
+	.set_settings		= ax8817x_set_settings,
+};
+
 static int ax8817x_bind(struct usbnet *dev, struct usb_interface *intf)
 {
 	int ret;
 	u8 buf[6];
-	u16 *buf16 = (u16 *) buf;
 	int i;
 	unsigned long gpio_bits = dev->driver_info->data;
+	struct ax8817x_data *data = (struct ax8817x_data *)dev->data;
 
 	dev->in = usb_rcvbulkpipe(dev->udev, 3);
 	dev->out = usb_sndbulkpipe(dev->udev, 2);
+
+	// allocate irq urb
+	if ((data->int_urb = usb_alloc_urb (0, GFP_KERNEL)) == NULL) {
+		dbg ("%s: cannot allocate interrupt URB",
+			dev->net->name);
+		return -ENOMEM;
+	}
+	
+	if ((data->int_buf = kmalloc(AX_INTERRUPT_BUFSIZE, GFP_KERNEL)) == NULL) {
+		dbg ("%s: cannot allocate memory for interrupt buffer",
+			dev->net->name);
+		usb_free_urb(data->int_urb);
+		return -ENOMEM;
+	}
+	memset(data->int_buf, 0, AX_INTERRUPT_BUFSIZE);
+
+	usb_fill_int_urb (data->int_urb, dev->udev,
+		usb_rcvintpipe (dev->udev, 1),
+		data->int_buf, AX_INTERRUPT_BUFSIZE,
+		ax8817x_interrupt_complete, dev,
+		dev->udev->speed == USB_SPEED_HIGH ? 8 : 100);
 
 	/* Toggle the GPIOs in a manufacturer/model specific way */
 	for (i = 2; i >= 0; i--) {
@@ -654,7 +771,7 @@ static int ax8817x_bind(struct usbnet *dev, struct usb_interface *intf)
 					(gpio_bits >> (i * 8)) & 0xff, 0, 0,
 					buf)) < 0)
 			return ret;
-		wait_ms(5);
+		msleep(5);
 	}
 
 	if ((ret = ax8817x_write_cmd(dev, AX_CMD_WRITE_RX_CTL, 0x80, 0, 0, buf)) < 0) {
@@ -669,16 +786,6 @@ static int ax8817x_bind(struct usbnet *dev, struct usb_interface *intf)
 		return ret;
 	}
 	memcpy(dev->net->dev_addr, buf, ETH_ALEN);
-
-	/* Get IPG values */
-	if ((ret = ax8817x_read_cmd(dev, AX_CMD_READ_IPG012, 0, 0, 3, buf)) < 0) {
-		dbg("Error reading IPG values: %d", ret);
-		return ret;
-	}
-
-	for(i = 0;i < 3;i++) {
-		ax8817x_write_cmd(dev, AX_CMD_WRITE_IPG0 + i, 0, 0, 1, &buf[i]);
-	}
 
 	/* Get the PHY id */
 	if ((ret = ax8817x_read_cmd(dev, AX_CMD_READ_PHY_ID, 0, 0, 2, buf)) < 0) {
@@ -698,53 +805,37 @@ static int ax8817x_bind(struct usbnet *dev, struct usb_interface *intf)
 	dev->mii.reg_num_mask = 0x1f;
 	dev->mii.phy_id = buf[1];
 
-	if ((ret = ax8817x_write_cmd(dev, AX_CMD_SET_SW_MII, 0, 0, 0, &buf)) < 0) {
-		dbg("Failed to go to software MII mode: %02x", ret);
-		return ret;
-	}
-
-	*buf16 = cpu_to_le16(BMCR_RESET);
-	if ((ret = ax8817x_write_cmd(dev, AX_CMD_WRITE_MII_REG,
-				     dev->mii.phy_id, MII_BMCR, 2, buf16)) < 0) {
-		dbg("Failed to write MII reg - MII_BMCR: %02x", ret);
-		return ret;
-	}
-
-	/* Advertise that we can do full-duplex pause */
-	*buf16 = cpu_to_le16(ADVERTISE_ALL | ADVERTISE_CSMA | 0x0400);
-	if ((ret = ax8817x_write_cmd(dev, AX_CMD_WRITE_MII_REG,
-			   	     dev->mii.phy_id, MII_ADVERTISE, 
-				     2, buf16)) < 0) {
-		dbg("Failed to write MII_REG advertisement: %02x", ret);
-		return ret;
-	}
-
-	*buf16 = cpu_to_le16(BMCR_ANENABLE | BMCR_ANRESTART);
-	if ((ret = ax8817x_write_cmd(dev, AX_CMD_WRITE_MII_REG,
-			  	     dev->mii.phy_id, MII_BMCR, 
-				     2, buf16)) < 0) {
-		dbg("Failed to write MII reg autonegotiate: %02x", ret);
-		return ret;
-	}
-
-	if ((ret = ax8817x_write_cmd(dev, AX_CMD_SET_HW_MII, 0, 0, 0, &buf)) < 0) {
-		dbg("Failed to set hardware MII: %02x", ret);
-		return ret;
-	}
-
 	dev->net->set_multicast_list = ax8817x_set_multicast;
+	dev->net->ethtool_ops = &ax8817x_ethtool_ops;
 
-	usbnet_ethtool_ops.get_drvinfo = &ax8817x_get_drvinfo;
-	usbnet_ethtool_ops.get_wol = &ax8817x_get_wol;
-	usbnet_ethtool_ops.set_wol = &ax8817x_set_wol;
-	usbnet_ethtool_ops.get_eeprom = &ax8817x_get_eeprom;
+	ax8817x_mdio_write(dev->net, dev->mii.phy_id, MII_BMCR,
+			cpu_to_le16(BMCR_RESET));
+	ax8817x_mdio_write(dev->net, dev->mii.phy_id, MII_ADVERTISE,
+			cpu_to_le16(ADVERTISE_ALL | ADVERTISE_CSMA | 0x0400));
+	mii_nway_restart(&dev->mii);
+
+	if((ret = usb_submit_urb(data->int_urb, GFP_KERNEL)) < 0) {
+		dbg("Failed to submit interrupt URB: %02x", ret);
+		usb_free_urb(data->int_urb);
+		return ret;
+	}
 
 	return 0;
+}
+
+static void ax8817x_unbind(struct usbnet *dev, struct usb_interface *intf)
+{
+	struct ax8817x_data *data = (struct ax8817x_data *)dev->data;
+
+	usb_kill_urb(data->int_urb);
+	usb_free_urb(data->int_urb);
+	kfree(data->int_buf);
 }
 
 static const struct driver_info ax8817x_info = {
 	.description = "ASIX AX8817x USB 2.0 Ethernet",
 	.bind = ax8817x_bind,
+	.unbind = ax8817x_unbind,
 	.flags =  FLAG_ETHER,
 	.data = 0x00130103,
 };
@@ -752,6 +843,7 @@ static const struct driver_info ax8817x_info = {
 static const struct driver_info dlink_dub_e100_info = {
 	.description = "DLink DUB-E100 USB Ethernet",
 	.bind = ax8817x_bind,
+	.unbind = ax8817x_unbind,
 	.flags =  FLAG_ETHER,
 	.data = 0x009f9d9f,
 };
@@ -759,6 +851,7 @@ static const struct driver_info dlink_dub_e100_info = {
 static const struct driver_info netgear_fa120_info = {
 	.description = "Netgear FA-120 USB Ethernet",
 	.bind = ax8817x_bind,
+	.unbind = ax8817x_unbind,
 	.flags =  FLAG_ETHER,
 	.data = 0x00130103,
 };
@@ -766,6 +859,7 @@ static const struct driver_info netgear_fa120_info = {
 static const struct driver_info hawking_uf200_info = {
 	.description = "Hawking UF200 USB Ethernet",
 	.bind = ax8817x_bind,
+	.unbind = ax8817x_unbind,
 	.flags =  FLAG_ETHER,
 	.data = 0x001f1d1f,
 };
@@ -793,22 +887,29 @@ static const struct driver_info	belkin_info = {
 
 
 
-#if	defined (CONFIG_USB_CDCETHER) || defined (CONFIG_USB_ZAURUS)
-
 /*-------------------------------------------------------------------------
  *
- * Communications Device Class, Ethernet Control model
- * 
- * Takes two interfaces.  The DATA interface is inactive till an altsetting
- * is selected.  Configuration data includes class descriptors.
- *
- * Zaurus uses nonstandard framing, and doesn't uniquify its Ethernet
- * addresses, but is otherwise CDC Ether.
- *
- * This should interop with whatever the 2.4 "CDCEther.c" driver
- * (by Brad Hards) talked with.
+ * Communications Device Class declarations.
+ * Used by CDC Ethernet, and some CDC variants
  *
  *-------------------------------------------------------------------------*/
+
+#ifdef	CONFIG_USB_CDCETHER
+#define NEED_GENERIC_CDC
+#endif
+
+#ifdef	CONFIG_USB_ZAURUS
+/* Ethernet variant uses funky framing, broken ethernet addressing */
+#define NEED_GENERIC_CDC
+#endif
+
+#ifdef	CONFIG_USB_RNDIS
+/* ACM variant uses even funkier framing, complex control RPC scheme */
+#define NEED_GENERIC_CDC
+#endif
+
+
+#ifdef	NEED_GENERIC_CDC
 
 /* "Header Functional Descriptor" from CDC spec  5.2.3.1 */
 struct header_desc {
@@ -838,8 +939,8 @@ struct ether_desc {
 
 	u8	iMACAddress;
 	u32	bmEthernetStatistics;
-	u16	wMaxSegmentSize;
-	u16	wNumberMCFilters;
+	__le16	wMaxSegmentSize;
+	__le16	wNumberMCFilters;
 	u8	bNumberPowerFilters;
 } __attribute__ ((packed));
 
@@ -851,43 +952,21 @@ struct cdc_state {
 	struct usb_interface	*data;
 };
 
-#include <linux/ctype.h>
-
-static u8 nibble (unsigned char c)
-{
-	if (likely (isdigit (c)))
-		return c - '0';
-	c = toupper (c);
-	if (likely (isxdigit (c)))
-		return 10 + c - 'A';
-	return 0;
-}
-
-static inline int get_ethernet_addr (struct usbnet *dev, struct ether_desc *e)
-{
-	int 		tmp, i;
-	unsigned char	buf [13];
-
-	tmp = usb_string (dev->udev, e->iMACAddress, buf, sizeof buf);
-	if (tmp < 0)
-		return tmp;
-	else if (tmp != 12)
-		return -EINVAL;
-	for (i = tmp = 0; i < 6; i++, tmp += 2)
-		dev->net->dev_addr [i] =
-			 (nibble (buf [tmp]) << 4) + nibble (buf [tmp + 1]);
-	return 0;
-}
-
 static struct usb_driver usbnet_driver;
 
-static int cdc_bind (struct usbnet *dev, struct usb_interface *intf)
+/*
+ * probes control interface, claims data interface, collects the bulk
+ * endpoints, activates data interface (if needed), maybe sets MTU.
+ * all pure cdc, except for certain firmware workarounds.
+ */
+static int generic_cdc_bind (struct usbnet *dev, struct usb_interface *intf)
 {
-	u8				*buf = intf->altsetting->extra;
-	int				len = intf->altsetting->extralen;
+	u8				*buf = intf->cur_altsetting->extra;
+	int				len = intf->cur_altsetting->extralen;
 	struct usb_interface_descriptor	*d;
 	struct cdc_state		*info = (void *) &dev->data;
 	int				status;
+	int				rndis;
 
 	if (sizeof dev->data < sizeof *info)
 		return -EDOM;
@@ -906,15 +985,23 @@ static int cdc_bind (struct usbnet *dev, struct usb_interface *intf)
 				"CDC descriptors on config\n");
 	}
 
+	/* this assumes that if there's a non-RNDIS vendor variant
+	 * of cdc-acm, it'll fail RNDIS requests cleanly.
+	 */
+	rndis = (intf->cur_altsetting->desc.bInterfaceProtocol == 0xff);
+
 	memset (info, 0, sizeof *info);
 	info->control = intf;
 	while (len > 3) {
-		/* ignore bDescriptorType != CS_INTERFACE */
-		if (buf [1] != 0x24)
+		if (buf [1] != USB_DT_CS_INTERFACE)
 			goto next_desc;
 
-		/* bDescriptorSubType identifies three "must have" descriptors;
-		 * save them for later.
+		/* use bDescriptorSubType to identify the CDC descriptors.
+		 * We expect devices with CDC header and union descriptors.
+		 * For CDC Ethernet we need the ethernet descriptor.
+		 * For RNDIS, ignore two (pointless) CDC modem descriptors
+		 * in favor of a complicated OID-based RPC scheme doing what
+		 * CDC Ethernet achieves with a simple descriptor.
 		 */
 		switch (buf [2]) {
 		case 0x00:		/* Header, mostly useless */
@@ -952,7 +1039,7 @@ static int cdc_bind (struct usbnet *dev, struct usb_interface *intf)
 			if (!info->control || !info->data) {
 				dev_dbg (&intf->dev,
 					"master #%u/%p slave #%u/%p\n",
-					info->u->bMasterInterface0
+					info->u->bMasterInterface0,
 					info->control,
 					info->u->bSlaveInterface0,
 					info->data);
@@ -971,14 +1058,12 @@ static int cdc_bind (struct usbnet *dev, struct usb_interface *intf)
 			}
 
 			/* a data interface altsetting does the real i/o */
-			d = &info->data->altsetting->desc;
+			d = &info->data->cur_altsetting->desc;
 			if (d->bInterfaceClass != USB_CLASS_CDC_DATA) {
 				dev_dbg (&intf->dev, "slave class %u\n",
 					d->bInterfaceClass);
 				goto bad_desc;
 			}
-			if (usb_interface_claimed (info->data))
-				return -EBUSY;
 			break;
 		case 0x0F:		/* Ethernet Networking */
 			if (info->ether) {
@@ -991,30 +1076,25 @@ static int cdc_bind (struct usbnet *dev, struct usb_interface *intf)
 					info->u->bLength);
 				goto bad_desc;
 			}
+			dev->net->mtu = le16_to_cpup (
+						&info->ether->wMaxSegmentSize)
+					- ETH_HLEN;
+			/* because of Zaurus, we may be ignoring the host
+			 * side link address we were given.
+			 */
 			break;
 		}
 next_desc:
 		len -= buf [0];	/* bLength */
 		buf += buf [0];
 	}
-	if (!info->header || !info ->u || !info->ether) {
+
+	if (!info->header || !info->u || (!rndis && !info->ether)) {
 		dev_dbg (&intf->dev, "missing cdc %s%s%sdescriptor\n",
 			info->header ? "" : "header ",
 			info->u ? "" : "union ",
 			info->ether ? "" : "ether ");
 		goto bad_desc;
-	}
-
-#ifdef CONFIG_USB_ZAURUS
-	/* Zaurus ethernet addresses aren't unique ... */
-	if ((dev->driver_info->flags & FLAG_FRAMING_Z) != 0)
-		/* ignore */ ;
-	else
-#endif
-	{
-		status = get_ethernet_addr (dev, info->ether);
-		if (status < 0)
-			return status;
 	}
 
 	/* claim data interface and set it up ... with side effects.
@@ -1025,16 +1105,11 @@ next_desc:
 		return status;
 	status = get_endpoints (dev, info->data);
 	if (status < 0) {
+		/* ensure immediate exit from usbnet_disconnect */
+		usb_set_intfdata(info->data, NULL);
 		usb_driver_release_interface (&usbnet_driver, info->data);
 		return status;
 	}
-
-	/* FIXME cdc-ether has some multicast code too, though it complains
-	 * in routine cases.  info->ether describes the multicast support.
-	 */
-
-	dev->net->mtu = cpu_to_le16p (&info->ether->wMaxSegmentSize)
-		- ETH_HLEN;
 	return 0;
 
 bad_desc:
@@ -1048,23 +1123,92 @@ static void cdc_unbind (struct usbnet *dev, struct usb_interface *intf)
 
 	/* disconnect master --> disconnect slave */
 	if (intf == info->control && info->data) {
+		/* ensure immediate exit from usbnet_disconnect */
+		usb_set_intfdata(info->data, NULL);
 		usb_driver_release_interface (&usbnet_driver, info->data);
-		info->data = 0;
+		info->data = NULL;
 	}
 
 	/* and vice versa (just in case) */
 	else if (intf == info->data && info->control) {
+		/* ensure immediate exit from usbnet_disconnect */
+		usb_set_intfdata(info->control, NULL);
 		usb_driver_release_interface (&usbnet_driver, info->control);
-		info->control = 0;
+		info->control = NULL;
 	}
-
 }
 
-#endif	/* CONFIG_USB_ZAURUS || CONFIG_USB_CDCETHER */
+#endif	/* NEED_GENERIC_CDC */
 
-
+
 #ifdef	CONFIG_USB_CDCETHER
 #define	HAVE_HARDWARE
+
+/*-------------------------------------------------------------------------
+ *
+ * Communications Device Class, Ethernet Control model
+ * 
+ * Takes two interfaces.  The DATA interface is inactive till an altsetting
+ * is selected.  Configuration data includes class descriptors.
+ *
+ * This should interop with whatever the 2.4 "CDCEther.c" driver
+ * (by Brad Hards) talked with.
+ *
+ *-------------------------------------------------------------------------*/
+
+#include <linux/ctype.h>
+
+static u8 nibble (unsigned char c)
+{
+	if (likely (isdigit (c)))
+		return c - '0';
+	c = toupper (c);
+	if (likely (isxdigit (c)))
+		return 10 + c - 'A';
+	return 0;
+}
+
+static inline int
+get_ethernet_addr (struct usbnet *dev, struct ether_desc *e)
+{
+	int 		tmp, i;
+	unsigned char	buf [13];
+
+	tmp = usb_string (dev->udev, e->iMACAddress, buf, sizeof buf);
+	if (tmp != 12) {
+		dev_dbg (&dev->udev->dev,
+			"bad MAC string %d fetch, %d\n", e->iMACAddress, tmp);
+		if (tmp >= 0)
+			tmp = -EINVAL;
+		return tmp;
+	}
+	for (i = tmp = 0; i < 6; i++, tmp += 2)
+		dev->net->dev_addr [i] =
+			 (nibble (buf [tmp]) << 4) + nibble (buf [tmp + 1]);
+	return 0;
+}
+
+static int cdc_bind (struct usbnet *dev, struct usb_interface *intf)
+{
+	int				status;
+	struct cdc_state		*info = (void *) &dev->data;
+
+	status = generic_cdc_bind (dev, intf);
+	if (status < 0)
+		return status;
+
+	status = get_ethernet_addr (dev, info->ether);
+	if (status < 0) {
+		usb_set_intfdata(info->data, NULL);
+		usb_driver_release_interface (&usbnet_driver, info->data);
+		return status;
+	}
+
+	/* FIXME cdc-ether has some multicast code too, though it complains
+	 * in routine cases.  info->ether describes the multicast support.
+	 */
+	return 0;
+}
 
 static const struct driver_info	cdc_info = {
 	.description =	"CDC Ethernet Device",
@@ -1154,7 +1298,7 @@ struct gl_header {
 	struct gl_packet	packets;
 };
 
-#ifdef	GENLINK_ACK
+#ifdef	GENELINK_ACK
 
 // FIXME:  this code is incomplete, not debugged; it doesn't
 // handle interrupts correctly.  interrupts should be generic
@@ -1295,7 +1439,7 @@ static int genelink_free (struct usbnet *dev)
 // handling needs to be generic)
 
 	// cancel irq urb first
-	usb_unlink_urb (priv->irq_urb);
+	usb_kill_urb (priv->irq_urb);
 
 	// free irq urb
 	usb_free_urb (priv->irq_urb);
@@ -1313,7 +1457,6 @@ static int genelink_rx_fixup (struct usbnet *dev, struct sk_buff *skb)
 	struct gl_header	*header;
 	struct gl_packet	*packet;
 	struct sk_buff		*gl_skb;
-	int			status;
 	u32			size;
 
 	header = (struct gl_header *) skb->data;
@@ -1349,17 +1492,7 @@ static int genelink_rx_fixup (struct usbnet *dev, struct sk_buff *skb)
 
 			// copy the packet data to the new skb
 			memcpy(skb_put(gl_skb, size), packet->packet_data, size);
-			gl_skb->dev = dev->net;
-
-			// determine the packet's protocol ID
-			gl_skb->protocol = eth_type_trans (gl_skb, dev->net);
-
-			// update the status
-			dev->stats.rx_packets++;
-			dev->stats.rx_bytes += size;
-
-			// notify os of the received packet
-			status = netif_rx (gl_skb);
+			skb_return (dev, skb);
 		}
 
 		// advance to the next packet
@@ -1548,7 +1681,7 @@ nc_vendor_write (struct usbnet *dev, u8 req, u8 regnum, u16 value)
 		req,
 		USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
 		value, regnum,
-		0, 0,			// data is in setup packet
+		NULL, 0,			// data is in setup packet
 		CONTROL_TIMEOUT_JIFFIES);
 }
 
@@ -1991,7 +2124,7 @@ pl_vendor_req (struct usbnet *dev, u8 req, u8 val, u8 index)
 		req,
 		USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
 		val, index,
-		0, 0,
+		NULL, 0,
 		CONTROL_TIMEOUT_JIFFIES);
 }
 
@@ -2011,8 +2144,12 @@ pl_set_QuickLink_features (struct usbnet *dev, int val)
 
 static int pl_reset (struct usbnet *dev)
 {
-	return pl_set_QuickLink_features (dev,
+	/* some units seem to need this reset, others reject it utterly.
+	 * FIXME be more like "naplink" or windows drivers.
+	 */
+	(void) pl_set_QuickLink_features (dev,
 		PL_S_EN|PL_RESET_OUT|PL_RESET_IN|PL_PEER_E);
+	return 0;
 }
 
 static const struct driver_info	prolific_info = {
@@ -2024,6 +2161,13 @@ static const struct driver_info	prolific_info = {
 
 #endif /* CONFIG_USB_PL2301 */
 
+
+#ifdef CONFIG_USB_KC2190
+#define HAVE_HARDWARE
+static const struct driver_info kc2190_info = {
+	.description =  "KC Technology KC-190",
+};
+#endif /* CONFIG_USB_KC2190 */
 
 
 #ifdef	CONFIG_USB_ARMLINUX
@@ -2117,18 +2261,38 @@ static const struct driver_info	zaurus_sl5x00_info = {
 	.description =	"Sharp Zaurus SL-5x00",
 	.flags =	FLAG_FRAMING_Z,
 	.check_connect = always_connected,
-	.bind =		cdc_bind,
+	.bind =		generic_cdc_bind,
 	.unbind =	cdc_unbind,
 	.tx_fixup = 	zaurus_tx_fixup,
 };
+#define	ZAURUS_STRONGARM_INFO	((unsigned long)&zaurus_sl5x00_info)
+
 static const struct driver_info	zaurus_pxa_info = {
 	.description =	"Sharp Zaurus, PXA-2xx based",
 	.flags =	FLAG_FRAMING_Z,
 	.check_connect = always_connected,
+	.bind =		generic_cdc_bind,
+	.unbind =	cdc_unbind,
 	.tx_fixup = 	zaurus_tx_fixup,
-
-	.in = 1, .out = 2,
 };
+#define	ZAURUS_PXA_INFO		((unsigned long)&zaurus_pxa_info)
+
+static const struct driver_info	olympus_mxl_info = {
+	.description =	"Olympus R1000",
+	.flags =	FLAG_FRAMING_Z,
+	.check_connect = always_connected,
+	.bind =		generic_cdc_bind,
+	.unbind =	cdc_unbind,
+	.tx_fixup = 	zaurus_tx_fixup,
+};
+#define	OLYMPUS_MXL_INFO	((unsigned long)&olympus_mxl_info)
+
+#else
+
+/* blacklist all those devices */
+#define	ZAURUS_STRONGARM_INFO	0
+#define	ZAURUS_PXA_INFO		0
+#define	OLYMPUS_MXL_INFO	0
 
 #endif
 
@@ -2141,7 +2305,7 @@ static const struct driver_info	zaurus_pxa_info = {
 
 static int usbnet_change_mtu (struct net_device *net, int new_mtu)
 {
-	struct usbnet	*dev = (struct usbnet *) net->priv;
+	struct usbnet	*dev = netdev_priv(net);
 
 	if (new_mtu <= MIN_PACKET || new_mtu > MAX_PACKET)
 		return -EINVAL;
@@ -2167,7 +2331,8 @@ static int usbnet_change_mtu (struct net_device *net, int new_mtu)
 
 static struct net_device_stats *usbnet_get_stats (struct net_device *net)
 {
-	return &((struct usbnet *) net->priv)->stats;
+	struct usbnet	*dev = netdev_priv(net);
+	return &dev->stats;
 }
 
 /*-------------------------------------------------------------------------*/
@@ -2232,9 +2397,14 @@ static void rx_submit (struct usbnet *dev, struct urb *urb, int flags)
 		size = 6 + (sizeof (struct ethhdr) + dev->net->mtu);
 	else
 #endif
+#ifdef CONFIG_USB_RNDIS
+	if (dev->driver_info->flags & FLAG_FRAMING_RN)
+		size = RNDIS_MAX_TRANSFER;
+	else
+#endif
 		size = (sizeof (struct ethhdr) + dev->net->mtu);
 
-	if ((skb = alloc_skb (size, flags)) == 0) {
+	if ((skb = alloc_skb (size, flags)) == NULL) {
 		devdbg (dev, "no rx skb");
 		defer_kevent (dev, EVENT_RX_MEMORY);
 		usb_free_urb (urb);
@@ -2295,23 +2465,9 @@ static inline void rx_process (struct usbnet *dev, struct sk_buff *skb)
 		goto error;
 	// else network stack removes extra byte if we forced a short packet
 
-	if (skb->len) {
-		int	status;
-
-		skb->dev = dev->net;
-		skb->protocol = eth_type_trans (skb, dev->net);
-		dev->stats.rx_packets++;
-		dev->stats.rx_bytes += skb->len;
-
-#ifdef	VERBOSE
-		devdbg (dev, "< rx, len %d, type 0x%x",
-			skb->len + sizeof (struct ethhdr), skb->protocol);
-#endif
-		memset (skb->cb, 0, sizeof (struct skb_data));
-		status = netif_rx (skb);
-		if (status != NET_RX_SUCCESS)
-			devdbg (dev, "netif_rx status %d", status);
-	} else {
+	if (skb->len)
+		skb_return (dev, skb);
+	else {
 		devdbg (dev, "drop");
 error:
 		dev->stats.rx_errors++;
@@ -2330,7 +2486,7 @@ static void rx_complete (struct urb *urb, struct pt_regs *regs)
 
 	skb_put (skb, urb->actual_length);
 	entry->state = rx_done;
-	entry->urb = 0;
+	entry->urb = NULL;
 
 	switch (urb_status) {
 	    // success
@@ -2374,7 +2530,7 @@ static void rx_complete (struct urb *urb, struct pt_regs *regs)
 block:
 		entry->state = rx_cleanup;
 		entry->urb = urb;
-		urb = 0;
+		urb = NULL;
 		break;
 
 	    // data overrun ... flush fifo?
@@ -2443,7 +2599,7 @@ static int unlink_urbs (struct usbnet *dev, struct sk_buff_head *q)
 
 static int usbnet_stop (struct net_device *net)
 {
-	struct usbnet		*dev = (struct usbnet *) net->priv;
+	struct usbnet		*dev = netdev_priv(net);
 	int			temp;
 	DECLARE_WAIT_QUEUE_HEAD (unlink_wakeup); 
 	DECLARE_WAITQUEUE (wait, current);
@@ -2465,11 +2621,10 @@ static int usbnet_stop (struct net_device *net)
 	while (skb_queue_len (&dev->rxq)
 			&& skb_queue_len (&dev->txq)
 			&& skb_queue_len (&dev->done)) {
-		set_current_state (TASK_UNINTERRUPTIBLE);
-		schedule_timeout (UNLINK_TIMEOUT_JIFFIES);
+		msleep(UNLINK_TIMEOUT_MS);
 		devdbg (dev, "waited for %d urb completions", temp);
 	}
-	dev->wait = 0;
+	dev->wait = NULL;
 	remove_wait_queue (&unlink_wakeup, &wait); 
 
 	/* deferred work (task, timer, softirq) must also stop.
@@ -2491,7 +2646,7 @@ static int usbnet_stop (struct net_device *net)
 
 static int usbnet_open (struct net_device *net)
 {
-	struct usbnet		*dev = (struct usbnet *) net->priv;
+	struct usbnet		*dev = netdev_priv(net);
 	int			retval = 0;
 	struct driver_info	*info = dev->driver_info;
 
@@ -2520,6 +2675,8 @@ static int usbnet_open (struct net_device *net)
 			framing = "GeneSys";
 		else if (dev->driver_info->flags & FLAG_FRAMING_Z)
 			framing = "Zaurus";
+		else if (dev->driver_info->flags & FLAG_FRAMING_RN)
+			framing = "RNDIS";
 		else
 			framing = "simple";
 
@@ -2539,7 +2696,7 @@ done:
 
 static void usbnet_get_drvinfo (struct net_device *net, struct ethtool_drvinfo *info)
 {
-	struct usbnet *dev = net->priv;
+	struct usbnet *dev = netdev_priv(net);
 
 	strncpy (info->driver, driver_name, sizeof info->driver);
 	strncpy (info->version, DRIVER_VERSION, sizeof info->version);
@@ -2550,7 +2707,7 @@ static void usbnet_get_drvinfo (struct net_device *net, struct ethtool_drvinfo *
 
 static u32 usbnet_get_link (struct net_device *net)
 {
-	struct usbnet *dev = net->priv;
+	struct usbnet *dev = netdev_priv(net);
 
 	/* If a check_connect is defined, return it's results */
 	if (dev->driver_info->check_connect)
@@ -2562,14 +2719,14 @@ static u32 usbnet_get_link (struct net_device *net)
 
 static u32 usbnet_get_msglevel (struct net_device *net)
 {
-	struct usbnet *dev = net->priv;
+	struct usbnet *dev = netdev_priv(net);
 
 	return dev->msg_level;
 }
 
 static void usbnet_set_msglevel (struct net_device *net, u32 level)
 {
-	struct usbnet *dev = net->priv;
+	struct usbnet *dev = netdev_priv(net);
 
 	dev->msg_level = level;
 }
@@ -2578,12 +2735,10 @@ static int usbnet_ioctl (struct net_device *net, struct ifreq *rq, int cmd)
 {
 #ifdef NEED_MII
 	{
-	struct usbnet *dev = (struct usbnet *)net->priv;
+	struct usbnet *dev = netdev_priv(net);
 
 	if (dev->mii.mdio_read != NULL && dev->mii.mdio_write != NULL)
-		return generic_mii_ioctl(&dev->mii,
-				(struct mii_ioctl_data *) &rq->ifr_data,
-				cmd, NULL);
+		return generic_mii_ioctl(&dev->mii, if_mii(rq), cmd, NULL);
 	}
 #endif
 	return -EOPNOTSUPP;
@@ -2606,7 +2761,7 @@ kevent (void *data)
 	if (test_bit (EVENT_TX_HALT, &dev->flags)) {
 		unlink_urbs (dev, &dev->txq);
 		status = usb_clear_halt (dev->udev, dev->out);
-		if (status < 0)
+		if (status < 0 && status != -EPIPE)
 			deverr (dev, "can't clear tx halt, status %d",
 				status);
 		else {
@@ -2617,7 +2772,7 @@ kevent (void *data)
 	if (test_bit (EVENT_RX_HALT, &dev->flags)) {
 		unlink_urbs (dev, &dev->rxq);
 		status = usb_clear_halt (dev->udev, dev->in);
-		if (status < 0)
+		if (status < 0 && status != -EPIPE)
 			deverr (dev, "can't clear rx halt, status %d",
 				status);
 		else {
@@ -2628,13 +2783,13 @@ kevent (void *data)
 
 	/* tasklet could resubmit itself forever if memory is tight */
 	if (test_bit (EVENT_RX_MEMORY, &dev->flags)) {
-		struct urb	*urb = 0;
+		struct urb	*urb = NULL;
 
 		if (netif_running (dev->net))
 			urb = usb_alloc_urb (0, GFP_KERNEL);
 		else
 			clear_bit (EVENT_RX_MEMORY, &dev->flags);
-		if (urb != 0) {
+		if (urb != NULL) {
 			clear_bit (EVENT_RX_MEMORY, &dev->flags);
 			rx_submit (dev, urb, GFP_KERNEL);
 			tasklet_schedule (&dev->bh);
@@ -2683,7 +2838,7 @@ static void tx_complete (struct urb *urb, struct pt_regs *regs)
 		}
 	}
 
-	urb->dev = 0;
+	urb->dev = NULL;
 	entry->state = tx_done;
 	defer_bh (dev, skb);
 }
@@ -2692,7 +2847,7 @@ static void tx_complete (struct urb *urb, struct pt_regs *regs)
 
 static void usbnet_tx_timeout (struct net_device *net)
 {
-	struct usbnet		*dev = (struct usbnet *) net->priv;
+	struct usbnet		*dev = netdev_priv(net);
 
 	unlink_urbs (dev, &dev->txq);
 	tasklet_schedule (&dev->bh);
@@ -2704,16 +2859,16 @@ static void usbnet_tx_timeout (struct net_device *net)
 
 static int usbnet_start_xmit (struct sk_buff *skb, struct net_device *net)
 {
-	struct usbnet		*dev = (struct usbnet *) net->priv;
+	struct usbnet		*dev = netdev_priv(net);
 	int			length;
 	int			retval = NET_XMIT_SUCCESS;
-	struct urb		*urb = 0;
+	struct urb		*urb = NULL;
 	struct skb_data		*entry;
 	struct driver_info	*info = dev->driver_info;
 	unsigned long		flags;
 #ifdef	CONFIG_USB_NET1080
-	struct nc_header	*header = 0;
-	struct nc_trailer	*trailer = 0;
+	struct nc_header	*header = NULL;
+	struct nc_trailer	*trailer = NULL;
 #endif	/* CONFIG_USB_NET1080 */
 
 	// some devices want funky USB-level framing, for
@@ -2861,7 +3016,8 @@ static void usbnet_bh (unsigned long param)
 
 			// don't refill the queue all at once
 			for (i = 0; i < 10 && dev->rxq.qlen < qlen; i++) {
-				if ((urb = usb_alloc_urb (0, GFP_ATOMIC)) != 0)
+				urb = usb_alloc_urb (0, GFP_ATOMIC);
+				if (urb != NULL)
 					rx_submit (dev, urb, GFP_ATOMIC);
 			}
 			if (temp != dev->rxq.qlen)
@@ -2889,6 +3045,7 @@ static void usbnet_disconnect (struct usb_interface *intf)
 {
 	struct usbnet		*dev;
 	struct usb_device	*xdev;
+	struct net_device	*net;
 
 	dev = usb_get_intfdata(intf);
 	usb_set_intfdata(intf, NULL);
@@ -2901,7 +3058,8 @@ static void usbnet_disconnect (struct usb_interface *intf)
 		xdev->bus->bus_name, xdev->devpath,
 		dev->driver_info->description);
 	
-	unregister_netdev (dev->net);
+	net = dev->net;
+	unregister_netdev (net);
 
 	/* we don't hold rtnl here ... */
 	flush_scheduled_work ();
@@ -2909,17 +3067,18 @@ static void usbnet_disconnect (struct usb_interface *intf)
 	if (dev->driver_info->unbind)
 		dev->driver_info->unbind (dev, intf);
 
-	kfree(dev->net);
-	kfree (dev);
+	free_netdev(net);
 	usb_put_dev (xdev);
 }
 
 
 /*-------------------------------------------------------------------------*/
 
+static struct ethtool_ops usbnet_ethtool_ops;
+
 // precondition: never called in_interrupt
 
-int
+static int
 usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 {
 	struct usbnet			*dev;
@@ -2935,19 +3094,20 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 		return -ENODEV;
 	}
 	xdev = interface_to_usbdev (udev);
-	interface = &udev->altsetting [udev->act_altsetting];
+	interface = udev->cur_altsetting;
 
 	usb_get_dev (xdev);
 
 	status = -ENOMEM;
 
 	// set up our own records
-	if (!(dev = kmalloc (sizeof *dev, GFP_KERNEL))) {
+	net = alloc_etherdev(sizeof(*dev));
+	if (!net) {
 		dbg ("can't kmalloc dev");
 		goto out;
 	}
-	memset (dev, 0, sizeof *dev);
 
+	dev = netdev_priv(net);
 	dev->udev = xdev;
 	dev->driver_info = info;
 	dev->msg_level = msg_level;
@@ -2961,14 +3121,8 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 	dev->delay.data = (unsigned long) dev;
 	init_timer (&dev->delay);
 
-	// set up network interface records
-	net = alloc_etherdev(0);
-	if (!net)
-		goto out1;
-
 	SET_MODULE_OWNER (net);
 	dev->net = net;
-	net->priv = dev;
 	strcpy (net->name, "usb%d");
 	memcpy (net->dev_addr, node_id, sizeof node_id);
 
@@ -3013,12 +3167,12 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 
 	}
 	if (status < 0)
-		goto out2;
+		goto out1;
 
 	dev->maxpacket = usb_maxpacket (dev->udev, dev->out, 1);
 	
-	SET_NETDEV_DEV(dev->net, &udev->dev);
-	status = register_netdev (dev->net);
+	SET_NETDEV_DEV(net, &udev->dev);
+	status = register_netdev (net);
 	if (status)
 		goto out3;
 	devinfo (dev, "register usbnet at usb-%s-%s, %s",
@@ -3029,17 +3183,15 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 	usb_set_intfdata (udev, dev);
 
 	// start as if the link is up
-	netif_device_attach (dev->net);
+	netif_device_attach (net);
 
 	return 0;
 
 out3:
 	if (info->unbind)
 		info->unbind (dev, udev);
-out2:
-	kfree(net);
 out1:
-	kfree(dev);
+	free_netdev(net);
 out:
 	usb_put_dev(xdev);
 	return status;
@@ -3058,6 +3210,13 @@ out:
  */
 
 static const struct usb_device_id	products [] = {
+
+#ifdef	CONFIG_USB_ALI_M5632
+{
+	USB_DEVICE (0x0402, 0x5632),	// ALi defaults
+	.driver_info =	(unsigned long) &ali_m5632_info,
+},
+#endif
 
 #ifdef	CONFIG_USB_AN2720
 {
@@ -3103,7 +3262,35 @@ static const struct usb_device_id	products [] = {
 	// Hawking UF200, TrendNet TU2-ET100
 	USB_DEVICE (0x07b8, 0x420a),
 	.driver_info =  (unsigned long) &hawking_uf200_info,
-}, 
+}, {
+        // Billionton Systems, USB2AR 
+        USB_DEVICE (0x08dd, 0x90ff),
+        .driver_info =  (unsigned long) &ax8817x_info,
+}, {
+	// ATEN UC210T
+	USB_DEVICE (0x0557, 0x2009),
+	.driver_info =  (unsigned long) &ax8817x_info,
+}, {
+	// Buffalo LUA-U2-KTX
+	USB_DEVICE (0x0411, 0x003d),
+	.driver_info =  (unsigned long) &ax8817x_info,
+}, {
+	// Sitecom LN-029 "USB 2.0 10/100 Ethernet adapter"
+	USB_DEVICE (0x6189, 0x182d),
+	.driver_info =  (unsigned long) &ax8817x_info,
+}, {
+	// corega FEther USB2-TX
+	USB_DEVICE (0x07aa, 0x0017),
+	.driver_info =  (unsigned long) &ax8817x_info,
+}, {
+	// Surecom EP-1427X-2
+	USB_DEVICE (0x1189, 0x0893),
+	.driver_info = (unsigned long) &ax8817x_info,
+}, {
+	// goodway corp usb gwusb2e
+	USB_DEVICE (0x1631, 0x6200),
+	.driver_info = (unsigned long) &ax8817x_info,
+},
 #endif
 
 #ifdef	CONFIG_USB_EPSON2888
@@ -3143,6 +3330,21 @@ static const struct usb_device_id	products [] = {
 },
 #endif
 
+#ifdef CONFIG_USB_KC2190
+{
+	USB_DEVICE (0x050f, 0x0190),	// KC-190
+	.driver_info =	(unsigned long) &kc2190_info,
+},
+#endif
+
+#ifdef	CONFIG_USB_RNDIS
+{
+	/* RNDIS is MSFT's un-official variant of CDC ACM */
+	USB_INTERFACE_INFO (USB_CLASS_COMM, 2 /* ACM */, 0x0ff),
+	.driver_info = (unsigned long) &rndis_info,
+},
+#endif
+
 #ifdef	CONFIG_USB_ARMLINUX
 /*
  * SA-1100 using standard ARM Linux kernels, or compatible.
@@ -3151,11 +3353,18 @@ static const struct usb_device_id	products [] = {
  *
  * PXA25x or PXA210 ...  these use a "usb-eth" driver much like
  * the sa1100 one, but hardware uses different endpoint numbers.
+ *
+ * Or the Linux "Ethernet" gadget on hardware that can't talk
+ * CDC Ethernet (e.g., no altsettings), in either of two modes:
+ *  - acting just like the old "usb-eth" firmware, though
+ *    the implementation is different 
+ *  - supporting RNDIS as the first/default configuration for
+ *    MS-Windows interop; Linux needs to use the other config
  */
 {
 	// 1183 = 0x049F, both used as hex values?
 	// Compaq "Itsy" vendor/product id
-	USB_DEVICE (0x049F, 0x505A),
+	USB_DEVICE (0x049F, 0x505A),	// usb-eth, or compatible
 	.driver_info =	(unsigned long) &linuxdev_info,
 }, {
 	USB_DEVICE (0x0E7E, 0x1001),	// G.Mate "Yopy"
@@ -3163,15 +3372,22 @@ static const struct usb_device_id	products [] = {
 }, {
 	USB_DEVICE (0x8086, 0x07d3),	// "blob" bootloader
 	.driver_info =	(unsigned long) &blob_info,
+}, {
+	// Linux Ethernet/RNDIS gadget on pxa210/25x/26x
+	USB_DEVICE_VER (0x0525, 0xa4a2, 0x0203, 0x0203),
+	.driver_info =	(unsigned long) &linuxdev_info,
 }, 
 #endif
 
-#ifdef	CONFIG_USB_ZAURUS
+#if	defined(CONFIG_USB_ZAURUS) || defined(CONFIG_USB_CDCETHER)
 /*
  * SA-1100 based Sharp Zaurus ("collie"), or compatible.
  * Same idea as above, but different framing.
  *
  * PXA-2xx based models are also lying-about-cdc.
+ *
+ * NOTE:  These entries do double-duty, serving as blacklist entries
+ * whenever Zaurus support isn't enabled, but CDC Ethernet is.
  */
 {
 	.match_flags	=   USB_DEVICE_ID_MATCH_INT_INFO
@@ -3182,64 +3398,79 @@ static const struct usb_device_id	products [] = {
 	.bInterfaceClass	= USB_CLASS_COMM,
 	.bInterfaceSubClass	= 6 /* Ethernet model */,
 	.bInterfaceProtocol	= 0,
-	.driver_info =  (unsigned long) &zaurus_sl5x00_info,
+	.driver_info = ZAURUS_STRONGARM_INFO,
 }, {
 	.match_flags	=   USB_DEVICE_ID_MATCH_INT_INFO
 			  | USB_DEVICE_ID_MATCH_DEVICE, 
 	.idVendor		= 0x04DD,
 	.idProduct		= 0x8005,	/* A-300 */
-	.bInterfaceClass	= 0x02,
-	.bInterfaceSubClass	= 0x0a,
+	.bInterfaceClass	= USB_CLASS_COMM,
+	.bInterfaceSubClass	= 6 /* Ethernet model */,
 	.bInterfaceProtocol	= 0x00,
-	.driver_info =  (unsigned long) &zaurus_pxa_info,
+	.driver_info = ZAURUS_PXA_INFO,
 }, {
 	.match_flags	=   USB_DEVICE_ID_MATCH_INT_INFO
 			  | USB_DEVICE_ID_MATCH_DEVICE, 
 	.idVendor		= 0x04DD,
 	.idProduct		= 0x8006,	/* B-500/SL-5600 */
-	.bInterfaceClass	= 0x02,
-	.bInterfaceSubClass	= 0x0a,
+	.bInterfaceClass	= USB_CLASS_COMM,
+	.bInterfaceSubClass	= 6 /* Ethernet model */,
 	.bInterfaceProtocol	= 0x00,
-	.driver_info =  (unsigned long) &zaurus_pxa_info,
+	.driver_info = ZAURUS_PXA_INFO,
 }, {
 	.match_flags    =   USB_DEVICE_ID_MATCH_INT_INFO
 	          | USB_DEVICE_ID_MATCH_DEVICE,
 	.idVendor		= 0x04DD,
 	.idProduct		= 0x8007,	/* C-700 */
-	.bInterfaceClass    = 0x02,
-	.bInterfaceSubClass = 0x0a,
+	.bInterfaceClass	= USB_CLASS_COMM,
+	.bInterfaceSubClass	= 6 /* Ethernet model */,
 	.bInterfaceProtocol = 0x00,
-	.driver_info =  (unsigned long) &zaurus_pxa_info,
+	.driver_info = ZAURUS_PXA_INFO,
 }, {
 	.match_flags    =   USB_DEVICE_ID_MATCH_INT_INFO
 		 | USB_DEVICE_ID_MATCH_DEVICE,
 	.idVendor               = 0x04DD,
-	.idProduct              = 0x9031,	/* C-750 */
-	.bInterfaceClass        = 0x02,
-	.bInterfaceSubClass     = 0x0a,
+	.idProduct              = 0x9031,	/* C-750 C-760 */
+	.bInterfaceClass	= USB_CLASS_COMM,
+	.bInterfaceSubClass	= 6 /* Ethernet model */,
 	.bInterfaceProtocol     = 0x00,
-	.driver_info =  (unsigned long) &zaurus_pxa_info,
+	.driver_info = ZAURUS_PXA_INFO,
+}, {
+	.match_flags    =   USB_DEVICE_ID_MATCH_INT_INFO
+		 | USB_DEVICE_ID_MATCH_DEVICE,
+	.idVendor               = 0x04DD,
+	.idProduct              = 0x9032,	/* SL-6000 */
+	.bInterfaceClass	= USB_CLASS_COMM,
+	.bInterfaceSubClass	= 6 /* Ethernet model */,
+	.bInterfaceProtocol     = 0x00,
+	.driver_info = ZAURUS_PXA_INFO,
+}, {
+	.match_flags    =   USB_DEVICE_ID_MATCH_INT_INFO
+		 | USB_DEVICE_ID_MATCH_DEVICE,
+	.idVendor               = 0x04DD,
+	.idProduct              = 0x9050,	/* C-860 */
+	.bInterfaceClass	= USB_CLASS_COMM,
+	.bInterfaceSubClass	= 6 /* Ethernet model */,
+	.bInterfaceProtocol     = 0x00,
+	.driver_info = ZAURUS_PXA_INFO,
+},
+
+/* Olympus has some models with a Zaurus-compatible option.
+ * R-1000 uses a FreeScale i.MXL cpu (ARMv4T)
+ */
+{
+	.match_flags    =   USB_DEVICE_ID_MATCH_INT_INFO
+		 | USB_DEVICE_ID_MATCH_DEVICE,
+	.idVendor               = 0x07B4,
+	.idProduct              = 0x0F02,	/* R-1000 */
+	.bInterfaceClass	= USB_CLASS_COMM,
+	.bInterfaceSubClass	= 6 /* Ethernet model */,
+	.bInterfaceProtocol     = 0x00,
+	.driver_info = OLYMPUS_MXL_INFO,
 },
 #endif
 
 #ifdef	CONFIG_USB_CDCETHER
-
-#ifndef	CONFIG_USB_ZAURUS
-	/* if we couldn't whitelist Zaurus, we must blacklist it */
-{
-	.match_flags	=   USB_DEVICE_ID_MATCH_INT_INFO
-			  | USB_DEVICE_ID_MATCH_DEVICE, 
-	.idVendor		= 0x04DD,
-	.idProduct		= 0x8004,
-	/* match the master interface */
-	.bInterfaceClass	= USB_CLASS_COMM,
-	.bInterfaceSubClass	= 6 /* Ethernet model */,
-	.bInterfaceProtocol	= 0,
-	.driver_info 		= 0, /* BLACKLIST */
-},
-	// FIXME blacklist the other Zaurus models too, sigh
-#endif
-
 {
 	/* CDC Ether uses two interfaces, not necessarily consecutive.
 	 * We match the main interface, ignoring the optional device
@@ -3286,9 +3517,7 @@ static int __init usbnet_init (void)
 			< sizeof (struct cdc_state)));
 #endif
 
-	get_random_bytes (node_id, sizeof node_id);
-	node_id [0] &= 0xfe;	// clear multicast bit
-	node_id [0] |= 0x02;    // set local assignment bit (IEEE802)
+	random_ether_addr(node_id);
 
  	return usb_register(&usbnet_driver);
 }

@@ -44,7 +44,6 @@
 #include "xfs_mount.h"
 
 
-#ifndef CONFIG_XFS_QUOTA
 STATIC struct xfs_dquot *
 xfs_dqvopchown_default(
 	struct xfs_trans	*tp,
@@ -55,7 +54,7 @@ xfs_dqvopchown_default(
 	return NULL;
 }
 
-xfs_qmops_t	xfs_qmcore_xfs = {
+xfs_qmops_t	xfs_qmcore_stub = {
 	.xfs_qminit		= (xfs_qminit_t) fs_noerr,
 	.xfs_qmdone		= (xfs_qmdone_t) fs_noerr,
 	.xfs_qmmount		= (xfs_qmmount_t) fs_noerr,
@@ -70,4 +69,3 @@ xfs_qmops_t	xfs_qmcore_xfs = {
 	.xfs_dqvopchown		= xfs_dqvopchown_default,
 	.xfs_dqvopchownresv	= (xfs_dqvopchownresv_t) fs_noerr,
 };
-#endif /* CONFIG_XFS_QUOTA */

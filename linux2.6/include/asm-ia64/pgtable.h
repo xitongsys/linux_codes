@@ -6,9 +6,9 @@
  * the IA-64 page table tree.
  *
  * This hopefully works with any (fixed) IA-64 page-size, as defined
- * in <asm/page.h> (currently 8192).
+ * in <asm/page.h>.
  *
- * Copyright (C) 1998-2003 Hewlett-Packard Co
+ * Copyright (C) 1998-2004 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
@@ -91,7 +91,7 @@
 #define PGDIR_SHIFT		(PAGE_SHIFT + 2*(PAGE_SHIFT-3))
 #define PGDIR_SIZE		(__IA64_UL(1) << PGDIR_SHIFT)
 #define PGDIR_MASK		(~(PGDIR_SIZE-1))
-#define PTRS_PER_PGD		(__IA64_UL(1) << (PAGE_SHIFT-3))
+#define PTRS_PER_PGD		(1UL << (PAGE_SHIFT-3))
 #define USER_PTRS_PER_PGD	(5*PTRS_PER_PGD/8)	/* regions 0-4 are user regions */
 #define FIRST_USER_PGD_NR	0
 
@@ -102,9 +102,9 @@
  * can map.
  */
 #define PMD_SHIFT	(PAGE_SHIFT + (PAGE_SHIFT-3))
-#define PMD_SIZE	(__IA64_UL(1) << PMD_SHIFT)
+#define PMD_SIZE	(1UL << PMD_SHIFT)
 #define PMD_MASK	(~(PMD_SIZE-1))
-#define PTRS_PER_PMD	(__IA64_UL(1) << (PAGE_SHIFT-3))
+#define PTRS_PER_PMD	(1UL << (PAGE_SHIFT-3))
 
 /*
  * Definitions for third level:
@@ -119,7 +119,8 @@
 #define PAGE_NONE	__pgprot(_PAGE_PROTNONE | _PAGE_A)
 #define PAGE_SHARED	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_RW)
 #define PAGE_READONLY	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_R)
-#define PAGE_COPY	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_RX)
+#define PAGE_COPY	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_R)
+#define PAGE_COPY_EXEC	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_RX)
 #define PAGE_GATE	__pgprot(__ACCESS_BITS | _PAGE_PL_0 | _PAGE_AR_X_RX)
 #define PAGE_KERNEL	__pgprot(__DIRTY_BITS  | _PAGE_PL_0 | _PAGE_AR_RWX)
 #define PAGE_KERNELRX	__pgprot(__ACCESS_BITS | _PAGE_PL_0 | _PAGE_AR_RX)
@@ -146,8 +147,8 @@
 #define __P011	PAGE_READONLY	/* ditto */
 #define __P100	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_X_RX)
 #define __P101	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_RX)
-#define __P110	PAGE_COPY
-#define __P111	PAGE_COPY
+#define __P110	PAGE_COPY_EXEC
+#define __P111	PAGE_COPY_EXEC
 
 #define __S000	PAGE_NONE
 #define __S001	PAGE_READONLY
@@ -205,18 +206,18 @@ ia64_phys_addr_valid (unsigned long addr)
 #define RGN_SIZE	(1UL << 61)
 #define RGN_KERNEL	7
 
-#define VMALLOC_START		0xa000000200000000
+#define VMALLOC_START		0xa000000200000000UL
 #ifdef CONFIG_VIRTUAL_MEM_MAP
-# define VMALLOC_END_INIT	(0xa000000000000000 + (1UL << (4*PAGE_SHIFT - 9)))
+# define VMALLOC_END_INIT	(0xa000000000000000UL + (1UL << (4*PAGE_SHIFT - 9)))
 # define VMALLOC_END		vmalloc_end
   extern unsigned long vmalloc_end;
 #else
-# define VMALLOC_END		(0xa000000000000000 + (1UL << (4*PAGE_SHIFT - 9)))
+# define VMALLOC_END		(0xa000000000000000UL + (1UL << (4*PAGE_SHIFT - 9)))
 #endif
 
 /* fs/proc/kcore.c */
-#define	kc_vaddr_to_offset(v) ((v) - 0xa000000000000000)
-#define	kc_offset_to_vaddr(o) ((o) + 0xa000000000000000)
+#define	kc_vaddr_to_offset(v) ((v) - 0xa000000000000000UL)
+#define	kc_offset_to_vaddr(o) ((o) + 0xa000000000000000UL)
 
 /*
  * Conversion functions: convert page frame number (pfn) and a protection value to a page
@@ -229,6 +230,10 @@ ia64_phys_addr_valid (unsigned long addr)
 #define pte_pfn(_pte)		((pte_val(_pte) & _PFN_MASK) >> PAGE_SHIFT)
 
 #define mk_pte(page, pgprot)	pfn_pte(page_to_pfn(page), (pgprot))
+
+/* This takes a physical page address that is used by the remapping functions */
+#define mk_pte_phys(physpage, pgprot) \
+({ pte_t __pte; pte_val(__pte) = physpage + pgprot_val(pgprot); __pte; })
 
 #define pte_modify(_pte, newprot) \
 	(__pte((pte_val(_pte) & ~_PAGE_CHG_MASK) | (pgprot_val(newprot) & _PAGE_CHG_MASK)))
@@ -249,11 +254,12 @@ ia64_phys_addr_valid (unsigned long addr)
 #define pmd_page_kernel(pmd)		((unsigned long) __va(pmd_val(pmd) & _PFN_MASK))
 #define pmd_page(pmd)			virt_to_page((pmd_val(pmd) + PAGE_OFFSET))
 
-#define pgd_none(pgd)			(!pgd_val(pgd))
-#define pgd_bad(pgd)			(!ia64_phys_addr_valid(pgd_val(pgd)))
-#define pgd_present(pgd)		(pgd_val(pgd) != 0UL)
-#define pgd_clear(pgdp)			(pgd_val(*(pgdp)) = 0UL)
-#define pgd_page(pgd)			((unsigned long) __va(pgd_val(pgd) & _PFN_MASK))
+#define pud_none(pud)			(!pud_val(pud))
+#define pud_bad(pud)			(!ia64_phys_addr_valid(pud_val(pud)))
+#define pud_present(pud)		(pud_val(pud) != 0UL)
+#define pud_clear(pudp)			(pud_val(*(pudp)) = 0UL)
+
+#define pud_page(pud)			((unsigned long) __va(pud_val(pud) & _PFN_MASK))
 
 /*
  * The following have defined behavior only work if pte_present() is true.
@@ -292,11 +298,7 @@ ia64_phys_addr_valid (unsigned long addr)
  * works bypasses the caches, but does allow for consecutive writes to
  * be combined into single (but larger) write transactions.
  */
-#ifdef CONFIG_MCKINLEY_A0_SPECIFIC
-# define pgprot_writecombine(prot)	prot
-#else
-# define pgprot_writecombine(prot)	__pgprot((pgprot_val(prot) & ~_PAGE_MA_MASK) | _PAGE_MA_WC)
-#endif
+#define pgprot_writecombine(prot)	__pgprot((pgprot_val(prot) & ~_PAGE_MA_MASK) | _PAGE_MA_WC)
 
 static inline unsigned long
 pgd_index (unsigned long address)
@@ -308,21 +310,26 @@ pgd_index (unsigned long address)
 }
 
 /* The offset in the 1-level directory is given by the 3 region bits
-   (61..63) and the seven level-1 bits (33-39).  */
+   (61..63) and the level-1 bits.  */
 static inline pgd_t*
 pgd_offset (struct mm_struct *mm, unsigned long address)
 {
 	return mm->pgd + pgd_index(address);
 }
 
-/* In the kernel's mapped region we have a full 43 bit space available and completely
-   ignore the region number (since we know its in region number 5). */
+/* In the kernel's mapped region we completely ignore the region number
+   (since we know it's in region number 5). */
 #define pgd_offset_k(addr) \
 	(init_mm.pgd + (((addr) >> PGDIR_SHIFT) & (PTRS_PER_PGD - 1)))
 
+/* Look up a pgd entry in the gate area.  On IA-64, the gate-area
+   resides in the kernel-mapped segment, hence we use pgd_offset_k()
+   here.  */
+#define pgd_offset_gate(mm, addr)	pgd_offset_k(addr)
+
 /* Find an entry in the second-level page table.. */
 #define pmd_offset(dir,addr) \
-	((pmd_t *) pgd_page(*(dir)) + (((addr) >> PMD_SHIFT) & (PTRS_PER_PMD - 1)))
+	((pmd_t *) pud_page(*(dir)) + (((addr) >> PMD_SHIFT) & (PTRS_PER_PMD - 1)))
 
 /*
  * Find an entry in the third-level page table.  This looks more complicated than it
@@ -341,6 +348,8 @@ static inline int
 ptep_test_and_clear_young (pte_t *ptep)
 {
 #ifdef CONFIG_SMP
+	if (!pte_young(*ptep))
+		return 0;
 	return test_and_clear_bit(_PAGE_A_BIT, ptep);
 #else
 	pte_t pte = *ptep;
@@ -355,6 +364,8 @@ static inline int
 ptep_test_and_clear_dirty (pte_t *ptep)
 {
 #ifdef CONFIG_SMP
+	if (!pte_dirty(*ptep))
+		return 0;
 	return test_and_clear_bit(_PAGE_D_BIT, ptep);
 #else
 	pte_t pte = *ptep;
@@ -442,7 +453,9 @@ extern void paging_init (void);
 #define pte_to_pgoff(pte)		((pte_val(pte) << 1) >> 3)
 #define pgoff_to_pte(off)		((pte_t) { ((off) << 2) | _PAGE_FILE })
 
-#define io_remap_page_range remap_page_range	/* XXX is this right? */
+/* XXX is this right? */
+#define io_remap_page_range(vma, vaddr, paddr, size, prot)		\
+		remap_pfn_range(vma, vaddr, (paddr) >> PAGE_SHIFT, size, prot)
 
 /*
  * ZERO_PAGE is a global shared page that is always zero: used
@@ -455,7 +468,14 @@ extern struct page *zero_page_memmap_ptr;
 /* We provide our own get_unmapped_area to cope with VA holes for userland */
 #define HAVE_ARCH_UNMAPPED_AREA
 
-typedef pte_t *pte_addr_t;
+#ifdef CONFIG_HUGETLB_PAGE
+#define HUGETLB_PGDIR_SHIFT	(HPAGE_SHIFT + 2*(PAGE_SHIFT-3))
+#define HUGETLB_PGDIR_SIZE	(__IA64_UL(1) << HUGETLB_PGDIR_SHIFT)
+#define HUGETLB_PGDIR_MASK	(~(HUGETLB_PGDIR_SIZE-1))
+struct mmu_gather;
+extern void hugetlb_free_pgtables(struct mmu_gather *tlb,
+	struct vm_area_struct * prev, unsigned long start, unsigned long end);
+#endif
 
 /*
  * IA-64 doesn't have any external MMU info: the page tables contain all the necessary
@@ -464,10 +484,46 @@ typedef pte_t *pte_addr_t;
  */
 extern void update_mmu_cache (struct vm_area_struct *vma, unsigned long vaddr, pte_t pte);
 
+#define __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
+/*
+ * Update PTEP with ENTRY, which is guaranteed to be a less
+ * restrictive PTE.  That is, ENTRY may have the ACCESSED, DIRTY, and
+ * WRITABLE bits turned on, when the value at PTEP did not.  The
+ * WRITABLE bit may only be turned if SAFELY_WRITABLE is TRUE.
+ *
+ * SAFELY_WRITABLE is TRUE if we can update the value at PTEP without
+ * having to worry about races.  On SMP machines, there are only two
+ * cases where this is true:
+ *
+ *	(1) *PTEP has the PRESENT bit turned OFF
+ *	(2) ENTRY has the DIRTY bit turned ON
+ *
+ * On ia64, we could implement this routine with a cmpxchg()-loop
+ * which ORs in the _PAGE_A/_PAGE_D bit if they're set in ENTRY.
+ * However, like on x86, we can get a more streamlined version by
+ * observing that it is OK to drop ACCESSED bit updates when
+ * SAFELY_WRITABLE is FALSE.  Besides being rare, all that would do is
+ * result in an extra Access-bit fault, which would then turn on the
+ * ACCESSED bit in the low-level fault handler (iaccess_bit or
+ * daccess_bit in ivt.S).
+ */
+#ifdef CONFIG_SMP
+# define ptep_set_access_flags(__vma, __addr, __ptep, __entry, __safely_writable)	\
+do {											\
+	if (__safely_writable) {							\
+		set_pte(__ptep, __entry);						\
+		flush_tlb_page(__vma, __addr);						\
+	}										\
+} while (0)
+#else
+# define ptep_set_access_flags(__vma, __addr, __ptep, __entry, __safely_writable)	\
+	ptep_establish(__vma, __addr, __ptep, __entry)
+#endif
+
 #  ifdef CONFIG_VIRTUAL_MEM_MAP
   /* arch mem_map init routine is needed due to holes in a virtual mem_map */
 #   define __HAVE_ARCH_MEMMAP_INIT
-    extern void memmap_init (struct page *start, unsigned long size, int nid, unsigned long zone,
+    extern void memmap_init (unsigned long size, int nid, unsigned long zone,
 			     unsigned long start_pfn);
 #  endif /* CONFIG_VIRTUAL_MEM_MAP */
 # endif /* !__ASSEMBLY__ */
@@ -497,5 +553,15 @@ extern void update_mmu_cache (struct vm_area_struct *vma, unsigned long vaddr, p
 /* These tell get_user_pages() that the first gate page is accessible from user-level.  */
 #define FIXADDR_USER_START	GATE_ADDR
 #define FIXADDR_USER_END	(GATE_ADDR + 2*PERCPU_PAGE_SIZE)
+
+#define __HAVE_ARCH_PTEP_TEST_AND_CLEAR_YOUNG
+#define __HAVE_ARCH_PTEP_TEST_AND_CLEAR_DIRTY
+#define __HAVE_ARCH_PTEP_GET_AND_CLEAR
+#define __HAVE_ARCH_PTEP_SET_WRPROTECT
+#define __HAVE_ARCH_PTEP_MKDIRTY
+#define __HAVE_ARCH_PTE_SAME
+#define __HAVE_ARCH_PGD_OFFSET_GATE
+#include <asm-generic/pgtable.h>
+#include <asm-generic/pgtable-nopud.h>
 
 #endif /* _ASM_IA64_PGTABLE_H */

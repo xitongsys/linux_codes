@@ -1,4 +1,7 @@
 /*
+ * Modified in order to keep it compatible both with new and old videotext IOCTLs by
+ * Michael Geng <linux@MichaelGeng.de>
+ *
  *	Cleaned up to use existing videodev interface and allow the idea
  *	of multiple teletext decoders on the video4linux iface. Changed i2c
  *	to cover addressing clashes on device busses. It's also rebuilt so
@@ -58,7 +61,7 @@
 #include <asm/uaccess.h>
 
 #define VTX_VER_MAJ 1
-#define VTX_VER_MIN 7
+#define VTX_VER_MIN 8
 
 
 
@@ -121,10 +124,6 @@ struct saa5249_device
 #ifndef FALSE
 #define FALSE 0
 #define TRUE 1
-#endif
-#ifndef MIN
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
 #endif
 
 #define RESCHED do { cond_resched(); } while(0)
@@ -223,7 +222,7 @@ static int saa5249_attach(struct i2c_adapter *adap, int addr, int kind)
  
 static int saa5249_probe(struct i2c_adapter *adap)
 {
-	if (adap->class & I2C_ADAP_CLASS_TV_ANALOG)
+	if (adap->class & I2C_CLASS_TV_ANALOG)
 		return i2c_probe(adap, &addr_data, saa5249_attach);
 	return 0;
 }
@@ -277,8 +276,7 @@ static void jdelay(unsigned long delay)
 	sigfillset(&current->blocked);
 	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(delay);
+	msleep_interruptible(jiffies_to_msecs(delay));
 
 	spin_lock_irq(&current->sighand->siglock);
 	current->blocked = oldblocked;
@@ -518,8 +516,8 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 			{
 				int len;
 				char buf[16];  
-				start = MAX(req->start, 32);
-				end = MIN(req->end, 39);
+				start = max(req->start, 32);
+				end = min(req->end, 39);
 				len=end-start+1;
 				if (i2c_senddata(t, 8, 0, 0, start, -1) ||
 					i2c_getdata(t, len, buf))
@@ -532,8 +530,8 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 			{
 				char buf[32];
 				int len;
-				start = MAX(req->start, 7);
-				end = MIN(req->end, 31);
+				start = max(req->start, 7);
+				end = min(req->end, 31);
 				len=end-start+1;
 				if (i2c_senddata(t, 8, 0, 0, start, -1) ||
 					i2c_getdata(t, len, buf))
@@ -583,6 +581,54 @@ static int do_saa5249_ioctl(struct inode *inode, struct file *file,
 }
 
 /*
+ * Translates old vtx IOCTLs to new ones
+ *
+ * This keeps new kernel versions compatible with old userspace programs.
+ */
+static inline unsigned int vtx_fix_command(unsigned int cmd)
+{
+	switch (cmd) {
+	case VTXIOCGETINFO_OLD:
+		cmd = VTXIOCGETINFO;
+		break;
+	case VTXIOCCLRPAGE_OLD:
+		cmd = VTXIOCCLRPAGE;
+		break;
+	case VTXIOCCLRFOUND_OLD:
+		cmd = VTXIOCCLRFOUND;
+		break;
+	case VTXIOCPAGEREQ_OLD:
+		cmd = VTXIOCPAGEREQ;
+		break;
+	case VTXIOCGETSTAT_OLD:
+		cmd = VTXIOCGETSTAT;
+		break;
+	case VTXIOCGETPAGE_OLD:
+		cmd = VTXIOCGETPAGE;
+		break;
+	case VTXIOCSTOPDAU_OLD:
+		cmd = VTXIOCSTOPDAU;
+		break;
+	case VTXIOCPUTPAGE_OLD:
+		cmd = VTXIOCPUTPAGE;
+		break;
+	case VTXIOCSETDISP_OLD:
+		cmd = VTXIOCSETDISP;
+		break;
+	case VTXIOCPUTSTAT_OLD:
+		cmd = VTXIOCPUTSTAT;
+		break;
+	case VTXIOCCLRCACHE_OLD:
+		cmd = VTXIOCCLRCACHE;
+		break;
+	case VTXIOCSETVIRT_OLD:
+		cmd = VTXIOCSETVIRT;
+		break;
+	}
+	return cmd;
+}
+
+/*
  *	Handle the locking
  */
  
@@ -593,6 +639,7 @@ static int saa5249_ioctl(struct inode *inode, struct file *file,
 	struct saa5249_device *t=vd->priv;
 	int err;
 	
+	cmd = vtx_fix_command(cmd);
 	down(&t->lock);
 	err = video_usercopy(inode,file,cmd,arg,do_saa5249_ioctl);
 	up(&t->lock);

@@ -33,6 +33,7 @@
 /* With some changes from Kyösti Mälkki <kmalkki@cc.hut.fi> and even
    Frodo Looijaard <frodol@dds.nl> */
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/ioport.h>
 #include <linux/module.h>
@@ -53,22 +54,15 @@
 #define DEFAULT_CLOCK 0x1b0e	/* default 16MHz/(27+14) = 400KHz */
 #define DEFAULT_OWN   0x55
 
-static int base  = 0;
-static int irq   = 0;
-static int clock = 0;
-static int own   = 0;
+static int base;
+static int irq;
+static int clock;
+static int own;
 
-static int i2c_debug=0;
 static struct iic_ite gpi;
 static wait_queue_head_t iic_wait;
 static int iic_pending;
-
-/* ----- global defines -----------------------------------------------	*/
-#define DEB(x)	if (i2c_debug>=1) x
-#define DEB2(x) if (i2c_debug>=2) x
-#define DEB3(x) if (i2c_debug>=3) x
-#define DEBE(x)	x	/* error messages 				*/
-
+static spinlock_t lock;
 
 /* ----- local functions ----------------------------------------------	*/
 
@@ -76,8 +70,11 @@ static void iic_ite_setiic(void *data, int ctl, short val)
 {
         unsigned long j = jiffies + 10;
 
-	DEB3(printk(" Write 0x%02x to 0x%x\n",(unsigned short)val, ctl&0xff));
-	DEB3({while (time_before(jiffies, j)) schedule();})
+	pr_debug(" Write 0x%02x to 0x%x\n",(unsigned short)val, ctl&0xff);
+#ifdef DEBUG
+	while (time_before(jiffies, j))
+		schedule();
+#endif
 	outw(val,ctl);
 }
 
@@ -86,7 +83,7 @@ static short iic_ite_getiic(void *data, int ctl)
 	short val;
 
 	val = inw(ctl);
-	DEB3(printk("Read 0x%02x from 0x%x\n",(unsigned short)val, ctl&0xff));  
+	pr_debug("Read 0x%02x from 0x%x\n",(unsigned short)val, ctl&0xff);
 	return (val);
 }
 
@@ -106,20 +103,13 @@ static int iic_ite_getclock(void *data)
 }
 
 
-#if 0
-static void iic_ite_sleep(unsigned long timeout)
-{
-	schedule_timeout( timeout * HZ);
-}
-#endif
-
-
 /* Put this process to sleep.  We will wake up when the
  * IIC controller interrupts.
  */
 static void iic_ite_waitforpin(void) {
 
    int timeout = 2;
+   long flags;
 
    /* If interrupts are enabled (which they are), then put the process to
     * sleep.  This process will be awakened by two events -- either the
@@ -128,25 +118,36 @@ static void iic_ite_waitforpin(void) {
     * of time and return.
     */
    if (gpi.iic_irq > 0) {
-	cli();
+	spin_lock_irqsave(&lock, flags);
 	if (iic_pending == 0) {
-		interruptible_sleep_on_timeout(&iic_wait, timeout*HZ );
-	} else
+		spin_unlock_irqrestore(&lock, flags);
+		if (interruptible_sleep_on_timeout(&iic_wait, timeout*HZ)) {
+			spin_lock_irqsave(&lock, flags);
+			if (iic_pending == 1) {
+				iic_pending = 0;
+			}
+			spin_unlock_irqrestore(&lock, flags);
+		}
+	} else {
 		iic_pending = 0;
-	sti();
+		spin_unlock_irqrestore(&lock, flags);
+	}
    } else {
       udelay(100);
    }
 }
 
 
-static void iic_ite_handler(int this_irq, void *dev_id, struct pt_regs *regs) 
+static irqreturn_t iic_ite_handler(int this_irq, void *dev_id,
+							struct pt_regs *regs)
 {
-	
-   iic_pending = 1;
+	spin_lock(&lock);
+	iic_pending = 1;
+	spin_unlock(&lock);
 
-   DEB2(printk("iic_ite_handler: in interrupt handler\n"));
-   wake_up_interruptible(&iic_wait);
+	wake_up_interruptible(&iic_wait);
+
+	return IRQ_HANDLED;
 }
 
 
@@ -234,6 +235,7 @@ static int __init iic_ite_init(void)
 
 	iic_ite_data.data = (void *)piic;
 	init_waitqueue_head(&iic_wait);
+	spin_lock_init(&lock);
 	if (iic_hw_resrc_init() == 0) {
 		if (i2c_iic_add_bus(&iic_ite_ops) < 0)
 			return -ENODEV;
@@ -259,11 +261,10 @@ MODULE_AUTHOR("MontaVista Software <www.mvista.com>");
 MODULE_DESCRIPTION("I2C-Bus adapter routines for ITE IIC bus adapter");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(base, "i");
-MODULE_PARM(irq, "i");
-MODULE_PARM(clock, "i");
-MODULE_PARM(own, "i");
-MODULE_PARM(i2c_debug,"i");
+module_param(base, int, 0);
+module_param(irq, int, 0);
+module_param(clock, int, 0);
+module_param(own, int, 0);
 
 
 /* Called when module is loaded or when kernel is initialized.

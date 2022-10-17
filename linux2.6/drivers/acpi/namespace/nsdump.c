@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -50,8 +50,8 @@
 #define _COMPONENT          ACPI_NAMESPACE
 	 ACPI_MODULE_NAME    ("nsdump")
 
-#if defined(ACPI_DEBUG_OUTPUT) || defined(ACPI_DEBUGGER)
 
+#if defined(ACPI_DEBUG_OUTPUT) || defined(ACPI_DEBUGGER)
 
 /*******************************************************************************
  *
@@ -76,7 +76,7 @@ acpi_ns_print_pathname (
 		return;
 	}
 
-		/* Print the entire name */
+	/* Print the entire name */
 
 	ACPI_DEBUG_PRINT ((ACPI_DB_NAMES, "["));
 
@@ -198,14 +198,15 @@ acpi_ns_dump_one_object (
 	}
 
 	if (!acpi_ut_valid_acpi_name (this_node->name.integer)) {
-		ACPI_REPORT_WARNING (("Invalid ACPI Name %08X\n", this_node->name.integer));
+		ACPI_REPORT_WARNING (("Invalid ACPI Name %08X\n",
+			this_node->name.integer));
 	}
 
 	/*
 	 * Now we can print out the pertinent information
 	 */
 	acpi_os_printf ("%4.4s %-12s %p ",
-			this_node->name.ascii, acpi_ut_get_type_name (type), this_node);
+			acpi_ut_get_node_name (this_node), acpi_ut_get_type_name (type), this_node);
 
 	dbg_level = acpi_dbg_level;
 	acpi_dbg_level = 0;
@@ -226,9 +227,8 @@ acpi_ns_dump_one_object (
 		case ACPI_TYPE_PROCESSOR:
 
 			acpi_os_printf ("ID %X Len %.4X Addr %p\n",
-					 obj_desc->processor.proc_id,
-					 obj_desc->processor.length,
-					 (char *) obj_desc->processor.address);
+				obj_desc->processor.proc_id, obj_desc->processor.length,
+				(char *) obj_desc->processor.address);
 			break;
 
 
@@ -241,17 +241,15 @@ acpi_ns_dump_one_object (
 		case ACPI_TYPE_METHOD:
 
 			acpi_os_printf ("Args %X Len %.4X Aml %p\n",
-					 (u32) obj_desc->method.param_count,
-					 obj_desc->method.aml_length,
-					 obj_desc->method.aml_start);
+				(u32) obj_desc->method.param_count,
+				obj_desc->method.aml_length, obj_desc->method.aml_start);
 			break;
 
 
 		case ACPI_TYPE_INTEGER:
 
 			acpi_os_printf ("= %8.8X%8.8X\n",
-					 ACPI_HIDWORD (obj_desc->integer.value),
-					 ACPI_LODWORD (obj_desc->integer.value));
+				ACPI_FORMAT_UINT64 (obj_desc->integer.value));
 			break;
 
 
@@ -259,7 +257,7 @@ acpi_ns_dump_one_object (
 
 			if (obj_desc->common.flags & AOPOBJ_DATA_VALID) {
 				acpi_os_printf ("Elements %.2X\n",
-						 obj_desc->package.count);
+					obj_desc->package.count);
 			}
 			else {
 				acpi_os_printf ("[Length not yet evaluated]\n");
@@ -299,12 +297,12 @@ acpi_ns_dump_one_object (
 
 		case ACPI_TYPE_REGION:
 
-			acpi_os_printf ("[%s]", acpi_ut_get_region_name (obj_desc->region.space_id));
+			acpi_os_printf ("[%s]",
+				acpi_ut_get_region_name (obj_desc->region.space_id));
 			if (obj_desc->region.flags & AOPOBJ_DATA_VALID) {
 				acpi_os_printf (" Addr %8.8X%8.8X Len %.4X\n",
-						 ACPI_HIDWORD (obj_desc->region.address),
-						 ACPI_LODWORD (obj_desc->region.address),
-						 obj_desc->region.length);
+					ACPI_FORMAT_UINT64 (obj_desc->region.address),
+					obj_desc->region.length);
 			}
 			else {
 				acpi_os_printf (" [Address/Length not yet evaluated]\n");
@@ -315,7 +313,7 @@ acpi_ns_dump_one_object (
 		case ACPI_TYPE_LOCAL_REFERENCE:
 
 			acpi_os_printf ("[%s]\n",
-					acpi_ps_get_opcode_name (obj_desc->reference.opcode));
+				acpi_ps_get_opcode_name (obj_desc->reference.opcode));
 			break;
 
 
@@ -324,7 +322,7 @@ acpi_ns_dump_one_object (
 			if (obj_desc->buffer_field.buffer_obj &&
 				obj_desc->buffer_field.buffer_obj->buffer.node) {
 				acpi_os_printf ("Buf [%4.4s]",
-						obj_desc->buffer_field.buffer_obj->buffer.node->name.ascii);
+					acpi_ut_get_node_name (obj_desc->buffer_field.buffer_obj->buffer.node));
 			}
 			break;
 
@@ -332,29 +330,31 @@ acpi_ns_dump_one_object (
 		case ACPI_TYPE_LOCAL_REGION_FIELD:
 
 			acpi_os_printf ("Rgn [%4.4s]",
-					obj_desc->common_field.region_obj->region.node->name.ascii);
+				acpi_ut_get_node_name (obj_desc->common_field.region_obj->region.node));
 			break;
 
 
 		case ACPI_TYPE_LOCAL_BANK_FIELD:
 
 			acpi_os_printf ("Rgn [%4.4s] Bnk [%4.4s]",
-					obj_desc->common_field.region_obj->region.node->name.ascii,
-					obj_desc->bank_field.bank_obj->common_field.node->name.ascii);
+				acpi_ut_get_node_name (obj_desc->common_field.region_obj->region.node),
+				acpi_ut_get_node_name (obj_desc->bank_field.bank_obj->common_field.node));
 			break;
 
 
 		case ACPI_TYPE_LOCAL_INDEX_FIELD:
 
 			acpi_os_printf ("Idx [%4.4s] Dat [%4.4s]",
-					obj_desc->index_field.index_obj->common_field.node->name.ascii,
-					obj_desc->index_field.data_obj->common_field.node->name.ascii);
+				acpi_ut_get_node_name (obj_desc->index_field.index_obj->common_field.node),
+				acpi_ut_get_node_name (obj_desc->index_field.data_obj->common_field.node));
 			break;
 
 
 		case ACPI_TYPE_LOCAL_ALIAS:
+		case ACPI_TYPE_LOCAL_METHOD_ALIAS:
 
-			acpi_os_printf ("Target %4.4s (%p)\n", ((struct acpi_namespace_node *) obj_desc)->name.ascii, obj_desc);
+			acpi_os_printf ("Target %4.4s (%p)\n",
+				acpi_ut_get_node_name (obj_desc), obj_desc);
 			break;
 
 		default:
@@ -371,11 +371,11 @@ acpi_ns_dump_one_object (
 		case ACPI_TYPE_LOCAL_BANK_FIELD:
 		case ACPI_TYPE_LOCAL_INDEX_FIELD:
 
-			acpi_os_printf ("Off %.2X Len %.2X Acc %.2hd\n",
-					(obj_desc->common_field.base_byte_offset * 8)
-						+ obj_desc->common_field.start_field_bit_offset,
-					obj_desc->common_field.bit_length,
-					obj_desc->common_field.access_byte_width);
+			acpi_os_printf (" Off %.3X Len %.2X Acc %.2hd\n",
+				(obj_desc->common_field.base_byte_offset * 8)
+					+ obj_desc->common_field.start_field_bit_offset,
+				obj_desc->common_field.bit_length,
+				obj_desc->common_field.access_byte_width);
 			break;
 
 		default:
@@ -408,8 +408,8 @@ acpi_ns_dump_one_object (
 
 		case ACPI_TYPE_INTEGER:
 
-			acpi_os_printf (" N:%X%X\n", ACPI_HIDWORD(obj_desc->integer.value),
-					 ACPI_LODWORD(obj_desc->integer.value));
+			acpi_os_printf (" I:%8.8X8.8%X\n",
+					ACPI_FORMAT_UINT64 (obj_desc->integer.value));
 			break;
 
 		case ACPI_TYPE_STRING:
@@ -472,12 +472,13 @@ acpi_ns_dump_one_object (
 			obj_type = ACPI_GET_OBJECT_TYPE (obj_desc);
 
 			if (obj_type > ACPI_TYPE_LOCAL_MAX) {
-				acpi_os_printf ("(Ptr to ACPI Object type %X [UNKNOWN])\n", obj_type);
+				acpi_os_printf ("(Ptr to ACPI Object type %X [UNKNOWN])\n",
+					obj_type);
 				bytes_to_dump = 32;
 			}
 			else {
 				acpi_os_printf ("(Ptr to ACPI Object type %s, %X)\n",
-						   acpi_ut_get_type_name (obj_type), obj_type);
+					acpi_ut_get_type_name (obj_type), obj_type);
 				bytes_to_dump = sizeof (union acpi_operand_object);
 			}
 			break;
@@ -485,7 +486,9 @@ acpi_ns_dump_one_object (
 
 		default:
 
-			acpi_os_printf ("(String or Buffer ptr - not an object descriptor)\n");
+			acpi_os_printf (
+				"(String or Buffer ptr - not an object descriptor) [%s]\n",
+				acpi_ut_get_descriptor_name (obj_desc));
 			bytes_to_dump = 16;
 			break;
 		}
@@ -547,12 +550,14 @@ cleanup:
 }
 
 
+#ifdef ACPI_FUTURE_USAGE
+
 /*******************************************************************************
  *
  * FUNCTION:    acpi_ns_dump_objects
  *
  * PARAMETERS:  Type                - Object type to be dumped
- *              max_depth           - Maximum depth of dump.  Use ACPI_UINT32_MAX
+ *              max_depth           - Maximum depth of dump. Use ACPI_UINT32_MAX
  *                                    for an effectively unlimited depth.
  *              owner_id            - Dump only objects owned by this ID.  Use
  *                                    ACPI_UINT32_MAX to match all owners.
@@ -580,7 +585,6 @@ acpi_ns_dump_objects (
 	info.debug_level = ACPI_LV_TABLES;
 	info.owner_id = owner_id;
 	info.display_type = display_type;
-
 
 	(void) acpi_ns_walk_namespace (type, start_handle, max_depth,
 			 ACPI_NS_WALK_NO_UNLOCK, acpi_ns_dump_one_object,
@@ -628,11 +632,12 @@ acpi_ns_dump_tables (
 		ACPI_DEBUG_PRINT ((ACPI_DB_TABLES, "\\\n"));
 	}
 
-
 	acpi_ns_dump_objects (ACPI_TYPE_ANY, ACPI_DISPLAY_OBJECTS, max_depth,
 			ACPI_UINT32_MAX, search_handle);
 	return_VOID;
 }
+
+#endif  /*  ACPI_FUTURE_USAGE  */
 
 
 /*******************************************************************************

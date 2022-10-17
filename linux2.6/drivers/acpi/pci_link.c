@@ -29,6 +29,7 @@
  *	   for IRQ management (e.g. start()->_SRS).
  */
 
+#include <linux/sysdev.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -71,7 +72,8 @@ struct acpi_pci_link_irq {
 	u8			active;			/* Current IRQ */
 	u8			edge_level;		/* All IRQs */
 	u8			active_high_low;	/* All IRQs */
-	u8			setonboot;
+	u8			initialized;
+	u8			resource_type;
 	u8			possible_count;
 	u8			possible[ACPI_PCI_LINK_MAX_POSSIBLE];
 };
@@ -93,25 +95,28 @@ static struct {
                             PCI Link Device Management
    -------------------------------------------------------------------------- */
 
+/*
+ * set context (link) possible list from resource list
+ */
 static acpi_status
 acpi_pci_link_check_possible (
 	struct acpi_resource	*resource,
 	void			*context)
 {
 	struct acpi_pci_link	*link = (struct acpi_pci_link *) context;
-	int			i = 0;
+	u32			i = 0;
 
 	ACPI_FUNCTION_TRACE("acpi_pci_link_check_possible");
 
 	switch (resource->id) {
 	case ACPI_RSTYPE_START_DPF:
-		return AE_OK;
+		return_ACPI_STATUS(AE_OK);
 	case ACPI_RSTYPE_IRQ:
 	{
 		struct acpi_resource_irq *p = &resource->data.irq;
 		if (!p || !p->number_of_interrupts) {
 			ACPI_DEBUG_PRINT((ACPI_DB_WARN, "Blank IRQ resource\n"));
-			return AE_OK;
+			return_ACPI_STATUS(AE_OK);
 		}
 		for (i = 0; (i<p->number_of_interrupts && i<ACPI_PCI_LINK_MAX_POSSIBLE); i++) {
 			if (!p->interrupts[i]) {
@@ -123,6 +128,7 @@ acpi_pci_link_check_possible (
 		}
 		link->irq.edge_level = p->edge_level;
 		link->irq.active_high_low = p->active_high_low;
+		link->irq.resource_type = ACPI_RSTYPE_IRQ;
 		break;
 	}
 	case ACPI_RSTYPE_EXT_IRQ:
@@ -130,8 +136,8 @@ acpi_pci_link_check_possible (
 		struct acpi_resource_ext_irq *p = &resource->data.extended_irq;
 		if (!p || !p->number_of_interrupts) {
 			ACPI_DEBUG_PRINT((ACPI_DB_WARN, 
-				"Blank IRQ resource\n"));
-			return AE_OK;
+				"Blank EXT IRQ resource\n"));
+			return_ACPI_STATUS(AE_OK);
 		}
 		for (i = 0; (i<p->number_of_interrupts && i<ACPI_PCI_LINK_MAX_POSSIBLE); i++) {
 			if (!p->interrupts[i]) {
@@ -143,15 +149,16 @@ acpi_pci_link_check_possible (
 		}
 		link->irq.edge_level = p->edge_level;
 		link->irq.active_high_low = p->active_high_low;
+		link->irq.resource_type = ACPI_RSTYPE_EXT_IRQ;
 		break;
 	}
 	default:
 		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, 
 			"Resource is not an IRQ entry\n"));
-		return AE_OK;
+		return_ACPI_STATUS(AE_OK);
 	}
 
-	return AE_CTRL_TERMINATE;
+	return_ACPI_STATUS(AE_CTRL_TERMINATE);
 }
 
 
@@ -194,9 +201,13 @@ acpi_pci_link_check_current (
 	{
 		struct acpi_resource_irq *p = &resource->data.irq;
 		if (!p || !p->number_of_interrupts) {
-			ACPI_DEBUG_PRINT((ACPI_DB_WARN,
-				"Blank IRQ resource\n"));
-			return AE_OK;
+			/*
+			 * IRQ descriptors may have no IRQ# bits set,
+			 * particularly those those w/ _STA disabled
+			 */
+			ACPI_DEBUG_PRINT((ACPI_DB_INFO,
+				"Blank IRQ resource\n")); 
+			return_ACPI_STATUS(AE_OK);
 		}
 		*irq = p->interrupts[0];
 		break;
@@ -205,9 +216,13 @@ acpi_pci_link_check_current (
 	{
 		struct acpi_resource_ext_irq *p = &resource->data.extended_irq;
 		if (!p || !p->number_of_interrupts) {
+			/*
+			 * extended IRQ descriptors must
+			 * return at least 1 IRQ
+			 */
 			ACPI_DEBUG_PRINT((ACPI_DB_WARN,
-				"Blank IRQ resource\n"));
-			return AE_OK;
+				"Blank EXT IRQ resource\n"));
+			return_ACPI_STATUS(AE_OK);
 		}
 		*irq = p->interrupts[0];
 		break;
@@ -215,11 +230,18 @@ acpi_pci_link_check_current (
 	default:
 		ACPI_DEBUG_PRINT((ACPI_DB_ERROR,
 			"Resource isn't an IRQ\n"));
-		return AE_OK;
+		return_ACPI_STATUS(AE_OK);
 	}
-	return AE_CTRL_TERMINATE;
+	return_ACPI_STATUS(AE_CTRL_TERMINATE);
 }
 
+/*
+ * Run _CRS and set link->irq.active
+ *
+ * return value:
+ * 0 - success
+ * !0 - failure
+ */
 static int
 acpi_pci_link_get_current (
 	struct acpi_pci_link	*link)
@@ -235,15 +257,19 @@ acpi_pci_link_get_current (
 
 	link->irq.active = 0;
 
-	/* Make sure the link is enabled (no use querying if it isn't). */
-	result = acpi_bus_get_status(link->device);
-	if (result) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Unable to read status\n"));
-		goto end;
-	}
-	if (!link->device->status.enabled) {
-		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Link disabled\n"));
-		return_VALUE(0);
+	/* in practice, status disabled is meaningless, ignore it */
+	if (acpi_strict) {
+		/* Query _STA, set link->device->status */
+		result = acpi_bus_get_status(link->device);
+		if (result) {
+			ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Unable to read status\n"));
+			goto end;
+		}
+
+		if (!link->device->status.enabled) {
+			ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Link disabled\n"));
+			return_VALUE(0);
+		}
 	}
 
 	/* 
@@ -258,47 +284,17 @@ acpi_pci_link_get_current (
 		goto end;
 	}
 
-	if (!irq) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "No IRQ resource found\n"));
+	if (acpi_strict && !irq) {
+		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "_CRS returned 0\n"));
 		result = -ENODEV;
-		goto end;
 	}
 
-	/*
-	 * Note that we don't validate that the current IRQ (_CRS) exists
-	 * within the possible IRQs (_PRS): we blindly assume that whatever
-	 * IRQ a boot-enabled Link device is set to is the correct one.
-	 * (Required to support systems such as the Toshiba 5005-S504.)
-	 */
 	link->irq.active = irq;
 
 	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Link at IRQ %d \n", link->irq.active));
 
 end:
 	return_VALUE(result);
-}
-
-static int
-acpi_pci_link_try_get_current (
-	struct acpi_pci_link *link,
-	int irq)
-{
-	int result;
-
-	ACPI_FUNCTION_TRACE("acpi_pci_link_try_get_current");
-
-	result = acpi_pci_link_get_current(link);
-	if (result && link->irq.active) {
- 		return_VALUE(result);
- 	}
-
-	if (!link->irq.active) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "No active IRQ resource found\n"));
-		printk(KERN_WARNING "_CRS returns NULL! Using IRQ %d for device (%s [%s]).\n", irq, acpi_device_name(link->device), acpi_device_bid(link->device));
-		link->irq.active = irq;
-	}
-	
-	return 0;
 }
 
 static int
@@ -311,117 +307,109 @@ acpi_pci_link_set (
 	struct {
 		struct acpi_resource	res;
 		struct acpi_resource	end;
-	}                       resource;
-	struct acpi_buffer	buffer = {sizeof(resource)+1, &resource};
-	int			i = 0;
-	int			valid = 0;
-	int			resource_type = 0;
+	}    *resource;
+	struct acpi_buffer	buffer = {0, NULL};
 
 	ACPI_FUNCTION_TRACE("acpi_pci_link_set");
 
 	if (!link || !irq)
 		return_VALUE(-EINVAL);
 
-	/* We don't check irqs the first time around */
-	if (link->irq.setonboot) {
-		/* See if we're already at the target IRQ. */
-		if (irq == link->irq.active)
-			return_VALUE(0);
+	resource = kmalloc( sizeof(*resource)+1, GFP_KERNEL);
+	if(!resource)
+		return_VALUE(-ENOMEM);
 
-		/* Make sure the target IRQ in the list of possible IRQs. */
-		for (i=0; i<link->irq.possible_count; i++) {
-			if (irq == link->irq.possible[i])
-				valid = 1;
-		}
-		if (!valid) {
-			ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Target IRQ %d invalid\n", irq));
-			return_VALUE(-EINVAL);
-		}
-	}
+	memset(resource, 0, sizeof(*resource)+1);
+	buffer.length = sizeof(*resource) +1;
+	buffer.pointer = resource;
 
-	/* If IRQ<=15, first try with a "normal" IRQ descriptor. If that fails, try with
-	 * an extended one */
-	if (irq <= 15) {
-		resource_type = ACPI_RSTYPE_IRQ;
-	} else {
-		resource_type = ACPI_RSTYPE_EXT_IRQ;
-	}
-
-retry_programming:
-   
-	memset(&resource, 0, sizeof(resource));
-
-	/* NOTE: PCI interrupts are always level / active_low / shared. But not all
-	   interrupts > 15 are PCI interrupts. Rely on the ACPI IRQ definition for 
-	   parameters */
-	switch(resource_type) {
+	switch(link->irq.resource_type) {
 	case ACPI_RSTYPE_IRQ:
-		resource.res.id = ACPI_RSTYPE_IRQ;
-		resource.res.length = sizeof(struct acpi_resource);
-		resource.res.data.irq.edge_level = link->irq.edge_level;
-		resource.res.data.irq.active_high_low = link->irq.active_high_low;
-		resource.res.data.irq.number_of_interrupts = 1;
-		resource.res.data.irq.interrupts[0] = irq;
+		resource->res.id = ACPI_RSTYPE_IRQ;
+		resource->res.length = sizeof(struct acpi_resource);
+		resource->res.data.irq.edge_level = link->irq.edge_level;
+		resource->res.data.irq.active_high_low = link->irq.active_high_low;
+		if (link->irq.edge_level == ACPI_EDGE_SENSITIVE)
+			resource->res.data.irq.shared_exclusive = ACPI_EXCLUSIVE;
+		else
+			resource->res.data.irq.shared_exclusive = ACPI_SHARED;
+		resource->res.data.irq.number_of_interrupts = 1;
+		resource->res.data.irq.interrupts[0] = irq;
 		break;
 	   
 	case ACPI_RSTYPE_EXT_IRQ:
-		resource.res.id = ACPI_RSTYPE_EXT_IRQ;
-		resource.res.length = sizeof(struct acpi_resource);
-		resource.res.data.extended_irq.producer_consumer = ACPI_CONSUMER;
-		resource.res.data.extended_irq.edge_level = link->irq.edge_level;
-		resource.res.data.extended_irq.active_high_low = link->irq.active_high_low;
-		resource.res.data.extended_irq.number_of_interrupts = 1;
-		resource.res.data.extended_irq.interrupts[0] = irq;
+		resource->res.id = ACPI_RSTYPE_EXT_IRQ;
+		resource->res.length = sizeof(struct acpi_resource);
+		resource->res.data.extended_irq.producer_consumer = ACPI_CONSUMER;
+		resource->res.data.extended_irq.edge_level = link->irq.edge_level;
+		resource->res.data.extended_irq.active_high_low = link->irq.active_high_low;
+		if (link->irq.edge_level == ACPI_EDGE_SENSITIVE)
+			resource->res.data.irq.shared_exclusive = ACPI_EXCLUSIVE;
+		else
+			resource->res.data.irq.shared_exclusive = ACPI_SHARED;
+		resource->res.data.extended_irq.number_of_interrupts = 1;
+		resource->res.data.extended_irq.interrupts[0] = irq;
 		/* ignore resource_source, it's optional */
 		break;
+	default:
+		printk("ACPI BUG: resource_type %d\n", link->irq.resource_type);
+		result = -EINVAL;
+		goto end;
+
 	}
-	resource.end.id = ACPI_RSTYPE_END_TAG;
+	resource->end.id = ACPI_RSTYPE_END_TAG;
 
 	/* Attempt to set the resource */
 	status = acpi_set_current_resources(link->handle, &buffer);
 
-	/* if we failed and IRQ <= 15, try again with an extended descriptor */
-	if (ACPI_FAILURE(status) && (resource_type == ACPI_RSTYPE_IRQ)) {
-                resource_type = ACPI_RSTYPE_EXT_IRQ;
-                printk(PREFIX "Retrying with extended IRQ descriptor\n");
-                goto retry_programming;
-	}
-  
 	/* check for total failure */
 	if (ACPI_FAILURE(status)) {
 		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Error evaluating _SRS\n"));
-		return_VALUE(-ENODEV);
+		result = -ENODEV;
+		goto end;
 	}
 
-	/* Make sure the device is enabled. */
+	/* Query _STA, set device->status */
 	result = acpi_bus_get_status(link->device);
 	if (result) {
 		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Unable to read status\n"));
-		return_VALUE(result);
+		goto end;
 	}
 	if (!link->device->status.enabled) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Link disabled\n"));
-		return_VALUE(-ENODEV);
+		printk(KERN_WARNING PREFIX
+			"%s [%s] disabled and referenced, BIOS bug.\n",
+			acpi_device_name(link->device),
+			acpi_device_bid(link->device));
 	}
 
-	/* Make sure the active IRQ is the one we requested. */
-	result = acpi_pci_link_try_get_current(link, irq);
+	/* Query _CRS, set link->irq.active */
+	result = acpi_pci_link_get_current(link);
 	if (result) {
-		return_VALUE(result);
+		goto end;
 	}
-   
+
+	/*
+	 * Is current setting not what we set?
+	 * set link->irq.active
+	 */
 	if (link->irq.active != irq) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, 
-			"Attempt to enable at IRQ %d resulted in IRQ %d\n", 
-			irq, link->irq.active));
-		link->irq.active = 0;
-		acpi_ut_evaluate_object (link->handle, "_DIS", 0, NULL);	   
-		return_VALUE(-ENODEV);
+		/*
+		 * policy: when _CRS doesn't return what we just _SRS
+		 * assume _SRS worked and override _CRS value.
+		 */
+		printk(KERN_WARNING PREFIX 
+			"%s [%s] BIOS reported IRQ %d, using IRQ %d\n",
+			acpi_device_name(link->device),
+			acpi_device_bid(link->device),
+			link->irq.active, irq);
+		link->irq.active = irq;
 	}
 
 	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Set IRQ %d\n", link->irq.active));
 	
-	return_VALUE(0);
+end:
+	kfree(resource);
+	return_VALUE(result);
 }
 
 
@@ -429,38 +417,75 @@ retry_programming:
                             PCI Link IRQ Management
    -------------------------------------------------------------------------- */
 
+/*
+ * "acpi_irq_balance" (default in APIC mode) enables ACPI to use PIC Interrupt
+ * Link Devices to move the PIRQs around to minimize sharing.
+ * 
+ * "acpi_irq_nobalance" (default in PIC mode) tells ACPI not to move any PIC IRQs
+ * that the BIOS has already set to active.  This is necessary because
+ * ACPI has no automatic means of knowing what ISA IRQs are used.  Note that
+ * if the BIOS doesn't set a Link Device active, ACPI needs to program it
+ * even if acpi_irq_nobalance is set.
+ *
+ * A tables of penalties avoids directing PCI interrupts to well known
+ * ISA IRQs. Boot params are available to over-ride the default table:
+ *
+ * List interrupts that are free for PCI use.
+ * acpi_irq_pci=n[,m]
+ *
+ * List interrupts that should not be used for PCI:
+ * acpi_irq_isa=n[,m]
+ *
+ * Note that PCI IRQ routers have a list of possible IRQs,
+ * which may not include the IRQs this table says are available.
+ * 
+ * Since this heuristic can't tell the difference between a link
+ * that no device will attach to, vs. a link which may be shared
+ * by multiple active devices -- it is not optimal.
+ *
+ * If interrupt performance is that important, get an IO-APIC system
+ * with a pin dedicated to each device.  Or for that matter, an MSI
+ * enabled system.
+ */
+
 #define ACPI_MAX_IRQS		256
 #define ACPI_MAX_ISA_IRQ	16
 
-/*
- * IRQ penalties are used to promote PCI IRQ balancing.  We set each ISA-
- * possible IRQ (0-15) with a default penalty relative to its feasibility
- * for PCI's use:
- *
- *   Never use:		0, 1, 2 (timer, keyboard, and cascade)
- *   Avoid using:	13, 14, and 15 (FP error and IDE)
- *   Penalize:		3, 4, 6, 7, 12 (known ISA uses)
- *
- * Thus we're left with IRQs 5, 9, 10, 11, and everything above 15 (IO[S]APIC)
- * as 'best bets' for PCI use.
- */
+#define PIRQ_PENALTY_PCI_AVAILABLE	(0)
+#define PIRQ_PENALTY_PCI_POSSIBLE	(16*16)
+#define PIRQ_PENALTY_PCI_USING		(16*16*16)
+#define PIRQ_PENALTY_ISA_TYPICAL	(16*16*16*16)
+#define PIRQ_PENALTY_ISA_USED		(16*16*16*16*16)
+#define PIRQ_PENALTY_ISA_ALWAYS		(16*16*16*16*16*16)
 
 static int acpi_irq_penalty[ACPI_MAX_IRQS] = {
-	1000000,  1000000,  1000000,    10000, 
-	  10000,        0,    10000,    10000,
-	  10000,        0,        0,        0, 
-	  10000,   100000,   100000,   100000,
+	PIRQ_PENALTY_ISA_ALWAYS,	/* IRQ0 timer */
+	PIRQ_PENALTY_ISA_ALWAYS,	/* IRQ1 keyboard */
+	PIRQ_PENALTY_ISA_ALWAYS,	/* IRQ2 cascade */
+	PIRQ_PENALTY_ISA_TYPICAL,	/* IRQ3	serial */
+	PIRQ_PENALTY_ISA_TYPICAL,	/* IRQ4	serial */
+	PIRQ_PENALTY_ISA_TYPICAL,	/* IRQ5 sometimes SoundBlaster */
+	PIRQ_PENALTY_ISA_TYPICAL,	/* IRQ6 */
+	PIRQ_PENALTY_ISA_TYPICAL,	/* IRQ7 parallel, spurious */
+	PIRQ_PENALTY_ISA_TYPICAL,	/* IRQ8 rtc, sometimes */
+	PIRQ_PENALTY_PCI_AVAILABLE,	/* IRQ9  PCI, often acpi */
+	PIRQ_PENALTY_PCI_AVAILABLE,	/* IRQ10 PCI */
+	PIRQ_PENALTY_PCI_AVAILABLE,	/* IRQ11 PCI */
+	PIRQ_PENALTY_ISA_USED,	/* IRQ12 mouse */
+	PIRQ_PENALTY_ISA_USED,	/* IRQ13 fpe, sometimes */
+	PIRQ_PENALTY_ISA_USED,	/* IRQ14 ide0 */
+	PIRQ_PENALTY_ISA_USED,	/* IRQ15 ide1 */
+			/* >IRQ15 */
 };
 
-
-int
-acpi_pci_link_check (void)
+int __init
+acpi_irq_penalty_init(void)
 {
 	struct list_head	*node = NULL;
 	struct acpi_pci_link    *link = NULL;
 	int			i = 0;
 
-	ACPI_FUNCTION_TRACE("acpi_pci_link_check");
+	ACPI_FUNCTION_TRACE("acpi_irq_penalty_init");
 
 	/*
 	 * Update penalties to facilitate IRQ balancing.
@@ -473,19 +498,29 @@ acpi_pci_link_check (void)
 			continue;
 		}
 
-		if (link->irq.active)
-			acpi_irq_penalty[link->irq.active] += 100;
-		else if (link->irq.possible_count) {
-			int penalty = 100 / link->irq.possible_count;
-			for (i=0; i<link->irq.possible_count; i++) {
+		/*
+		 * reflect the possible and active irqs in the penalty table --
+		 * useful for breaking ties.
+		 */
+		if (link->irq.possible_count) {
+			int penalty = PIRQ_PENALTY_PCI_POSSIBLE / link->irq.possible_count;
+
+			for (i = 0; i < link->irq.possible_count; i++) {
 				if (link->irq.possible[i] < ACPI_MAX_ISA_IRQ)
 					acpi_irq_penalty[link->irq.possible[i]] += penalty;
 			}
+
+		} else if (link->irq.active) {
+			acpi_irq_penalty[link->irq.active] += PIRQ_PENALTY_PCI_POSSIBLE;
 		}
 	}
+	/* Add a penalty for the SCI */
+	acpi_irq_penalty[acpi_fadt.sci_int] += PIRQ_PENALTY_PCI_USING;
 
 	return_VALUE(0);
 }
+
+static int acpi_irq_balance;	/* 0: static, 1: balance */
 
 static int acpi_pci_link_allocate(struct acpi_pci_link* link) {
 	int irq;
@@ -493,19 +528,41 @@ static int acpi_pci_link_allocate(struct acpi_pci_link* link) {
 
 	ACPI_FUNCTION_TRACE("acpi_pci_link_allocate");
 
-	if (link->irq.setonboot)
+	if (link->irq.initialized)
 		return_VALUE(0);
 
+	/*
+	 * search for active IRQ in list of possible IRQs.
+	 */
+	for (i = 0; i < link->irq.possible_count; ++i) {
+		if (link->irq.active == link->irq.possible[i])
+			break;
+	}
+	/*
+	 * forget active IRQ that is not in possible list
+	 */
+	if (i == link->irq.possible_count) {
+		if (acpi_strict)
+			printk(KERN_WARNING PREFIX "_CRS %d not found"
+				" in _PRS\n", link->irq.active);
+		link->irq.active = 0;
+	}
+
+	/*
+	 * if active found, use it; else pick entry from end of possible list.
+	 */
 	if (link->irq.active) {
 		irq = link->irq.active;
 	} else {
-		irq = link->irq.possible[0];
+		irq = link->irq.possible[link->irq.possible_count - 1];
+	}
 
+	if (acpi_irq_balance || !link->irq.active) {
 		/*
 		 * Select the best IRQ.  This is done in reverse to promote
 		 * the use of IRQs 9, 10, 11, and >15.
 		 */
-		for (i=(link->irq.possible_count-1); i>0; i--) {
+		for (i = (link->irq.possible_count - 1); i >= 0; i--) {
 			if (acpi_irq_penalty[irq] > acpi_irq_penalty[link->irq.possible[i]])
 				irq = link->irq.possible[i];
 		}
@@ -513,21 +570,28 @@ static int acpi_pci_link_allocate(struct acpi_pci_link* link) {
 
 	/* Attempt to enable the link device at this IRQ. */
 	if (acpi_pci_link_set(link, irq)) {
-		printk(PREFIX "Unable to set IRQ for %s [%s] (likely buggy ACPI BIOS). Aborting ACPI-based IRQ routing. Try pci=noacpi or acpi=off\n",
+		printk(PREFIX "Unable to set IRQ for %s [%s] (likely buggy ACPI BIOS).\n"
+				"Try pci=noacpi or acpi=off\n",
 			acpi_device_name(link->device),
 			acpi_device_bid(link->device));
 		return_VALUE(-ENODEV);
 	} else {
-		acpi_irq_penalty[link->irq.active] += 100;
+		acpi_irq_penalty[link->irq.active] += PIRQ_PENALTY_PCI_USING;
 		printk(PREFIX "%s [%s] enabled at IRQ %d\n", 
 			acpi_device_name(link->device),
 			acpi_device_bid(link->device), link->irq.active);
 	}
 
-	link->irq.setonboot = 1;
+	link->irq.initialized = 1;
+
 	return_VALUE(0);
 }
 
+/*
+ * acpi_pci_link_get_irq
+ * success: return IRQ >= 0
+ * failure: return -1
+ */
 
 int
 acpi_pci_link_get_irq (
@@ -545,27 +609,27 @@ acpi_pci_link_get_irq (
 	result = acpi_bus_get_device(handle, &device);
 	if (result) {
 		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Invalid link device\n"));
-		return_VALUE(0);
+		return_VALUE(-1);
 	}
 
 	link = (struct acpi_pci_link *) acpi_driver_data(device);
 	if (!link) {
 		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Invalid link context\n"));
-		return_VALUE(0);
+		return_VALUE(-1);
 	}
 
 	/* TBD: Support multiple index (IRQ) entries per Link Device */
 	if (index) {
 		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Invalid index %d\n", index));
-		return_VALUE(0);
+		return_VALUE(-1);
 	}
 
 	if (acpi_pci_link_allocate(link))
-		return_VALUE(0);
+		return_VALUE(-1);
 	   
 	if (!link->irq.active) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Link disabled\n"));
-		return_VALUE(0);
+		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Link active IRQ is 0!\n"));
+		return_VALUE(-1);
 	}
 
 	if (edge_level) *edge_level = link->irq.edge_level;
@@ -599,17 +663,19 @@ acpi_pci_link_add (
 
 	link->device = device;
 	link->handle = device->handle;
-	sprintf(acpi_device_name(device), "%s", ACPI_PCI_LINK_DEVICE_NAME);
-	sprintf(acpi_device_class(device), "%s", ACPI_PCI_LINK_CLASS);
+	strcpy(acpi_device_name(device), ACPI_PCI_LINK_DEVICE_NAME);
+	strcpy(acpi_device_class(device), ACPI_PCI_LINK_CLASS);
 	acpi_driver_data(device) = link;
 
 	result = acpi_pci_link_get_possible(link);
 	if (result)
 		goto end;
 
+	/* query and set link->irq.active */
 	acpi_pci_link_get_current(link);
 
-	printk(PREFIX "%s [%s] (IRQs", acpi_device_name(device), acpi_device_bid(device));
+	printk(PREFIX "%s [%s] (IRQs", acpi_device_name(device),
+		acpi_device_bid(device));
 	for (i = 0; i < link->irq.possible_count; i++) {
 		if (link->irq.active == link->irq.possible[i]) {
 			printk(" *%d", link->irq.possible[i]);
@@ -618,17 +684,65 @@ acpi_pci_link_add (
 		else
 			printk(" %d", link->irq.possible[i]);
 	}
-	printk(")\n");
+
+	printk(")");
+
+	if (!found)
+		printk(" *%d", link->irq.active);
+
+	if(!link->device->status.enabled)
+		printk(", disabled.");
+
+	printk("\n");
 
 	/* TBD: Acquire/release lock */
 	list_add_tail(&link->node, &acpi_link.entries);
 	acpi_link.count++;
 
 end:
+	/* disable all links -- to be activated on use */
+	acpi_ut_evaluate_object(link->handle, "_DIS", 0, NULL);
+
 	if (result)
 		kfree(link);
 
 	return_VALUE(result);
+}
+
+
+static int
+acpi_pci_link_resume (
+	struct acpi_pci_link	*link)
+{
+	ACPI_FUNCTION_TRACE("acpi_pci_link_resume");
+	
+	if (link->irq.active && link->irq.initialized)
+		return_VALUE(acpi_pci_link_set(link, link->irq.active));
+	else
+		return_VALUE(0);
+}
+
+
+static int
+irqrouter_resume(
+	struct sys_device *dev)
+{
+	struct list_head        *node = NULL;
+	struct acpi_pci_link    *link = NULL;
+
+	ACPI_FUNCTION_TRACE("irqrouter_resume");
+
+	list_for_each(node, &acpi_link.entries) {
+
+		link = list_entry(node, struct acpi_pci_link, node);
+		if (!link) {
+			ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Invalid link context\n"));
+			continue;
+		}
+
+		acpi_pci_link_resume(link);
+	}
+	return_VALUE(0);
 }
 
 
@@ -654,12 +768,124 @@ acpi_pci_link_remove (
 	return_VALUE(0);
 }
 
+/*
+ * modify acpi_irq_penalty[] from cmdline
+ */
+static int __init acpi_irq_penalty_update(char *str, int used)
+{
+	int i;
+
+	for (i = 0; i < 16; i++) {
+		int retval;
+		int irq;
+
+		retval = get_option(&str,&irq);
+
+		if (!retval)
+			break;	/* no number found */
+
+		if (irq < 0)
+			continue;
+		
+		if (irq >= ACPI_MAX_IRQS)
+			continue;
+
+		if (used)
+			acpi_irq_penalty[irq] += PIRQ_PENALTY_ISA_USED;
+		else
+			acpi_irq_penalty[irq] = PIRQ_PENALTY_PCI_AVAILABLE;
+
+		if (retval != 2)	/* no next number */
+			break;
+	}
+	return 1;
+}
+
+/*
+ * We'd like PNP to call this routine for the
+ * single ISA_USED value for each legacy device.
+ * But instead it calls us with each POSSIBLE setting.
+ * There is no ISA_POSSIBLE weight, so we simply use
+ * the (small) PCI_USING penalty.
+ */
+void acpi_penalize_isa_irq(int irq)
+{
+	acpi_irq_penalty[irq] += PIRQ_PENALTY_PCI_USING;
+}
+
+/*
+ * Over-ride default table to reserve additional IRQs for use by ISA
+ * e.g. acpi_irq_isa=5
+ * Useful for telling ACPI how not to interfere with your ISA sound card.
+ */
+static int __init acpi_irq_isa(char *str)
+{
+	return acpi_irq_penalty_update(str, 1);
+}
+__setup("acpi_irq_isa=", acpi_irq_isa);
+
+/*
+ * Over-ride default table to free additional IRQs for use by PCI
+ * e.g. acpi_irq_pci=7,15
+ * Used for acpi_irq_balance to free up IRQs to reduce PCI IRQ sharing.
+ */
+static int __init acpi_irq_pci(char *str)
+{
+	return acpi_irq_penalty_update(str, 0);
+}
+__setup("acpi_irq_pci=", acpi_irq_pci);
+
+static int __init acpi_irq_nobalance_set(char *str)
+{
+	acpi_irq_balance = 0;
+	return 1;
+}
+__setup("acpi_irq_nobalance", acpi_irq_nobalance_set);
+
+int __init acpi_irq_balance_set(char *str)
+{
+	acpi_irq_balance = 1;
+	return 1;
+}
+__setup("acpi_irq_balance", acpi_irq_balance_set);
+
+
+static struct sysdev_class irqrouter_sysdev_class = {
+        set_kset_name("irqrouter"),
+        .resume = irqrouter_resume,
+};
+
+
+static struct sys_device device_irqrouter = {
+	.id     = 0,
+	.cls    = &irqrouter_sysdev_class,
+};
+
+
+static int __init irqrouter_init_sysfs(void)
+{
+	int error;
+
+	ACPI_FUNCTION_TRACE("irqrouter_init_sysfs");
+
+	if (acpi_disabled || acpi_noirq)
+		return_VALUE(0);
+
+	error = sysdev_class_register(&irqrouter_sysdev_class);
+	if (!error)
+		error = sysdev_register(&device_irqrouter);
+
+	return_VALUE(error);
+}                                        
+
+device_initcall(irqrouter_init_sysfs);
+
 
 static int __init acpi_pci_link_init (void)
 {
 	ACPI_FUNCTION_TRACE("acpi_pci_link_init");
 
-	if (acpi_disabled)
+	if (acpi_noirq)
 		return_VALUE(0);
 
 	acpi_link.count = 0;

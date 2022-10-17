@@ -1,6 +1,6 @@
 /*
  *  ALSA sequencer Memory Manager
- *  Copyright (c) 1998 by Frank van de Pol <fvdpol@home.nl>
+ *  Copyright (c) 1998 by Frank van de Pol <fvdpol@coil.demon.nl>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -64,7 +64,6 @@ struct pool {
 };
 
 extern void snd_seq_cell_free(snd_seq_event_cell_t* cell);
-int snd_seq_cell_alloc(pool_t *pool, snd_seq_event_cell_t **cellp, int nonblock, struct file *file);
 
 int snd_seq_event_dup(pool_t *pool, snd_seq_event_t *event, snd_seq_event_cell_t **cellp, int nonblock, struct file *file);
 

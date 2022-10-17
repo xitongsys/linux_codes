@@ -18,14 +18,16 @@
 #include <asm/fpu.h>
 #include <asm/ptrace.h>
 
-extern inline unsigned long rdusp(void) {
-  	unsigned long usp;
+static inline unsigned long rdusp(void)
+{
+	unsigned long usp;
 
 	__asm__ __volatile__("move %/usp,%0" : "=a" (usp));
 	return usp;
 }
 
-extern inline void wrusp(unsigned long usp) {
+static inline void wrusp(unsigned long usp)
+{
 	__asm__ __volatile__("move %0,%/usp" : : "a" (usp));
 }
 
@@ -53,11 +55,6 @@ extern inline void wrusp(unsigned long usp) {
 #endif
 #define TASK_UNMAPPED_ALIGN(addr, off)	PAGE_ALIGN(addr)
 
-/*
- * Bus types
- */
-#define MCA_bus 0
-
 struct task_work {
 	unsigned char sigpending;
 	unsigned char notify_resume;	/* request for notification on
@@ -83,10 +80,11 @@ struct thread_struct {
 	struct task_work work;
 };
 
-#define INIT_THREAD  {						\
-	ksp: sizeof(init_stack) + (unsigned long) init_stack,	\
-	sr: PS_S, 						\
-	fs: __KERNEL_DS,					\
+#define INIT_THREAD  {							\
+	ksp:	sizeof(init_stack) + (unsigned long) init_stack,	\
+	sr:	PS_S,							\
+	fs:	__KERNEL_DS,						\
+	info:	INIT_THREAD_INFO(init_task)				\
 }
 
 /*

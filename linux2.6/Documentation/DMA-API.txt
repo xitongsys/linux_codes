@@ -20,6 +20,10 @@ Part I - pci_ and dma_ Equivalent API
 To get the pci_ API, you must #include <linux/pci.h>
 To get the dma_ API, you must #include <linux/dma-mapping.h>
 
+
+Part Ia - Using large dma-coherent buffers
+------------------------------------------
+
 void *
 dma_alloc_coherent(struct device *dev, size_t size,
 			     dma_addr_t *dma_handle, int flag)
@@ -42,6 +46,7 @@ address space) or NULL if the allocation failed.
 Note: consistent memory can be expensive on some platforms, and the
 minimum allocation length may be as big as a page, so you should
 consolidate your requests for consistent memory as much as possible.
+The simplest way to do that is to use the dma_pool calls (see below).
 
 The flag parameter (dma_alloc_coherent only) allows the caller to
 specify the GFP_ flags (see kmalloc) for the allocation (the
@@ -60,6 +65,77 @@ Free the region of consistent memory you previously allocated.  dev,
 size and dma_handle must all be the same as those passed into the
 consistent allocate.  cpu_addr must be the virtual address returned by
 the consistent allocate
+
+
+Part Ib - Using small dma-coherent buffers
+------------------------------------------
+
+To get this part of the dma_ API, you must #include <linux/dmapool.h>
+
+Many drivers need lots of small dma-coherent memory regions for DMA
+descriptors or I/O buffers.  Rather than allocating in units of a page
+or more using dma_alloc_coherent(), you can use DMA pools.  These work
+much like a kmem_cache_t, except that they use the dma-coherent allocator
+not __get_free_pages().  Also, they understand common hardware constraints
+for alignment, like queue heads needing to be aligned on N byte boundaries.
+
+
+	struct dma_pool *
+	dma_pool_create(const char *name, struct device *dev,
+			size_t size, size_t align, size_t alloc);
+
+	struct pci_pool *
+	pci_pool_create(const char *name, struct pci_device *dev,
+			size_t size, size_t align, size_t alloc);
+
+The pool create() routines initialize a pool of dma-coherent buffers
+for use with a given device.  It must be called in a context which
+can sleep.
+
+The "name" is for diagnostics (like a kmem_cache_t name); dev and size
+are like what you'd pass to dma_alloc_coherent().  The device's hardware
+alignment requirement for this type of data is "align" (which is expressed
+in bytes, and must be a power of two).  If your device has no boundary
+crossing restrictions, pass 0 for alloc; passing 4096 says memory allocated
+from this pool must not cross 4KByte boundaries.
+
+
+	void *dma_pool_alloc(struct dma_pool *pool, int gfp_flags,
+			dma_addr_t *dma_handle);
+
+	void *pci_pool_alloc(struct pci_pool *pool, int gfp_flags,
+			dma_addr_t *dma_handle);
+
+This allocates memory from the pool; the returned memory will meet the size
+and alignment requirements specified at creation time.  Pass GFP_ATOMIC to
+prevent blocking, or if it's permitted (not in_interrupt, not holding SMP locks)
+pass GFP_KERNEL to allow blocking.  Like dma_alloc_coherent(), this returns
+two values:  an address usable by the cpu, and the dma address usable by the
+pool's device.
+
+
+	void dma_pool_free(struct dma_pool *pool, void *vaddr,
+			dma_addr_t addr);
+
+	void pci_pool_free(struct pci_pool *pool, void *vaddr,
+			dma_addr_t addr);
+
+This puts memory back into the pool.  The pool is what was passed to
+the the pool allocation routine; the cpu and dma addresses are what
+were returned when that routine allocated the memory being freed.
+
+
+	void dma_pool_destroy(struct dma_pool *pool);
+
+	void pci_pool_destroy(struct pci_pool *pool);
+
+The pool destroy() routines free the resources of the pool.  They must be
+called in a context which can sleep.  Make sure you've freed all allocated
+memory back to the pool before you destroy it.
+
+
+Part Ic - DMA addressing limitations
+------------------------------------
 
 int
 dma_supported(struct device *dev, u64 mask)
@@ -84,7 +160,25 @@ pci_set_dma_mask(struct pci_device *dev, u64 mask)
 Checks to see if the mask is possible and updates the device
 parameters if it is.
 
-Returns: 1 if successful and 0 if not
+Returns: 0 if successful and a negative error if not.
+
+u64
+dma_get_required_mask(struct device *dev)
+
+After setting the mask with dma_set_mask(), this API returns the
+actual mask (within that already set) that the platform actually
+requires to operate efficiently.  Usually this means the returned mask
+is the minimum required to cover all of memory.  Examining the
+required mask gives drivers with variable descriptor sizes the
+opportunity to use smaller descriptors as necessary.
+
+Requesting the required mask does not alter the current mask.  If you
+wish to take advantage of it, you should issue another dma_set_mask()
+call to lower the mask again.
+
+
+Part Id - Streaming DMA mappings
+--------------------------------
 
 dma_addr_t
 dma_map_single(struct device *dev, void *cpu_addr, size_t size,
@@ -199,6 +293,18 @@ recommended that you never use these unless you really know what the
 cache width is.
 
 int
+dma_mapping_error(dma_addr_t dma_addr)
+
+int
+pci_dma_mapping_error(dma_addr_t dma_addr)
+
+In some circumstances dma_map_single and dma_map_page will fail to create
+a mapping. A driver can check for these errors by testing the returned
+dma address with dma_mapping_error(). A non zero return value means the mapping
+could not be created and the driver should take appropriate action (eg
+reduce current DMA mapping usage or delay and try again later).
+
+int
 dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 	   enum dma_data_direction direction)
 int
@@ -211,6 +317,15 @@ Returns: the number of physical segments mapped (this may be shorted
 than <nents> passed in if the block layer determines that some
 elements of the scatter/gather list are physically adjacent and thus
 may be mapped with a single entry).
+
+Please note that the sg cannot be mapped again if it has been mapped once.
+The mapping process is allowed to destroy information in the sg.
+
+As with the other mapping interfaces, dma_map_sg can fail. When it
+does, 0 is returned and a driver must take appropriate action. It is
+critical that the driver do something, in the case of a block driver
+aborting the request or even oopsing is better than doing nothing and
+corrupting the filesystem.
 
 void
 dma_unmap_sg(struct device *dev, struct scatterlist *sg, int nhwentries,
@@ -253,6 +368,7 @@ Notes:  You must do this:
   DMA_BIDIRECTIONAL
 
 See also dma_map_single().
+
 
 Part II - Advanced dma_ usage
 -----------------------------
@@ -327,5 +443,84 @@ Do a partial sync of memory that was allocated by
 dma_alloc_noncoherent(), starting at virtual address vaddr and
 continuing on for size.  Again, you *must* observe the cache line
 boundaries when doing this.
+
+int
+dma_declare_coherent_memory(struct device *dev, dma_addr_t bus_addr,
+			    dma_addr_t device_addr, size_t size, int
+			    flags)
+
+
+Declare region of memory to be handed out by dma_alloc_coherent when
+it's asked for coherent memory for this device.
+
+bus_addr is the physical address to which the memory is currently
+assigned in the bus responding region (this will be used by the
+platform to perform the mapping)
+
+device_addr is the physical address the device needs to be programmed
+with actually to address this memory (this will be handed out as the
+dma_addr_t in dma_alloc_coherent())
+
+size is the size of the area (must be multiples of PAGE_SIZE).
+
+flags can be or'd together and are
+
+DMA_MEMORY_MAP - request that the memory returned from
+dma_alloc_coherent() be directly writeable.
+
+DMA_MEMORY_IO - request that the memory returned from
+dma_alloc_coherent() be addressable using read/write/memcpy_toio etc.
+
+One or both of these flags must be present
+
+DMA_MEMORY_INCLUDES_CHILDREN - make the declared memory be allocated by
+dma_alloc_coherent of any child devices of this one (for memory residing
+on a bridge).
+
+DMA_MEMORY_EXCLUSIVE - only allocate memory from the declared regions. 
+Do not allow dma_alloc_coherent() to fall back to system memory when
+it's out of memory in the declared region.
+
+The return value will be either DMA_MEMORY_MAP or DMA_MEMORY_IO and
+must correspond to a passed in flag (i.e. no returning DMA_MEMORY_IO
+if only DMA_MEMORY_MAP were passed in) for success or zero for
+failure.
+
+Note, for DMA_MEMORY_IO returns, all subsequent memory returned by
+dma_alloc_coherent() may no longer be accessed directly, but instead
+must be accessed using the correct bus functions.  If your driver
+isn't prepared to handle this contingency, it should not specify
+DMA_MEMORY_IO in the input flags.
+
+As a simplification for the platforms, only *one* such region of
+memory may be declared per device.
+
+For reasons of efficiency, most platforms choose to track the declared
+region only at the granularity of a page.  For smaller allocations,
+you should use the dma_pool() API.
+
+void
+dma_release_declared_memory(struct device *dev)
+
+Remove the memory region previously declared from the system.  This
+API performs *no* in-use checking for this region and will return
+unconditionally having removed all the required structures.  It is the
+drivers job to ensure that no parts of this memory region are
+currently in use.
+
+void *
+dma_mark_declared_memory_occupied(struct device *dev,
+				  dma_addr_t device_addr, size_t size)
+
+This is used to occupy specific regions of the declared space
+(dma_alloc_coherent() will hand out the first free region it finds).
+
+device_addr is the *device* address of the region requested
+
+size is the size (and should be a page sized multiple).
+
+The return value will be either a pointer to the processor virtual
+address of the memory, or an error (via PTR_ERR()) if any part of the
+region is occupied.
 
 

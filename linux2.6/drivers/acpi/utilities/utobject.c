@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -155,9 +155,8 @@ acpi_ut_create_buffer_object (
 	ACPI_FUNCTION_TRACE_U32 ("ut_create_buffer_object", buffer_size);
 
 
-	/*
-	 * Create a new Buffer object
-	 */
+	/* Create a new Buffer object */
+
 	buffer_desc = acpi_ut_create_internal_object (ACPI_TYPE_BUFFER);
 	if (!buffer_desc) {
 		return_PTR (NULL);
@@ -186,6 +185,61 @@ acpi_ut_create_buffer_object (
 	/* Return the new buffer descriptor */
 
 	return_PTR (buffer_desc);
+}
+
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_ut_create_string_object
+ *
+ * PARAMETERS:  string_size            - Size of string to be created.  Does not
+ *                                       include NULL terminator, this is added
+ *                                       automatically.
+ *
+ * RETURN:      Pointer to a new String object
+ *
+ * DESCRIPTION: Create a fully initialized string object
+ *
+ ******************************************************************************/
+
+union acpi_operand_object *
+acpi_ut_create_string_object (
+	acpi_size                       string_size)
+{
+	union acpi_operand_object       *string_desc;
+	char                            *string;
+
+
+	ACPI_FUNCTION_TRACE_U32 ("ut_create_string_object", string_size);
+
+
+	/* Create a new String object */
+
+	string_desc = acpi_ut_create_internal_object (ACPI_TYPE_STRING);
+	if (!string_desc) {
+		return_PTR (NULL);
+	}
+
+	/*
+	 * Allocate the actual string buffer -- (Size + 1) for NULL terminator.
+	 * NOTE: Zero-length strings are NULL terminated
+	 */
+	string = ACPI_MEM_CALLOCATE (string_size + 1);
+	if (!string) {
+		ACPI_REPORT_ERROR (("create_string: could not allocate size %X\n",
+			(u32) string_size));
+		acpi_ut_remove_reference (string_desc);
+		return_PTR (NULL);
+	}
+
+	/* Complete string object initialization */
+
+	string_desc->string.pointer = string;
+	string_desc->string.length = (u32) string_size;
+
+	/* Return the new string descriptor */
+
+	return_PTR (string_desc);
 }
 
 
@@ -223,29 +277,10 @@ acpi_ut_valid_internal_object (
 
 		return (TRUE);
 
-	case ACPI_DESC_TYPE_NAMED:
-
-		ACPI_DEBUG_PRINT ((ACPI_DB_INFO,
-			"**** Obj %p is a named obj, not ACPI obj\n", object));
-		break;
-
-	case ACPI_DESC_TYPE_PARSER:
-
-		ACPI_DEBUG_PRINT ((ACPI_DB_INFO,
-			"**** Obj %p is a parser obj, not ACPI obj\n", object));
-		break;
-
-	case ACPI_DESC_TYPE_CACHED:
-
-		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
-			"**** Obj %p has already been released to internal cache\n", object));
-		break;
-
 	default:
-
-		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
-			"**** Obj %p has unknown descriptor type %X\n", object,
-			ACPI_GET_DESCRIPTOR_TYPE (object)));
+		ACPI_DEBUG_PRINT ((ACPI_DB_INFO,
+				"%p is not not an ACPI operand obj [%s]\n",
+				object, acpi_ut_get_descriptor_name (object)));
 		break;
 	}
 
@@ -322,7 +357,8 @@ acpi_ut_delete_object_desc (
 
 	if (ACPI_GET_DESCRIPTOR_TYPE (object) != ACPI_DESC_TYPE_OPERAND) {
 		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
-			"Obj %p is not an ACPI object\n", object));
+				"%p is not an ACPI Operand object [%s]\n", object,
+				acpi_ut_get_descriptor_name (object)));
 		return_VOID;
 	}
 
@@ -332,6 +368,7 @@ acpi_ut_delete_object_desc (
 }
 
 
+#ifdef ACPI_ENABLE_OBJECT_CACHE
 /*******************************************************************************
  *
  * FUNCTION:    acpi_ut_delete_object_cache
@@ -355,6 +392,7 @@ acpi_ut_delete_object_cache (
 	acpi_ut_delete_generic_cache (ACPI_MEM_LIST_OPERAND);
 	return_VOID;
 }
+#endif
 
 
 /*******************************************************************************

@@ -15,6 +15,7 @@
 
 #include <linux/config.h>
 #include <linux/linkage.h>
+#include <asm/hazards.h>
 
 /*
  * The following macros are especially useful for __asm__
@@ -185,6 +186,20 @@
 #endif
 
 /*
+ * Default page size for a given kernel configuration
+ */
+#ifdef CONFIG_PAGE_SIZE_4KB
+#define PM_DEFAULT_MASK	PM_4K
+#elif defined(CONFIG_PAGE_SIZE_16KB)
+#define PM_DEFAULT_MASK	PM_16K
+#elif defined(CONFIG_PAGE_SIZE_64KB)
+#define PM_DEFAULT_MASK	PM_64K
+#else
+#error Bad page size configuration!
+#endif
+
+
+/*
  * Values used for computation of new tlb entries
  */
 #define PL_4K		12
@@ -236,6 +251,13 @@
 #define ST0_KX 			0x00000080
 #define ST0_DE			0x00010000
 #define ST0_CE			0x00020000
+
+/*
+ * Setting c0_status.co enables Hit_Writeback and Hit_Writeback_Invalidate
+ * cacheops in userspace.  This bit exists only on RM7000 and RM9000
+ * processors.
+ */
+#define ST0_CO			0x08000000
 
 /*
  * Bitfields in the R[23]000 cp0 status register.
@@ -511,31 +533,50 @@
 #ifndef __ASSEMBLY__
 
 /*
- * Functions to access the r10k performance counter and control registers
+ * Functions to access the R10000 performance counters.  These are basically
+ * mfc0 and mtc0 instructions from and to coprocessor register with a 5-bit
+ * performance counter number encoded into bits 1 ... 5 of the instruction.
+ * Only performance counters 0 to 1 actually exist, so for a non-R10000 aware
+ * disassembler these will look like an access to sel 0 or 1.
  */
-#define read_r10k_perf_cntr(counter)                            \
-({ unsigned int __res;                                          \
-        __asm__ __volatile__(                                   \
-        "mfpc\t%0, "STR(counter)                                \
-        : "=r" (__res));                                        \
-        __res;})
+#define read_r10k_perf_cntr(counter)				\
+({								\
+	unsigned int __res;					\
+	__asm__ __volatile__(					\
+	"mfpc\t%0, %1"						\
+        : "=r" (__res)						\
+	: "i" (counter));					\
+								\
+        __res;							\
+})
 
 #define write_r10k_perf_cntr(counter,val)                       \
-        __asm__ __volatile__(                                   \
-        "mtpc\t%0, "STR(counter)                                \
-        : : "r" (val));
+do {								\
+	__asm__ __volatile__(					\
+	"mtpc\t%0, %1"						\
+	:							\
+	: "r" (val), "i" (counter));				\
+} while (0)
 
-#define read_r10k_perf_cntl(counter)                            \
-({ unsigned int __res;                                          \
-        __asm__ __volatile__(                                   \
-        "mfps\t%0, "STR(counter)                                \
-        : "=r" (__res));                                        \
-        __res;})
+#define read_r10k_perf_event(counter)				\
+({								\
+	unsigned int __res;					\
+	__asm__ __volatile__(					\
+	"mfps\t%0, %1"						\
+        : "=r" (__res)						\
+	: "i" (counter));					\
+								\
+        __res;							\
+})
 
 #define write_r10k_perf_cntl(counter,val)                       \
-        __asm__ __volatile__(                                   \
-        "mtps\t%0, "STR(counter)                                \
-        : : "r" (val));
+do {								\
+	__asm__ __volatile__(					\
+	"mtps\t%0, %1"						\
+	:							\
+	: "r" (val), "i" (counter));				\
+} while (0)
+
 
 /*
  * Macros to access the system control coprocessor
@@ -557,8 +598,10 @@
 })
 
 #define __read_64bit_c0_register(source, sel)				\
-({ unsigned long __res;							\
-	if (sel == 0)							\
+({ unsigned long long __res;						\
+	if (sizeof(unsigned long) == 4)					\
+		__res = __read_64bit_c0_split(source, sel);		\
+	else if (sel == 0)						\
 		__asm__ __volatile__(					\
 			".set\tmips3\n\t"				\
 			"dmfc0\t%0, " #source "\n\t"			\
@@ -578,18 +621,20 @@ do {									\
 	if (sel == 0)							\
 		__asm__ __volatile__(					\
 			"mtc0\t%z0, " #register "\n\t"			\
-			: : "Jr" (value));				\
+			: : "Jr" ((unsigned int)value));		\
 	else								\
 		__asm__ __volatile__(					\
 			".set\tmips32\n\t"				\
 			"mtc0\t%z0, " #register ", " #sel "\n\t"	\
 			".set\tmips0"					\
-			: : "Jr" (value));				\
+			: : "Jr" ((unsigned int)value));		\
 } while (0)
 
 #define __write_64bit_c0_register(register, sel, value)			\
 do {									\
-	if (sel == 0)							\
+	if (sizeof(unsigned long) == 4)					\
+		__write_64bit_c0_split(register, sel, value);		\
+	else if (sel == 0)						\
 		__asm__ __volatile__(					\
 			".set\tmips3\n\t"				\
 			"dmtc0\t%z0, " #register "\n\t"			\
@@ -605,8 +650,8 @@ do {									\
 
 #define __read_ulong_c0_register(reg, sel)				\
 	((sizeof(unsigned long) == 4) ?					\
-	__read_32bit_c0_register(reg, sel) :				\
-	__read_64bit_c0_register(reg, sel))
+	(unsigned long) __read_32bit_c0_register(reg, sel) :		\
+	(unsigned long) __read_64bit_c0_register(reg, sel))
 
 #define __write_ulong_c0_register(reg, sel, val)			\
 do {									\
@@ -614,6 +659,24 @@ do {									\
 		__write_32bit_c0_register(reg, sel, val);		\
 	else								\
 		__write_64bit_c0_register(reg, sel, val);		\
+} while (0)
+
+/*
+ * On RM7000/RM9000 these are uses to access cop0 set 1 registers
+ */
+#define __read_32bit_c0_ctrl_register(source)				\
+({ int __res;								\
+	__asm__ __volatile__(						\
+		"cfc0\t%0, " #source "\n\t"				\
+		: "=r" (__res));					\
+	__res;								\
+})
+
+#define __write_32bit_c0_ctrl_register(register, value)			\
+do {									\
+	__asm__ __volatile__(						\
+		"ctc0\t%z0, " #register "\n\t"				\
+		: : "Jr" ((unsigned int)value));			\
 } while (0)
 
 /*
@@ -776,17 +839,63 @@ do {									\
 #define read_c0_xcontext()	__read_ulong_c0_register($20, 0)
 #define write_c0_xcontext(val)	__write_ulong_c0_register($20, 0, val)
 
-#define read_c0_intcontrol()	__read_32bit_c0_register($20, 1)
-#define write_c0_intcontrol(val) __write_32bit_c0_register($20, 1, val)
+#define read_c0_intcontrol()	__read_32bit_c0_ctrl_register($20)
+#define write_c0_intcontrol(val) __write_32bit_c0_ctrl_register($20, val)
 
 #define read_c0_framemask()	__read_32bit_c0_register($21, 0)
 #define write_c0_framemask(val)	__write_32bit_c0_register($21, 0, val)
+
+/* RM9000 PerfControl performance counter control register */
+#define read_c0_perfcontrol()	__read_32bit_c0_register($22, 0)
+#define write_c0_perfcontrol(val) __write_32bit_c0_register($22, 0, val)
+
+#define read_c0_diag()		__read_32bit_c0_register($22, 0)
+#define write_c0_diag(val)	__write_32bit_c0_register($22, 0, val)
+
+#define read_c0_diag1()		__read_32bit_c0_register($22, 1)
+#define write_c0_diag1(val)	__write_32bit_c0_register($22, 1, val)
+
+#define read_c0_diag2()		__read_32bit_c0_register($22, 2)
+#define write_c0_diag2(val)	__write_32bit_c0_register($22, 2, val)
+
+#define read_c0_diag3()		__read_32bit_c0_register($22, 3)
+#define write_c0_diag3(val)	__write_32bit_c0_register($22, 3, val)
+
+#define read_c0_diag4()		__read_32bit_c0_register($22, 4)
+#define write_c0_diag4(val)	__write_32bit_c0_register($22, 4, val)
+
+#define read_c0_diag5()		__read_32bit_c0_register($22, 5)
+#define write_c0_diag5(val)	__write_32bit_c0_register($22, 5, val)
 
 #define read_c0_debug()		__read_32bit_c0_register($23, 0)
 #define write_c0_debug(val)	__write_32bit_c0_register($23, 0, val)
 
 #define read_c0_depc()		__read_ulong_c0_register($24, 0)
 #define write_c0_depc(val)	__write_ulong_c0_register($24, 0, val)
+
+/*
+ * MIPS32 / MIPS64 performance counters
+ */
+#define read_c0_perfctrl0()	__read_32bit_c0_register($25, 0)
+#define write_c0_perfctrl0(val)	__write_32bit_c0_register($25, 0, val)
+#define read_c0_perfcntr0()	__read_32bit_c0_register($25, 1)
+#define write_c0_perfcntr0(val)	__write_32bit_c0_register($25, 1, val)
+#define read_c0_perfctrl1()	__read_32bit_c0_register($25, 2)
+#define write_c0_perfctrl1(val)	__write_32bit_c0_register($25, 2, val)
+#define read_c0_perfcntr1()	__read_32bit_c0_register($25, 3)
+#define write_c0_perfcntr1(val)	__write_32bit_c0_register($25, 3, val)
+#define read_c0_perfctrl2()	__read_32bit_c0_register($25, 4)
+#define write_c0_perfctrl2(val)	__write_32bit_c0_register($25, 4, val)
+#define read_c0_perfcntr2()	__read_32bit_c0_register($25, 5)
+#define write_c0_perfcntr2(val)	__write_32bit_c0_register($25, 5, val)
+#define read_c0_perfctrl3()	__read_32bit_c0_register($25, 6)
+#define write_c0_perfctrl3(val)	__write_32bit_c0_register($25, 6, val)
+#define read_c0_perfcntr3()	__read_32bit_c0_register($25, 7)
+#define write_c0_perfcntr3(val)	__write_32bit_c0_register($25, 7, val)
+
+/* RM9000 PerfCount performance counter register */
+#define read_c0_perfcount()	__read_64bit_c0_register($25, 0)
+#define write_c0_perfcount(val)	__write_64bit_c0_register($25, 0, val)
 
 #define read_c0_ecc()		__read_32bit_c0_register($26, 0)
 #define write_c0_ecc(val)	__write_32bit_c0_register($26, 0, val)
@@ -821,7 +930,11 @@ do {									\
         : "=r" (__res));                                        \
         __res;})
 
-/* TLB operations. */
+/*
+ * TLB operations.
+ *
+ * It is responsibility of the caller to take care of any TLB hazards.
+ */
 static inline void tlb_probe(void)
 {
 	__asm__ __volatile__(
@@ -857,7 +970,7 @@ static inline void tlb_write_random(void)
 /*
  * Manipulate bits in a c0 register.
  */
-#define __BUILD_SET_C0(name,register)				\
+#define __BUILD_SET_C0(name)					\
 static inline unsigned int					\
 set_c0_##name(unsigned int set)					\
 {								\
@@ -895,9 +1008,10 @@ change_c0_##name(unsigned int change, unsigned int new)		\
 	return res;						\
 }
 
-__BUILD_SET_C0(status,CP0_STATUS)
-__BUILD_SET_C0(cause,CP0_CAUSE)
-__BUILD_SET_C0(config,CP0_CONFIG)
+__BUILD_SET_C0(status)
+__BUILD_SET_C0(cause)
+__BUILD_SET_C0(config)
+__BUILD_SET_C0(intcontrol)
 
 #endif /* !__ASSEMBLY__ */
 

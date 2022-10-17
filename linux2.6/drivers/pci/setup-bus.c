@@ -43,21 +43,28 @@
 #define CARDBUS_IO_SIZE		(4096)
 #define CARDBUS_MEM_SIZE	(32*1024*1024)
 
-static int __devinit
+static void __devinit
 pbus_assign_resources_sorted(struct pci_bus *bus)
 {
 	struct pci_dev *dev;
 	struct resource *res;
 	struct resource_list head, *list, *tmp;
-	int idx, found_vga = 0;
+	int idx;
+
+	bus->bridge_ctl &= ~PCI_BRIDGE_CTL_VGA;
 
 	head.next = NULL;
 	list_for_each_entry(dev, &bus->devices, bus_list) {
 		u16 class = dev->class >> 8;
 
-		if (class == PCI_CLASS_DISPLAY_VGA
-				|| class == PCI_CLASS_NOT_DEFINED_VGA)
-			found_vga = 1;
+		/* Don't touch classless devices and host bridges.  */
+		if (class == PCI_CLASS_NOT_DEFINED ||
+		    class == PCI_CLASS_BRIDGE_HOST)
+			continue;
+
+		if (class == PCI_CLASS_DISPLAY_VGA ||
+		    class == PCI_CLASS_NOT_DEFINED_VGA)
+			bus->bridge_ctl |= PCI_BRIDGE_CTL_VGA;
 
 		pdev_sort_resources(dev, &head);
 	}
@@ -70,8 +77,6 @@ pbus_assign_resources_sorted(struct pci_bus *bus)
 		list = list->next;
 		kfree(tmp);
 	}
-
-	return found_vga;
 }
 
 static void __devinit
@@ -211,10 +216,7 @@ pci_setup_bridge(struct pci_bus *bus)
 	/* Clear out the upper 32 bits of PREF base. */
 	pci_write_config_dword(bridge, PCI_PREF_BASE_UPPER32, 0);
 
-	/* Check if we have VGA behind the bridge.
-	   Enable ISA in either case (FIXME!). */
-	l = (bus->resource[0]->flags & IORESOURCE_BUS_HAS_VGA) ? 0x0c : 0x04;
-	pci_write_config_word(bridge, PCI_BRIDGE_CONTROL, l);
+	pci_write_config_word(bridge, PCI_BRIDGE_CONTROL, bus->bridge_ctl);
 }
 
 /* Check whether the bridge supports optional I/O and
@@ -498,13 +500,14 @@ void __devinit
 pci_bus_assign_resources(struct pci_bus *bus)
 {
 	struct pci_bus *b;
-	int found_vga = pbus_assign_resources_sorted(bus);
 	struct pci_dev *dev;
 
-	if (found_vga) {
+	pbus_assign_resources_sorted(bus);
+
+	if (bus->bridge_ctl & PCI_BRIDGE_CTL_VGA) {
 		/* Propagate presence of the VGA to upstream bridges */
 		for (b = bus; b->parent; b = b->parent) {
-			b->resource[0]->flags |= IORESOURCE_BUS_HAS_VGA;
+			b->bridge_ctl |= PCI_BRIDGE_CTL_VGA;
 		}
 	}
 	list_for_each_entry(dev, &bus->devices, bus_list) {
@@ -535,15 +538,16 @@ EXPORT_SYMBOL(pci_bus_assign_resources);
 void __init
 pci_assign_unassigned_resources(void)
 {
-	struct list_head *ln;
+	struct pci_bus *bus;
 
 	/* Depth first, calculate sizes and alignments of all
 	   subordinate buses. */
-	for(ln=pci_root_buses.next; ln != &pci_root_buses; ln=ln->next)
-		pci_bus_size_bridges(pci_bus_b(ln));
+	list_for_each_entry(bus, &pci_root_buses, node) {
+		pci_bus_size_bridges(bus);
+	}
 	/* Depth last, allocate resources and update the hardware. */
-	for(ln=pci_root_buses.next; ln != &pci_root_buses; ln=ln->next) {
-		pci_bus_assign_resources(pci_bus_b(ln));
-		pci_enable_bridges(pci_bus_b(ln));
+	list_for_each_entry(bus, &pci_root_buses, node) {
+		pci_bus_assign_resources(bus);
+		pci_enable_bridges(bus);
 	}
 }

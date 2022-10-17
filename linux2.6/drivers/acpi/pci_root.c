@@ -62,8 +62,6 @@ struct acpi_pci_root {
 	acpi_handle		handle;
 	struct acpi_pci_id	id;
 	struct pci_bus		*bus;
-	u64			mem_tra;
-	u64			io_tra;
 };
 
 static LIST_HEAD(acpi_pci_roots);
@@ -92,6 +90,7 @@ int acpi_pci_register_driver(struct acpi_pci_driver *driver)
 
 	return n;
 }
+EXPORT_SYMBOL(acpi_pci_register_driver);
 
 void acpi_pci_unregister_driver(struct acpi_pci_driver *driver)
 {
@@ -114,97 +113,41 @@ void acpi_pci_unregister_driver(struct acpi_pci_driver *driver)
 		driver->remove(root->handle);
 	}
 }
+EXPORT_SYMBOL(acpi_pci_unregister_driver);
 
-void
-acpi_pci_get_translations (
-	struct acpi_pci_id	*id,
-	u64			*mem_tra,
-	u64			*io_tra)
+static acpi_status
+get_root_bridge_busnr_callback (struct acpi_resource *resource, void *data)
 {
-	struct list_head	*node = NULL;
-	struct acpi_pci_root	*entry;
+	int *busnr = (int *)data;
+	struct acpi_resource_address64 address;
 
-	/* TBD: Locking */
-	list_for_each(node, &acpi_pci_roots) {
-		entry = list_entry(node, struct acpi_pci_root, node);
-		if ((id->segment == entry->id.segment)
-			&& (id->bus == entry->id.bus)) {
-			*mem_tra = entry->mem_tra;
-			*io_tra = entry->io_tra;
-			return;
-		}
-	}
+	if (resource->id != ACPI_RSTYPE_ADDRESS16 &&
+	    resource->id != ACPI_RSTYPE_ADDRESS32 &&
+	    resource->id != ACPI_RSTYPE_ADDRESS64)
+		return AE_OK;
 
-	*mem_tra = 0;
-	*io_tra = 0;
+	acpi_resource_to_address64(resource, &address);
+	if ((address.address_length > 0) && 
+	   (address.resource_type == ACPI_BUS_NUMBER_RANGE))
+		*busnr = address.min_address_range;
+
+	return AE_OK;
 }
 
-
-static u64
-acpi_pci_root_bus_tra (
-       struct acpi_resource	*resource,
-       int			type)
+static acpi_status 
+try_get_root_bridge_busnr(acpi_handle handle, int *busnum)
 {
-	struct acpi_resource_address16 *address16;
-	struct acpi_resource_address32 *address32;
-	struct acpi_resource_address64 *address64;
+	acpi_status status;
 
-	while (1) {
-		switch (resource->id) {
-		case ACPI_RSTYPE_END_TAG:
-			return 0;
-
-		case ACPI_RSTYPE_ADDRESS16:
-			address16 = (struct acpi_resource_address16 *) &resource->data;
-			if (type == address16->resource_type) {
-				return address16->address_translation_offset;
-			}
-			break;
-
-		case ACPI_RSTYPE_ADDRESS32:
-			address32 = (struct acpi_resource_address32 *) &resource->data;
-			if (type == address32->resource_type) {
-				return address32->address_translation_offset;
-			}
-			break;
-
-		case ACPI_RSTYPE_ADDRESS64:
-			address64 = (struct acpi_resource_address64 *) &resource->data;
-			if (type == address64->resource_type) {
-				return address64->address_translation_offset;
-			}
-			break;
-		}
-		resource = ACPI_PTR_ADD (struct acpi_resource,
-				resource, resource->length);
-	}
-
-	return 0;
-}
-
-
-static int
-acpi_pci_evaluate_crs (
-	struct acpi_pci_root	*root)
-{
-	acpi_status		status;
-	struct acpi_buffer	buffer = {ACPI_ALLOCATE_BUFFER, NULL};
-
-	ACPI_FUNCTION_TRACE("acpi_pci_evaluate_crs");
-
-	status = acpi_get_current_resources (root->handle, &buffer);
+	*busnum = -1;
+	status = acpi_walk_resources(handle, METHOD_NAME__CRS, get_root_bridge_busnr_callback, busnum);
 	if (ACPI_FAILURE(status))
-		return_VALUE(-ENODEV);
-
-	root->io_tra = acpi_pci_root_bus_tra ((struct acpi_resource *)
-			buffer.pointer, ACPI_IO_RANGE);
-	root->mem_tra = acpi_pci_root_bus_tra ((struct acpi_resource *)
-			buffer.pointer, ACPI_MEMORY_RANGE);
-
-	acpi_os_free(buffer.pointer);
-	return_VALUE(0);
+		return status;
+	/* Check if we really get a bus number from _CRS */
+	if (*busnum == -1)
+		return AE_ERROR;
+	return AE_OK;
 }
-
 
 static int
 acpi_pci_root_add (
@@ -212,6 +155,7 @@ acpi_pci_root_add (
 {
 	int			result = 0;
 	struct acpi_pci_root	*root = NULL;
+	struct acpi_pci_root	*tmp;
 	acpi_status		status = AE_OK;
 	unsigned long		value = 0;
 	acpi_handle		handle = NULL;
@@ -227,8 +171,8 @@ acpi_pci_root_add (
 	memset(root, 0, sizeof(struct acpi_pci_root));
 
 	root->handle = device->handle;
-	sprintf(acpi_device_name(device), "%s", ACPI_PCI_ROOT_DEVICE_NAME);
-	sprintf(acpi_device_class(device), "%s", ACPI_PCI_ROOT_CLASS);
+	strcpy(acpi_device_name(device), ACPI_PCI_ROOT_DEVICE_NAME);
+	strcpy(acpi_device_class(device), ACPI_PCI_ROOT_CLASS);
 	acpi_driver_data(device) = root;
 
 	/*
@@ -279,6 +223,26 @@ acpi_pci_root_add (
 		goto end;
 	}
 
+	/* Some systems have wrong _BBN */
+	list_for_each_entry(tmp, &acpi_pci_roots, node) {
+		if ((tmp->id.segment == root->id.segment)
+				&& (tmp->id.bus == root->id.bus)) {
+			int bus = 0;
+			acpi_status status;
+
+			ACPI_DEBUG_PRINT((ACPI_DB_ERROR, 
+				"Wrong _BBN value, please reboot and using option 'pci=noacpi'\n"));
+
+			status = try_get_root_bridge_busnr(root->handle, &bus);
+			if (ACPI_FAILURE(status))
+				break;
+			if (bus != root->id.bus) {
+				printk(KERN_INFO PREFIX "PCI _CRS %d overrides _BBN 0\n", bus);
+				root->id.bus = bus;
+			}
+			break;
+		}
+	}
 	/*
 	 * Device & Function
 	 * -----------------
@@ -288,10 +252,8 @@ acpi_pci_root_add (
 	root->id.function = device->pnp.bus_address & 0xFFFF;
 
 	/*
-	 * Evaluate _CRS to get root bridge resources
 	 * TBD: Need PCI interface for enumeration/configuration of roots.
 	 */
- 	acpi_pci_evaluate_crs(root);
 
  	/* TBD: Locking */
  	list_add_tail(&root->node, &acpi_pci_roots);
@@ -367,7 +329,7 @@ static int __init acpi_pci_root_init (void)
 {
 	ACPI_FUNCTION_TRACE("acpi_pci_root_init");
 
-	if (acpi_disabled)
+	if (acpi_pci_disabled)
 		return_VALUE(0);
 
 	/* DEBUG:

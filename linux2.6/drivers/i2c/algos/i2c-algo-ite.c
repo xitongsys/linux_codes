@@ -52,35 +52,15 @@
 #define	PM_IBSR		IT8172_PCI_IO_BASE + IT_PM_DSR + 0x04 
 #define GPIO_CCR	IT8172_PCI_IO_BASE + IT_GPCCR
 
-/* ----- global defines ----------------------------------------------- */
-#define DEB(x) if (i2c_debug>=1) x
 #define DEB2(x) if (i2c_debug>=2) x
 #define DEB3(x) if (i2c_debug>=3) x /* print several statistical values*/
-#define DEBPROTO(x) if (i2c_debug>=9) x;
- 	/* debug the protocol by showing transferred bits */
 #define DEF_TIMEOUT 16
 
-/* debugging - slow down transfer to have a look at the data .. 	*/
-/* I use this with two leds&resistors, each one connected to sda,scl 	*/
-/* respectively. This makes sure that the algorithm works. Some chips   */
-/* might not like this, as they have an internal timeout of some mils	*/
-/*
-#define SLO_IO      jif=jiffies;while(jiffies<=jif+i2c_table[minor].veryslow)\
-                        cond_resched();
-*/
-
-
-/* ----- global variables ---------------------------------------------	*/
-
-#ifdef SLO_IO
-	int jif;
-#endif
 
 /* module parameters:
  */
-static int i2c_debug=1;
-static int iic_test=0;	/* see if the line-setting functions work	*/
-static int iic_scan=0;	/* have a look at what's hanging 'round		*/
+static int i2c_debug;
+static int iic_test;	/* see if the line-setting functions work	*/
 
 /* --- setting states on the bus with the right timing: ---------------	*/
 
@@ -125,14 +105,6 @@ static int wait_for_bb(struct i2c_algo_iic_data *adap)
 		iic_reset(adap);
 	}
 	return(timeout<=0);
-}
-
-/*
- * Puts this process to sleep for a period equal to timeout 
- */
-static inline void iic_sleep(unsigned long timeout)
-{
-	schedule_timeout( timeout * HZ);
 }
 
 /* After we issue a transaction on the IIC bus, this function
@@ -757,8 +729,6 @@ static struct i2c_algorithm iic_algo = {
  */
 int i2c_iic_add_bus(struct i2c_adapter *adap)
 {
-	int i;
-	short status;
 	struct i2c_algo_iic_data *iic_adap = adap->algo_data;
 
 	if (iic_test) {
@@ -782,24 +752,6 @@ int i2c_iic_add_bus(struct i2c_adapter *adap)
 	i2c_add_adapter(adap);
 	iic_init(iic_adap);
 
-	/* scan bus */
-	/* By default scanning the bus is turned off. */
-	if (iic_scan) {
-		printk(KERN_INFO " i2c-algo-ite: scanning bus %s.\n",
-		       adap->name);
-		for (i = 0x00; i < 0xff; i+=2) {
-			iic_outw(iic_adap, ITE_I2CSAR, i);
-			iic_start(iic_adap);
-			if ( (wait_for_pin(iic_adap, &status) == 0) && 
-			    ((status & ITE_I2CHSR_DNE) == 0) ) { 
-				printk(KERN_INFO "\n(%02x)\n",i>>1); 
-			} else {
-				printk(KERN_INFO "."); 
-				iic_reset(iic_adap);
-			}
-			udelay(iic_adap->udelay);
-		}
-	}
 	return 0;
 }
 
@@ -838,12 +790,10 @@ MODULE_AUTHOR("MontaVista Software <www.mvista.com>");
 MODULE_DESCRIPTION("ITE iic algorithm");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(iic_test, "i");
-MODULE_PARM(iic_scan, "i");
-MODULE_PARM(i2c_debug,"i");
+module_param(iic_test, bool, 0);
+module_param(i2c_debug, int, S_IRUGO | S_IWUSR);
 
 MODULE_PARM_DESC(iic_test, "Test if the I2C bus is available");
-MODULE_PARM_DESC(iic_scan, "Scan for active chips on the bus");
 MODULE_PARM_DESC(i2c_debug,
         "debug level - 0 off; 1 normal; 2,3 more verbose; 9 iic-protocol");
 

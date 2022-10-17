@@ -24,7 +24,6 @@
 #include <linux/stddef.h>
 #include <linux/personality.h>
 #include <linux/compiler.h>
-#include <linux/suspend.h>
 #include <asm/ucontext.h>
 #include <asm/uaccess.h>
 #include <asm/i387.h>
@@ -40,7 +39,7 @@ void ia32_setup_frame(int sig, struct k_sigaction *ka,
             sigset_t *set, struct pt_regs * regs); 
 
 asmlinkage long
-sys_rt_sigsuspend(sigset_t *unewset, size_t sigsetsize, struct pt_regs regs)
+sys_rt_sigsuspend(sigset_t __user *unewset, size_t sigsetsize, struct pt_regs *regs)
 {
 	sigset_t saveset, newset;
 
@@ -57,23 +56,24 @@ sys_rt_sigsuspend(sigset_t *unewset, size_t sigsetsize, struct pt_regs regs)
 	current->blocked = newset;
 	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
-#if DEBUG_SIG
+#ifdef DEBUG_SIG
 	printk("rt_sigsuspend savset(%lx) newset(%lx) regs(%p) rip(%lx)\n",
-		saveset, newset, &regs, regs.rip);
+		saveset, newset, regs, regs->rip);
 #endif 
-	regs.rax = -EINTR;
+	regs->rax = -EINTR;
 	while (1) {
 		current->state = TASK_INTERRUPTIBLE;
 		schedule();
-		if (do_signal(&regs, &saveset))
+		if (do_signal(regs, &saveset))
 			return -EINTR;
 	}
 }
 
 asmlinkage long
-sys_sigaltstack(const stack_t *uss, stack_t *uoss, struct pt_regs regs)
+sys_sigaltstack(const stack_t __user *uss, stack_t __user *uoss,
+		struct pt_regs *regs)
 {
-	return do_sigaltstack(uss, uoss, regs.rsp);
+	return do_sigaltstack(uss, uoss, regs->rsp);
 }
 
 
@@ -89,10 +89,12 @@ struct rt_sigframe
 };
 
 static int
-restore_sigcontext(struct pt_regs *regs, struct sigcontext *sc, unsigned long *prax)
+restore_sigcontext(struct pt_regs *regs, struct sigcontext __user *sc, unsigned long *prax)
 {
 	unsigned int err = 0;
 
+	/* Always make any pending restarted system calls return -EINTR */
+	current_thread_info()->restart_block.fn = do_no_restart_syscall;
 
 #define COPY(x)		err |= __get_user(regs->x, &sc->x)
 
@@ -115,13 +117,19 @@ restore_sigcontext(struct pt_regs *regs, struct sigcontext *sc, unsigned long *p
 	}
 
 	{
-		struct _fpstate * buf;
+		struct _fpstate __user * buf;
 		err |= __get_user(buf, &sc->fpstate);
 
 		if (buf) {
 			if (verify_area(VERIFY_READ, buf, sizeof(*buf)))
 				goto badframe;
 			err |= restore_i387(buf);
+		} else {
+			struct task_struct *me = current;
+			if (used_math()) {
+				clear_fpu(me);
+				clear_used_math();
+			}
 		}
 	}
 
@@ -132,13 +140,13 @@ badframe:
 	return 1;
 }
 
-asmlinkage long sys_rt_sigreturn(struct pt_regs regs)
+asmlinkage long sys_rt_sigreturn(struct pt_regs *regs)
 {
-	struct rt_sigframe *frame = (struct rt_sigframe *)(regs.rsp - 8);
+	struct rt_sigframe __user *frame;
 	sigset_t set;
-	stack_t st;
-	long eax;
+	unsigned long eax;
 
+	frame = (struct rt_sigframe __user *)(regs->rsp - 8);
 	if (verify_area(VERIFY_READ, frame, sizeof(*frame))) { 
 		goto badframe;
 	} 
@@ -152,25 +160,21 @@ asmlinkage long sys_rt_sigreturn(struct pt_regs regs)
 	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
 	
-	if (restore_sigcontext(&regs, &frame->uc.uc_mcontext, &eax)) { 
+	if (restore_sigcontext(regs, &frame->uc.uc_mcontext, &eax)) {
 		goto badframe;
 	} 
 
-#if DEBUG_SIG
+#ifdef DEBUG_SIG
 	printk("%d sigreturn rip:%lx rsp:%lx frame:%p rax:%lx\n",current->pid,regs.rip,regs.rsp,frame,eax);
 #endif
 
-	if (__copy_from_user(&st, &frame->uc.uc_stack, sizeof(st))) {
+	if (do_sigaltstack(&frame->uc.uc_stack, NULL, regs->rsp) == -EFAULT)
 		goto badframe;
-	} 
-	/* It is more difficult to avoid calling this function than to
-	   call it and ignore errors.  */
-	do_sigaltstack(&st, NULL, regs.rsp);
 
 	return eax;
 
 badframe:
-	signal_fault(&regs,frame,"sigreturn");
+	signal_fault(regs,frame,"sigreturn");
 	return 0;
 }	
 
@@ -179,9 +183,10 @@ badframe:
  */
 
 static inline int
-setup_sigcontext(struct sigcontext *sc, struct pt_regs *regs, unsigned long mask, struct task_struct *me)
+setup_sigcontext(struct sigcontext __user *sc, struct pt_regs *regs, unsigned long mask, struct task_struct *me)
 {
 	int err = 0;
+	unsigned long eflags;
 
 	err |= __put_user(0, &sc->gs);
 	err |= __put_user(0, &sc->fs);
@@ -205,7 +210,11 @@ setup_sigcontext(struct sigcontext *sc, struct pt_regs *regs, unsigned long mask
 	err |= __put_user(me->thread.trap_no, &sc->trapno);
 	err |= __put_user(me->thread.error_code, &sc->err);
 	err |= __put_user(regs->rip, &sc->rip);
-	err |= __put_user(regs->eflags, &sc->eflags);
+	eflags = regs->eflags;
+	if (current->ptrace & PT_PTRACED) {
+		eflags &= ~TF_MASK;
+	}
+	err |= __put_user(eflags, &sc->eflags);
 	err |= __put_user(mask, &sc->oldmask);
 	err |= __put_user(me->thread.cr2, &sc->cr2);
 
@@ -216,7 +225,7 @@ setup_sigcontext(struct sigcontext *sc, struct pt_regs *regs, unsigned long mask
  * Determine which stack to use..
  */
 
-static void *
+static void __user *
 get_stack(struct k_sigaction *ka, struct pt_regs *regs, unsigned long size)
 {
 	unsigned long rsp;
@@ -231,20 +240,20 @@ get_stack(struct k_sigaction *ka, struct pt_regs *regs, unsigned long size)
 			rsp = current->sas_ss_sp + current->sas_ss_size;
 	}
 
-	return (void *)round_down(rsp - size, 16); 
+	return (void __user *)round_down(rsp - size, 16); 
 }
 
 static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 			   sigset_t *set, struct pt_regs * regs)
 {
-	struct rt_sigframe *frame;
-	struct _fpstate *fp = NULL; 
+	struct rt_sigframe __user *frame;
+	struct _fpstate __user *fp = NULL; 
 	int err = 0;
 	struct task_struct *me = current;
 
-	if (me->used_math) {
+	if (used_math()) {
 		fp = get_stack(ka, regs, sizeof(struct _fpstate)); 
-		frame = (void *)round_down((u64)fp - sizeof(struct rt_sigframe), 16) - 8;
+		frame = (void __user *)round_down((unsigned long)fp - sizeof(struct rt_sigframe), 16) - 8;
 
 		if (!access_ok(VERIFY_WRITE, fp, sizeof(struct _fpstate))) { 
 		goto give_sigsegv;
@@ -289,7 +298,7 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	if (ka->sa.sa_flags & SA_RESTORER) {
 		err |= __put_user(ka->sa.sa_restorer, &frame->pretcode);
 	} else {
-		printk("%s forgot to set SA_RESTORER for signal %d.\n", me->comm, sig); 
+		/* could use a vstub here */
 		goto give_sigsegv; 
 	}
 
@@ -297,7 +306,7 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 		goto give_sigsegv;
 	} 
 
-#if DEBUG_SIG
+#ifdef DEBUG_SIG
 	printk("%d old rip %lx old rsp %lx old rax %lx\n", current->pid,regs->rip,regs->rsp,regs->rax);
 #endif
 
@@ -320,9 +329,15 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	regs->rsp = (unsigned long)frame;
 
 	set_fs(USER_DS);
-	regs->eflags &= ~TF_MASK;
+	if (regs->eflags & TF_MASK) {
+		if ((current->ptrace & (PT_PTRACED | PT_DTRACE)) == (PT_PTRACED | PT_DTRACE)) {
+			ptrace_notify(SIGTRAP);
+		} else {
+			regs->eflags &= ~TF_MASK;
+		}
+	}
 
-#if DEBUG_SIG
+#ifdef DEBUG_SIG
 	printk("SIG deliver (%s:%d): sp=%p pc=%p ra=%p\n",
 		current->comm, current->pid, frame, regs->rip, frame->pretcode);
 #endif
@@ -330,9 +345,7 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	return;
 
 give_sigsegv:
-	if (sig == SIGSEGV)
-		ka->sa.sa_handler = SIG_DFL;
-	signal_fault(regs,frame,"signal deliver");
+	force_sigsegv(sig, current);
 }
 
 /*
@@ -340,23 +353,19 @@ give_sigsegv:
  */	
 
 static void
-handle_signal(unsigned long sig, siginfo_t *info, sigset_t *oldset,
-	struct pt_regs * regs)
+handle_signal(unsigned long sig, siginfo_t *info, struct k_sigaction *ka,
+		sigset_t *oldset, struct pt_regs *regs)
 {
-	struct k_sigaction *ka = &current->sighand->action[sig-1];
-
-#if DEBUG_SIG
+#ifdef DEBUG_SIG
 	printk("handle_signal pid:%d sig:%lu rip:%lx rsp:%lx regs=%p\n", current->pid, sig, 
 		regs->rip, regs->rsp, regs);
 #endif
 
 	/* Are we from a system call? */
-	if (regs->orig_rax >= 0) {
+	if ((long)regs->orig_rax >= 0) {
 		/* If so, check system call restarting.. */
 		switch (regs->rax) {
 		        case -ERESTART_RESTARTBLOCK:
-				current_thread_info()->restart_block.fn = do_no_restart_syscall;
-				/* FALL THROUGH */
 			case -ERESTARTNOHAND:
 				regs->rax = -EINTR;
 				break;
@@ -371,10 +380,6 @@ handle_signal(unsigned long sig, siginfo_t *info, sigset_t *oldset,
 				regs->rax = regs->orig_rax;
 				regs->rip -= 2;
 		}
-		if (regs->rax == (unsigned long)-ERESTART_RESTARTBLOCK){
-			regs->rax = __NR_restart_syscall;
- 			regs->rip -= 2;
- 		}		
 	}
 
 #ifdef CONFIG_IA32_EMULATION
@@ -386,9 +391,6 @@ handle_signal(unsigned long sig, siginfo_t *info, sigset_t *oldset,
 	} else 
 #endif
 	setup_rt_frame(sig, ka, info, oldset, regs);
-
-	if (ka->sa.sa_flags & SA_ONESHOT)
-		ka->sa.sa_handler = SIG_DFL;
 
 	if (!(ka->sa.sa_flags & SA_NODEFER)) {
 		spin_lock_irq(&current->sighand->siglock);
@@ -406,6 +408,7 @@ handle_signal(unsigned long sig, siginfo_t *info, sigset_t *oldset,
  */
 int do_signal(struct pt_regs *regs, sigset_t *oldset)
 {
+	struct k_sigaction ka;
 	siginfo_t info;
 	int signr;
 
@@ -419,15 +422,13 @@ int do_signal(struct pt_regs *regs, sigset_t *oldset)
 		return 1;
 	} 	
 
-	if (current->flags & PF_FREEZE) {
-		refrigerator(0);
+	if (try_to_freeze(0))
 		goto no_signal;
-	}
 
 	if (!oldset)
 		oldset = &current->blocked;
 
-	signr = get_signal_to_deliver(&info, regs, NULL);
+	signr = get_signal_to_deliver(&info, &ka, regs, NULL);
 	if (signr > 0) {
 		/* Reenable any watchpoints before delivering the
 		 * signal to user space. The processor register will
@@ -438,13 +439,13 @@ int do_signal(struct pt_regs *regs, sigset_t *oldset)
 			asm volatile("movq %0,%%db7"	: : "r" (current->thread.debugreg7));
 
 		/* Whee!  Actually deliver the signal.  */
-		handle_signal(signr, &info, oldset, regs);
+		handle_signal(signr, &info, &ka, oldset, regs);
 		return 1;
 	}
 
  no_signal:
 	/* Did we come from a system call? */
-	if (regs->orig_rax >= 0) {
+	if ((long)regs->orig_rax >= 0) {
 		/* Restart the system call - no handlers present */
 		long res = regs->rax;
 		if (res == -ERESTARTNOHAND ||
@@ -453,13 +454,17 @@ int do_signal(struct pt_regs *regs, sigset_t *oldset)
 			regs->rax = regs->orig_rax;
 			regs->rip -= 2;
 		}
+		if (regs->rax == (unsigned long)-ERESTART_RESTARTBLOCK) {
+			regs->rax = __NR_restart_syscall;
+			regs->rip -= 2;
+		}
 	}
 	return 0;
 }
 
 void do_notify_resume(struct pt_regs *regs, sigset_t *oldset, __u32 thread_info_flags)
 {
-#if DEBUG_SIG
+#ifdef DEBUG_SIG
 	printk("do_notify_resume flags:%x rip:%lx rsp:%lx caller:%lx pending:%lx\n",
 	       thread_info_flags, regs->rip, regs->rsp, __builtin_return_address(0),signal_pending(current)); 
 #endif
@@ -475,7 +480,7 @@ void do_notify_resume(struct pt_regs *regs, sigset_t *oldset, __u32 thread_info_
 		do_signal(regs,oldset);
 }
 
-void signal_fault(struct pt_regs *regs, void *frame, char *where)
+void signal_fault(struct pt_regs *regs, void __user *frame, char *where)
 { 
 	struct task_struct *me = current; 
 	if (exception_trace)

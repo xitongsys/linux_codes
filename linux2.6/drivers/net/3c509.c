@@ -56,10 +56,6 @@
 		v1.19b 08Nov2002 Marc Zyngier <maz@wild-wind.fr.eu.org>
 		    - Introduce driver model for EISA cards.
 */
-/*
-  FIXES for PC-9800:
-  Shu Iwanaga: 3c569B(PC-9801 C-bus) support
-*/
 
 #define DRV_NAME	"3c509"
 #define DRV_VERSION	"1.19b"
@@ -94,9 +90,9 @@ static int max_interrupt_work = 10;
 #include <linux/ethtool.h>
 #include <linux/device.h>
 #include <linux/eisa.h>
+#include <linux/bitops.h>
 
 #include <asm/uaccess.h>
-#include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 
@@ -201,9 +197,9 @@ static int el3_rx(struct net_device *dev);
 static int el3_close(struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
 static void el3_tx_timeout (struct net_device *dev);
-static int netdev_ioctl (struct net_device *dev, struct ifreq *rq, int cmd);
 static void el3_down(struct net_device *dev);
 static void el3_up(struct net_device *dev);
+static struct ethtool_ops ethtool_ops;
 #ifdef CONFIG_PM
 static int el3_suspend(struct pm_dev *pdev);
 static int el3_resume(struct pm_dev *pdev);
@@ -212,6 +208,9 @@ static int el3_pm_callback(struct pm_dev *pdev, pm_request_t rqst, void *data);
 /* generic device remove for all device types */
 #if defined(CONFIG_EISA) || defined(CONFIG_MCA)
 static int el3_device_remove (struct device *device);
+#endif
+#ifdef CONFIG_NET_POLL_CONTROLLER
+static void el3_poll_controller(struct net_device *dev);
 #endif
 
 #ifdef CONFIG_EISA
@@ -265,7 +264,7 @@ static struct mca_driver el3_mca_driver = {
 };
 #endif /* CONFIG_MCA */
 
-#if defined(__ISAPNP__) && !defined(CONFIG_X86_PC9800)
+#if defined(__ISAPNP__)
 static struct isapnp_device_id el3_isapnp_adapters[] __initdata = {
 	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
 		ISAPNP_VENDOR('T', 'C', 'M'), ISAPNP_FUNCTION(0x5090),
@@ -304,7 +303,7 @@ static int nopnp;
 
 static int __init el3_common_init(struct net_device *dev)
 {
-	struct el3_private *lp = dev->priv;
+	struct el3_private *lp = netdev_priv(dev);
 	short i;
 	int err;
 
@@ -325,7 +324,10 @@ static int __init el3_common_init(struct net_device *dev)
 	dev->set_multicast_list = &set_multicast_list;
 	dev->tx_timeout = el3_tx_timeout;
 	dev->watchdog_timeo = TX_TIMEOUT;
-	dev->do_ioctl = netdev_ioctl;
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	dev->poll_controller = el3_poll_controller;
+#endif
+	SET_ETHTOOL_OPS(dev, &ethtool_ops);
 
 	err = register_netdev(dev);
 	if (err) {
@@ -355,21 +357,21 @@ static int __init el3_common_init(struct net_device *dev)
 
 static void el3_common_remove (struct net_device *dev)
 {
-		struct el3_private *lp = dev->priv;
+	struct el3_private *lp = netdev_priv(dev);
 
-		(void) lp;				/* Keep gcc quiet... */
+	(void) lp;				/* Keep gcc quiet... */
 #ifdef CONFIG_PM
-		if (lp->pmdev)
-			pm_unregister(lp->pmdev);
+	if (lp->pmdev)
+		pm_unregister(lp->pmdev);
 #endif
-#if defined(__ISAPNP__) && !defined(CONFIG_X86_PC9800)
-		if (lp->type == EL3_PNP)
-			pnp_device_detach(to_pnp_dev(lp->dev));
+#if defined(__ISAPNP__)
+	if (lp->type == EL3_PNP)
+		pnp_device_detach(to_pnp_dev(lp->dev));
 #endif
 
-		unregister_netdev (dev);
-		release_region(dev->base_addr, EL3_IO_EXTENT);
-		free_netdev (dev);
+	unregister_netdev (dev);
+	release_region(dev->base_addr, EL3_IO_EXTENT);
+	free_netdev (dev);
 }
 
 static int __init el3_probe(int card_idx)
@@ -381,7 +383,7 @@ static int __init el3_probe(int card_idx)
 	u16 phys_addr[3];
 	static int current_tag;
 	int err = -ENODEV;
-#if defined(__ISAPNP__) && !defined(CONFIG_X86_PC9800)
+#if defined(__ISAPNP__)
 	static int pnp_cards;
 	struct pnp_dev *idev = NULL;
 
@@ -397,9 +399,9 @@ static int __init el3_probe(int card_idx)
 			if (pnp_device_attach(idev) < 0)
 				continue;
 			if (pnp_activate_dev(idev) < 0) {
-			      __again:
-			      	pnp_device_detach(idev);
-			      	continue;
+__again:
+				pnp_device_detach(idev);
+				continue;
 			}
 			if (!pnp_port_valid(idev, 0) || !pnp_irq_valid(idev, 0))
 				goto __again;
@@ -426,6 +428,7 @@ static int __init el3_probe(int card_idx)
 			}
 
 			SET_MODULE_OWNER(dev);
+			SET_NETDEV_DEV(dev, &idev->dev);
 			pnp_cards++;
 
 			netdev_boot_setup_check(dev);
@@ -435,9 +438,6 @@ static int __init el3_probe(int card_idx)
 no_pnp:
 #endif /* __ISAPNP__ */
 
-#ifdef CONFIG_X86_PC9800
-	id_port = 0x71d0;
-#else
 	/* Select an open I/O location at 0x1*0 to do contention select. */
 	for ( ; id_port < 0x200; id_port += 0x10) {
 		if (!request_region(id_port, 1, "3c509"))
@@ -455,7 +455,7 @@ no_pnp:
 		printk(" WARNING: No I/O port available for 3c509 activation.\n");
 		return -ENODEV;
 	}
-#endif /* CONFIG_X86_PC9800 */
+
 	/* Next check for all ISA bus boards by sending the ID sequence to the
 	   ID_PORT.  We find cards past the first by setting the 'current_tag'
 	   on cards as they are found.  Cards with their tag set will not
@@ -486,7 +486,7 @@ no_pnp:
 		phys_addr[i] = htons(id_read_eeprom(i));
 	}
 
-#if defined(__ISAPNP__) && !defined(CONFIG_X86_PC9800)
+#if defined(__ISAPNP__)
 	if (nopnp == 0) {
 		/* The ISA PnP 3c509 cards respond to the ID sequence.
 		   This check is needed in order not to register them twice. */
@@ -511,19 +511,9 @@ no_pnp:
 	{
 		unsigned int iobase = id_read_eeprom(8);
 		if_port = iobase >> 14;
-#ifdef CONFIG_X86_PC9800
-		ioaddr = 0x40d0 + ((iobase & 0x1f) << 8);
-#else
 		ioaddr = 0x200 + ((iobase & 0x1f) << 4);
-#endif
 	}
 	irq = id_read_eeprom(9) >> 12;
-#ifdef CONFIG_X86_PC9800
-	if (irq == 7)
-		irq = 6;
-	else if (irq == 15)
-		irq = 13;
-#endif
 
 	dev = alloc_etherdev(sizeof (struct el3_private));
 	if (!dev)
@@ -554,11 +544,7 @@ no_pnp:
 	outb(0xd0 + ++current_tag, id_port);
 
 	/* Activate the adaptor at the EEPROM location. */
-#ifdef CONFIG_X86_PC9800
-	outb((ioaddr >> 8) | 0xe0, id_port);
-#else
 	outb((ioaddr >> 4) | 0xe0, id_port);
-#endif
 
 	EL3WINDOW(0);
 	if (inw(ioaddr) != 0x6d50)
@@ -567,7 +553,7 @@ no_pnp:
 	/* Free the interrupt so that some other card can use it. */
 	outw(0x0f00, ioaddr + WN0_IRQ);
 
-#if defined(__ISAPNP__) && !defined(CONFIG_X86_PC9800)
+#if defined(__ISAPNP__)
  found:							/* PNP jumps here... */
 #endif /* __ISAPNP__ */
 
@@ -575,8 +561,8 @@ no_pnp:
 	dev->base_addr = ioaddr;
 	dev->irq = irq;
 	dev->if_port = if_port;
-	lp = dev->priv;
-#if defined(__ISAPNP__) && !defined(CONFIG_X86_PC9800)
+	lp = netdev_priv(dev);
+#if defined(__ISAPNP__)
 	lp->dev = &idev->dev;
 #endif
 	err = el3_common_init(dev);
@@ -595,14 +581,12 @@ no_pnp:
 #endif
 
 	el3_cards++;
-#if !defined(__ISAPNP__) || defined(CONFIG_X86_PC9800)
 	lp->next_dev = el3_root_dev;
 	el3_root_dev = dev;
-#endif
 	return 0;
 
 out1:
-#if defined(__ISAPNP__) && !defined(CONFIG_X86_PC9800)
+#if defined(__ISAPNP__)
 	if (idev)
 		pnp_device_detach(idev);
 #endif
@@ -612,77 +596,80 @@ out:
 }
 
 #ifdef CONFIG_MCA
-static int __init el3_mca_probe(struct device *device) {
-		/* Based on Erik Nygren's (nygren@mit.edu) 3c529 patch,
-		 * heavily modified by Chris Beauregard
-		 * (cpbeaure@csclub.uwaterloo.ca) to support standard MCA
-		 * probing.
-		 *
-		 * redone for multi-card detection by ZP Gu (zpg@castle.net)
-		 * now works as a module */
+static int __init el3_mca_probe(struct device *device)
+{
+	/* Based on Erik Nygren's (nygren@mit.edu) 3c529 patch,
+	 * heavily modified by Chris Beauregard
+	 * (cpbeaure@csclub.uwaterloo.ca) to support standard MCA
+	 * probing.
+	 *
+	 * redone for multi-card detection by ZP Gu (zpg@castle.net)
+	 * now works as a module */
 
-		struct el3_private *lp;
-		short i;
-		int ioaddr, irq, if_port;
-		u16 phys_addr[3];
-		struct net_device *dev = NULL;
-		u_char pos4, pos5;
-		struct mca_device *mdev = to_mca_device(device);
-		int slot = mdev->slot;
-		int err;
+	struct el3_private *lp;
+	short i;
+	int ioaddr, irq, if_port;
+	u16 phys_addr[3];
+	struct net_device *dev = NULL;
+	u_char pos4, pos5;
+	struct mca_device *mdev = to_mca_device(device);
+	int slot = mdev->slot;
+	int err;
 
-		pos4 = mca_device_read_stored_pos(mdev, 4);
-		pos5 = mca_device_read_stored_pos(mdev, 5);
+	pos4 = mca_device_read_stored_pos(mdev, 4);
+	pos5 = mca_device_read_stored_pos(mdev, 5);
 
-		ioaddr = ((short)((pos4&0xfc)|0x02)) << 8;
-		irq = pos5 & 0x0f;
+	ioaddr = ((short)((pos4&0xfc)|0x02)) << 8;
+	irq = pos5 & 0x0f;
 
 
-		printk("3c529: found %s at slot %d\n",
-			   el3_mca_adapter_names[mdev->index], slot + 1);
+	printk("3c529: found %s at slot %d\n",
+		   el3_mca_adapter_names[mdev->index], slot + 1);
 
-		/* claim the slot */
-		strncpy(mdev->name, el3_mca_adapter_names[mdev->index],
-				sizeof(mdev->name));
-		mca_device_set_claim(mdev, 1);
+	/* claim the slot */
+	strncpy(mdev->name, el3_mca_adapter_names[mdev->index],
+			sizeof(mdev->name));
+	mca_device_set_claim(mdev, 1);
 
-		if_port = pos4 & 0x03;
+	if_port = pos4 & 0x03;
 
-		irq = mca_device_transform_irq(mdev, irq);
-		ioaddr = mca_device_transform_ioport(mdev, ioaddr); 
-		if (el3_debug > 2) {
-				printk("3c529: irq %d  ioaddr 0x%x  ifport %d\n", irq, ioaddr, if_port);
-		}
-		EL3WINDOW(0);
-		for (i = 0; i < 3; i++) {
-				phys_addr[i] = htons(read_eeprom(ioaddr, i));
-		}
+	irq = mca_device_transform_irq(mdev, irq);
+	ioaddr = mca_device_transform_ioport(mdev, ioaddr); 
+	if (el3_debug > 2) {
+			printk("3c529: irq %d  ioaddr 0x%x  ifport %d\n", irq, ioaddr, if_port);
+	}
+	EL3WINDOW(0);
+	for (i = 0; i < 3; i++) {
+			phys_addr[i] = htons(read_eeprom(ioaddr, i));
+	}
 
-		dev = alloc_etherdev(sizeof (struct el3_private));
-		if (dev == NULL) {
-				release_region(ioaddr, EL3_IO_EXTENT);
-				return -ENOMEM;
-		}
-
-		SET_MODULE_OWNER(dev);
-		netdev_boot_setup_check(dev);
-
-		memcpy(dev->dev_addr, phys_addr, sizeof(phys_addr));
-		dev->base_addr = ioaddr;
-		dev->irq = irq;
-		dev->if_port = if_port;
-		lp = dev->priv;
-		lp->dev = device;
-		lp->type = EL3_MCA;
-		device->driver_data = dev;
-		err = el3_common_init(dev);
-
-		if (err) {
+	dev = alloc_etherdev(sizeof (struct el3_private));
+	if (dev == NULL) {
+			release_region(ioaddr, EL3_IO_EXTENT);
 			return -ENOMEM;
-		}
+	}
 
-		el3_cards++;
-		return 0;
+	SET_MODULE_OWNER(dev);
+	netdev_boot_setup_check(dev);
+
+	memcpy(dev->dev_addr, phys_addr, sizeof(phys_addr));
+	dev->base_addr = ioaddr;
+	dev->irq = irq;
+	dev->if_port = if_port;
+	lp = netdev_priv(dev);
+	lp->dev = device;
+	lp->type = EL3_MCA;
+	device->driver_data = dev;
+	err = el3_common_init(dev);
+
+	if (err) {
+		device->driver_data = NULL;
+		free_netdev(dev);
+		return -ENOMEM;
+	}
+
+	el3_cards++;
+	return 0;
 }
 		
 #endif /* CONFIG_MCA */
@@ -711,15 +698,15 @@ static int __init el3_eisa_probe (struct device *device)
 	irq = inw(ioaddr + WN0_IRQ) >> 12;
 	if_port = inw(ioaddr + 6)>>14;
 	for (i = 0; i < 3; i++)
-			phys_addr[i] = htons(read_eeprom(ioaddr, i));
+		phys_addr[i] = htons(read_eeprom(ioaddr, i));
 
 	/* Restore the "Product ID" to the EEPROM read register. */
 	read_eeprom(ioaddr, 3);
 
 	dev = alloc_etherdev(sizeof (struct el3_private));
 	if (dev == NULL) {
-			release_region(ioaddr, EL3_IO_EXTENT);
-			return -ENOMEM;
+		release_region(ioaddr, EL3_IO_EXTENT);
+		return -ENOMEM;
 	}
 
 	SET_MODULE_OWNER(dev);
@@ -730,13 +717,15 @@ static int __init el3_eisa_probe (struct device *device)
 	dev->base_addr = ioaddr;
 	dev->irq = irq;
 	dev->if_port = if_port;
-	lp = dev->priv;
+	lp = netdev_priv(dev);
 	lp->dev = device;
 	lp->type = EL3_EISA;
 	eisa_set_drvdata (edev, dev);
 	err = el3_common_init(dev);
 
 	if (err) {
+		eisa_set_drvdata (edev, NULL);
+		free_netdev(dev);
 		return err;
 	}
 
@@ -751,12 +740,12 @@ static int __init el3_eisa_probe (struct device *device)
  * The net dev must be stored in the driver_data field */
 static int __devexit el3_device_remove (struct device *device)
 {
-		struct net_device *dev;
+	struct net_device *dev;
 
-		dev  = device->driver_data;
+	dev  = device->driver_data;
 
-		el3_common_remove (dev);
-		return 0;
+	el3_common_remove (dev);
+	return 0;
 }
 #endif
 
@@ -806,7 +795,8 @@ el3_open(struct net_device *dev)
 	outw(SetStatusEnb | 0x00, ioaddr + EL3_CMD);
 
 	i = request_irq(dev->irq, &el3_interrupt, 0, dev->name, dev);
-	if (i) return i;
+	if (i)
+		return i;
 
 	EL3WINDOW(0);
 	if (el3_debug > 3)
@@ -825,7 +815,7 @@ el3_open(struct net_device *dev)
 static void
 el3_tx_timeout (struct net_device *dev)
 {
-	struct el3_private *lp = (struct el3_private *)dev->priv;
+	struct el3_private *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 
 	/* Transmitter timeout, serious problems. */
@@ -845,7 +835,7 @@ el3_tx_timeout (struct net_device *dev)
 static int
 el3_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct el3_private *lp = (struct el3_private *)dev->priv;
+	struct el3_private *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 	unsigned long flags;
 
@@ -887,8 +877,8 @@ el3_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	 *	time sensitive devices.
 	 */
 
-    	spin_lock_irqsave(&lp->lock, flags);
-	    
+	spin_lock_irqsave(&lp->lock, flags);
+
 	/* Put out the doubleword header... */
 	outw(skb->len, ioaddr + TX_FIFO);
 	outw(0x00, ioaddr + TX_FIFO);
@@ -939,7 +929,7 @@ el3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		return IRQ_NONE;
 	}
 
-	lp = (struct el3_private *)dev->priv;
+	lp = netdev_priv(dev);
 	spin_lock(&lp->lock);
 
 	ioaddr = dev->base_addr;
@@ -971,7 +961,7 @@ el3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 				outw(AckIntr | RxEarly, ioaddr + EL3_CMD);
 			}
 			if (status & TxComplete) {			/* Really Tx error. */
-				struct el3_private *lp = (struct el3_private *)dev->priv;
+				struct el3_private *lp = netdev_priv(dev);
 				short tx_status;
 				int i = 4;
 
@@ -1015,10 +1005,23 @@ el3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 }
 
 
+#ifdef CONFIG_NET_POLL_CONTROLLER
+/*
+ * Polling receive - used by netconsole and other diagnostic tools
+ * to allow network i/o with interrupts disabled.
+ */
+static void el3_poll_controller(struct net_device *dev)
+{
+	disable_irq(dev->irq);
+	el3_interrupt(dev->irq, dev, NULL);
+	enable_irq(dev->irq);
+}
+#endif
+
 static struct net_device_stats *
 el3_get_stats(struct net_device *dev)
 {
-	struct el3_private *lp = (struct el3_private *)dev->priv;
+	struct el3_private *lp = netdev_priv(dev);
 	unsigned long flags;
 
 	/*
@@ -1039,7 +1042,7 @@ el3_get_stats(struct net_device *dev)
 	*/
 static void update_stats(struct net_device *dev)
 {
-	struct el3_private *lp = (struct el3_private *)dev->priv;
+	struct el3_private *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 
 	if (el3_debug > 5)
@@ -1069,7 +1072,7 @@ static void update_stats(struct net_device *dev)
 static int
 el3_rx(struct net_device *dev)
 {
-	struct el3_private *lp = (struct el3_private *)dev->priv;
+	struct el3_private *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 	short rx_status;
 
@@ -1141,7 +1144,7 @@ static void
 set_multicast_list(struct net_device *dev)
 {
 	unsigned long flags;
-	struct el3_private *lp = (struct el3_private *)dev->priv;
+	struct el3_private *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
 
 	if (el3_debug > 1) {
@@ -1160,7 +1163,7 @@ set_multicast_list(struct net_device *dev)
 		outw(SetRxFilter | RxStation | RxMulticast | RxBroadcast, ioaddr + EL3_CMD);
 	}
 	else
-                outw(SetRxFilter | RxStation | RxBroadcast, ioaddr + EL3_CMD);
+		outw(SetRxFilter | RxStation | RxBroadcast, ioaddr + EL3_CMD);
 	spin_unlock_irqrestore(&lp->lock, flags);
 }
 
@@ -1168,7 +1171,7 @@ static int
 el3_close(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr;
-	struct el3_private *lp = (struct el3_private *)dev->priv;
+	struct el3_private *lp = netdev_priv(dev);
 	
 	if (el3_debug > 2)
 		printk("%s: Shutting down ethercard.\n", dev->name);
@@ -1179,10 +1182,10 @@ el3_close(struct net_device *dev)
 	/* Switching back to window 0 disables the IRQ. */
 	EL3WINDOW(0);
 	if (lp->type != EL3_EISA) {
-	    /* But we explicitly zero the IRQ line select anyway. Don't do
-	     * it on EISA cards, it prevents the module from getting an
-	     * IRQ after unload+reload... */
-	    outw(0x0f00, ioaddr + WN0_IRQ);
+		/* But we explicitly zero the IRQ line select anyway. Don't do
+		 * it on EISA cards, it prevents the module from getting an
+		 * IRQ after unload+reload... */
+		outw(0x0f00, ioaddr + WN0_IRQ);
 	}
 
 	return 0;
@@ -1301,122 +1304,63 @@ el3_netdev_set_ecmd(struct net_device *dev, struct ethtool_cmd *ecmd)
 	return 0;
 }
 
-/**
- * netdev_ethtool_ioctl: Handle network interface SIOCETHTOOL ioctls
- * @dev: network interface on which out-of-band action is to be performed
- * @useraddr: userspace address to which data is to be read and returned
- *
- * Process the various commands of the SIOCETHTOOL interface.
- */
-
-static int
-netdev_ethtool_ioctl (struct net_device *dev, void *useraddr)
+static void el3_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
 {
-	u32 ethcmd;
-	struct el3_private *lp = dev->priv;
-
-	/* dev_ioctl() in ../../net/core/dev.c has already checked
-	   capable(CAP_NET_ADMIN), so don't bother with that here.  */
-
-	if (get_user(ethcmd, (u32 *)useraddr))
-		return -EFAULT;
-
-	switch (ethcmd) {
-
-	case ETHTOOL_GDRVINFO: {
-		struct ethtool_drvinfo info = { ETHTOOL_GDRVINFO };
-		strcpy (info.driver, DRV_NAME);
-		strcpy (info.version, DRV_VERSION);
-		if (copy_to_user (useraddr, &info, sizeof (info)))
-			return -EFAULT;
-		return 0;
-	}
-
-	/* get settings */
-	case ETHTOOL_GSET: {
-		int ret;
-		struct ethtool_cmd ecmd = { ETHTOOL_GSET };
-		spin_lock_irq(&lp->lock);
-		ret = el3_netdev_get_ecmd(dev, &ecmd);
-		spin_unlock_irq(&lp->lock);
-		if (copy_to_user(useraddr, &ecmd, sizeof(ecmd)))
-			return -EFAULT;
-		return ret;
-	}
-
-	/* set settings */
-	case ETHTOOL_SSET: {
-		int ret;
-		struct ethtool_cmd ecmd;
-		if (copy_from_user(&ecmd, useraddr, sizeof(ecmd)))
-			return -EFAULT;
-		spin_lock_irq(&lp->lock);
-		ret = el3_netdev_set_ecmd(dev, &ecmd);
-		spin_unlock_irq(&lp->lock);
-		return ret;
-	}
-
-	/* get link status */
-	case ETHTOOL_GLINK: {
-		struct ethtool_value edata = { ETHTOOL_GLINK };
-		spin_lock_irq(&lp->lock);
-		edata.data = el3_link_ok(dev);
-		spin_unlock_irq(&lp->lock);
-		if (copy_to_user(useraddr, &edata, sizeof(edata)))
-			return -EFAULT;
-		return 0;
-	}
-
-	/* get message-level */
-	case ETHTOOL_GMSGLVL: {
-		struct ethtool_value edata = {ETHTOOL_GMSGLVL};
-		edata.data = el3_debug;
-		if (copy_to_user(useraddr, &edata, sizeof(edata)))
-			return -EFAULT;
-		return 0;
-	}
-	/* set message-level */
-	case ETHTOOL_SMSGLVL: {
-		struct ethtool_value edata;
-		if (copy_from_user(&edata, useraddr, sizeof(edata)))
-			return -EFAULT;
-		el3_debug = edata.data;
-		return 0;
-	}
-
-	default:
-		break;
-	}
-
-	return -EOPNOTSUPP;
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
 }
 
-/**
- * netdev_ioctl: Handle network interface ioctls
- * @dev: network interface on which out-of-band action is to be performed
- * @rq: user request data
- * @cmd: command issued by user
- *
- * Process the various out-of-band ioctls passed to this driver.
- */
-
-static int
-netdev_ioctl (struct net_device *dev, struct ifreq *rq, int cmd)
+static int el3_get_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
 {
-	int rc = 0;
+	struct el3_private *lp = netdev_priv(dev);
+	int ret;
 
-	switch (cmd) {
-	case SIOCETHTOOL:
-		rc = netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
-		break;
-
-	default:
-		rc = -EOPNOTSUPP;
-		break;
-	}
-
-	return rc;
+	spin_lock_irq(&lp->lock);
+	ret = el3_netdev_get_ecmd(dev, ecmd);
+	spin_unlock_irq(&lp->lock);
+	return ret;
 }
+
+static int el3_set_settings(struct net_device *dev, struct ethtool_cmd *ecmd)
+{
+	struct el3_private *lp = netdev_priv(dev);
+	int ret;
+
+	spin_lock_irq(&lp->lock);
+	ret = el3_netdev_set_ecmd(dev, ecmd);
+	spin_unlock_irq(&lp->lock);
+	return ret;
+}
+
+static u32 el3_get_link(struct net_device *dev)
+{
+	struct el3_private *lp = netdev_priv(dev);
+	u32 ret;
+
+	spin_lock_irq(&lp->lock);
+	ret = el3_link_ok(dev);
+	spin_unlock_irq(&lp->lock);
+	return ret;
+}
+
+static u32 el3_get_msglevel(struct net_device *dev)
+{
+	return el3_debug;
+}
+
+static void el3_set_msglevel(struct net_device *dev, u32 v)
+{
+	el3_debug = v;
+}
+
+static struct ethtool_ops ethtool_ops = {
+	.get_drvinfo = el3_get_drvinfo,
+	.get_settings = el3_get_settings,
+	.set_settings = el3_set_settings,
+	.get_link = el3_get_link,
+	.get_msglevel = el3_get_msglevel,
+	.set_msglevel = el3_set_msglevel,
+};
 
 static void
 el3_down(struct net_device *dev)
@@ -1456,12 +1400,6 @@ el3_up(struct net_device *dev)
 	outw(0x0001, ioaddr + 4);
 
 	/* Set the IRQ line. */
-#ifdef CONFIG_X86_PC9800
-	if (dev->irq == 6)
-		dev->irq = 7;
-	else if (dev->irq == 13)
-		dev->irq = 15;
-#endif
 	outw((dev->irq << 12) | 0x0f00, ioaddr + WN0_IRQ);
 
 	/* Set the station address in window 2 each time opened. */
@@ -1554,7 +1492,7 @@ el3_suspend(struct pm_dev *pdev)
 		return -EINVAL;
 
 	dev = (struct net_device *)pdev->data;
-	lp = (struct el3_private *)dev->priv;
+	lp = netdev_priv(dev);
 	ioaddr = dev->base_addr;
 
 	spin_lock_irqsave(&lp->lock, flags);
@@ -1581,7 +1519,7 @@ el3_resume(struct pm_dev *pdev)
 		return -EINVAL;
 
 	dev = (struct net_device *)pdev->data;
-	lp = (struct el3_private *)dev->priv;
+	lp = netdev_priv(dev);
 	ioaddr = dev->base_addr;
 
 	spin_lock_irqsave(&lp->lock, flags);
@@ -1616,16 +1554,16 @@ static int debug = -1;
 static int irq[] = {-1, -1, -1, -1, -1, -1, -1, -1};
 static int xcvr[] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 
-MODULE_PARM(debug,"i");
-MODULE_PARM(irq,"1-8i");
-MODULE_PARM(xcvr,"1-12i");
-MODULE_PARM(max_interrupt_work, "i");
+module_param(debug,int, 0);
+module_param_array(irq, int, NULL, 0);
+module_param_array(xcvr, int, NULL, 0);
+module_param(max_interrupt_work, int, 0);
 MODULE_PARM_DESC(debug, "debug level (0-6)");
 MODULE_PARM_DESC(irq, "IRQ number(s) (assigned)");
 MODULE_PARM_DESC(xcvr,"transceiver(s) (0=internal, 1=external)");
 MODULE_PARM_DESC(max_interrupt_work, "maximum events handled per interrupt");
-#if defined(__ISAPNP__) && !defined(CONFIG_X86_PC9800)
-MODULE_PARM(nopnp, "i");
+#if defined(__ISAPNP__)
+module_param(nopnp, int, 0);
 MODULE_PARM_DESC(nopnp, "disable ISA PnP support (0-1)");
 MODULE_DEVICE_TABLE(isapnp, el3_isapnp_adapters);
 #endif	/* __ISAPNP__ */
@@ -1650,13 +1588,13 @@ static int __init el3_init_module(void)
 
 #ifdef CONFIG_EISA
 	if (eisa_driver_register (&el3_eisa_driver) < 0) {
-			eisa_driver_unregister (&el3_eisa_driver);
+		eisa_driver_unregister (&el3_eisa_driver);
 	}
 #endif
 #ifdef CONFIG_MCA
 	mca_register_driver(&el3_mca_driver);
 #endif
-	return el3_cards ? 0 : -ENODEV;
+	return 0;
 }
 
 static void __exit el3_cleanup_module(void)
@@ -1664,7 +1602,7 @@ static void __exit el3_cleanup_module(void)
 	struct net_device *next_dev;
 
 	while (el3_root_dev) {
-		struct el3_private *lp = (struct el3_private *)el3_root_dev->priv;
+		struct el3_private *lp = netdev_priv(el3_root_dev);
 
 		next_dev = lp->next_dev;
 		el3_common_remove (el3_root_dev);
@@ -1682,11 +1620,3 @@ static void __exit el3_cleanup_module(void)
 module_init (el3_init_module);
 module_exit (el3_cleanup_module);
 
-/*
- * Local variables:
- *  compile-command: "gcc -DMODULE -D__KERNEL__ -Wall -Wstrict-prototypes -O6 -c 3c509.c"
- *  version-control: t
- *  kept-new-versions: 5
- *  tab-width: 4
- * End:
- */

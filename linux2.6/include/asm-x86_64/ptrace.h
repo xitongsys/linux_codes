@@ -6,7 +6,7 @@
 #define R14 8
 #define R13 16
 #define R12 24
-#define RBP 36
+#define RBP 32
 #define RBX 40
 /* arguments: interrupts/non tracing syscalls only save upto here*/
 #define R11 48
@@ -83,7 +83,8 @@ struct pt_regs {
 #if defined(__KERNEL__) && !defined(__ASSEMBLY__) 
 #define user_mode(regs) (!!((regs)->cs & 3))
 #define instruction_pointer(regs) ((regs)->rip)
-void signal_fault(struct pt_regs *regs, void *frame, char *where);
+extern unsigned long profile_pc(struct pt_regs *regs);
+void signal_fault(struct pt_regs *regs, void __user *frame, char *where);
 
 enum {
         EF_CF   = 0x00000001,

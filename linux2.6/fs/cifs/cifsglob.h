@@ -16,6 +16,7 @@
  * 
  */
 #include <linux/in.h>
+#include <linux/in6.h>
 #include "cifs_fs_sb.h"
 /*
  * The sizes of various internal tables and strings
@@ -31,11 +32,18 @@
 				   termination then *2 for unicode versions */
 #define MAX_PASSWORD_SIZE 16
 
+#define CIFS_MIN_RCV_POOL 4
+
 /*
  * MAX_REQ is the maximum number of requests that WE will send
- * on one NetBIOS handle concurently.
+ * on one socket concurently. It also matches the most common
+ * value of max multiplex returned by servers.  We may 
+ * eventually want to use the negotiated value (in case
+ * future servers can handle more) when we are more confident that
+ * we will not have problems oveloading the socket with pending
+ * write data.
  */
-#define MAX_REQ (10)
+#define CIFS_MAX_REQ 50 
 
 #define SERVER_NAME_LENGTH 15
 #define SERVER_NAME_LEN_WITH_NULL     (SERVER_NAME_LENGTH + 1)
@@ -53,6 +61,10 @@
 
 #ifndef TRUE
 #define TRUE 1
+#endif
+
+#ifndef XATTR_DOS_ATTRIB
+#define XATTR_DOS_ATTRIB "user.DOSATTRIB"
 #endif
 
 /*
@@ -83,6 +95,13 @@ enum securityEnum {
 	Kerberos		/* Kerberos via SPNEGO */
 };
 
+enum protocolEnum {
+	IPV4 = 0,
+	IPV6,
+	SCTP
+	/* Netbios frames protocol not supported at this time */
+};
+
 /*
  *****************************************************************
  * Except the CIFS PDUs themselves all the
@@ -94,17 +113,22 @@ struct TCP_Server_Info {
 	char server_Name[SERVER_NAME_LEN_WITH_NULL];	/* 15 chars + X'20'in 16th */
 	char unicode_server_Name[SERVER_NAME_LEN_WITH_NULL * 2];	/* Unicode version of server_Name */
 	struct socket *ssocket;
-	struct sockaddr_in sockAddr;
-	wait_queue_head_t response_q;
+	union {
+		struct sockaddr_in sockAddr;
+		struct sockaddr_in6 sockAddr6;
+	} addr;
+	wait_queue_head_t response_q; 
+	wait_queue_head_t request_q; /* if more than maxmpx to srvr must block*/
 	struct list_head pending_mid_q;
 	void *Server_NlsInfo;	/* BB - placeholder for future NLS info  */
 	unsigned short server_codepage;	/* codepage for the server    */
 	unsigned long ip_address;	/* IP addr for the server if known     */
-	unsigned long svType;	/* computer type                       */
+	enum protocolEnum protocolType;	
 	char versionMajor;
 	char versionMinor;
-	int svlocal:1;		/* local server or remote */
-	atomic_t socketUseCount;	/* indicates if the server has any open cifs sessions */
+	unsigned svlocal:1;	/* local server or remote */
+	atomic_t socketUseCount; /* number of open cifs sessions on socket */
+	atomic_t inFlight;  /* number of requests on the wire to server */
 	enum statusEnum tcpStatus; /* what we think the status is */
 	struct semaphore tcpSem;
 	struct task_struct *tsk;
@@ -124,6 +148,7 @@ struct TCP_Server_Info {
 	int capabilities; /* allow selective disabling of caps by smb sess */
 	__u16 timeZone;
 	char cryptKey[CIFS_CRYPTO_KEY_SIZE];
+	char workstation_RFC1001_name[16]; /* 16th byte is always zero */
 };
 
 /*
@@ -147,7 +172,7 @@ struct cifsSesInfo {
 	struct semaphore sesSem;
 	struct cifsUidInfo *uidInfo;	/* pointer to user info */
 	struct TCP_Server_Info *server;	/* pointer to server info */
-	atomic_t inUse;		/* # of CURRENT users of this ses */
+	atomic_t inUse; /* # of mounts (tree connections) on this ses */
 	enum statusEnum status;
 	__u32 sequence_number;  /* needed for CIFS PDU signature */
 	__u16 ipc_tid;		/* special tid for connection to IPC share */
@@ -161,7 +186,7 @@ struct cifsSesInfo {
 	char serverName[SERVER_NAME_LEN_WITH_NULL * 2];	/* BB make bigger for tcp names - will ipv6 and sctp addresses fit here?? */
 	char userName[MAX_USERNAME_SIZE + 1];
 	char domainName[MAX_USERNAME_SIZE + 1];
-	char password_with_pad[CIFS_ENCPWD_SIZE];
+	char * password;
 };
 
 /*
@@ -175,13 +200,29 @@ struct cifsTconInfo {
 	struct cifsSesInfo *ses;	/* pointer to session associated with */
 	char treeName[MAX_TREE_SIZE + 1]; /* UNC name of resource (in ASCII not UTF) */
 	char *nativeFileSystem;
-	__u16 tid;		/* The 2 byte transaction id */
+	__u16 tid;		/* The 2 byte tree id */
 	__u16 Flags;		/* optional support bits */
 	enum statusEnum tidStatus;
-	atomic_t useCount;	/* how many mounts (explicit or implicit refer to this share */
+	atomic_t useCount;	/* how many mounts (explicit or implicit) to this share */
+#ifdef CONFIG_CIFS_STATS
+	atomic_t num_smbs_sent;
+	atomic_t num_writes;
+	atomic_t num_reads;
+	atomic_t num_oplock_brks;
+	atomic_t num_opens;
+	atomic_t num_deletes;
+	atomic_t num_mkdirs;
+	atomic_t num_rmdirs;
+	atomic_t num_renames;
+	atomic_t num_t2renames;
+	__u64    bytes_read;
+	__u64    bytes_written;
+	spinlock_t stat_lock;
+#endif
 	FILE_SYSTEM_DEVICE_INFO fsDevInfo;
-	FILE_SYSTEM_ATTRIBUTE_INFO fsAttrInfo;	/* note file system name may be truncated - but very unlikely */
+	FILE_SYSTEM_ATTRIBUTE_INFO fsAttrInfo;	/* ok if file system name truncated */
 	FILE_SYSTEM_UNIX_INFO fsUnixInfo;
+	unsigned retry:1;
 	/* BB add field for back pointer to sb struct? */
 };
 
@@ -199,6 +240,20 @@ struct cifsLockInfo {
 /*
  * One of these for each open instance of a file
  */
+struct cifs_search_info {
+	loff_t index_of_last_entry;
+	__u16 entries_in_buffer;
+	__u16 info_level;
+	__u32 resume_key;
+	char * ntwrk_buf_start;
+	char * srch_entries_start;
+	char * presume_name;
+	unsigned int resume_name_len;
+	unsigned endOfSearch:1;
+	unsigned emptyDir:1;
+	unsigned unicode:1;
+};
+
 struct cifsFileInfo {
 	struct list_head tlist;	/* pointer to next fid owned by tcon */
 	struct list_head flist;	/* next fid (file instance) for this inode */
@@ -209,13 +264,12 @@ struct cifsFileInfo {
 	/* lock scope id (0 if none) */
 	struct file * pfile; /* needed for writepage */
 	struct inode * pInode; /* needed for oplock break */
-	int endOfSearch:1;	/* we have reached end of search */
-	int closePend:1;	/* file is marked to close */
-	int emptyDir:1;
-	int invalidHandle:1;  /* file closed via session abend */
-	char * search_resume_name;
-	unsigned int resume_name_length;
-	__u32 resume_key;
+	unsigned closePend:1;	/* file is marked to close */
+	unsigned invalidHandle:1;  /* file closed via session abend */
+	struct semaphore fh_sem; /* prevents reopen race after dead ses*/
+	char * search_resume_name; /* BB removeme BB */
+	unsigned int resume_name_length; /* BB removeme - field renamed and moved BB */
+	struct cifs_search_info srch_inf;
 };
 
 /*
@@ -230,9 +284,9 @@ struct cifsInodeInfo {
 	__u32 cifsAttrs; /* e.g. DOS archive bit, sparse, compressed, system */
 	atomic_t inUse;	 /* num concurrent users (local openers cifs) of file*/
 	unsigned long time;	/* jiffies of last update/check of inode */
-	int clientCanCacheRead:1; /* read oplock */
-	int clientCanCacheAll:1;  /* read and writebehind oplock */
-	int oplockPending:1;
+	unsigned clientCanCacheRead:1; /* read oplock */
+	unsigned clientCanCacheAll:1;  /* read and writebehind oplock */
+	unsigned oplockPending:1;
 	struct inode vfs_inode;
 };
 
@@ -274,13 +328,9 @@ struct oplock_q_entry {
 #define   MID_REQUEST_ALLOCATED 1
 #define   MID_REQUEST_SUBMITTED 2
 #define   MID_RESPONSE_RECEIVED 4
-
-struct servers_not_supported { /* @z4a */
-	struct servers_not_supported *next1;  /* @z4a */
-	char server_Name[SERVER_NAME_LEN_WITH_NULL]; /* @z4a */
-	/* Server Names in SMB protocol are 15 chars + X'20'  */
-	/*   in 16th byte...                      @z4a        */
-};
+#define   MID_RETRY_NEEDED      8 /* session closed while this request out */
+#define   MID_NO_RESP_NEEDED 0x10
+#define   MID_SMALL_BUFFER   0x20 /* 112 byte response buffer instead of 4K */
 
 /*
  *****************************************************************
@@ -313,7 +363,7 @@ struct servers_not_supported { /* @z4a */
  *  ----------
  *  sesSem     operations on smb session
  *  tconSem    operations on tree connection
- *  i_sem      inode operations 
+ *  fh_sem      file handle reconnection operations 
  *
  ****************************************************************************/
 
@@ -357,9 +407,13 @@ GLOBAL_EXTERN char Local_System_Name[15];
  */
 GLOBAL_EXTERN atomic_t sesInfoAllocCount;
 GLOBAL_EXTERN atomic_t tconInfoAllocCount;
+GLOBAL_EXTERN atomic_t tcpSesAllocCount;
+GLOBAL_EXTERN atomic_t tcpSesReconnectCount;
+GLOBAL_EXTERN atomic_t tconInfoReconnectCount;
 
 /* Various Debug counters to remove someday (BB) */
 GLOBAL_EXTERN atomic_t bufAllocCount;
+GLOBAL_EXTERN atomic_t smBufAllocCount;      
 GLOBAL_EXTERN atomic_t midCount;
 
 /* Misc globals */
@@ -368,10 +422,15 @@ GLOBAL_EXTERN unsigned int multiuser_mount;	/* if enabled allows new sessions
 				have the uid/password or Kerberos credential 
 				or equivalent for current user */
 GLOBAL_EXTERN unsigned int oplockEnabled;
-GLOBAL_EXTERN unsigned int quotaEnabled;
+GLOBAL_EXTERN unsigned int experimEnabled;
 GLOBAL_EXTERN unsigned int lookupCacheEnabled;
 GLOBAL_EXTERN unsigned int extended_security;	/* if on, session setup sent 
 				with more secure ntlmssp2 challenge/resp */
 GLOBAL_EXTERN unsigned int ntlmv2_support;  /* better optional password hash */
 GLOBAL_EXTERN unsigned int sign_CIFS_PDUs;  /* enable smb packet signing */
+GLOBAL_EXTERN unsigned int linuxExtEnabled;/*enable Linux/Unix CIFS extensions*/
+GLOBAL_EXTERN unsigned int CIFSMaxBufSize;  /* max size not including hdr */
+GLOBAL_EXTERN unsigned int cifs_min_rcv;    /* min size of big ntwrk buf pool */
+GLOBAL_EXTERN unsigned int cifs_min_small;  /* min size of small buf pool */
+GLOBAL_EXTERN unsigned int cifs_max_pending; /* MAX requests at once to server*/
 

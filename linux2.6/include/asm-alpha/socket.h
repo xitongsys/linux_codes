@@ -48,25 +48,11 @@
 #define SO_TIMESTAMP		29
 #define SCM_TIMESTAMP		SO_TIMESTAMP
 
+#define SO_PEERSEC		30
+
 /* Security levels - as per NRL IPv6 - don't actually do anything */
 #define SO_SECURITY_AUTHENTICATION		19
 #define SO_SECURITY_ENCRYPTION_TRANSPORT	20
 #define SO_SECURITY_ENCRYPTION_NETWORK		21
-
-/* Nast libc5 fixup - bletch */
-#if defined(__KERNEL__)
-/* Socket types. */
-#define SOCK_STREAM	1		/* stream (connection) socket	*/
-#define SOCK_DGRAM	2		/* datagram (conn.less) socket	*/
-#define SOCK_RAW	3		/* raw socket			*/
-#define SOCK_RDM	4		/* reliably-delivered message	*/
-#define SOCK_SEQPACKET	5		/* sequential packet socket	*/
-#define SOCK_PACKET	10		/* linux specific way of	*/
-					/* getting packets at the dev	*/
-					/* level.  For writing rarp and	*/
-					/* other similar things on the	*/
-					/* user level.			*/
-#define	SOCK_MAX	(SOCK_PACKET+1)
-#endif
 
 #endif /* _ASM_SOCKET_H */

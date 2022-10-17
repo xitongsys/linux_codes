@@ -55,7 +55,7 @@
 /*
  * Table for permanently allocated memory (used when unloading the module)
  */
-caddr_t         sound_mem_blocks[1024];
+void *          sound_mem_blocks[1024];
 int             sound_nblocks = 0;
 
 /* Persistent DMA buffers */
@@ -73,6 +73,7 @@ static char     dma_alloc_map[MAX_DMA_CHANNELS];
 
 
 unsigned long seq_time = 0;	/* Time for /dev/sequencer */
+extern struct class_simple *sound_class;
 
 /*
  * Table for configurable mixer volume handling
@@ -109,7 +110,7 @@ int *load_mixer_volumes(char *name, int *levels, int present)
 	return mixer_vols[n].levels;
 }
 
-static int set_mixer_levels(caddr_t arg)
+static int set_mixer_levels(void __user * arg)
 {
         /* mixer_vol_table is 174 bytes, so IMHO no reason to not allocate it on the stack */
 	mixer_vol_table buf;   
@@ -122,11 +123,11 @@ static int set_mixer_levels(caddr_t arg)
 	return 0;
 }
 
-static int get_mixer_levels(caddr_t arg)
+static int get_mixer_levels(void __user * arg)
 {
 	int n;
 
-	if (__get_user(n, (int *)(&(((mixer_vol_table *)arg)->num))))
+	if (__get_user(n, (int __user *)(&(((mixer_vol_table __user *)arg)->num))))
 		return -EFAULT;
 	if (n < 0 || n >= num_mixer_volumes)
 		return -EINVAL;
@@ -135,14 +136,10 @@ static int get_mixer_levels(caddr_t arg)
 	return 0;
 }
 
-#ifndef MIN
-#define MIN(a,b) (((a) < (b)) ? (a) : (b))
-#endif
-
 /* 4K page size but our output routines use some slack for overruns */
 #define PROC_BLOCK_SIZE (3*1024)
 
-static ssize_t sound_read(struct file *file, char *buf, size_t count, loff_t *ppos)
+static ssize_t sound_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
 	int dev = iminor(file->f_dentry->d_inode);
 	int ret = -EINVAL;
@@ -175,7 +172,7 @@ static ssize_t sound_read(struct file *file, char *buf, size_t count, loff_t *pp
 	return ret;
 }
 
-static ssize_t sound_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
+static ssize_t sound_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
 	int dev = iminor(file->f_dentry->d_inode);
 	int ret = -EINVAL;
@@ -285,7 +282,7 @@ static int sound_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int get_mixer_info(int dev, caddr_t arg)
+static int get_mixer_info(int dev, void __user *arg)
 {
 	mixer_info info;
 	memset(&info, 0, sizeof(info));
@@ -297,7 +294,7 @@ static int get_mixer_info(int dev, caddr_t arg)
 	return 0;
 }
 
-static int get_old_mixer_info(int dev, caddr_t arg)
+static int get_old_mixer_info(int dev, void __user *arg)
 {
 	_old_mixer_info info;
 	memset(&info, 0, sizeof(info));
@@ -308,7 +305,7 @@ static int get_old_mixer_info(int dev, caddr_t arg)
 	return 0;
 }
 
-static int sound_mixer_ioctl(int mixdev, unsigned int cmd, caddr_t arg)
+static int sound_mixer_ioctl(int mixdev, unsigned int cmd, void __user *arg)
 {
  	if (mixdev < 0 || mixdev >= MAX_MIXER_DEV)
  		return -ENXIO;
@@ -334,24 +331,25 @@ static int sound_ioctl(struct inode *inode, struct file *file,
 {
 	int err, len = 0, dtype;
 	int dev = iminor(inode);
+	void __user *p = (void __user *)arg;
 
 	if (_SIOC_DIR(cmd) != _SIOC_NONE && _SIOC_DIR(cmd) != 0) {
 		/*
 		 * Have to validate the address given by the process.
 		 */
 		len = _SIOC_SIZE(cmd);
-		if (len < 1 || len > 65536 || arg == 0)
+		if (len < 1 || len > 65536 || !p)
 			return -EFAULT;
 		if (_SIOC_DIR(cmd) & _SIOC_WRITE)
-			if ((err = verify_area(VERIFY_READ, (void *)arg, len)) < 0)
+			if ((err = verify_area(VERIFY_READ, p, len)) < 0)
 				return err;
 		if (_SIOC_DIR(cmd) & _SIOC_READ)
-			if ((err = verify_area(VERIFY_WRITE, (void *)arg, len)) < 0)
+			if ((err = verify_area(VERIFY_WRITE, p, len)) < 0)
 				return err;
 	}
 	DEB(printk("sound_ioctl(dev=%d, cmd=0x%x, arg=0x%x)\n", dev, cmd, arg));
 	if (cmd == OSS_GETVERSION)
-		return __put_user(SOUND_VERSION, (int *)arg);
+		return __put_user(SOUND_VERSION, (int __user *)p);
 	
 	if (_IOC_TYPE(cmd) == 'M' && num_mixers > 0 &&   /* Mixer ioctl */
 	    (dev & 0x0f) != SND_DEV_CTL) {              
@@ -361,32 +359,32 @@ static int sound_ioctl(struct inode *inode, struct file *file,
 		case SND_DEV_DSP16:
 		case SND_DEV_AUDIO:
 			return sound_mixer_ioctl(audio_devs[dev >> 4]->mixer_dev,
-						 cmd, (caddr_t)arg);
+						 cmd, p);
 			
 		default:
-			return sound_mixer_ioctl(dev >> 4, cmd, (caddr_t)arg);
+			return sound_mixer_ioctl(dev >> 4, cmd, p);
 		}
 	}
 	switch (dev & 0x0f) {
 	case SND_DEV_CTL:
 		if (cmd == SOUND_MIXER_GETLEVELS)
-			return get_mixer_levels((caddr_t)arg);
+			return get_mixer_levels(p);
 		if (cmd == SOUND_MIXER_SETLEVELS)
-			return set_mixer_levels((caddr_t)arg);
-		return sound_mixer_ioctl(dev >> 4, cmd, (caddr_t)arg);
+			return set_mixer_levels(p);
+		return sound_mixer_ioctl(dev >> 4, cmd, p);
 
 	case SND_DEV_SEQ:
 	case SND_DEV_SEQ2:
-		return sequencer_ioctl(dev, file, cmd, (caddr_t)arg);
+		return sequencer_ioctl(dev, file, cmd, p);
 
 	case SND_DEV_DSP:
 	case SND_DEV_DSP16:
 	case SND_DEV_AUDIO:
-		return audio_ioctl(dev, file, cmd, (caddr_t)arg);
+		return audio_ioctl(dev, file, cmd, p);
 		break;
 
 	case SND_DEV_MIDIN:
-		return MIDIbuf_ioctl(dev, file, cmd, (caddr_t)arg);
+		return MIDIbuf_ioctl(dev, file, cmd, p);
 		break;
 
 	}
@@ -465,9 +463,9 @@ static int sound_mmap(struct file *file, struct vm_area_struct *vma)
 	if (size != dmap->bytes_in_use) {
 		printk(KERN_WARNING "Sound: mmap() size = %ld. Should be %d\n", size, dmap->bytes_in_use);
 	}
-	if (remap_page_range(vma, vma->vm_start, virt_to_phys(dmap->raw_buf),
-		vma->vm_end - vma->vm_start,
-		vma->vm_page_prot)) {
+	if (remap_pfn_range(vma, vma->vm_start,
+			virt_to_phys(dmap->raw_buf) >> PAGE_SHIFT,
+			vma->vm_end - vma->vm_start, vma->vm_page_prot)) {
 		unlock_kernel();
 		return -EAGAIN;
 	}
@@ -537,8 +535,8 @@ static const struct {
 static int dmabuf;
 static int dmabug;
 
-MODULE_PARM(dmabuf, "i");
-MODULE_PARM(dmabug, "i");
+module_param(dmabuf, int, 0444);
+module_param(dmabug, int, 0444);
 
 static int __init oss_init(void)
 {
@@ -569,6 +567,9 @@ static int __init oss_init(void)
 		devfs_mk_cdev(MKDEV(SOUND_MAJOR, dev_list[i].minor),
 				S_IFCHR | dev_list[i].mode,
 				"sound/%s", dev_list[i].name);
+		class_simple_device_add(sound_class, 
+					MKDEV(SOUND_MAJOR, dev_list[i].minor),
+					NULL, "%s", dev_list[i].name);
 
 		if (!dev_list[i].num)
 			continue;
@@ -578,6 +579,10 @@ static int __init oss_init(void)
 						dev_list[i].minor + (j*0x10)),
 					S_IFCHR | dev_list[i].mode,
 					"sound/%s%d", dev_list[i].name, j);
+			class_simple_device_add(sound_class,
+					MKDEV(SOUND_MAJOR, dev_list[i].minor + (j*0x10)),
+					NULL,
+					"%s%d", dev_list[i].name, j);
 		}
 	}
 
@@ -593,10 +598,13 @@ static void __exit oss_cleanup(void)
 
 	for (i = 0; i < sizeof (dev_list) / sizeof *dev_list; i++) {
 		devfs_remove("sound/%s", dev_list[i].name);
+		class_simple_device_remove(MKDEV(SOUND_MAJOR, dev_list[i].minor));
 		if (!dev_list[i].num)
 			continue;
-		for (j = 1; j < *dev_list[i].num; j++)
+		for (j = 1; j < *dev_list[i].num; j++) {
 			devfs_remove("sound/%s%d", dev_list[i].name, j);
+			class_simple_device_remove(MKDEV(SOUND_MAJOR, dev_list[i].minor + (j*0x10)));
+		}
 	}
 	
 	unregister_sound_special(1);
@@ -699,7 +707,7 @@ void request_sound_timer(int count)
 
 void sound_stop_timer(void)
 {
-	del_timer(&seq_timer);;
+	del_timer(&seq_timer);
 }
 
 void conf_printf(char *name, struct address_info *hw_config)

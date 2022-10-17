@@ -28,7 +28,9 @@
     82801CA/CAM		2483           
     82801DB		24C3   (HW PEC supported, 32 byte buffer not supported)
     82801EB		24D3   (HW PEC supported, 32 byte buffer not supported)
-
+    6300ESB		25A4
+    ICH6		266A
+    ICH7		27DA
     This driver supports several versions of Intel's I/O Controller Hubs (ICH).
     For SMBus support, they are similar to the PIIX4 and are part
     of Intel's '810' and other chipsets.
@@ -38,12 +40,12 @@
 
 /* Note: we assume there can only be one I801, with one SMBus interface */
 
-/* #define DEBUG 1 */
-
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
+#include <linux/delay.h>
 #include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
@@ -97,8 +99,8 @@
 
 /* If force_addr is set to anything different from 0, we forcibly enable
    the I801 at the given address. VERY DANGEROUS! */
-static int force_addr = 0;
-MODULE_PARM(force_addr, "i");
+static u16 force_addr;
+module_param(force_addr, ushort, 0);
 MODULE_PARM_DESC(force_addr,
 		 "Forcibly enable the I801 at the given address. "
 		 "EXTREMELY DANGEROUS!");
@@ -122,7 +124,8 @@ static int i801_setup(struct pci_dev *dev)
 
 	I801_dev = dev;
 	if ((dev->device == PCI_DEVICE_ID_INTEL_82801DB_3) ||
-	    (dev->device == PCI_DEVICE_ID_INTEL_82801EB_3))
+	    (dev->device == PCI_DEVICE_ID_INTEL_82801EB_3) ||
+	    (dev->device == PCI_DEVICE_ID_INTEL_ESB_4))
 		isich4 = 1;
 	else
 		isich4 = 0;
@@ -206,7 +209,7 @@ static int i801_transaction(void)
 
 	/* We will always wait for a fraction of a second! */
 	do {
-		i2c_delay(1);
+		msleep(1);
 		temp = inb_p(SMBHSTSTS);
 	} while ((temp & 0x01) && (timeout++ < MAX_TIMEOUT));
 
@@ -334,7 +337,7 @@ static int i801_block_transaction(union i2c_smbus_data *data, char read_write,
 		timeout = 0;
 		do {
 			temp = inb_p(SMBHSTSTS);
-			i2c_delay(1);
+			msleep(1);
 		}
 		    while ((!(temp & 0x80))
 			   && (timeout++ < MAX_TIMEOUT));
@@ -394,7 +397,7 @@ static int i801_block_transaction(union i2c_smbus_data *data, char read_write,
 		timeout = 0;
 		do {
 			temp = inb_p(SMBHSTSTS);
-			i2c_delay(1);
+			msleep(1);
 		} while ((!(temp & 0x02))
 			   && (timeout++ < MAX_TIMEOUT));
 
@@ -540,50 +543,25 @@ static struct i2c_algorithm smbus_algorithm = {
 
 static struct i2c_adapter i801_adapter = {
 	.owner		= THIS_MODULE,
-	.class		= I2C_ADAP_CLASS_SMBUS,
+	.class		= I2C_CLASS_HWMON,
 	.algo		= &smbus_algorithm,
 	.name		= "unset",
 };
 
 static struct pci_device_id i801_ids[] = {
-	{
-		.vendor =	PCI_VENDOR_ID_INTEL,
-		.device =	PCI_DEVICE_ID_INTEL_82801AA_3,
-		.subvendor =	PCI_ANY_ID,
-		.subdevice =	PCI_ANY_ID,
-	},
-	{
-		.vendor =	PCI_VENDOR_ID_INTEL,
-		.device =	PCI_DEVICE_ID_INTEL_82801AB_3,
-		.subvendor =	PCI_ANY_ID,
-		.subdevice =	PCI_ANY_ID,
-	},
-	{
-		.vendor =	PCI_VENDOR_ID_INTEL,
-		.device =	PCI_DEVICE_ID_INTEL_82801BA_2,
-		.subvendor =	PCI_ANY_ID,
-		.subdevice =	PCI_ANY_ID,
-	},
-	{
-		.vendor =	PCI_VENDOR_ID_INTEL,
-		.device =	PCI_DEVICE_ID_INTEL_82801CA_3,
-		.subvendor =	PCI_ANY_ID,
-		.subdevice =	PCI_ANY_ID,
-	},
-	{
-		.vendor =	PCI_VENDOR_ID_INTEL,
-		.device =	PCI_DEVICE_ID_INTEL_82801DB_3,
-		.subvendor =	PCI_ANY_ID,
-		.subdevice =	PCI_ANY_ID,
-	},
-	{
-		.vendor =   PCI_VENDOR_ID_INTEL,
-		.device =   PCI_DEVICE_ID_INTEL_82801EB_3,
-		.subvendor =    PCI_ANY_ID,
-		.subdevice =    PCI_ANY_ID,
-	},
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801AA_3) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801AB_3) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801BA_2) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801CA_3) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801DB_3) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801EB_3) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_ESB_4) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_ICH6_16) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_ICH7_17) },
 	{ 0, }
 };
+
+MODULE_DEVICE_TABLE (pci, i801_ids);
 
 static int __devinit i801_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
@@ -605,10 +583,11 @@ static int __devinit i801_probe(struct pci_dev *dev, const struct pci_device_id 
 static void __devexit i801_remove(struct pci_dev *dev)
 {
 	i2c_del_adapter(&i801_adapter);
+	release_region(i801_smba, (isich4 ? 16 : 8));
 }
 
 static struct pci_driver i801_driver = {
-	.name		= "i801 smbus",
+	.name		= "i801_smbus",
 	.id_table	= i801_ids,
 	.probe		= i801_probe,
 	.remove		= __devexit_p(i801_remove),
@@ -616,13 +595,12 @@ static struct pci_driver i801_driver = {
 
 static int __init i2c_i801_init(void)
 {
-	return pci_module_init(&i801_driver);
+	return pci_register_driver(&i801_driver);
 }
 
 static void __exit i2c_i801_exit(void)
 {
 	pci_unregister_driver(&i801_driver);
-	release_region(i801_smba, (isich4 ? 16 : 8));
 }
 
 MODULE_AUTHOR ("Frodo Looijaard <frodol@dds.nl>, "

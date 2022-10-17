@@ -3,18 +3,14 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1992 - 1997, 2000-2003 Silicon Graphics, Inc. All rights reserved.
+ * Copyright (C) 1992 - 1997, 2000-2004 Silicon Graphics, Inc. All rights reserved.
  */
 #ifndef _ASM_IA64_SN_PDA_H
 #define _ASM_IA64_SN_PDA_H
 
-#include <linux/config.h>
 #include <linux/cache.h>
-#include <linux/numa.h>
 #include <asm/percpu.h>
 #include <asm/system.h>
-#include <asm/processor.h>
-#include <asm/page.h>
 #include <asm/sn/bte.h>
 
 
@@ -41,17 +37,21 @@ typedef struct pda_s {
 	 * Support for SN LEDs
 	 */
 	volatile short	*led_address;
+	u16		nasid_bitmask;
+	u8		shub2;
+	u8		nasid_shift;
+	u8		as_shift;
+	u8		shub_1_1_found;
 	u8		led_state;
 	u8		hb_state;	/* supports blinking heartbeat leds */
-	u8		shub_1_1_found;
 	unsigned int	hb_count;
 
 	unsigned int	idle_flag;
 	
 	volatile unsigned long *bedrock_rev_id;
 	volatile unsigned long *pio_write_status_addr;
+	unsigned long pio_write_status_val;
 	volatile unsigned long *pio_shub_war_cam_addr;
-	volatile unsigned long *mem_write_status_addr;
 
 	struct bteinfo_s *cpu_bte_if[BTES_PER_NODE];	/* cpu interface order */
 
@@ -80,7 +80,7 @@ typedef struct pda_s {
  */
 DECLARE_PER_CPU(struct pda_s, pda_percpu);
 
-#define pda		(&__get_cpu_var(pda_percpu))
+#define pda		(&__ia64_per_cpu_var(pda_percpu))
 
 #define pdacpu(cpu)	(&per_cpu(pda_percpu, cpu))
 
@@ -88,5 +88,8 @@ DECLARE_PER_CPU(struct pda_s, pda_percpu);
  * Use this macro to test if shub 1.1 wars should be enabled
  */
 #define enable_shub_wars_1_1()	(pda->shub_1_1_found)
+
+#define is_shub2()	(pda->shub2)
+#define is_shub1()	(pda->shub2 == 0)
 
 #endif /* _ASM_IA64_SN_PDA_H */

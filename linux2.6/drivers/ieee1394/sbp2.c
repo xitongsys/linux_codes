@@ -65,8 +65,9 @@
 #include <asm/scatterlist.h>
 
 #include "../scsi/scsi.h"
-#include "../scsi/hosts.h"
+#include <scsi/scsi_host.h>
 
+#include "csr1212.h"
 #include "ieee1394.h"
 #include "ieee1394_types.h"
 #include "ieee1394_core.h"
@@ -77,7 +78,7 @@
 #include "sbp2.h"
 
 static char version[] __devinitdata =
-	"$Rev: 1034 $ Ben Collins <bcollins@debian.org>";
+	"$Rev: 1219 $ Ben Collins <bcollins@debian.org>";
 
 /*
  * Module load parameter definitions
@@ -136,7 +137,7 @@ MODULE_PARM_DESC(exclusive_login, "Exclusive login to sbp2 device (default = 1)"
  * if your sbp2 device is not properly handling the SCSI inquiry command.
  * This hack makes the inquiry look more like a typical MS Windows
  * inquiry.
- * 
+ *
  * If force_inquiry_hack=1 is required for your device to work,
  * please submit the logged sbp2_firmware_revision value of this device to
  * the linux1394-devel mailing list.
@@ -205,7 +206,7 @@ static u32 global_outstanding_dmas = 0;
 #define SBP2_INFO(fmt, args...)		HPSB_INFO("sbp2: "fmt, ## args)
 #define SBP2_NOTICE(fmt, args...)	HPSB_NOTICE("sbp2: "fmt, ## args)
 #define SBP2_WARN(fmt, args...)		HPSB_WARN("sbp2: "fmt, ## args)
-#else 
+#else
 #define SBP2_DEBUG(fmt, args...)
 #define SBP2_INFO(fmt, args...)		HPSB_INFO("sbp2: "fmt, ## args)
 #define SBP2_NOTICE(fmt, args...)       HPSB_NOTICE("sbp2: "fmt, ## args)
@@ -225,14 +226,20 @@ static void sbp2scsi_complete_all_commands(struct scsi_id_instance_data *scsi_id
 static void sbp2scsi_complete_command(struct scsi_id_instance_data *scsi_id,
 				      u32 scsi_status, Scsi_Cmnd *SCpnt,
 				      void (*done)(Scsi_Cmnd *));
-	
+
 static Scsi_Host_Template scsi_driver_template;
 
 const u8 sbp2_speedto_max_payload[] = { 0x7, 0x8, 0x9, 0xA, 0xB, 0xC };
 
+static void sbp2_host_reset(struct hpsb_host *host);
+
+static int sbp2_probe(struct device *dev);
+static int sbp2_remove(struct device *dev);
+static int sbp2_update(struct unit_directory *ud);
+
 static struct hpsb_highlevel sbp2_highlevel = {
 	.name =		SBP2_DEVICE_NAME,
-	.remove_host =	sbp2_remove_host,
+	.host_reset =	sbp2_host_reset,
 };
 
 static struct hpsb_address_ops sbp2_ops = {
@@ -350,8 +357,7 @@ static int sbp2util_down_timeout(atomic_t *done, int timeout)
 	int i;
 
 	for (i = timeout; (i > 0 && atomic_read(done) == 0); i-= HZ/10) {
-		set_current_state(TASK_INTERRUPTIBLE);
-		if (schedule_timeout(HZ/10))	/* 100ms */
+		if (msleep_interruptible(100))	/* 100ms */
 			return(1);
 	}
 	return ((i > 0) ? 0:1);
@@ -361,38 +367,34 @@ static int sbp2util_down_timeout(atomic_t *done, int timeout)
 static void sbp2_free_packet(struct hpsb_packet *packet)
 {
 	hpsb_free_tlabel(packet);
-	free_hpsb_packet(packet);
+	hpsb_free_packet(packet);
 }
 
-/*
- * This function is called to retrieve a block write packet from our
- * packet pool. This function is used in place of calling
- * alloc_hpsb_packet (which costs us three kmallocs). Instead we just pull
- * out a free request packet and re-initialize values in it. I'm sure this
- * can still stand some more optimization.
+/* This is much like hpsb_node_write(), except it ignores the response
+ * subaction and returns immediately. Can be used from interrupts.
  */
-static struct hpsb_packet *
-sbp2util_allocate_write_packet(struct sbp2scsi_host_info *hi,
-			       struct node_entry *ne, u64 addr,
-			       size_t data_size,
-			       quadlet_t *data)
+int sbp2util_node_write_no_wait(struct node_entry *ne, u64 addr,
+				quadlet_t *buffer, size_t length)
 {
 	struct hpsb_packet *packet;
 
-	packet = hpsb_make_writepacket(hi->host, ne->nodeid,
-				       addr, data, data_size);
-
+	packet = hpsb_make_writepacket(ne->host, ne->nodeid,
+				       addr, buffer, length);
         if (!packet)
-                return NULL;
+                return -ENOMEM;
 
 	hpsb_set_packet_complete_task(packet, (void (*)(void*))sbp2_free_packet,
 				      packet);
 
 	hpsb_node_fill_packet(ne, packet);
 
-	return packet;
-}
+        if (hpsb_send_packet(packet) < 0) {
+		sbp2_free_packet(packet);
+		return -EIO;
+	}
 
+	return 0;
+}
 
 /*
  * This function is called to create a pool of command orbs used for
@@ -405,8 +407,8 @@ static int sbp2util_create_command_orb_pool(struct scsi_id_instance_data *scsi_i
 	unsigned long flags, orbs;
 	struct sbp2_command_info *command;
 
-	orbs = serialize_io ? 2 : SBP2_MAX_COMMAND_ORBS;
-        
+	orbs = serialize_io ? 2 : SBP2_MAX_CMDS;
+
 	spin_lock_irqsave(&scsi_id->sbp2_command_orb_lock, flags);
 	for (i = 0; i < orbs; i++) {
 		command = (struct sbp2_command_info *)
@@ -442,7 +444,7 @@ static void sbp2util_remove_command_orb_pool(struct scsi_id_instance_data *scsi_
 	struct list_head *lh, *next;
 	struct sbp2_command_info *command;
 	unsigned long flags;
-        
+
 	spin_lock_irqsave(&scsi_id->sbp2_command_orb_lock, flags);
 	if (!list_empty(&scsi_id->sbp2_command_orb_completed)) {
 		list_for_each_safe(lh, next, &scsi_id->sbp2_command_orb_completed) {
@@ -465,21 +467,19 @@ static void sbp2util_remove_command_orb_pool(struct scsi_id_instance_data *scsi_
 	return;
 }
 
-/* 
+/*
  * This function finds the sbp2_command for a given outstanding command
  * orb.Only looks at the inuse list.
  */
 static struct sbp2_command_info *sbp2util_find_command_for_orb(
 		struct scsi_id_instance_data *scsi_id, dma_addr_t orb)
 {
-	struct list_head *lh;
 	struct sbp2_command_info *command;
 	unsigned long flags;
 
 	spin_lock_irqsave(&scsi_id->sbp2_command_orb_lock, flags);
 	if (!list_empty(&scsi_id->sbp2_command_orb_inuse)) {
-		list_for_each(lh, &scsi_id->sbp2_command_orb_inuse) {
-			command = list_entry(lh, struct sbp2_command_info, list);
+		list_for_each_entry(command, &scsi_id->sbp2_command_orb_inuse, list) {
 			if (command->command_orb_dma == orb) {
 				spin_unlock_irqrestore(&scsi_id->sbp2_command_orb_lock, flags);
 				return (command);
@@ -493,20 +493,18 @@ static struct sbp2_command_info *sbp2util_find_command_for_orb(
 	return(NULL);
 }
 
-/* 
+/*
  * This function finds the sbp2_command for a given outstanding SCpnt.
  * Only looks at the inuse list.
  */
 static struct sbp2_command_info *sbp2util_find_command_for_SCpnt(struct scsi_id_instance_data *scsi_id, void *SCpnt)
 {
-	struct list_head *lh;
 	struct sbp2_command_info *command;
 	unsigned long flags;
 
 	spin_lock_irqsave(&scsi_id->sbp2_command_orb_lock, flags);
 	if (!list_empty(&scsi_id->sbp2_command_orb_inuse)) {
-		list_for_each(lh, &scsi_id->sbp2_command_orb_inuse) {
-			command = list_entry(lh, struct sbp2_command_info, list);
+		list_for_each_entry(command, &scsi_id->sbp2_command_orb_inuse, list) {
 			if (command->Current_SCpnt == SCpnt) {
 				spin_unlock_irqrestore(&scsi_id->sbp2_command_orb_lock, flags);
 				return (command);
@@ -521,8 +519,8 @@ static struct sbp2_command_info *sbp2util_find_command_for_SCpnt(struct scsi_id_
  * This function allocates a command orb used to send a scsi command.
  */
 static struct sbp2_command_info *sbp2util_allocate_command_orb(
-		struct scsi_id_instance_data *scsi_id, 
-		Scsi_Cmnd *Current_SCpnt, 
+		struct scsi_id_instance_data *scsi_id,
+		Scsi_Cmnd *Current_SCpnt,
 		void (*Current_done)(Scsi_Cmnd *))
 {
 	struct list_head *lh;
@@ -547,14 +545,16 @@ static struct sbp2_command_info *sbp2util_allocate_command_orb(
 /* Free our DMA's */
 static void sbp2util_free_command_dma(struct sbp2_command_info *command)
 {
+	struct scsi_id_instance_data *scsi_id =
+		(struct scsi_id_instance_data *)command->Current_SCpnt->device->host->hostdata[0];
 	struct hpsb_host *host;
 
-	host = hpsb_get_host_bykey(&sbp2_highlevel,
-			(unsigned long)command->Current_SCpnt->device->host);
-	if (!host) {
-		printk(KERN_ERR "%s: host == NULL\n", __FUNCTION__);
+	if (!scsi_id) {
+		printk(KERN_ERR "%s: scsi_id == NULL\n", __FUNCTION__);
 		return;
 	}
+
+	host = scsi_id->ud->ne->host;
 
 	if (command->cmd_dma) {
 		if (command->dma_type == CMD_DMA_SINGLE) {
@@ -597,13 +597,14 @@ static void sbp2util_mark_command_completed(struct scsi_id_instance_data *scsi_i
 /*********************************************
  * IEEE-1394 core driver stack related section
  *********************************************/
+static struct scsi_id_instance_data *sbp2_alloc_device(struct unit_directory *ud);
 
 static int sbp2_probe(struct device *dev)
 {
 	struct unit_directory *ud;
-	struct sbp2scsi_host_info *hi;
+	struct scsi_id_instance_data *scsi_id;
 
-	SBP2_DEBUG(__FUNCTION__);
+	SBP2_DEBUG("sbp2_probe");
 
 	ud = container_of(dev, struct unit_directory, device);
 
@@ -612,194 +613,168 @@ static int sbp2_probe(struct device *dev)
 	if (ud->flags & UNIT_DIRECTORY_HAS_LUN_DIRECTORY)
 		return -ENODEV;
 
-	/* This will only add it if it doesn't exist */
-	hi = sbp2_add_host(ud->ne->host);
+        scsi_id = sbp2_alloc_device(ud);
 
-	if (!hi)
-		return -ENODEV;
+        if (!scsi_id)
+                return -ENOMEM;
 
-	return sbp2_start_ud(hi, ud);
+        sbp2_parse_unit_directory(scsi_id, ud);
+
+        return sbp2_start_device(scsi_id);
 }
 
 static int sbp2_remove(struct device *dev)
 {
-	struct scsi_id_group *scsi_group;
-	struct list_head *lh, *next;
 	struct unit_directory *ud;
 	struct scsi_id_instance_data *scsi_id;
 
-	SBP2_DEBUG(__FUNCTION__);
+	SBP2_DEBUG("sbp2_remove");
 
 	ud = container_of(dev, struct unit_directory, device);
-	scsi_group = ud->device.driver_data;
-	ud->device.driver_data = NULL;
+	scsi_id = ud->device.driver_data;
 
-	list_for_each_safe (lh, next, &scsi_group->scsi_id_list) {
-		scsi_id = list_entry(lh, struct scsi_id_instance_data, list);
-
-		if (scsi_id != NULL) {
-			sbp2_logout_device(scsi_id);
- 			sbp2_remove_device(scsi_id);
-		}
-	}
-
-	kfree(scsi_group);
+	sbp2_logout_device(scsi_id);
+	sbp2_remove_device(scsi_id);
 
 	return 0;
 }
 
-static void sbp2_update(struct unit_directory *ud)
+static int sbp2_update(struct unit_directory *ud)
 {
-	struct sbp2scsi_host_info *hi;
-	struct scsi_id_group *scsi_group = ud->device.driver_data;
-	struct list_head *lh, *next;
-	struct scsi_id_instance_data *scsi_id;
-	unsigned long flags;
+	struct scsi_id_instance_data *scsi_id = ud->device.driver_data;
 
 	SBP2_DEBUG("sbp2_update");
 
-	list_for_each_safe (lh, next, &scsi_group->scsi_id_list) {
-		scsi_id = list_entry(lh, struct scsi_id_instance_data, list);
+	if (sbp2_reconnect_device(scsi_id)) {
 
-		hi = scsi_id->hi;
-
-		if (sbp2_reconnect_device(scsi_id)) {
-		
-			/* 
-			 * Ok, reconnect has failed. Perhaps we didn't
-			 * reconnect fast enough. Try doing a regular login.
-			 */
-			if (sbp2_login_device(scsi_id)) {
-				/* Login failed too, just remove the device. */
-				SBP2_ERR("sbp2_reconnect_device failed!");
-				sbp2_remove_device(scsi_id);
-				return;
-			}
-		}
-
-		/* Set max retries to something large on the device. */
-		sbp2_set_busy_timeout(scsi_id);
-
-		/* Do a SBP-2 fetch agent reset. */
-		sbp2_agent_reset(scsi_id, 1);
-	
-		/* Get the max speed and packet size that we can use. */
-		sbp2_max_speed_and_size(scsi_id);
-
-		/* Complete any pending commands with busy (so they get
-		 * retried) and remove them from our queue
+		/*
+		 * Ok, reconnect has failed. Perhaps we didn't
+		 * reconnect fast enough. Try doing a regular login, but
+		 * first do a logout just in case of any weirdness.
 		 */
-		spin_lock_irqsave(&hi->sbp2_command_lock, flags);
-		sbp2scsi_complete_all_commands(scsi_id, DID_BUS_BUSY);
-		spin_unlock_irqrestore(&hi->sbp2_command_lock, flags);
+		sbp2_logout_device(scsi_id);
+
+		if (sbp2_login_device(scsi_id)) {
+			/* Login failed too, just fail, and the backend
+			 * will call our sbp2_remove for us */
+			SBP2_ERR("Failed to reconnect to sbp2 device!");
+			return -EBUSY;
+		}
 	}
+
+	/* Set max retries to something large on the device. */
+	sbp2_set_busy_timeout(scsi_id);
+
+	/* Do a SBP-2 fetch agent reset. */
+	sbp2_agent_reset(scsi_id, 1);
+
+	/* Get the max speed and packet size that we can use. */
+	sbp2_max_speed_and_size(scsi_id);
+
+	/* Complete any pending commands with busy (so they get
+	 * retried) and remove them from our queue
+	 */
+	sbp2scsi_complete_all_commands(scsi_id, DID_BUS_BUSY);
+
+	/* Make sure we unblock requests (since this is likely after a bus
+	 * reset). */
+	scsi_unblock_requests(scsi_id->scsi_host);
+
+	return 0;
 }
 
-/* This functions is called by the sbp2_probe, for each new device. If the
- * host_info already exists, it will return it. If not, it allocated a new
- * host_info entry and a corresponding scsi_host. */
-static struct sbp2scsi_host_info *sbp2_add_host(struct hpsb_host *host)
+/* This functions is called by the sbp2_probe, for each new device. We now
+ * allocate one scsi host for each scsi_id (unit directory). */
+static struct scsi_id_instance_data *sbp2_alloc_device(struct unit_directory *ud)
 {
 	struct sbp2scsi_host_info *hi;
-	struct Scsi_Host *scsi_host;
+	struct Scsi_Host *scsi_host = NULL;
+	struct scsi_id_instance_data *scsi_id = NULL;
 
-	SBP2_DEBUG("sbp2_add_host");
+	SBP2_DEBUG("sbp2_alloc_device");
 
-	hi = hpsb_get_hostinfo(&sbp2_highlevel, host);
-	if (hi)
-		return hi;
+	scsi_id = kmalloc(sizeof(*scsi_id), GFP_KERNEL);
+	if (!scsi_id) {
+		SBP2_ERR("failed to create scsi_id");
+		goto failed_alloc;
+	}
+	memset(scsi_id, 0, sizeof(*scsi_id));
+
+	scsi_id->ne = ud->ne;
+	scsi_id->ud = ud;
+	scsi_id->speed_code = IEEE1394_SPEED_100;
+	scsi_id->max_payload_size = sbp2_speedto_max_payload[IEEE1394_SPEED_100];
+	atomic_set(&scsi_id->sbp2_login_complete, 0);
+	INIT_LIST_HEAD(&scsi_id->sbp2_command_orb_inuse);
+	INIT_LIST_HEAD(&scsi_id->sbp2_command_orb_completed);
+	INIT_LIST_HEAD(&scsi_id->scsi_list);
+	spin_lock_init(&scsi_id->sbp2_command_orb_lock);
+	scsi_id->sbp2_device_type_and_lun = SBP2_DEVICE_TYPE_LUN_UNINITIALIZED;
+
+	ud->device.driver_data = scsi_id;
+
+	hi = hpsb_get_hostinfo(&sbp2_highlevel, ud->ne->host);
+	if (!hi) {
+		hi = hpsb_create_hostinfo(&sbp2_highlevel, ud->ne->host, sizeof(*hi));
+		if (!hi) {
+			SBP2_ERR("failed to allocate hostinfo");
+			goto failed_alloc;
+		}
+		SBP2_DEBUG("sbp2_alloc_device: allocated hostinfo");
+		hi->host = ud->ne->host;
+		INIT_LIST_HEAD(&hi->scsi_ids);
+
+		/* Register our sbp2 status address space... */
+		hpsb_register_addrspace(&sbp2_highlevel, ud->ne->host, &sbp2_ops,
+					SBP2_STATUS_FIFO_ADDRESS,
+					SBP2_STATUS_FIFO_ADDRESS +
+					SBP2_STATUS_FIFO_ENTRY_TO_OFFSET(SBP2_MAX_UDS_PER_NODE+1));
+#ifdef CONFIG_IEEE1394_SBP2_PHYS_DMA
+		/* Handle data movement if physical dma is not
+		 * enabled/supportedon host controller */
+		hpsb_register_addrspace(&sbp2_highlevel, ud->ne->host, &sbp2_physdma_ops,
+					0x0ULL, 0xfffffffcULL);
+#endif
+	}
+
+	scsi_id->hi = hi;
+
+	list_add_tail(&scsi_id->scsi_list, &hi->scsi_ids);
 
 	/* Register our host with the SCSI stack. */
 	scsi_host = scsi_host_alloc(&scsi_driver_template, 0);
 	if (!scsi_host) {
 		SBP2_ERR("failed to register scsi host");
-		return NULL;
+		goto failed_alloc;
 	}
 
-	hi = hpsb_create_hostinfo(&sbp2_highlevel, host, sizeof(*hi));
-	if (!hi) {
-		SBP2_ERR("failed to allocate hostinfo");
-		scsi_host_put(hi->scsi_host);
+	scsi_host->hostdata[0] = (unsigned long)scsi_id;
+
+	if (!scsi_add_host(scsi_host, &ud->device)) {
+		scsi_id->scsi_host = scsi_host;
+		return scsi_id;
 	}
 
-	hpsb_set_hostinfo_key(&sbp2_highlevel, host, (unsigned long)scsi_host);
+	SBP2_ERR("failed to add scsi host");
+	scsi_host_put(scsi_host);
 
-	hi->scsi_host = scsi_host;
-	hi->host = host;
-	hi->sbp2_command_lock = SPIN_LOCK_UNLOCKED;
-	hi->scsi_host->max_id = SBP2SCSI_MAX_SCSI_IDS;
-
-	/* XXX We need a device to pass here as the scsi-host class. Can't
-	 * use the PCI device, since it is already bound to the ieee1394
-	 * host. Can't use the fw-host device since it is multi-class
-	 * enabled (scsi-host uses classdata member of the device). */
-	if (scsi_add_host(hi->scsi_host, NULL)) {
-		SBP2_ERR("failed to add scsi host");
-		scsi_host_put(hi->scsi_host);
-		hpsb_destroy_hostinfo(&sbp2_highlevel, host);
-	}
-
-	return hi;
+failed_alloc:
+	sbp2_remove_device(scsi_id);
+	return NULL;
 }
 
 
-/*
- * This function is called when a host is removed.
- */
-static void sbp2_remove_host(struct hpsb_host *host)
+static void sbp2_host_reset(struct hpsb_host *host)
 {
 	struct sbp2scsi_host_info *hi;
-
-	SBP2_DEBUG("sbp2_remove_host");
+	struct scsi_id_instance_data *scsi_id;
 
 	hi = hpsb_get_hostinfo(&sbp2_highlevel, host);
 
 	if (hi) {
-		scsi_remove_host(hi->scsi_host);
-		scsi_host_put(hi->scsi_host);
+		list_for_each_entry(scsi_id, &hi->scsi_ids, scsi_list)
+			scsi_block_requests(scsi_id->scsi_host);
 	}
-}
-
-static int sbp2_start_ud(struct sbp2scsi_host_info *hi, struct unit_directory *ud)
-{
-	struct scsi_id_instance_data *scsi_id;
-	struct scsi_id_group *scsi_group;
-	struct list_head *lh, *next;
-
-	SBP2_DEBUG("sbp2_start_ud");
-
-	scsi_group = kmalloc(sizeof(*scsi_group), GFP_KERNEL);
-	if (!scsi_group) {
-		SBP2_ERR ("Could not allocate memory for scsi_group");
-		return -ENOMEM;
-	}
-
-	INIT_LIST_HEAD(&scsi_group->scsi_id_list);
-	ud->device.driver_data = scsi_group;
-	sbp2_parse_unit_directory(scsi_group, ud);
-
-	list_for_each_safe (lh, next, &scsi_group->scsi_id_list) {
-		scsi_id = list_entry(lh, struct scsi_id_instance_data, list);
-
-		scsi_id->ne = ud->ne;
-		scsi_id->hi = hi;
-		scsi_id->speed_code = IEEE1394_SPEED_100;
-		scsi_id->max_payload_size = sbp2_speedto_max_payload[IEEE1394_SPEED_100];
-		atomic_set(&scsi_id->sbp2_login_complete, 0);
-		INIT_LIST_HEAD(&scsi_id->sbp2_command_orb_inuse);
-		INIT_LIST_HEAD(&scsi_id->sbp2_command_orb_completed);
-		scsi_id->sbp2_command_orb_lock = SPIN_LOCK_UNLOCKED;
-
-		sbp2_start_device(scsi_id);
-	}
-
-	/* Check to see if any of our devices survived the ordeal */
-	if (list_empty(&scsi_group->scsi_id_list)) {
-		kfree(scsi_group);
-		return -ENODEV;
-	}
-
-	return 0;
 }
 
 
@@ -811,7 +786,6 @@ static int sbp2_start_device(struct scsi_id_instance_data *scsi_id)
 {
 	struct sbp2scsi_host_info *hi = scsi_id->hi;
 	struct scsi_device *sdev;
-	int i;
 
 	SBP2_DEBUG("sbp2_start_device");
 
@@ -876,7 +850,7 @@ alloc_fail:
 					    scsi_id->query_logins_orb_dma);
 			SBP2_DMA_FREE("query logins ORB DMA");
 		}
-	
+
 		if (scsi_id->logout_orb) {
 			pci_free_consistent(hi->host->pdev,
 					sizeof(struct sbp2_logout_orb),
@@ -901,9 +875,9 @@ alloc_fail:
 			SBP2_DMA_FREE("login FIFO DMA");
 		}
 
-		kfree(scsi_id);
+		list_del(&scsi_id->scsi_list);
 
-		list_del(&scsi_id->list);
+		kfree(scsi_id);
 
 		SBP2_ERR ("Could not allocate memory for scsi_id");
 
@@ -911,17 +885,7 @@ alloc_fail:
 	}
 	SBP2_DMA_ALLOC("consistent DMA region for login ORB");
 
-	/*
-	 * Find an empty spot to stick our scsi id instance data. 
-	 */
-	for (i = 0; i < hi->scsi_host->max_id; i++) {
-		if (!hi->scsi_id[i]) {
-			hi->scsi_id[i] = scsi_id;
-			scsi_id->id = i;
-			SBP2_DEBUG("New SBP-2 device inserted, SCSI ID = %x", (unsigned int) i);
-			break;
-		}
-	}
+	SBP2_DEBUG("New SBP-2 device inserted, SCSI ID = %x", scsi_id->ud->id);
 
 	/*
 	 * Create our command orb pool
@@ -932,15 +896,6 @@ alloc_fail:
 		return -ENOMEM;
 	}
 
-	/*
-	 * Make sure we are not out of space
-	 */
-	if (i == hi->scsi_host->max_id) {
-		SBP2_ERR("No slots left for SBP-2 device");
-		sbp2_remove_device(scsi_id);
-		return -EBUSY;
-	}
-
 	/* Schedule a timeout here. The reason is that we may be so close
 	 * to a bus reset, that the device is not available for logins.
 	 * This can happen when the bus reset is caused by the host
@@ -949,7 +904,6 @@ alloc_fail:
 	 * allows someone else to login instead. One second makes sense. */
 	set_current_state(TASK_INTERRUPTIBLE);
 	schedule_timeout(HZ);
-						
 
 	/*
 	 * Login to the sbp-2 device
@@ -964,19 +918,19 @@ alloc_fail:
 	 * Set max retries to something large on the device
 	 */
 	sbp2_set_busy_timeout(scsi_id);
-	
+
 	/*
 	 * Do a SBP-2 fetch agent reset
 	 */
 	sbp2_agent_reset(scsi_id, 1);
-	
+
 	/*
 	 * Get the max speed and packet size that we can use
 	 */
 	sbp2_max_speed_and_size(scsi_id);
 
 	/* Add this device to the scsi layer now */
-	sdev = scsi_add_device(hi->scsi_host, 0, scsi_id->id, 0);
+	sdev = scsi_add_device(scsi_id->scsi_host, 0, scsi_id->ud->id, 0);
 	if (IS_ERR(sdev)) {
 		SBP2_ERR("scsi_add_device failed");
 		return PTR_ERR(sdev);
@@ -990,26 +944,24 @@ alloc_fail:
  */
 static void sbp2_remove_device(struct scsi_id_instance_data *scsi_id)
 {
-	struct sbp2scsi_host_info *hi = scsi_id->hi;
-	struct scsi_device *sdev;
+	struct sbp2scsi_host_info *hi;
 
 	SBP2_DEBUG("sbp2_remove_device");
 
-	/* Complete any pending commands with selection timeout */
-	sbp2scsi_complete_all_commands(scsi_id, DID_NO_CONNECT);
+	if (!scsi_id)
+		return;
 
-	/* Remove it from the scsi layer now */
-	/* XXX(hch): why can't we simply cache the scsi_device
-	   	     in struct scsi_id_instance_data? */
-	sdev = scsi_device_lookup(hi->scsi_host, 0, scsi_id->id, 0);
-	if (sdev) {
-		scsi_remove_device(sdev);
-		scsi_device_put(sdev);
+	hi = scsi_id->hi;
+
+	/* This will remove our scsi device aswell */
+	if (scsi_id->scsi_host) {
+		scsi_remove_host(scsi_id->scsi_host);
+		scsi_host_put(scsi_id->scsi_host);
 	}
 
 	sbp2util_remove_command_orb_pool(scsi_id);
 
-	hi->scsi_id[scsi_id->id] = NULL;
+	list_del(&scsi_id->scsi_list);
 
 	if (scsi_id->login_response) {
 		pci_free_consistent(hi->host->pdev,
@@ -1059,9 +1011,9 @@ static void sbp2_remove_device(struct scsi_id_instance_data *scsi_id)
 		SBP2_DMA_FREE("single query logins data");
 	}
 
-	SBP2_DEBUG("SBP-2 device removed, SCSI ID = %d", scsi_id->id);
+	scsi_id->ud->device.driver_data = NULL;
 
-	list_del(&scsi_id->list);
+	SBP2_DEBUG("SBP-2 device removed, SCSI ID = %d", scsi_id->ud->id);
 
 	kfree(scsi_id);
 }
@@ -1135,7 +1087,7 @@ static int sbp2_query_logins(struct scsi_id_instance_data *scsi_id)
 	scsi_id->query_logins_orb->query_response_hi = ORB_SET_NODE_ID(hi->host->node_id);
 	SBP2_DEBUG("sbp2_query_logins: query_response_hi/lo initialized");
 
-	scsi_id->query_logins_orb->lun_misc = ORB_SET_FUNCTION(QUERY_LOGINS_REQUEST);
+	scsi_id->query_logins_orb->lun_misc = ORB_SET_FUNCTION(SBP2_QUERY_LOGINS_REQUEST);
 	scsi_id->query_logins_orb->lun_misc |= ORB_SET_NOTIFY(1);
 	if (scsi_id->sbp2_device_type_and_lun != SBP2_DEVICE_TYPE_LUN_UNINITIALIZED) {
 		scsi_id->query_logins_orb->lun_misc |= ORB_SET_LUN(scsi_id->sbp2_device_type_and_lun);
@@ -1149,7 +1101,7 @@ static int sbp2_query_logins(struct scsi_id_instance_data *scsi_id)
 	SBP2_DEBUG("sbp2_query_logins: reserved_resp_length initialized");
 
 	scsi_id->query_logins_orb->status_FIFO_lo = SBP2_STATUS_FIFO_ADDRESS_LO +
-						    SBP2_STATUS_FIFO_ENTRY_TO_OFFSET(scsi_id->id);
+						    SBP2_STATUS_FIFO_ENTRY_TO_OFFSET(scsi_id->ud->id);
 	scsi_id->query_logins_orb->status_FIFO_hi = (ORB_SET_NODE_ID(hi->host->node_id) |
 						     SBP2_STATUS_FIFO_ADDRESS_HI);
 	SBP2_DEBUG("sbp2_query_logins: status FIFO initialized");
@@ -1177,12 +1129,12 @@ static int sbp2_query_logins(struct scsi_id_instance_data *scsi_id)
 	SBP2_DEBUG("sbp2_query_logins: written");
 
 	if (sbp2util_down_timeout(&scsi_id->sbp2_login_complete, 2*HZ)) {
-		SBP2_ERR("Error querying logins to SBP-2 device - timed out");
+		SBP2_INFO("Error querying logins to SBP-2 device - timed out");
 		return(-EIO);
 	}
 
 	if (scsi_id->status_block.ORB_offset_lo != scsi_id->query_logins_orb_dma) {
-		SBP2_ERR("Error querying logins to SBP-2 device - timed out");
+		SBP2_INFO("Error querying logins to SBP-2 device - timed out");
 		return(-EIO);
 	}
 
@@ -1190,7 +1142,7 @@ static int sbp2_query_logins(struct scsi_id_instance_data *scsi_id)
 	    STATUS_GET_DEAD_BIT(scsi_id->status_block.ORB_offset_hi_misc) ||
 	    STATUS_GET_SBP_STATUS(scsi_id->status_block.ORB_offset_hi_misc)) {
 
-		SBP2_ERR("Error querying logins to SBP-2 device - timed out");
+		SBP2_INFO("Error querying logins to SBP-2 device - timed out");
 		return(-EIO);
 	}
 
@@ -1199,18 +1151,18 @@ static int sbp2_query_logins(struct scsi_id_instance_data *scsi_id)
 	SBP2_DEBUG("length_max_logins = %x",
 		   (unsigned int)scsi_id->query_logins_response->length_max_logins);
 
-	SBP2_INFO("Query logins to SBP-2 device successful");
+	SBP2_DEBUG("Query logins to SBP-2 device successful");
 
 	max_logins = RESPONSE_GET_MAX_LOGINS(scsi_id->query_logins_response->length_max_logins);
-	SBP2_INFO("Maximum concurrent logins supported: %d", max_logins);
-                                                                                
+	SBP2_DEBUG("Maximum concurrent logins supported: %d", max_logins);
+
 	active_logins = RESPONSE_GET_ACTIVE_LOGINS(scsi_id->query_logins_response->length_max_logins);
-	SBP2_INFO("Number of active logins: %d", active_logins);
-                                                                                
+	SBP2_DEBUG("Number of active logins: %d", active_logins);
+
 	if (active_logins >= max_logins) {
 		return(-EIO);
 	}
-                                                                                
+
 	return 0;
 }
 
@@ -1218,7 +1170,7 @@ static int sbp2_query_logins(struct scsi_id_instance_data *scsi_id)
  * This function is called in order to login to a particular SBP-2 device,
  * after a bus reset.
  */
-static int sbp2_login_device(struct scsi_id_instance_data *scsi_id) 
+static int sbp2_login_device(struct scsi_id_instance_data *scsi_id)
 {
 	struct sbp2scsi_host_info *hi = scsi_id->hi;
 	quadlet_t data[2];
@@ -1232,13 +1184,13 @@ static int sbp2_login_device(struct scsi_id_instance_data *scsi_id)
 
 	if (!exclusive_login) {
 		if (sbp2_query_logins(scsi_id)) {
-			SBP2_ERR("Device does not support any more concurrent logins");
+			SBP2_INFO("Device does not support any more concurrent logins");
 			return(-EIO);
 		}
 	}
 
 	/* Set-up login ORB, assume no password */
-	scsi_id->login_orb->password_hi = 0; 
+	scsi_id->login_orb->password_hi = 0;
 	scsi_id->login_orb->password_lo = 0;
 	SBP2_DEBUG("sbp2_login_device: password_hi/lo initialized");
 
@@ -1246,7 +1198,7 @@ static int sbp2_login_device(struct scsi_id_instance_data *scsi_id)
 	scsi_id->login_orb->login_response_hi = ORB_SET_NODE_ID(hi->host->node_id);
 	SBP2_DEBUG("sbp2_login_device: login_response_hi/lo initialized");
 
-	scsi_id->login_orb->lun_misc = ORB_SET_FUNCTION(LOGIN_REQUEST);
+	scsi_id->login_orb->lun_misc = ORB_SET_FUNCTION(SBP2_LOGIN_REQUEST);
 	scsi_id->login_orb->lun_misc |= ORB_SET_RECONNECT(0);	/* One second reconnect time */
 	scsi_id->login_orb->lun_misc |= ORB_SET_EXCLUSIVE(exclusive_login);	/* Exclusive access to device */
 	scsi_id->login_orb->lun_misc |= ORB_SET_NOTIFY(1);	/* Notify us of login complete */
@@ -1262,8 +1214,8 @@ static int sbp2_login_device(struct scsi_id_instance_data *scsi_id)
 		ORB_SET_LOGIN_RESP_LENGTH(sizeof(struct sbp2_login_response));
 	SBP2_DEBUG("sbp2_login_device: passwd_resp_lengths initialized");
 
-	scsi_id->login_orb->status_FIFO_lo = SBP2_STATUS_FIFO_ADDRESS_LO + 
-					     SBP2_STATUS_FIFO_ENTRY_TO_OFFSET(scsi_id->id);
+	scsi_id->login_orb->status_FIFO_lo = SBP2_STATUS_FIFO_ADDRESS_LO +
+					     SBP2_STATUS_FIFO_ENTRY_TO_OFFSET(scsi_id->ud->id);
 	scsi_id->login_orb->status_FIFO_hi = (ORB_SET_NODE_ID(hi->host->node_id) |
 					      SBP2_STATUS_FIFO_ADDRESS_HI);
 	SBP2_DEBUG("sbp2_login_device: status FIFO initialized");
@@ -1275,7 +1227,7 @@ static int sbp2_login_device(struct scsi_id_instance_data *scsi_id)
 
 	SBP2_DEBUG("sbp2_login_device: orb byte-swapped");
 
-	sbp2util_packet_dump(scsi_id->login_orb, sizeof(struct sbp2_login_orb), 
+	sbp2util_packet_dump(scsi_id->login_orb, sizeof(struct sbp2_login_orb),
 			     "sbp2 login orb", scsi_id->login_orb_dma);
 
 	/*
@@ -1301,7 +1253,7 @@ static int sbp2_login_device(struct scsi_id_instance_data *scsi_id)
 	SBP2_DEBUG("sbp2_login_device: written");
 
 	/*
-	 * Wait for login status (up to 20 seconds)... 
+	 * Wait for login status (up to 20 seconds)...
 	 */
 	if (sbp2util_down_timeout(&scsi_id->sbp2_login_complete, 20*HZ)) {
 		SBP2_ERR("Error logging into SBP-2 device - login timed-out");
@@ -1356,10 +1308,11 @@ static int sbp2_login_device(struct scsi_id_instance_data *scsi_id)
  * This function is called in order to logout from a particular SBP-2
  * device, usually called during driver unload.
  */
-static int sbp2_logout_device(struct scsi_id_instance_data *scsi_id) 
+static int sbp2_logout_device(struct scsi_id_instance_data *scsi_id)
 {
 	struct sbp2scsi_host_info *hi = scsi_id->hi;
 	quadlet_t data[2];
+	int error;
 
 	SBP2_DEBUG("sbp2_logout_device");
 
@@ -1371,15 +1324,15 @@ static int sbp2_logout_device(struct scsi_id_instance_data *scsi_id)
 	scsi_id->logout_orb->reserved3 = 0x0;
 	scsi_id->logout_orb->reserved4 = 0x0;
 
-	scsi_id->logout_orb->login_ID_misc = ORB_SET_FUNCTION(LOGOUT_REQUEST);
+	scsi_id->logout_orb->login_ID_misc = ORB_SET_FUNCTION(SBP2_LOGOUT_REQUEST);
 	scsi_id->logout_orb->login_ID_misc |= ORB_SET_LOGIN_ID(scsi_id->login_response->length_login_ID);
 
 	/* Notify us when complete */
 	scsi_id->logout_orb->login_ID_misc |= ORB_SET_NOTIFY(1);
 
 	scsi_id->logout_orb->reserved5 = 0x0;
-	scsi_id->logout_orb->status_FIFO_lo = SBP2_STATUS_FIFO_ADDRESS_LO + 
-					      SBP2_STATUS_FIFO_ENTRY_TO_OFFSET(scsi_id->id);
+	scsi_id->logout_orb->status_FIFO_lo = SBP2_STATUS_FIFO_ADDRESS_LO +
+					      SBP2_STATUS_FIFO_ENTRY_TO_OFFSET(scsi_id->ud->id);
 	scsi_id->logout_orb->status_FIFO_hi = (ORB_SET_NODE_ID(hi->host->node_id) |
 					       SBP2_STATUS_FIFO_ADDRESS_HI);
 
@@ -1388,7 +1341,7 @@ static int sbp2_logout_device(struct scsi_id_instance_data *scsi_id)
 	 */
 	sbp2util_cpu_to_be32_buffer(scsi_id->logout_orb, sizeof(struct sbp2_logout_orb));
 
-	sbp2util_packet_dump(scsi_id->logout_orb, sizeof(struct sbp2_logout_orb), 
+	sbp2util_packet_dump(scsi_id->logout_orb, sizeof(struct sbp2_logout_orb),
 			     "sbp2 logout orb", scsi_id->logout_orb_dma);
 
 	/*
@@ -1400,10 +1353,15 @@ static int sbp2_logout_device(struct scsi_id_instance_data *scsi_id)
 
 	atomic_set(&scsi_id->sbp2_login_complete, 0);
 
-	hpsb_node_write(scsi_id->ne, scsi_id->sbp2_management_agent_addr, data, 8);
+	error = hpsb_node_write(scsi_id->ne,
+	                            scsi_id->sbp2_management_agent_addr,
+	                            data, 8);
+	if (error)
+		return error;
 
 	/* Wait for device to logout...1 second. */
-	sbp2util_down_timeout(&scsi_id->sbp2_login_complete, HZ);
+	if (sbp2util_down_timeout(&scsi_id->sbp2_login_complete, HZ))
+		return -EIO;
 
 	SBP2_INFO("Logged out of SBP-2 device");
 
@@ -1415,10 +1373,11 @@ static int sbp2_logout_device(struct scsi_id_instance_data *scsi_id)
  * This function is called in order to reconnect to a particular SBP-2
  * device, after a bus reset.
  */
-static int sbp2_reconnect_device(struct scsi_id_instance_data *scsi_id) 
+static int sbp2_reconnect_device(struct scsi_id_instance_data *scsi_id)
 {
 	struct sbp2scsi_host_info *hi = scsi_id->hi;
 	quadlet_t data[2];
+	int error;
 
 	SBP2_DEBUG("sbp2_reconnect_device");
 
@@ -1430,7 +1389,7 @@ static int sbp2_reconnect_device(struct scsi_id_instance_data *scsi_id)
 	scsi_id->reconnect_orb->reserved3 = 0x0;
 	scsi_id->reconnect_orb->reserved4 = 0x0;
 
-	scsi_id->reconnect_orb->login_ID_misc = ORB_SET_FUNCTION(RECONNECT_REQUEST);
+	scsi_id->reconnect_orb->login_ID_misc = ORB_SET_FUNCTION(SBP2_RECONNECT_REQUEST);
 	scsi_id->reconnect_orb->login_ID_misc |=
 		ORB_SET_LOGIN_ID(scsi_id->login_response->length_login_ID);
 
@@ -1438,8 +1397,8 @@ static int sbp2_reconnect_device(struct scsi_id_instance_data *scsi_id)
 	scsi_id->reconnect_orb->login_ID_misc |= ORB_SET_NOTIFY(1);
 
 	scsi_id->reconnect_orb->reserved5 = 0x0;
-	scsi_id->reconnect_orb->status_FIFO_lo = SBP2_STATUS_FIFO_ADDRESS_LO + 
-						 SBP2_STATUS_FIFO_ENTRY_TO_OFFSET(scsi_id->id);
+	scsi_id->reconnect_orb->status_FIFO_lo = SBP2_STATUS_FIFO_ADDRESS_LO +
+						 SBP2_STATUS_FIFO_ENTRY_TO_OFFSET(scsi_id->ud->id);
 	scsi_id->reconnect_orb->status_FIFO_hi =
 		(ORB_SET_NODE_ID(hi->host->node_id) | SBP2_STATUS_FIFO_ADDRESS_HI);
 
@@ -1448,7 +1407,7 @@ static int sbp2_reconnect_device(struct scsi_id_instance_data *scsi_id)
 	 */
 	sbp2util_cpu_to_be32_buffer(scsi_id->reconnect_orb, sizeof(struct sbp2_reconnect_orb));
 
-	sbp2util_packet_dump(scsi_id->reconnect_orb, sizeof(struct sbp2_reconnect_orb), 
+	sbp2util_packet_dump(scsi_id->reconnect_orb, sizeof(struct sbp2_reconnect_orb),
 			     "sbp2 reconnect orb", scsi_id->reconnect_orb_dma);
 
 	/*
@@ -1465,7 +1424,11 @@ static int sbp2_reconnect_device(struct scsi_id_instance_data *scsi_id)
 
 	atomic_set(&scsi_id->sbp2_login_complete, 0);
 
-	hpsb_node_write(scsi_id->ne, scsi_id->sbp2_management_agent_addr, data, 8);
+	error = hpsb_node_write(scsi_id->ne,
+	                            scsi_id->sbp2_management_agent_addr,
+	                            data, 8);
+	if (error)
+		return error;
 
 	/*
 	 * Wait for reconnect status (up to 1 second)...
@@ -1494,7 +1457,7 @@ static int sbp2_reconnect_device(struct scsi_id_instance_data *scsi_id)
 		return(-EIO);
 	}
 
-	SBP2_INFO("Reconnected to SBP-2 device");
+	HPSB_DEBUG("Reconnected to SBP-2 device");
 
 	return(0);
 
@@ -1502,7 +1465,7 @@ static int sbp2_reconnect_device(struct scsi_id_instance_data *scsi_id)
 
 /*
  * This function is called in order to set the busy timeout (number of
- * retries to attempt) on the sbp2 device. 
+ * retries to attempt) on the sbp2 device.
  */
 static int sbp2_set_busy_timeout(struct scsi_id_instance_data *scsi_id)
 {
@@ -1522,16 +1485,17 @@ static int sbp2_set_busy_timeout(struct scsi_id_instance_data *scsi_id)
 	return(0);
 }
 
+
 /*
  * This function is called to parse sbp2 device's config rom unit
  * directory. Used to determine things like sbp2 management agent offset,
- * and command set used (SCSI or RBC). 
+ * and command set used (SCSI or RBC).
  */
-static void sbp2_parse_unit_directory(struct scsi_id_group *scsi_group,
+static void sbp2_parse_unit_directory(struct scsi_id_instance_data *scsi_id,
 				      struct unit_directory *ud)
 {
-	struct scsi_id_instance_data *scsi_id;
-	struct list_head *lh;
+	struct csr1212_keyval *kv;
+	struct csr1212_dentry *dentry;
 	u64 management_agent_addr;
 	u32 command_set_spec_id, command_set, unit_characteristics,
 		firmware_revision, workarounds;
@@ -1546,29 +1510,31 @@ static void sbp2_parse_unit_directory(struct scsi_id_group *scsi_group,
 	firmware_revision = 0x0;
 
 	/* Handle different fields in the unit directory, based on keys */
-	for (i = 0; i < ud->length; i++) {
-		switch (CONFIG_ROM_KEY(ud->quadlets[i])) {
-		case SBP2_CSR_OFFSET_KEY:
-			/* Save off the management agent address */
-			management_agent_addr =
-				CSR_REGISTER_BASE + 
-				(CONFIG_ROM_VALUE(ud->quadlets[i]) << 2);
+	csr1212_for_each_dir_entry(ud->ne->csr, kv, ud->ud_kv, dentry) {
+		switch (kv->key.id) {
+		case CSR1212_KV_ID_DEPENDENT_INFO:
+			if (kv->key.type == CSR1212_KV_TYPE_CSR_OFFSET) {
+				/* Save off the management agent address */
+				management_agent_addr =
+					CSR1212_REGISTER_SPACE_BASE +
+					(kv->value.csr_offset << 2);
 
-			SBP2_DEBUG("sbp2_management_agent_addr = %x",
-				   (unsigned int) management_agent_addr);
+				SBP2_DEBUG("sbp2_management_agent_addr = %x",
+					   (unsigned int) management_agent_addr);
+			} else
+				scsi_id->sbp2_device_type_and_lun = kv->value.immediate;
 			break;
 
 		case SBP2_COMMAND_SET_SPEC_ID_KEY:
 			/* Command spec organization */
-			command_set_spec_id
-				= CONFIG_ROM_VALUE(ud->quadlets[i]);
+			command_set_spec_id = kv->value.immediate;
 			SBP2_DEBUG("sbp2_command_set_spec_id = %x",
 				   (unsigned int) command_set_spec_id);
 			break;
 
 		case SBP2_COMMAND_SET_KEY:
 			/* Command set used by sbp2 device */
-			command_set = CONFIG_ROM_VALUE(ud->quadlets[i]);
+			command_set = kv->value.immediate;
 			SBP2_DEBUG("sbp2_command_set = %x",
 				   (unsigned int) command_set);
 			break;
@@ -1578,35 +1544,14 @@ static void sbp2_parse_unit_directory(struct scsi_id_group *scsi_group,
 			 * Unit characterisitcs (orb related stuff
 			 * that I'm not yet paying attention to)
 			 */
-			unit_characteristics
-				= CONFIG_ROM_VALUE(ud->quadlets[i]);
+			unit_characteristics = kv->value.immediate;
 			SBP2_DEBUG("sbp2_unit_characteristics = %x",
 				   (unsigned int) unit_characteristics);
 			break;
 
-		case SBP2_DEVICE_TYPE_AND_LUN_KEY:
-			/*
-			 * Device type and lun (used for
-			 * detemining type of sbp2 device)
-			 */
-			scsi_id = kmalloc(sizeof(*scsi_id), GFP_KERNEL);
-			if (!scsi_id) {
-				SBP2_ERR("Out of memory adding scsi_id, not all LUN's will be added");
-				break;
-			}
-			memset(scsi_id, 0, sizeof(*scsi_id));
-
-			scsi_id->sbp2_device_type_and_lun
-				= CONFIG_ROM_VALUE(ud->quadlets[i]);
-			SBP2_DEBUG("sbp2_device_type_and_lun = %x",
-				   (unsigned int) scsi_id->sbp2_device_type_and_lun);
-			list_add_tail(&scsi_id->list, &scsi_group->scsi_id_list);
-			break;
-
 		case SBP2_FIRMWARE_REVISION_KEY:
 			/* Firmware revision */
-			firmware_revision
-				= CONFIG_ROM_VALUE(ud->quadlets[i]);
+			firmware_revision = kv->value.immediate;
 			if (force_inquiry_hack)
 				SBP2_INFO("sbp2_firmware_revision = %x",
 				   (unsigned int) firmware_revision);
@@ -1656,37 +1601,18 @@ static void sbp2_parse_unit_directory(struct scsi_id_group *scsi_group,
 	}
 
 	/* If this is a logical unit directory entry, process the parent
-	 * to get the common values. */
+	 * to get the values. */
 	if (ud->flags & UNIT_DIRECTORY_LUN_DIRECTORY) {
 		struct unit_directory *parent_ud =
 			container_of(ud->device.parent, struct unit_directory, device);
-		sbp2_parse_unit_directory(scsi_group, parent_ud);
+		sbp2_parse_unit_directory(scsi_id, parent_ud);
 	} else {
-		/* If our list is empty, add a base scsi_id (happens in a normal
-		 * case where there is no logical_unit_number entry */
-		if (list_empty(&scsi_group->scsi_id_list)) {
-			scsi_id = kmalloc(sizeof(*scsi_id), GFP_KERNEL);
-			if (!scsi_id) {
-				SBP2_ERR("Out of memory adding scsi_id");
-				return;
-			}
-			memset(scsi_id, 0, sizeof(*scsi_id));
-
-			scsi_id->sbp2_device_type_and_lun = SBP2_DEVICE_TYPE_LUN_UNINITIALIZED;
-			list_add_tail(&scsi_id->list, &scsi_group->scsi_id_list);
-		}
-
-		/* Update the generic fields in all the LUN's */
-		list_for_each (lh, &scsi_group->scsi_id_list) {
-			scsi_id = list_entry(lh, struct scsi_id_instance_data, list);
-
-			scsi_id->sbp2_management_agent_addr = management_agent_addr;
-			scsi_id->sbp2_command_set_spec_id = command_set_spec_id;
-			scsi_id->sbp2_command_set = command_set;
-			scsi_id->sbp2_unit_characteristics = unit_characteristics;
-			scsi_id->sbp2_firmware_revision = firmware_revision;
-			scsi_id->workarounds = workarounds;
-		}
+		scsi_id->sbp2_management_agent_addr = management_agent_addr;
+		scsi_id->sbp2_command_set_spec_id = command_set_spec_id;
+		scsi_id->sbp2_command_set = command_set;
+		scsi_id->sbp2_unit_characteristics = unit_characteristics;
+		scsi_id->sbp2_firmware_revision = firmware_revision;
+		scsi_id->workarounds = workarounds;
 	}
 }
 
@@ -1719,50 +1645,41 @@ static int sbp2_max_speed_and_size(struct scsi_id_instance_data *scsi_id)
 	/* Payload size is the lesser of what our speed supports and what
 	 * our host supports.  */
 	scsi_id->max_payload_size = min(sbp2_speedto_max_payload[scsi_id->speed_code],
-					(u8)(((be32_to_cpu(hi->host->csr.rom[2]) >> 12) & 0xf) - 1));
+					(u8)(hi->host->csr.max_rec - 1));
 
-	SBP2_ERR("Node " NODE_BUS_FMT ": Max speed [%s] - Max payload [%u]",
-		 NODE_BUS_ARGS(hi->host, scsi_id->ne->nodeid),
-		 hpsb_speedto_str[scsi_id->speed_code],
-		 1 << ((u32)scsi_id->max_payload_size + 2));
+	HPSB_DEBUG("Node " NODE_BUS_FMT ": Max speed [%s] - Max payload [%u]",
+		   NODE_BUS_ARGS(hi->host, scsi_id->ne->nodeid),
+		   hpsb_speedto_str[scsi_id->speed_code],
+		   1 << ((u32)scsi_id->max_payload_size + 2));
 
 	return(0);
 }
 
 /*
- * This function is called in order to perform a SBP-2 agent reset. 
+ * This function is called in order to perform a SBP-2 agent reset.
  */
-static int sbp2_agent_reset(struct scsi_id_instance_data *scsi_id, int wait) 
+static int sbp2_agent_reset(struct scsi_id_instance_data *scsi_id, int wait)
 {
-	struct sbp2scsi_host_info *hi = scsi_id->hi;
-	struct hpsb_packet *packet;
 	quadlet_t data;
-	
+	u64 addr;
+	int retval;
+
 	SBP2_DEBUG("sbp2_agent_reset");
 
 	/*
 	 * Ok, let's write to the target's management agent register
 	 */
 	data = ntohl(SBP2_AGENT_RESET_DATA);
-	packet = sbp2util_allocate_write_packet(hi, scsi_id->ne,
-						scsi_id->sbp2_command_block_agent_addr +
-						SBP2_AGENT_RESET_OFFSET,
-						4, &data);
+	addr = scsi_id->sbp2_command_block_agent_addr + SBP2_AGENT_RESET_OFFSET;
 
-	if (!packet) {
-		SBP2_ERR("sbp2util_allocate_write_packet failed");
-		return(-ENOMEM);
-	}
+	if (wait)
+		retval = hpsb_node_write(scsi_id->ne, addr, &data, 4);
+	else
+		retval = sbp2util_node_write_no_wait(scsi_id->ne, addr, &data, 4);
 
-	if (!hpsb_send_packet(packet)) {
-		SBP2_ERR("hpsb_send_packet failed");
-		sbp2_free_packet(packet); 
-		return(-EIO);
-	}
-
-	if (wait) {
-		down(&packet->state_change);
-		down(&packet->state_change);
+	if (retval < 0) {
+		SBP2_ERR("hpsb_node_write failed.\n");
+		return -EIO;
 	}
 
 	/*
@@ -1782,7 +1699,7 @@ static int sbp2_create_command_orb(struct scsi_id_instance_data *scsi_id,
 				   unchar *scsi_cmd,
 				   unsigned int scsi_use_sg,
 				   unsigned int scsi_request_bufflen,
-				   void *scsi_request_buffer, 
+				   void *scsi_request_buffer,
 				   unsigned char scsi_dir)
 {
 	struct sbp2scsi_host_info *hi = scsi_id->hi;
@@ -1826,7 +1743,7 @@ static int sbp2_create_command_orb(struct scsi_id_instance_data *scsi_id,
 		case SCSI_DATA_UNKNOWN:
 		default:
 			SBP2_ERR("SCSI data transfer direction not specified. "
-				 "Update the SBP2 direction table in sbp2.h if " 
+				 "Update the SBP2 direction table in sbp2.h if "
 				 "necessary for your application");
 			print_command (scsi_cmd);
 			orb_direction = sbp2scsi_direction_table[*scsi_cmd];
@@ -1897,12 +1814,12 @@ static int sbp2_create_command_orb(struct scsi_id_instance_data *scsi_id,
 				while (sg_len) {
 					scatter_gather_element[sg_count].segment_base_lo = sg_addr;
 					if (sg_len > SBP2_MAX_SG_ELEMENT_LENGTH) {
-						scatter_gather_element[sg_count].length_segment_base_hi =  
+						scatter_gather_element[sg_count].length_segment_base_hi =
 							PAGE_TABLE_SET_SEGMENT_LENGTH(SBP2_MAX_SG_ELEMENT_LENGTH);
 						sg_addr += SBP2_MAX_SG_ELEMENT_LENGTH;
 						sg_len -= SBP2_MAX_SG_ELEMENT_LENGTH;
 					} else {
-						scatter_gather_element[sg_count].length_segment_base_hi = 
+						scatter_gather_element[sg_count].length_segment_base_hi =
 							PAGE_TABLE_SET_SEGMENT_LENGTH(sg_len);
 						sg_len = 0;
 					}
@@ -1913,14 +1830,14 @@ static int sbp2_create_command_orb(struct scsi_id_instance_data *scsi_id,
 			/* Number of page table (s/g) elements */
 			command_orb->misc |= ORB_SET_DATA_SIZE(sg_count);
 
-			sbp2util_packet_dump(scatter_gather_element, 
-					     (sizeof(struct sbp2_unrestricted_page_table)) * sg_count, 
+			sbp2util_packet_dump(scatter_gather_element,
+					     (sizeof(struct sbp2_unrestricted_page_table)) * sg_count,
 					     "sbp2 s/g list", command->sge_dma);
 
 			/*
 			 * Byte swap page tables if necessary
 			 */
-			sbp2util_cpu_to_be32_buffer(scatter_gather_element, 
+			sbp2util_cpu_to_be32_buffer(scatter_gather_element,
 						    (sizeof(struct sbp2_unrestricted_page_table)) *
 						    sg_count);
 
@@ -1963,7 +1880,7 @@ static int sbp2_create_command_orb(struct scsi_id_instance_data *scsi_id,
 			/*
 			 * Need to turn this into page tables, since the
 			 * buffer is too large.
-			 */                     
+			 */
 			command_orb->data_descriptor_hi = ORB_SET_NODE_ID(hi->host->node_id);
 			command_orb->data_descriptor_lo = command->sge_dma;
 
@@ -1981,12 +1898,12 @@ static int sbp2_create_command_orb(struct scsi_id_instance_data *scsi_id,
 			while (sg_len) {
 				scatter_gather_element[sg_count].segment_base_lo = sg_addr;
 				if (sg_len > SBP2_MAX_SG_ELEMENT_LENGTH) {
-					scatter_gather_element[sg_count].length_segment_base_hi = 
+					scatter_gather_element[sg_count].length_segment_base_hi =
 						PAGE_TABLE_SET_SEGMENT_LENGTH(SBP2_MAX_SG_ELEMENT_LENGTH);
 					sg_addr += SBP2_MAX_SG_ELEMENT_LENGTH;
 					sg_len -= SBP2_MAX_SG_ELEMENT_LENGTH;
 				} else {
-					scatter_gather_element[sg_count].length_segment_base_hi = 
+					scatter_gather_element[sg_count].length_segment_base_hi =
 						PAGE_TABLE_SET_SEGMENT_LENGTH(sg_len);
 					sg_len = 0;
 				}
@@ -1996,14 +1913,14 @@ static int sbp2_create_command_orb(struct scsi_id_instance_data *scsi_id,
 			/* Number of page table (s/g) elements */
 			command_orb->misc |= ORB_SET_DATA_SIZE(sg_count);
 
-			sbp2util_packet_dump(scatter_gather_element, 
-					     (sizeof(struct sbp2_unrestricted_page_table)) * sg_count, 
+			sbp2util_packet_dump(scatter_gather_element,
+					     (sizeof(struct sbp2_unrestricted_page_table)) * sg_count,
 					     "sbp2 s/g list", command->sge_dma);
 
 			/*
 			 * Byte swap page tables if necessary
 			 */
-			sbp2util_cpu_to_be32_buffer(scatter_gather_element, 
+			sbp2util_cpu_to_be32_buffer(scatter_gather_element,
 						    (sizeof(struct sbp2_unrestricted_page_table)) *
 						     sg_count);
 
@@ -2024,65 +1941,56 @@ static int sbp2_create_command_orb(struct scsi_id_instance_data *scsi_id,
 
 	return(0);
 }
- 
+
 /*
- * This function is called in order to begin a regular SBP-2 command. 
+ * This function is called in order to begin a regular SBP-2 command.
  */
 static int sbp2_link_orb_command(struct scsi_id_instance_data *scsi_id,
 				 struct sbp2_command_info *command)
 {
 	struct sbp2scsi_host_info *hi = scsi_id->hi;
-        struct hpsb_packet *packet;
 	struct sbp2_command_orb *command_orb = &command->command_orb;
+	struct node_entry *ne = scsi_id->ne;
+	u64 addr;
 
 	outstanding_orb_incr;
 	SBP2_ORB_DEBUG("sending command orb %p, total orbs = %x",
 			command_orb, global_outstanding_command_orbs);
 
-	pci_dma_sync_single(hi->host->pdev, command->command_orb_dma,
-			    sizeof(struct sbp2_command_orb),
-			    PCI_DMA_BIDIRECTIONAL);
-	pci_dma_sync_single(hi->host->pdev, command->sge_dma,
-			    sizeof(command->scatter_gather_element),
-			    PCI_DMA_BIDIRECTIONAL);
+	pci_dma_sync_single_for_device(hi->host->pdev, command->command_orb_dma,
+				       sizeof(struct sbp2_command_orb),
+				       PCI_DMA_BIDIRECTIONAL);
+	pci_dma_sync_single_for_device(hi->host->pdev, command->sge_dma,
+				       sizeof(command->scatter_gather_element),
+				       PCI_DMA_BIDIRECTIONAL);
 	/*
 	 * Check to see if there are any previous orbs to use
 	 */
 	if (scsi_id->last_orb == NULL) {
-	
+		quadlet_t data[2];
+
 		/*
 		 * Ok, let's write to the target's management agent register
 		 */
-		if (hpsb_node_entry_valid(scsi_id->ne)) {
+		addr = scsi_id->sbp2_command_block_agent_addr + SBP2_ORB_POINTER_OFFSET;
+		data[0] = ORB_SET_NODE_ID(hi->host->node_id);
+		data[1] = command->command_orb_dma;
+		sbp2util_cpu_to_be32_buffer(data, 8);
 
-			packet = sbp2util_allocate_write_packet(hi, scsi_id->ne,
-								scsi_id->sbp2_command_block_agent_addr +
-								SBP2_ORB_POINTER_OFFSET, 8, NULL);
-		
-			if (!packet) {
-				SBP2_ERR("sbp2util_allocate_write_packet failed");
-				return(-ENOMEM);
-			}
-		
-			packet->data[0] = ORB_SET_NODE_ID(hi->host->node_id);
-			packet->data[1] = command->command_orb_dma;
-			sbp2util_cpu_to_be32_buffer(packet->data, 8);
-		
-			SBP2_ORB_DEBUG("write command agent, command orb %p", command_orb);
+		SBP2_ORB_DEBUG("write command agent, command orb %p", command_orb);
 
-			if (!hpsb_send_packet(packet)) {
-				SBP2_ERR("hpsb_send_packet failed");
-				sbp2_free_packet(packet); 
-				return(-EIO);
-			}
-
-			SBP2_ORB_DEBUG("write command agent complete");
+		if (sbp2util_node_write_no_wait(ne, addr, data, 8) < 0) {
+			SBP2_ERR("sbp2util_node_write_no_wait failed.\n");
+			return -EIO;
 		}
+
+		SBP2_ORB_DEBUG("write command agent complete");
 
 		scsi_id->last_orb = command_orb;
 		scsi_id->last_orb_dma = command->command_orb_dma;
 
 	} else {
+		quadlet_t data;
 
 		/*
 		 * We have an orb already sent (maybe or maybe not
@@ -2095,32 +2003,21 @@ static int sbp2_link_orb_command(struct scsi_id_instance_data *scsi_id,
 			cpu_to_be32(command->command_orb_dma);
 		/* Tells hardware that this pointer is valid */
 		scsi_id->last_orb->next_ORB_hi = 0x0;
-		pci_dma_sync_single(hi->host->pdev, scsi_id->last_orb_dma,
-				    sizeof(struct sbp2_command_orb),
-				    PCI_DMA_BIDIRECTIONAL);
+		pci_dma_sync_single_for_device(hi->host->pdev, scsi_id->last_orb_dma,
+					       sizeof(struct sbp2_command_orb),
+					       PCI_DMA_BIDIRECTIONAL);
 
 		/*
 		 * Ring the doorbell
 		 */
-		if (hpsb_node_entry_valid(scsi_id->ne)) {
-			quadlet_t data = cpu_to_be32(command->command_orb_dma);
+		data = cpu_to_be32(command->command_orb_dma);
+		addr = scsi_id->sbp2_command_block_agent_addr + SBP2_DOORBELL_OFFSET;
 
-			packet = sbp2util_allocate_write_packet(hi, scsi_id->ne,
-					scsi_id->sbp2_command_block_agent_addr +
-					SBP2_DOORBELL_OFFSET, 4, &data);
-	
-			if (!packet) {
-				SBP2_ERR("sbp2util_allocate_write_packet failed");
-				return(-ENOMEM);
-			}
+		SBP2_ORB_DEBUG("ring doorbell, command orb %p", command_orb);
 
-			SBP2_ORB_DEBUG("ring doorbell, command orb %p", command_orb);
-
-			if (!hpsb_send_packet(packet)) {
-				SBP2_ERR("hpsb_send_packet failed");
-				sbp2_free_packet(packet);
-				return(-EIO);
-			}
+		if (sbp2util_node_write_no_wait(ne, addr, &data, 4) < 0) {
+			SBP2_ERR("sbp2util_node_write_no_wait failed");
+			return(-EIO);
 		}
 
 		scsi_id->last_orb = command_orb;
@@ -2131,7 +2028,7 @@ static int sbp2_link_orb_command(struct scsi_id_instance_data *scsi_id,
 }
 
 /*
- * This function is called in order to begin a regular SBP-2 command. 
+ * This function is called in order to begin a regular SBP-2 command.
  */
 static int sbp2_send_command(struct scsi_id_instance_data *scsi_id,
 			     Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
@@ -2158,8 +2055,8 @@ static int sbp2_send_command(struct scsi_id_instance_data *scsi_id,
 
 	/*
 	 * The scsi stack sends down a request_bufflen which does not match the
-	 * length field in the scsi cdb. This causes some sbp2 devices to 
-	 * reject this inquiry command. Fix the request_bufflen. 
+	 * length field in the scsi cdb. This causes some sbp2 devices to
+	 * reject this inquiry command. Fix the request_bufflen.
 	 */
 	if (*cmd == INQUIRY) {
 		if (force_inquiry_hack || scsi_id->workarounds & SBP2_BREAKAGE_INQUIRY_HACK)
@@ -2173,14 +2070,14 @@ static int sbp2_send_command(struct scsi_id_instance_data *scsi_id,
 	 */
 	sbp2_create_command_orb(scsi_id, command, cmd, SCpnt->use_sg,
 				request_bufflen, SCpnt->request_buffer,
-				SCpnt->sc_data_direction); 
+				SCpnt->sc_data_direction);
 	/*
 	 * Update our cdb if necessary (to handle sbp2 RBC command set
 	 * differences). This is where the command set hacks go!   =)
 	 */
 	sbp2_check_sbp2_command(scsi_id, command->command_orb.cdb);
 
-	sbp2util_packet_dump(&command->command_orb, sizeof(struct sbp2_command_orb), 
+	sbp2util_packet_dump(&command->command_orb, sizeof(struct sbp2_command_orb),
 			     "sbp2 command orb", command->command_orb_dma);
 
 	/*
@@ -2192,7 +2089,7 @@ static int sbp2_send_command(struct scsi_id_instance_data *scsi_id,
 	 * Link up the orb, and ring the doorbell if needed
 	 */
 	sbp2_link_orb_command(scsi_id, command);
-	
+
 	return(0);
 }
 
@@ -2209,13 +2106,13 @@ static void sbp2_check_sbp2_command(struct scsi_id_instance_data *scsi_id, uncha
 	SBP2_DEBUG("sbp2_check_sbp2_command");
 
 	switch (*cmd) {
-		
+
 		case READ_6:
 
 			if (sbp2_command_conversion_device_type(device_type)) {
 
 				SBP2_DEBUG("Convert READ_6 to READ_10");
-					    
+
 				/*
 				 * Need to turn read_6 into read_10
 				 */
@@ -2229,7 +2126,7 @@ static void sbp2_check_sbp2_command(struct scsi_id_instance_data *scsi_id, uncha
 				new_cmd[7] = 0x0;
 				new_cmd[8] = cmd[4];
 				new_cmd[9] = cmd[5];
-	
+
 				memcpy(cmd, new_cmd, 10);
 
 			}
@@ -2241,7 +2138,7 @@ static void sbp2_check_sbp2_command(struct scsi_id_instance_data *scsi_id, uncha
 			if (sbp2_command_conversion_device_type(device_type)) {
 
 				SBP2_DEBUG("Convert WRITE_6 to WRITE_10");
-	
+
 				/*
 				 * Need to turn write_6 into write_10
 				 */
@@ -2255,7 +2152,7 @@ static void sbp2_check_sbp2_command(struct scsi_id_instance_data *scsi_id, uncha
 				new_cmd[7] = 0x0;
 				new_cmd[8] = cmd[4];
 				new_cmd[9] = cmd[5];
-	
+
 				memcpy(cmd, new_cmd, 10);
 
 			}
@@ -2281,7 +2178,7 @@ static void sbp2_check_sbp2_command(struct scsi_id_instance_data *scsi_id, uncha
 				new_cmd[7] = 0x0;
 				new_cmd[8] = cmd[4];
 				new_cmd[9] = cmd[5];
-	
+
 				memcpy(cmd, new_cmd, 10);
 
 			}
@@ -2344,7 +2241,7 @@ static void sbp2_check_sbp2_response(struct scsi_id_instance_data *scsi_id,
 	SBP2_DEBUG("sbp2_check_sbp2_response");
 
 	switch (SCpnt->cmnd[0]) {
-		
+
 		case INQUIRY:
 
 			/*
@@ -2382,7 +2279,7 @@ static void sbp2_check_sbp2_response(struct scsi_id_instance_data *scsi_id,
 		case MODE_SENSE:
 
 			if (sbp2_command_conversion_device_type(device_type)) {
-			
+
 				SBP2_DEBUG("Modify mode sense response (10 byte version)");
 
 				scsi_buf[0] = scsi_buf[1];	/* Mode data length */
@@ -2390,7 +2287,6 @@ static void sbp2_check_sbp2_response(struct scsi_id_instance_data *scsi_id,
 				scsi_buf[2] = scsi_buf[3];	/* Device specific parameter */
 				scsi_buf[3] = scsi_buf[7];	/* Block descriptor length */
 				memcpy(scsi_buf + 4, scsi_buf + 8, scsi_buf[0]);
-	
 			}
 
 			break;
@@ -2413,10 +2309,9 @@ static void sbp2_check_sbp2_response(struct scsi_id_instance_data *scsi_id,
 static int sbp2_handle_status_write(struct hpsb_host *host, int nodeid, int destid,
 				    quadlet_t *data, u64 addr, size_t length, u16 fl)
 {
-	struct sbp2scsi_host_info *hi = NULL;
-	struct scsi_id_instance_data *scsi_id = NULL;
+	struct sbp2scsi_host_info *hi;
+	struct scsi_id_instance_data *scsi_id = NULL, *scsi_id_tmp;
 	u32 id;
-	unsigned long flags;
 	Scsi_Cmnd *SCpnt = NULL;
 	u32 scsi_status = SBP2_SCSI_STATUS_GOOD;
 	struct sbp2_command_info *command;
@@ -2437,23 +2332,25 @@ static int sbp2_handle_status_write(struct hpsb_host *host, int nodeid, int dest
 		return(RCODE_ADDRESS_ERROR);
 	}
 
-	spin_lock_irqsave(&hi->sbp2_command_lock, flags);
-
 	/*
 	 * Find our scsi_id structure by looking at the status fifo address written to by
 	 * the sbp2 device.
 	 */
-	id = SBP2_STATUS_FIFO_OFFSET_TO_ENTRY((u32)(addr - SBP2_STATUS_FIFO_ADDRESS)); 
-	scsi_id = hi->scsi_id[id];
+	id = SBP2_STATUS_FIFO_OFFSET_TO_ENTRY((u32)(addr - SBP2_STATUS_FIFO_ADDRESS));
+	list_for_each_entry(scsi_id_tmp, &hi->scsi_ids, scsi_list) {
+		if (scsi_id_tmp->ne->nodeid == nodeid && scsi_id_tmp->ud->id == id) {
+			scsi_id = scsi_id_tmp;
+			break;
+		}
+	}
 
 	if (!scsi_id) {
 		SBP2_ERR("scsi_id is NULL - device is gone?");
-		spin_unlock_irqrestore(&hi->sbp2_command_lock, flags);
 		return(RCODE_ADDRESS_ERROR);
 	}
 
 	/*
-	 * Put response into scsi_id status fifo... 
+	 * Put response into scsi_id status fifo...
 	 */
 	memcpy(&scsi_id->status_block, data, length);
 
@@ -2469,12 +2366,12 @@ static int sbp2_handle_status_write(struct hpsb_host *host, int nodeid, int dest
 	if (command) {
 
 		SBP2_DEBUG("Found status for command ORB");
-		pci_dma_sync_single(hi->host->pdev, command->command_orb_dma,
-				    sizeof(struct sbp2_command_orb),
-				    PCI_DMA_BIDIRECTIONAL);
-		pci_dma_sync_single(hi->host->pdev, command->sge_dma,
-				    sizeof(command->scatter_gather_element),
-				    PCI_DMA_BIDIRECTIONAL);
+		pci_dma_sync_single_for_cpu(hi->host->pdev, command->command_orb_dma,
+					    sizeof(struct sbp2_command_orb),
+					    PCI_DMA_BIDIRECTIONAL);
+		pci_dma_sync_single_for_cpu(hi->host->pdev, command->sge_dma,
+					    sizeof(command->scatter_gather_element),
+					    PCI_DMA_BIDIRECTIONAL);
 
 		SBP2_ORB_DEBUG("matched command orb %p", &command->command_orb);
 		outstanding_orb_decr;
@@ -2505,7 +2402,7 @@ static int sbp2_handle_status_write(struct hpsb_host *host, int nodeid, int dest
 			if (STATUS_GET_DEAD_BIT(scsi_id->status_block.ORB_offset_hi_misc)) {
 
 				/*
-				 * Initiate a fetch agent reset. 
+				 * Initiate a fetch agent reset.
 				 */
 				SBP2_DEBUG("Dead bit set - initiating fetch agent reset");
                                 sbp2_agent_reset(scsi_id, 0);
@@ -2516,7 +2413,7 @@ static int sbp2_handle_status_write(struct hpsb_host *host, int nodeid, int dest
 
 		/*
 		 * Check here to see if there are no commands in-use. If there are none, we can
-		 * null out last orb so that next time around we write directly to the orb pointer... 
+		 * null out last orb so that next time around we write directly to the orb pointer...
 		 * Quick start saves one 1394 bus transaction.
 		 */
 		if (list_empty(&scsi_id->sbp2_command_orb_inuse)) {
@@ -2524,8 +2421,8 @@ static int sbp2_handle_status_write(struct hpsb_host *host, int nodeid, int dest
 		}
 
 	} else {
-		
-		/* 
+
+		/*
 		 * It's probably a login/logout/reconnect status.
 		 */
 		if ((scsi_id->login_orb_dma == scsi_id->status_block.ORB_offset_lo) ||
@@ -2536,18 +2433,9 @@ static int sbp2_handle_status_write(struct hpsb_host *host, int nodeid, int dest
 		}
 	}
 
-	spin_unlock_irqrestore(&hi->sbp2_command_lock, flags);
-
-
 	if (SCpnt) {
 
-		/*
-		 * Complete the SCSI command.
-		 *
-		 * Only do it after we've released the sbp2_command_lock,
-		 * as it might otherwise deadlock with the 
-		 * io_request_lock (in sbp2scsi_queuecommand).
-		 */
+		/* Complete the SCSI command. */
 		SBP2_DEBUG("Completing SCSI command");
 		sbp2scsi_complete_command(scsi_id, scsi_status, SCpnt,
 					  command->Current_done);
@@ -2563,36 +2451,31 @@ static int sbp2_handle_status_write(struct hpsb_host *host, int nodeid, int dest
  **************************************/
 
 /*
- * This routine is the main request entry routine for doing I/O. It is 
+ * This routine is the main request entry routine for doing I/O. It is
  * called from the scsi stack directly.
  */
-static int sbp2scsi_queuecommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *)) 
+static int sbp2scsi_queuecommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 {
-	struct sbp2scsi_host_info *hi = NULL;
-	struct scsi_id_instance_data *scsi_id = NULL;
-	unsigned long flags;
+	struct scsi_id_instance_data *scsi_id =
+		(struct scsi_id_instance_data *)SCpnt->device->host->hostdata[0];
+	struct sbp2scsi_host_info *hi;
 
 	SBP2_DEBUG("sbp2scsi_queuecommand");
-
-	/*
-	 * Pull our host info and scsi id instance data from the scsi command
-	 */
-	hi = hpsb_get_hostinfo_bykey(&sbp2_highlevel, (unsigned long)SCpnt->device->host);
-
-	if (!hi) {
-		SBP2_ERR("sbp2scsi_host_info is NULL - this is bad!");
-		SCpnt->result = DID_NO_CONNECT << 16;
-		done (SCpnt);
-		return(0);
-	}
-
-	scsi_id = hi->scsi_id[SCpnt->device->id];
 
 	/*
 	 * If scsi_id is null, it means there is no device in this slot,
 	 * so we should return selection timeout.
 	 */
 	if (!scsi_id) {
+		SCpnt->result = DID_NO_CONNECT << 16;
+		done (SCpnt);
+		return 0;
+	}
+
+	hi = scsi_id->hi;
+
+	if (!hi) {
+		SBP2_ERR("sbp2scsi_host_info is NULL - this is bad!");
 		SCpnt->result = DID_NO_CONNECT << 16;
 		done (SCpnt);
 		return(0);
@@ -2633,13 +2516,11 @@ static int sbp2scsi_queuecommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 	/*
 	 * Try and send our SCSI command
 	 */
-	spin_lock_irqsave(&hi->sbp2_command_lock, flags);
 	if (sbp2_send_command(scsi_id, SCpnt, done)) {
 		SBP2_ERR("Error sending SCSI command");
 		sbp2scsi_complete_command(scsi_id, SBP2_SCSI_STATUS_SELECTION_TIMEOUT,
 					  SCpnt, done);
 	}
-	spin_unlock_irqrestore(&hi->sbp2_command_lock, flags);
 
 	return(0);
 }
@@ -2648,25 +2529,25 @@ static int sbp2scsi_queuecommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
  * This function is called in order to complete all outstanding SBP-2
  * commands (in case of resets, etc.).
  */
-static void sbp2scsi_complete_all_commands(struct scsi_id_instance_data *scsi_id, 
+static void sbp2scsi_complete_all_commands(struct scsi_id_instance_data *scsi_id,
 					   u32 status)
 {
 	struct sbp2scsi_host_info *hi = scsi_id->hi;
 	struct list_head *lh;
 	struct sbp2_command_info *command;
 
-	SBP2_DEBUG("sbp2_complete_all_commands");
+	SBP2_DEBUG("sbp2scsi_complete_all_commands");
 
 	while (!list_empty(&scsi_id->sbp2_command_orb_inuse)) {
 		SBP2_DEBUG("Found pending command to complete");
 		lh = scsi_id->sbp2_command_orb_inuse.next;
 		command = list_entry(lh, struct sbp2_command_info, list);
-		pci_dma_sync_single(hi->host->pdev, command->command_orb_dma,
-				    sizeof(struct sbp2_command_orb),
-				    PCI_DMA_BIDIRECTIONAL);
-		pci_dma_sync_single(hi->host->pdev, command->sge_dma,
-				    sizeof(command->scatter_gather_element),
-				    PCI_DMA_BIDIRECTIONAL);
+		pci_dma_sync_single_for_cpu(hi->host->pdev, command->command_orb_dma,
+					    sizeof(struct sbp2_command_orb),
+					    PCI_DMA_BIDIRECTIONAL);
+		pci_dma_sync_single_for_cpu(hi->host->pdev, command->sge_dma,
+					    sizeof(command->scatter_gather_element),
+					    PCI_DMA_BIDIRECTIONAL);
 		sbp2util_mark_command_completed(scsi_id, command);
 		if (command->Current_SCpnt) {
 			void (*done)(Scsi_Cmnd *) = command->Current_done;
@@ -2708,7 +2589,7 @@ static void sbp2scsi_complete_command(struct scsi_id_instance_data *scsi_id,
 		SBP2_ERR("Bus reset in progress - retry command later");
 		return;
 	}
-        
+ 
 	/*
 	 * Switch on scsi status
 	 */
@@ -2777,7 +2658,7 @@ static void sbp2scsi_complete_command(struct scsi_id_instance_data *scsi_id,
 	 * or hot-plug...
 	 */
 #if 0
-	if ((scsi_status == SBP2_SCSI_STATUS_CHECK_CONDITION) && 
+	if ((scsi_status == SBP2_SCSI_STATUS_CHECK_CONDITION) &&
 	    (SCpnt->sense_buffer[2] == UNIT_ATTENTION)) {
 		SBP2_DEBUG("UNIT ATTENTION - return busy");
 		SCpnt->result = DID_BUS_BUSY << 16;
@@ -2787,46 +2668,53 @@ static void sbp2scsi_complete_command(struct scsi_id_instance_data *scsi_id,
 	/*
 	 * Tell scsi stack that we're done with this command
 	 */
-	spin_lock_irqsave(scsi_id->hi->scsi_host->host_lock,flags);
+	spin_lock_irqsave(scsi_id->scsi_host->host_lock,flags);
 	done (SCpnt);
-	spin_unlock_irqrestore(scsi_id->hi->scsi_host->host_lock,flags);
+	spin_unlock_irqrestore(scsi_id->scsi_host->host_lock,flags);
 
 	return;
 }
+
+
+static int sbp2scsi_slave_configure (struct scsi_device *sdev)
+{
+	blk_queue_dma_alignment(sdev->request_queue, (512 - 1));
+
+	return 0;
+}
+
 
 /*
  * Called by scsi stack when something has really gone wrong.  Usually
  * called when a command has timed-out for some reason.
  */
-static int sbp2scsi_abort (Scsi_Cmnd *SCpnt) 
+static int sbp2scsi_abort (Scsi_Cmnd *SCpnt)
 {
-	struct sbp2scsi_host_info *hi = hpsb_get_hostinfo_bykey(&sbp2_highlevel,
-								(unsigned long)SCpnt->device->host);
-	struct scsi_id_instance_data *scsi_id = hi->scsi_id[SCpnt->device->id];
+	struct scsi_id_instance_data *scsi_id =
+		(struct scsi_id_instance_data *)SCpnt->device->host->hostdata[0];
+	struct sbp2scsi_host_info *hi = scsi_id->hi;
 	struct sbp2_command_info *command;
-	unsigned long flags;
 
 	SBP2_ERR("aborting sbp2 command");
 	print_command (SCpnt->cmnd);
-        
+
 	if (scsi_id) {
 
 		/*
 		 * Right now, just return any matching command structures
 		 * to the free pool.
 		 */
-		spin_lock_irqsave(&hi->sbp2_command_lock, flags);
 		command = sbp2util_find_command_for_SCpnt(scsi_id, SCpnt);
 		if (command) {
 			SBP2_DEBUG("Found command to abort");
-			pci_dma_sync_single(hi->host->pdev,
-					    command->command_orb_dma,
-					    sizeof(struct sbp2_command_orb),
-					    PCI_DMA_BIDIRECTIONAL);
-			pci_dma_sync_single(hi->host->pdev,
-					    command->sge_dma,
-					    sizeof(command->scatter_gather_element),
-					    PCI_DMA_BIDIRECTIONAL);
+			pci_dma_sync_single_for_cpu(hi->host->pdev,
+						    command->command_orb_dma,
+						    sizeof(struct sbp2_command_orb),
+						    PCI_DMA_BIDIRECTIONAL);
+			pci_dma_sync_single_for_cpu(hi->host->pdev,
+						    command->sge_dma,
+						    sizeof(command->scatter_gather_element),
+						    PCI_DMA_BIDIRECTIONAL);
 			sbp2util_mark_command_completed(scsi_id, command);
 			if (command->Current_SCpnt) {
 				void (*done)(Scsi_Cmnd *) = command->Current_done;
@@ -2836,11 +2724,10 @@ static int sbp2scsi_abort (Scsi_Cmnd *SCpnt)
 		}
 
 		/*
-		 * Initiate a fetch agent reset. 
+		 * Initiate a fetch agent reset.
 		 */
 		sbp2_agent_reset(scsi_id, 0);
-		sbp2scsi_complete_all_commands(scsi_id, DID_BUS_BUSY);		
-		spin_unlock_irqrestore(&hi->sbp2_command_lock, flags);
+		sbp2scsi_complete_all_commands(scsi_id, DID_BUS_BUSY);
 	}
 
 	return(SUCCESS);
@@ -2849,11 +2736,10 @@ static int sbp2scsi_abort (Scsi_Cmnd *SCpnt)
 /*
  * Called by scsi stack when something has really gone wrong.
  */
-static int sbp2scsi_reset (Scsi_Cmnd *SCpnt) 
+static int sbp2scsi_reset (Scsi_Cmnd *SCpnt)
 {
-	struct sbp2scsi_host_info *hi = hpsb_get_hostinfo_bykey(&sbp2_highlevel,
-								(unsigned long)SCpnt->device->host);
-	struct scsi_id_instance_data *scsi_id = hi->scsi_id[SCpnt->device->id];
+	struct scsi_id_instance_data *scsi_id =
+		(struct scsi_id_instance_data *)SCpnt->device->host->hostdata[0];
 
 	SBP2_ERR("reset requested");
 
@@ -2869,6 +2755,33 @@ static const char *sbp2scsi_info (struct Scsi_Host *host)
 {
         return "SCSI emulation for IEEE-1394 SBP-2 Devices";
 }
+
+static ssize_t sbp2_sysfs_ieee1394_id_show(struct device *dev, char *buf)
+{
+	struct scsi_device *sdev;
+	struct scsi_id_instance_data *scsi_id;
+	int lun;
+
+	if (!(sdev = to_scsi_device(dev)))
+		return 0;
+
+	if (!(scsi_id = (struct scsi_id_instance_data *)sdev->host->hostdata[0]))
+		return 0;
+
+	if (scsi_id->sbp2_device_type_and_lun == SBP2_DEVICE_TYPE_LUN_UNINITIALIZED)
+		lun = 0;
+	else
+		lun = ORB_SET_LUN(scsi_id->sbp2_device_type_and_lun);
+
+	return sprintf(buf, "%016Lx:%d:%d\n", (unsigned long long)scsi_id->ne->guid,
+		       scsi_id->ud->id, lun);
+}
+static DEVICE_ATTR(ieee1394_id, S_IRUGO, sbp2_sysfs_ieee1394_id_show, NULL);
+
+static struct device_attribute *sbp2_sysfs_sdev_attrs[] = {
+	&dev_attr_ieee1394_id,
+	NULL
+};
 
 MODULE_AUTHOR("Ben Collins <bcollins@debian.org>");
 MODULE_DESCRIPTION("IEEE-1394 SBP-2 protocol driver");
@@ -2886,16 +2799,20 @@ static Scsi_Host_Template scsi_driver_template = {
 	.eh_device_reset_handler =	sbp2scsi_reset,
 	.eh_bus_reset_handler =		sbp2scsi_reset,
 	.eh_host_reset_handler =	sbp2scsi_reset,
+	.slave_configure =		sbp2scsi_slave_configure,
 	.this_id =			-1,
 	.sg_tablesize =			SG_ALL,
 	.use_clustering =		ENABLE_CLUSTERING,
-	.cmd_per_lun =			SBP2_MAX_CMDS_PER_LUN,
-	.can_queue = 			SBP2_MAX_SCSI_QUEUE,
+	.cmd_per_lun =			SBP2_MAX_CMDS,
+	.can_queue = 			SBP2_MAX_CMDS,
 	.emulated =			1,
+	.sdev_attrs =			sbp2_sysfs_sdev_attrs,
 };
 
 static int sbp2_module_init(void)
 {
+	int ret;
+
 	SBP2_DEBUG("sbp2_module_init");
 
 	printk(KERN_INFO "sbp2: %s\n", version);
@@ -2914,18 +2831,12 @@ static int sbp2_module_init(void)
 	/* Register our high level driver with 1394 stack */
 	hpsb_register_highlevel(&sbp2_highlevel);
 
-	/* Register our sbp2 status address space... */
-	hpsb_register_addrspace(&sbp2_highlevel, &sbp2_ops, SBP2_STATUS_FIFO_ADDRESS,
-				SBP2_STATUS_FIFO_ADDRESS + 
-				SBP2_STATUS_FIFO_ENTRY_TO_OFFSET(SBP2SCSI_MAX_SCSI_IDS+1));
-
-	/* Handle data movement if physical dma is not enabled/supported
-	 * on host controller */
-#ifdef CONFIG_IEEE1394_SBP2_PHYS_DMA
-	hpsb_register_addrspace(&sbp2_highlevel, &sbp2_physdma_ops, 0x0ULL, 0xfffffffcULL);
-#endif
-
-	hpsb_register_protocol(&sbp2_driver);
+	ret = hpsb_register_protocol(&sbp2_driver);
+	if (ret) {
+		SBP2_ERR("Failed to register protocol");
+		hpsb_unregister_highlevel(&sbp2_highlevel);
+		return ret;
+	}
 
 	return 0;
 }

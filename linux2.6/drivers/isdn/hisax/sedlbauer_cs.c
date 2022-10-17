@@ -53,6 +53,7 @@
 #include <pcmcia/cistpl.h>
 #include <pcmcia/cisreg.h>
 #include <pcmcia/ds.h>
+#include "hisax_cfg.h"
 
 MODULE_DESCRIPTION("ISDN4Linux: PCMCIA client driver for Sedlbauer cards");
 MODULE_AUTHOR("Marcus Niemann");
@@ -68,7 +69,7 @@ MODULE_LICENSE("Dual MPL/GPL");
 
 #ifdef PCMCIA_DEBUG
 static int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
+module_param(pc_debug, int, 0);
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args); 
 static char *version =
 "sedlbauer_cs.c 1.1a 2001/01/28 15:04:04 (M.Niemann)";
@@ -81,19 +82,8 @@ static char *version =
 
 /* Parameters that can be set with 'insmod' */
 
-/* The old way: bit map of interrupts to choose from */
-/* This means pick from 15, 14, 12, 11, 10, 9, 7, 5, 4, and 3 */
-static u_int irq_mask = 0xdeb8;
-/* Newer, simpler way of listing specific interrupts */
-static int irq_list[4] = { -1 };
-
-MODULE_PARM(irq_mask, "i");
-MODULE_PARM(irq_list, "1-4i");
-
 static int protocol = 2;        /* EURO-ISDN Default */
-MODULE_PARM(protocol, "i");
-
-extern int sedl_init_pcmcia(int, int, int*, int);
+module_param(protocol, int, 0);
 
 /*====================================================================*/
 
@@ -176,6 +166,7 @@ typedef struct local_info_t {
     dev_link_t		link;
     dev_node_t		node;
     int			stop;
+    int			cardnr;
 } local_info_t;
 
 /*======================================================================
@@ -195,7 +186,7 @@ static dev_link_t *sedlbauer_attach(void)
     local_info_t *local;
     dev_link_t *link;
     client_reg_t client_reg;
-    int ret, i;
+    int ret;
     
     DEBUG(0, "sedlbauer_attach()\n");
 
@@ -203,18 +194,14 @@ static dev_link_t *sedlbauer_attach(void)
     local = kmalloc(sizeof(local_info_t), GFP_KERNEL);
     if (!local) return NULL;
     memset(local, 0, sizeof(local_info_t));
+    local->cardnr = -1;
     link = &local->link; link->priv = local;
     
     /* Interrupt setup */
     link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
-    link->irq.IRQInfo1 = IRQ_INFO2_VALID|IRQ_LEVEL_ID;
-    if (irq_list[0] == -1)
-	link->irq.IRQInfo2 = irq_mask;
-    else
-	for (i = 0; i < 4; i++)
-	    link->irq.IRQInfo2 |= 1 << irq_list[i];
+    link->irq.IRQInfo1 = IRQ_LEVEL_ID;
     link->irq.Handler = NULL;
-    
+
     /*
       General socket configuration defaults can go here.  In this
       client, we assume very little, and rely on the CIS for almost
@@ -239,7 +226,6 @@ static dev_link_t *sedlbauer_attach(void)
     link->next = dev_list;
     dev_list = link;
     client_reg.dev_info = &dev_info;
-    client_reg.Attributes = INFO_IO_CLIENT | INFO_CARD_SHARE;
     client_reg.EventMask =
 	CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL |
 	CS_EVENT_RESET_PHYSICAL | CS_EVENT_CARD_RESET |
@@ -247,7 +233,7 @@ static dev_link_t *sedlbauer_attach(void)
     client_reg.event_handler = &sedlbauer_event;
     client_reg.Version = 0x0210;
     client_reg.event_callback_args.client_data = link;
-    ret = CardServices(RegisterClient, &link->handle, &client_reg);
+    ret = pcmcia_register_client(&link->handle, &client_reg);
     if (ret != CS_SUCCESS) {
 	cs_error(link->handle, RegisterClient, ret);
 	sedlbauer_detach(link);
@@ -295,7 +281,7 @@ static void sedlbauer_detach(dev_link_t *link)
 
     /* Break the link with Card Services */
     if (link->handle)
-	CardServices(DeregisterClient, link->handle);
+	pcmcia_deregister_client(link->handle);
     
     /* Unlink device structure, and free it */
     *linkp = link->next;
@@ -310,12 +296,8 @@ static void sedlbauer_detach(dev_link_t *link)
     device available to the system.
     
 ======================================================================*/
-
-#define CS_CHECK(fn, args...) \
-while ((last_ret=CardServices(last_fn=(fn),args))!=0) goto cs_failed
-
-#define CFG_CHECK(fn, args...) \
-if (CardServices(fn, args) != 0) goto next_entry
+#define CS_CHECK(fn, ret) \
+do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
 
 static void sedlbauer_config(dev_link_t *link)
 {
@@ -328,7 +310,7 @@ static void sedlbauer_config(dev_link_t *link)
     config_info_t conf;
     win_req_t req;
     memreq_t map;
-    
+    IsdnCard_t  icard;
 
     DEBUG(0, "sedlbauer_config(0x%p)\n", link);
 
@@ -341,9 +323,9 @@ static void sedlbauer_config(dev_link_t *link)
     tuple.TupleData = buf;
     tuple.TupleDataMax = sizeof(buf);
     tuple.TupleOffset = 0;
-    CS_CHECK(GetFirstTuple, handle, &tuple);
-    CS_CHECK(GetTupleData, handle, &tuple);
-    CS_CHECK(ParseTuple, handle, &tuple, &parse);
+    CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
+    CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
+    CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
     link->conf.ConfigBase = parse.config.base;
     link->conf.Present = parse.config.rmask[0];
     
@@ -351,7 +333,7 @@ static void sedlbauer_config(dev_link_t *link)
     link->state |= DEV_CONFIG;
 
     /* Look up the current Vcc */
-    CS_CHECK(GetConfigurationInfo, handle, &conf);
+    CS_CHECK(GetConfigurationInfo, pcmcia_get_configuration_info(handle, &conf));
     link->conf.Vcc = conf.Vcc;
 
     /*
@@ -367,12 +349,13 @@ static void sedlbauer_config(dev_link_t *link)
       will only use the CIS to fill in implementation-defined details.
     */
     tuple.DesiredTuple = CISTPL_CFTABLE_ENTRY;
-    CS_CHECK(GetFirstTuple, handle, &tuple);
+    CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
     while (1) {
 	cistpl_cftable_entry_t dflt = { 0 };
 	cistpl_cftable_entry_t *cfg = &(parse.cftable_entry);
-	CFG_CHECK(GetTupleData, handle, &tuple);
-	CFG_CHECK(ParseTuple, handle, &tuple, &parse);
+	if (pcmcia_get_tuple_data(handle, &tuple) != 0 ||
+		pcmcia_parse_tuple(handle, &tuple, &parse) != 0)
+	    goto next_entry;
 
 	if (cfg->flags & CISTPL_CFTABLE_DEFAULT) dflt = *cfg;
 	if (cfg->index == 0) goto next_entry;
@@ -425,7 +408,8 @@ static void sedlbauer_config(dev_link_t *link)
 		link->io.NumPorts2 = io->win[1].len;
 	    }
 	    /* This reserves IO space but doesn't actually enable it */
-	    CFG_CHECK(RequestIO, link->handle, &link->io);
+	    if (pcmcia_request_io(link->handle, &link->io) != 0)
+		goto next_entry;
 	}
 
 	/*
@@ -451,10 +435,11 @@ static void sedlbauer_config(dev_link_t *link)
                 req.Size = 0x1000;
 */
 	    req.AccessSpeed = 0;
-	    link->win = (window_handle_t)link->handle;
-	    CFG_CHECK(RequestWindow, &link->win, &req);
+	    if (pcmcia_request_window(&link->handle, &req, &link->win) != 0)
+		goto next_entry;
 	    map.Page = 0; map.CardOffset = mem->win[0].card_addr;
-	    CFG_CHECK(MapMemPage, link->win, &map);
+	    if (pcmcia_map_mem_page(link->win, &map) != 0)
+		goto next_entry;
 	}
 	/* If we got this far, we're cool! */
 	break;
@@ -462,9 +447,9 @@ static void sedlbauer_config(dev_link_t *link)
     next_entry:
 /* new in dummy.cs 2001/01/28 MN 
         if (link->io.NumPorts1)
-           CardServices(ReleaseIO, link->handle, &link->io);
+           pcmcia_release_io(link->handle, &link->io);
 */
-	CS_CHECK(GetNextTuple, handle, &tuple);
+	CS_CHECK(GetNextTuple, pcmcia_get_next_tuple(handle, &tuple));
     }
     
     /*
@@ -473,14 +458,14 @@ static void sedlbauer_config(dev_link_t *link)
        irq structure is initialized.
     */
     if (link->conf.Attributes & CONF_ENABLE_IRQ)
-	CS_CHECK(RequestIRQ, link->handle, &link->irq);
+	CS_CHECK(RequestIRQ, pcmcia_request_irq(link->handle, &link->irq));
 	
     /*
        This actually configures the PCMCIA socket -- setting up
        the I/O windows and the interrupt mapping, and putting the
        card and host interface into "Memory and IO" mode.
     */
-    CS_CHECK(RequestConfiguration, link->handle, &link->conf);
+    CS_CHECK(RequestConfiguration, pcmcia_request_configuration(link->handle, &link->conf));
 
     /*
       At this point, the dev_node_t structure(s) need to be
@@ -510,10 +495,19 @@ static void sedlbauer_config(dev_link_t *link)
     printk("\n");
     
     link->state &= ~DEV_CONFIG_PENDING;
- 
-    sedl_init_pcmcia(link->io.BasePort1, link->irq.AssignedIRQ,
-                     &(((local_info_t*)link->priv)->stop),
-                     protocol);
+
+    icard.para[0] = link->irq.AssignedIRQ;
+    icard.para[1] = link->io.BasePort1;
+    icard.protocol = protocol;
+    icard.typ = ISDN_CTYPE_SEDLBAUER_PCMCIA;
+    
+    last_ret = hisax_init_pcmcia(link, &(((local_info_t*)link->priv)->stop), &icard);
+    if (last_ret < 0) {
+    	printk(KERN_ERR "sedlbauer_cs: failed to initialize SEDLBAUER PCMCIA %d at i/o %#x\n",
+    		last_ret, link->io.BasePort1);
+    	sedlbauer_release(link);
+    } else
+    	((local_info_t*)link->priv)->cardnr = last_ret;
 
     return;
 
@@ -533,8 +527,15 @@ cs_failed:
 
 static void sedlbauer_release(dev_link_t *link)
 {
+    local_info_t *local = link->priv;
     DEBUG(0, "sedlbauer_release(0x%p)\n", link);
 
+    if (local) {
+    	if (local->cardnr >= 0) {
+    	    /* no unregister function with hisax */
+	    HiSax_closecard(local->cardnr);
+	}
+    }
     /* Unlink the device chain */
     link->dev = NULL;
 
@@ -545,12 +546,12 @@ static void sedlbauer_release(dev_link_t *link)
     
     /* Don't bother checking to see if these succeed or not */
     if (link->win)
-	CardServices(ReleaseWindow, link->win);
-    CardServices(ReleaseConfiguration, link->handle);
+	pcmcia_release_window(link->win);
+    pcmcia_release_configuration(link->handle);
     if (link->io.NumPorts1)
-	CardServices(ReleaseIO, link->handle, &link->io);
+	pcmcia_release_io(link->handle, &link->io);
     if (link->irq.AssignedIRQ)
-	CardServices(ReleaseIRQ, link->handle, &link->irq);
+	pcmcia_release_irq(link->handle, &link->irq);
     link->state &= ~DEV_CONFIG;
     
     if (link->state & DEV_STALE_LINK)
@@ -597,14 +598,14 @@ static int sedlbauer_event(event_t event, int priority,
 	/* Mark the device as stopped, to block IO until later */
 	dev->stop = 1;
 	if (link->state & DEV_CONFIG)
-	    CardServices(ReleaseConfiguration, link->handle);
+	    pcmcia_release_configuration(link->handle);
 	break;
     case CS_EVENT_PM_RESUME:
 	link->state &= ~DEV_SUSPEND;
 	/* Fall through... */
     case CS_EVENT_CARD_RESET:
 	if (link->state & DEV_CONFIG)
-	    CardServices(RequestConfiguration, link->handle, &link->conf);
+	    pcmcia_request_configuration(link->handle, &link->conf);
 	dev->stop = 0;
 	/*
 	  In a normal driver, additional code may go here to restore
@@ -632,13 +633,7 @@ static int __init init_sedlbauer_cs(void)
 static void __exit exit_sedlbauer_cs(void)
 {
 	pcmcia_unregister_driver(&sedlbauer_driver);
-
-	/* XXX: this really needs to move into generic code.. */
-	while (dev_list != NULL) {
-		if (dev_list->state & DEV_CONFIG)
-			sedlbauer_release(dev_list);
-		sedlbauer_detach(dev_list);
-	}
+	BUG_ON(dev_list != NULL);
 }
 
 module_init(init_sedlbauer_cs);

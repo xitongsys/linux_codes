@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -53,6 +53,62 @@
 
 /*******************************************************************************
  *
+ * FUNCTION:    acpi_ut_osi_implementation
+ *
+ * PARAMETERS:  walk_state          - Current walk state
+ *
+ * RETURN:      Status
+ *
+ * DESCRIPTION: Implementation of _OSI predefined control method
+ *              Supported = _OSI (String)
+ *
+ ******************************************************************************/
+
+acpi_status
+acpi_ut_osi_implementation (
+	struct acpi_walk_state          *walk_state)
+{
+	union acpi_operand_object       *string_desc;
+	union acpi_operand_object       *return_desc;
+	acpi_native_uint                i;
+
+
+	ACPI_FUNCTION_TRACE ("ut_osi_implementation");
+
+
+	/* Validate the string input argument */
+
+	string_desc = walk_state->arguments[0].object;
+	if (!string_desc || (string_desc->common.type != ACPI_TYPE_STRING)) {
+		return_ACPI_STATUS (AE_TYPE);
+	}
+
+	/* Create a return object (Default value = 0) */
+
+	return_desc = acpi_ut_create_internal_object (ACPI_TYPE_INTEGER);
+	if (!return_desc) {
+		return_ACPI_STATUS (AE_NO_MEMORY);
+	}
+
+	/* Compare input string to table of supported strings */
+
+	for (i = 0; i < ACPI_NUM_OSI_STRINGS; i++) {
+		if (!ACPI_STRCMP (string_desc->string.pointer,
+				   (char *) acpi_gbl_valid_osi_strings[i])) {
+			/* This string is supported */
+
+			return_desc->integer.value = 0xFFFFFFFF;
+			break;
+		}
+	}
+
+	walk_state->return_desc = return_desc;
+	return_ACPI_STATUS (AE_CTRL_TERMINATE);
+}
+
+
+/*******************************************************************************
+ *
  * FUNCTION:    acpi_ut_evaluate_object
  *
  * PARAMETERS:  prefix_node         - Starting node
@@ -77,7 +133,7 @@ acpi_ut_evaluate_object (
 	u32                             expected_return_btypes,
 	union acpi_operand_object       **return_desc)
 {
-	union acpi_operand_object       *obj_desc;
+	struct acpi_parameter_info      info;
 	acpi_status                     status;
 	u32                             return_btype;
 
@@ -85,13 +141,17 @@ acpi_ut_evaluate_object (
 	ACPI_FUNCTION_TRACE ("ut_evaluate_object");
 
 
+	info.node = prefix_node;
+	info.parameters = NULL;
+	info.parameter_type = ACPI_PARAM_ARGS;
+
 	/* Evaluate the object/method */
 
-	status = acpi_ns_evaluate_relative (prefix_node, path, NULL, &obj_desc);
+	status = acpi_ns_evaluate_relative (path, &info);
 	if (ACPI_FAILURE (status)) {
 		if (status == AE_NOT_FOUND) {
 			ACPI_DEBUG_PRINT ((ACPI_DB_EXEC, "[%4.4s.%s] was not found\n",
-				prefix_node->name.ascii, path));
+				acpi_ut_get_node_name (prefix_node), path));
 		}
 		else {
 			ACPI_REPORT_METHOD_ERROR ("Method execution failed",
@@ -103,7 +163,7 @@ acpi_ut_evaluate_object (
 
 	/* Did we get a return object? */
 
-	if (!obj_desc) {
+	if (!info.return_object) {
 		if (expected_return_btypes) {
 			ACPI_REPORT_METHOD_ERROR ("No object was returned from",
 				prefix_node, path, AE_NOT_EXIST);
@@ -116,7 +176,7 @@ acpi_ut_evaluate_object (
 
 	/* Map the return object type to the bitmapped type */
 
-	switch (ACPI_GET_OBJECT_TYPE (obj_desc)) {
+	switch (ACPI_GET_OBJECT_TYPE (info.return_object)) {
 	case ACPI_TYPE_INTEGER:
 		return_btype = ACPI_BTYPE_INTEGER;
 		break;
@@ -138,6 +198,17 @@ acpi_ut_evaluate_object (
 		break;
 	}
 
+	if ((acpi_gbl_enable_interpreter_slack) &&
+		(!expected_return_btypes)) {
+		/*
+		 * We received a return object, but one was not expected.  This can
+		 * happen frequently if the "implicit return" feature is enabled.
+		 * Just delete the return object and return AE_OK.
+		 */
+		acpi_ut_remove_reference (info.return_object);
+		return_ACPI_STATUS (AE_OK);
+	}
+
 	/* Is the return object one of the expected types? */
 
 	if (!(expected_return_btypes & return_btype)) {
@@ -145,18 +216,19 @@ acpi_ut_evaluate_object (
 			prefix_node, path, AE_TYPE);
 
 		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
-			"Type returned from %s was incorrect: %X\n",
-			path, ACPI_GET_OBJECT_TYPE (obj_desc)));
+			"Type returned from %s was incorrect: %s, expected Btypes: %X\n",
+			path, acpi_ut_get_object_type_name (info.return_object),
+			expected_return_btypes));
 
 		/* On error exit, we must delete the return object */
 
-		acpi_ut_remove_reference (obj_desc);
+		acpi_ut_remove_reference (info.return_object);
 		return_ACPI_STATUS (AE_TYPE);
 	}
 
 	/* Object type is OK, return it */
 
-	*return_desc = obj_desc;
+	*return_desc = info.return_object;
 	return_ACPI_STATUS (AE_OK);
 }
 
@@ -544,7 +616,7 @@ acpi_ut_execute_STA (
 		if (AE_NOT_FOUND == status) {
 			ACPI_DEBUG_PRINT ((ACPI_DB_EXEC,
 				"_STA on %4.4s was not found, assuming device is present\n",
-				device_node->name.ascii));
+				acpi_ut_get_node_name (device_node)));
 
 			*flags = 0x0F;
 			status = AE_OK;
@@ -561,4 +633,64 @@ acpi_ut_execute_STA (
 
 	acpi_ut_remove_reference (obj_desc);
 	return_ACPI_STATUS (status);
+}
+
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_ut_execute_Sxds
+ *
+ * PARAMETERS:  device_node         - Node for the device
+ *              *Flags              - Where the status flags are returned
+ *
+ * RETURN:      Status
+ *
+ * DESCRIPTION: Executes _STA for selected device and stores results in
+ *              *Flags.
+ *
+ *              NOTE: Internal function, no parameter validation
+ *
+ ******************************************************************************/
+
+acpi_status
+acpi_ut_execute_sxds (
+	struct acpi_namespace_node      *device_node,
+	u8                              *highest)
+{
+	union acpi_operand_object       *obj_desc;
+	acpi_status                     status;
+	u32                             i;
+
+
+	ACPI_FUNCTION_TRACE ("ut_execute_Sxds");
+
+
+	for (i = 0; i < 4; i++) {
+		highest[i] = 0xFF;
+		status = acpi_ut_evaluate_object (device_node,
+				 (char *) acpi_gbl_highest_dstate_names[i],
+				 ACPI_BTYPE_INTEGER, &obj_desc);
+		if (ACPI_FAILURE (status)) {
+			if (status != AE_NOT_FOUND) {
+				ACPI_DEBUG_PRINT ((ACPI_DB_EXEC,
+					"%s on Device %4.4s, %s\n",
+					(char *) acpi_gbl_highest_dstate_names[i],
+					acpi_ut_get_node_name (device_node),
+					acpi_format_exception (status)));
+
+				return_ACPI_STATUS (status);
+			}
+		}
+		else {
+			/* Extract the Dstate value */
+
+			highest[i] = (u8) obj_desc->integer.value;
+
+			/* Delete the return object */
+
+			acpi_ut_remove_reference (obj_desc);
+		}
+	}
+
+	return_ACPI_STATUS (AE_OK);
 }

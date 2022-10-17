@@ -67,8 +67,11 @@ void snd_pcm_playback_silence(snd_pcm_substream_t *substream, snd_pcm_uframes_t 
 			frames = runtime->silence_size;
 	} else {
 		if (new_hw_ptr == ULONG_MAX) {	/* initialization */
-			runtime->silence_filled = 0;
-			runtime->silence_start = runtime->control->appl_ptr;
+			snd_pcm_sframes_t avail = snd_pcm_playback_hw_avail(runtime);
+			runtime->silence_filled = avail > 0 ? avail : 0;
+			runtime->silence_start = (runtime->status->hw_ptr +
+						  runtime->silence_filled) %
+						 runtime->boundary;
 		} else {
 			ofs = runtime->status->hw_ptr;
 			frames = new_hw_ptr - ofs;
@@ -125,16 +128,29 @@ void snd_pcm_playback_silence(snd_pcm_substream_t *substream, snd_pcm_uframes_t 
 	}
 }
 
-static inline int snd_pcm_update_hw_ptr_interrupt(snd_pcm_substream_t *substream)
+static void xrun(snd_pcm_substream_t *substream)
 {
-	snd_pcm_runtime_t *runtime = substream->runtime;
-	snd_pcm_uframes_t pos;
-	snd_pcm_uframes_t old_hw_ptr, new_hw_ptr, hw_ptr_interrupt;
-	snd_pcm_uframes_t avail;
-	snd_pcm_sframes_t delta;
+	snd_pcm_stop(substream, SNDRV_PCM_STATE_XRUN);
+#ifdef CONFIG_SND_DEBUG
+	if (substream->pstr->xrun_debug) {
+		snd_printd(KERN_DEBUG "XRUN: pcmC%dD%d%c\n",
+			   substream->pcm->card->number,
+			   substream->pcm->device,
+			   substream->stream ? 'c' : 'p');
+		if (substream->pstr->xrun_debug > 1)
+			dump_stack();
+	}
+#endif
+}
 
-	old_hw_ptr = runtime->status->hw_ptr;
+static inline snd_pcm_uframes_t snd_pcm_update_hw_ptr_pos(snd_pcm_substream_t *substream,
+							  snd_pcm_runtime_t *runtime)
+{
+	snd_pcm_uframes_t pos;
+
 	pos = substream->ops->pointer(substream);
+	if (pos == SNDRV_PCM_POS_XRUN)
+		return pos; /* XRUN */
 	if (runtime->tstamp_mode & SNDRV_PCM_TSTAMP_MMAP)
 		snd_timestamp_now((snd_timestamp_t*)&runtime->status->tstamp, runtime->tstamp_timespec);
 #ifdef CONFIG_SND_DEBUG
@@ -143,18 +159,63 @@ static inline int snd_pcm_update_hw_ptr_interrupt(snd_pcm_substream_t *substream
 	} else
 #endif
 	snd_runtime_check(pos < runtime->buffer_size, return 0);
-
 	pos -= pos % runtime->min_align;
-	new_hw_ptr = runtime->hw_ptr_base + pos;
+	return pos;
+}
 
+static inline int snd_pcm_update_hw_ptr_post(snd_pcm_substream_t *substream,
+					     snd_pcm_runtime_t *runtime)
+{
+	snd_pcm_uframes_t avail;
+
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		avail = snd_pcm_playback_avail(runtime);
+	else
+		avail = snd_pcm_capture_avail(runtime);
+	if (avail > runtime->avail_max)
+		runtime->avail_max = avail;
+	if (avail >= runtime->stop_threshold) {
+		if (substream->runtime->status->state == SNDRV_PCM_STATE_DRAINING)
+			snd_pcm_drain_done(substream);
+		else
+			xrun(substream);
+		return -EPIPE;
+	}
+	if (avail >= runtime->control->avail_min)
+		wake_up(&runtime->sleep);
+	return 0;
+}
+
+static inline int snd_pcm_update_hw_ptr_interrupt(snd_pcm_substream_t *substream)
+{
+	snd_pcm_runtime_t *runtime = substream->runtime;
+	snd_pcm_uframes_t pos;
+	snd_pcm_uframes_t new_hw_ptr, hw_ptr_interrupt;
+	snd_pcm_sframes_t delta;
+
+	pos = snd_pcm_update_hw_ptr_pos(substream, runtime);
+	if (pos == SNDRV_PCM_POS_XRUN) {
+		xrun(substream);
+		return -EPIPE;
+	}
+	if (runtime->period_size == runtime->buffer_size)
+		goto __next_buf;
+	new_hw_ptr = runtime->hw_ptr_base + pos;
 	hw_ptr_interrupt = runtime->hw_ptr_interrupt + runtime->period_size;
 
 	delta = hw_ptr_interrupt - new_hw_ptr;
 	if (delta > 0) {
 		if ((snd_pcm_uframes_t)delta < runtime->buffer_size / 2) {
-			snd_printd("Unexpected hw_pointer value (stream = %i, delta: -%ld, max jitter = %ld): wrong interrupt acknowledge?\n", substream->stream, (long) delta, runtime->buffer_size / 2);
+#ifdef CONFIG_SND_DEBUG
+			if (runtime->periods > 1 && substream->pstr->xrun_debug) {
+				snd_printd(KERN_ERR "Unexpected hw_pointer value [1] (stream = %i, delta: -%ld, max jitter = %ld): wrong interrupt acknowledge?\n", substream->stream, (long) delta, runtime->buffer_size / 2);
+				if (substream->pstr->xrun_debug > 1)
+					dump_stack();
+			}
+#endif
 			return 0;
 		}
+	      __next_buf:
 		runtime->hw_ptr_base += runtime->buffer_size;
 		if (runtime->hw_ptr_base == runtime->boundary)
 			runtime->hw_ptr_base = 0;
@@ -168,21 +229,7 @@ static inline int snd_pcm_update_hw_ptr_interrupt(snd_pcm_substream_t *substream
 	runtime->status->hw_ptr = new_hw_ptr;
 	runtime->hw_ptr_interrupt = new_hw_ptr - new_hw_ptr % runtime->period_size;
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		avail = snd_pcm_playback_avail(runtime);
-	else
-		avail = snd_pcm_capture_avail(runtime);
-	if (avail > runtime->avail_max)
-		runtime->avail_max = avail;
-	if (avail >= runtime->stop_threshold) {
-		snd_pcm_stop(substream,
-			     runtime->status->state == SNDRV_PCM_STATE_DRAINING ?
-			     SNDRV_PCM_STATE_SETUP : SNDRV_PCM_STATE_XRUN);
-		return -EPIPE;
-	}
-	if (avail >= runtime->control->avail_min)
-		wake_up(&runtime->sleep);
-	return 0;
+	return snd_pcm_update_hw_ptr_post(substream, runtime);
 }
 
 /* CAUTION: call it with irq disabled */
@@ -191,27 +238,26 @@ int snd_pcm_update_hw_ptr(snd_pcm_substream_t *substream)
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	snd_pcm_uframes_t pos;
 	snd_pcm_uframes_t old_hw_ptr, new_hw_ptr;
-	snd_pcm_uframes_t avail;
 	snd_pcm_sframes_t delta;
 
 	old_hw_ptr = runtime->status->hw_ptr;
-	pos = substream->ops->pointer(substream);
-	if (runtime->tstamp_mode & SNDRV_PCM_TSTAMP_MMAP)
-		snd_timestamp_now((snd_timestamp_t*)&runtime->status->tstamp, runtime->tstamp_timespec);
-#ifdef CONFIG_SND_DEBUG
-	if (pos >= runtime->buffer_size) {
-		snd_printk(KERN_ERR "BUG: stream = %i, pos = 0x%lx, buffer size = 0x%lx, period size = 0x%lx\n", substream->stream, pos, runtime->buffer_size, runtime->period_size);
-	} else
-#endif
-	snd_runtime_check(pos < runtime->buffer_size, return 0);
-
-	pos -= pos % runtime->min_align;
+	pos = snd_pcm_update_hw_ptr_pos(substream, runtime);
+	if (pos == SNDRV_PCM_POS_XRUN) {
+		xrun(substream);
+		return -EPIPE;
+	}
 	new_hw_ptr = runtime->hw_ptr_base + pos;
 
 	delta = old_hw_ptr - new_hw_ptr;
 	if (delta > 0) {
 		if ((snd_pcm_uframes_t)delta < runtime->buffer_size / 2) {
-			snd_printd("Unexpected hw_pointer value (stream = %i, delta: -%ld, max jitter = %ld): wrong interrupt acknowledge?\n", substream->stream, (long) delta, runtime->buffer_size / 2);
+#ifdef CONFIG_SND_DEBUG
+			if (runtime->periods > 2 && substream->pstr->xrun_debug) {
+				snd_printd(KERN_ERR "Unexpected hw_pointer value [2] (stream = %i, delta: -%ld, max jitter = %ld): wrong interrupt acknowledge?\n", substream->stream, (long) delta, runtime->buffer_size / 2);
+				if (substream->pstr->xrun_debug > 1)
+					dump_stack();
+			}
+#endif
 			return 0;
 		}
 		runtime->hw_ptr_base += runtime->buffer_size;
@@ -222,23 +268,10 @@ int snd_pcm_update_hw_ptr(snd_pcm_substream_t *substream)
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
 	    runtime->silence_size > 0)
 		snd_pcm_playback_silence(substream, new_hw_ptr);
+
 	runtime->status->hw_ptr = new_hw_ptr;
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		avail = snd_pcm_playback_avail(runtime);
-	else
-		avail = snd_pcm_capture_avail(runtime);
-	if (avail > runtime->avail_max)
-		runtime->avail_max = avail;
-	if (avail >= runtime->stop_threshold) {
-		snd_pcm_stop(substream,
-			     runtime->status->state == SNDRV_PCM_STATE_DRAINING ?
-			     SNDRV_PCM_STATE_SETUP : SNDRV_PCM_STATE_XRUN);
-		return -EPIPE;
-	}
-	if (avail >= runtime->control->avail_min)
-		wake_up(&runtime->sleep);
-	return 0;
+	return snd_pcm_update_hw_ptr_post(substream, runtime);
 }
 
 /**
@@ -338,7 +371,7 @@ static inline unsigned int muldiv32(unsigned int a, unsigned int b,
 	return n;
 }
 
-int snd_interval_refine_min(snd_interval_t *i, unsigned int min, int openmin)
+static int snd_interval_refine_min(snd_interval_t *i, unsigned int min, int openmin)
 {
 	int changed = 0;
 	assert(!snd_interval_empty(i));
@@ -363,7 +396,7 @@ int snd_interval_refine_min(snd_interval_t *i, unsigned int min, int openmin)
 	return changed;
 }
 
-int snd_interval_refine_max(snd_interval_t *i, unsigned int max, int openmax)
+static int snd_interval_refine_max(snd_interval_t *i, unsigned int max, int openmax)
 {
 	int changed = 0;
 	assert(!snd_interval_empty(i));
@@ -441,7 +474,7 @@ int snd_interval_refine(snd_interval_t *i, const snd_interval_t *v)
 	return changed;
 }
 
-int snd_interval_refine_first(snd_interval_t *i)
+static int snd_interval_refine_first(snd_interval_t *i)
 {
 	assert(!snd_interval_empty(i));
 	if (snd_interval_single(i))
@@ -453,7 +486,7 @@ int snd_interval_refine_first(snd_interval_t *i)
 	return 1;
 }
 
-int snd_interval_refine_last(snd_interval_t *i)
+static int snd_interval_refine_last(snd_interval_t *i)
 {
 	assert(!snd_interval_empty(i));
 	if (snd_interval_single(i))
@@ -465,7 +498,7 @@ int snd_interval_refine_last(snd_interval_t *i)
 	return 1;
 }
 
-int snd_interval_refine_set(snd_interval_t *i, unsigned int val)
+static int snd_interval_refine_set(snd_interval_t *i, unsigned int val)
 {
 	snd_interval_t t;
 	t.empty = 0;
@@ -685,9 +718,9 @@ int snd_interval_ratnum(snd_interval_t *i,
  *
  * Returns non-zero if the value is changed, zero if not changed.
  */
-int snd_interval_ratden(snd_interval_t *i,
-		    unsigned int rats_count, ratden_t *rats,
-		    unsigned int *nump, unsigned int *denp)
+static int snd_interval_ratden(snd_interval_t *i,
+			       unsigned int rats_count, ratden_t *rats,
+			       unsigned int *nump, unsigned int *denp)
 {
 	unsigned int best_num, best_diff, best_den;
 	unsigned int k;
@@ -825,7 +858,7 @@ int snd_interval_list(snd_interval_t *i, unsigned int count, unsigned int *list,
         return changed;
 }
 
-int snd_interval_step(snd_interval_t *i, unsigned int min, unsigned int step)
+static int snd_interval_step(snd_interval_t *i, unsigned int min, unsigned int step)
 {
 	unsigned int n;
 	int changed = 0;
@@ -870,22 +903,18 @@ int snd_pcm_hw_rule_add(snd_pcm_runtime_t *runtime, unsigned int cond,
 	va_list args;
 	va_start(args, dep);
 	if (constrs->rules_num >= constrs->rules_all) {
-		snd_pcm_hw_rule_t *old = constrs->rules;
-		if (constrs->rules_all == 0)
-			constrs->rules_all = 32;
-		else {
-			old = constrs->rules;
-			constrs->rules_all += 10;
-		}
-		constrs->rules = snd_kcalloc(constrs->rules_all * sizeof(*c),
-					     GFP_KERNEL);
-		if (!constrs->rules)
+		snd_pcm_hw_rule_t *new;
+		unsigned int new_rules = constrs->rules_all + 16;
+		new = kcalloc(new_rules, sizeof(*c), GFP_KERNEL);
+		if (!new)
 			return -ENOMEM;
-		if (old) {
-			memcpy(constrs->rules, old,
+		if (constrs->rules) {
+			memcpy(new, constrs->rules,
 			       constrs->rules_num * sizeof(*c));
-			kfree(old);
+			kfree(constrs->rules);
 		}
+		constrs->rules = new;
+		constrs->rules_all = new_rules;
 	}
 	c = &constrs->rules[constrs->rules_num];
 	c->cond = cond;
@@ -894,7 +923,7 @@ int snd_pcm_hw_rule_add(snd_pcm_runtime_t *runtime, unsigned int cond,
 	c->private = private;
 	k = 0;
 	while (1) {
-		snd_assert(k < sizeof(c->deps) / sizeof(c->deps[0]), return -EINVAL);
+		snd_assert(k < ARRAY_SIZE(c->deps), return -EINVAL);
 		c->deps[k++] = dep;
 		if (dep < 0)
 			break;
@@ -1092,7 +1121,7 @@ static int snd_pcm_hw_rule_pow2(snd_pcm_hw_params_t *params, snd_pcm_hw_rule_t *
 		1<<24, 1<<25, 1<<26, 1<<27, 1<<28, 1<<29, 1<<30
 	};
 	return snd_interval_list(hw_param_interval(params, rule->var),
-				 sizeof(pow2_sizes)/sizeof(int), pow2_sizes, 0);
+				 ARRAY_SIZE(pow2_sizes), pow2_sizes, 0);
 }		
 
 /**
@@ -1542,7 +1571,7 @@ int snd_pcm_hw_param_set(snd_pcm_t *pcm, snd_pcm_hw_params_t *params,
 		if (err < 0)
 			return err;
 	}
-	return snd_pcm_hw_param_value(params, var, 0);
+	return snd_pcm_hw_param_value(params, var, NULL);
 }
 
 int _snd_pcm_hw_param_mask(snd_pcm_hw_params_t *params,
@@ -1718,28 +1747,28 @@ int snd_pcm_hw_params_choose(snd_pcm_t *pcm, snd_pcm_hw_params_t *params)
 {
 	int err;
 
-	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_ACCESS, 0);
+	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_ACCESS, NULL);
 	assert(err >= 0);
 
-	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_FORMAT, 0);
+	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_FORMAT, NULL);
 	assert(err >= 0);
 
-	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_SUBFORMAT, 0);
+	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_SUBFORMAT, NULL);
 	assert(err >= 0);
 
-	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_CHANNELS, 0);
+	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_CHANNELS, NULL);
 	assert(err >= 0);
 
-	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_RATE, 0);
+	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_RATE, NULL);
 	assert(err >= 0);
 
-	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_PERIOD_TIME, 0);
+	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_PERIOD_TIME, NULL);
 	assert(err >= 0);
 
-	err = snd_pcm_hw_param_last(pcm, params, SNDRV_PCM_HW_PARAM_BUFFER_SIZE, 0);
+	err = snd_pcm_hw_param_last(pcm, params, SNDRV_PCM_HW_PARAM_BUFFER_SIZE, NULL);
 	assert(err >= 0);
 
-	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_TICK_TIME, 0);
+	err = snd_pcm_hw_param_first(pcm, params, SNDRV_PCM_HW_PARAM_TICK_TIME, NULL);
 	assert(err >= 0);
 
 	return 0;
@@ -1752,12 +1781,14 @@ static int snd_pcm_lib_ioctl_reset(snd_pcm_substream_t *substream,
 				   void *arg)
 {
 	snd_pcm_runtime_t *runtime = substream->runtime;
+	unsigned long flags;
+	snd_pcm_stream_lock_irqsave(substream, flags);
 	if (snd_pcm_running(substream) &&
-	    snd_pcm_update_hw_ptr(substream) >= 0) {
+	    snd_pcm_update_hw_ptr(substream) >= 0)
 		runtime->status->hw_ptr %= runtime->buffer_size;
-		return 0;
-	}
-	runtime->status->hw_ptr = 0;
+	else
+		runtime->status->hw_ptr = 0;
+	snd_pcm_stream_unlock_irqrestore(substream, flags);
 	return 0;
 }
 
@@ -1824,80 +1855,6 @@ int snd_pcm_lib_ioctl(snd_pcm_substream_t *substream,
 /*
  *  Conditions
  */
-
-/**
- * snd_pcm_playback_ready - check whether the playback buffer is available
- * @substream: the pcm substream instance
- *
- * Checks whether enough free space is available on the playback buffer.
- *
- * Returns non-zero if available, or zero if not.
- */
-int snd_pcm_playback_ready(snd_pcm_substream_t *substream)
-{
-	snd_pcm_runtime_t *runtime = substream->runtime;
-	return snd_pcm_playback_avail(runtime) >= runtime->control->avail_min;
-}
-
-/**
- * snd_pcm_capture_ready - check whether the capture buffer is available
- * @substream: the pcm substream instance
- *
- * Checks whether enough capture data is available on the capture buffer.
- *
- * Returns non-zero if available, or zero if not.
- */
-int snd_pcm_capture_ready(snd_pcm_substream_t *substream)
-{
-	snd_pcm_runtime_t *runtime = substream->runtime;
-	return snd_pcm_capture_avail(runtime) >= runtime->control->avail_min;
-}
-
-/**
- * snd_pcm_playback_data - check whether any data exists on the playback buffer
- * @substream: the pcm substream instance
- *
- * Checks whether any data exists on the playback buffer. If stop_threshold
- * is bigger or equal to boundary, then this function returns always non-zero.
- *
- * Returns non-zero if exists, or zero if not.
- */
-int snd_pcm_playback_data(snd_pcm_substream_t *substream)
-{
-	snd_pcm_runtime_t *runtime = substream->runtime;
-	
-	if (runtime->stop_threshold >= runtime->boundary)
-		return 1;
-	return snd_pcm_playback_avail(runtime) < runtime->buffer_size;
-}
-
-/**
- * snd_pcm_playback_empty - check whether the playback buffer is empty
- * @substream: the pcm substream instance
- *
- * Checks whether the playback buffer is empty.
- *
- * Returns non-zero if empty, or zero if not.
- */
-int snd_pcm_playback_empty(snd_pcm_substream_t *substream)
-{
-	snd_pcm_runtime_t *runtime = substream->runtime;
-	return snd_pcm_playback_avail(runtime) >= runtime->buffer_size;
-}
-
-/**
- * snd_pcm_capture_empty - check whether the capture buffer is empty
- * @substream: the pcm substream instance
- *
- * Checks whether the capture buffer is empty.
- *
- * Returns non-zero if empty, or zero if not.
- */
-int snd_pcm_capture_empty(snd_pcm_substream_t *substream)
-{
-	snd_pcm_runtime_t *runtime = substream->runtime;
-	return snd_pcm_capture_avail(runtime) == 0;
-}
 
 static void snd_pcm_system_tick_set(snd_pcm_substream_t *substream, 
 				    unsigned long ticks)
@@ -2032,12 +1989,12 @@ void snd_pcm_period_elapsed(snd_pcm_substream_t *substream)
 
 static int snd_pcm_lib_write_transfer(snd_pcm_substream_t *substream,
 				      unsigned int hwoff,
-				      void *data, unsigned int off,
+				      unsigned long data, unsigned int off,
 				      snd_pcm_uframes_t frames)
 {
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	int err;
-	char *buf = (char *) data + frames_to_bytes(runtime, off);
+	char __user *buf = (char __user *) data + frames_to_bytes(runtime, off);
 	if (substream->ops->copy) {
 		if ((err = substream->ops->copy(substream, -1, hwoff, buf, frames)) < 0)
 			return err;
@@ -2051,10 +2008,12 @@ static int snd_pcm_lib_write_transfer(snd_pcm_substream_t *substream,
 }
  
 typedef int (*transfer_f)(snd_pcm_substream_t *substream, unsigned int hwoff,
-			  void *data, unsigned int off, snd_pcm_uframes_t size);
+			  unsigned long data, unsigned int off,
+			  snd_pcm_uframes_t size);
 
 static snd_pcm_sframes_t snd_pcm_lib_write1(snd_pcm_substream_t *substream, 
-					    const void *data, snd_pcm_uframes_t size,
+					    unsigned long data,
+					    snd_pcm_uframes_t size,
 					    int nonblock,
 					    transfer_f transfer)
 {
@@ -2169,7 +2128,7 @@ static snd_pcm_sframes_t snd_pcm_lib_write1(snd_pcm_substream_t *substream,
 		appl_ptr = runtime->control->appl_ptr;
 		appl_ofs = appl_ptr % runtime->buffer_size;
 		snd_pcm_stream_unlock_irq(substream);
-		if ((err = transfer(substream, appl_ofs, (void *)data, offset, frames)) < 0)
+		if ((err = transfer(substream, appl_ofs, data, offset, frames)) < 0)
 			goto _end;
 		snd_pcm_stream_lock_irq(substream);
 		switch (runtime->status->state) {
@@ -2210,7 +2169,7 @@ static snd_pcm_sframes_t snd_pcm_lib_write1(snd_pcm_substream_t *substream,
 	return xfer > 0 ? (snd_pcm_sframes_t)xfer : err;
 }
 
-snd_pcm_sframes_t snd_pcm_lib_write(snd_pcm_substream_t *substream, const void *buf, snd_pcm_uframes_t size)
+snd_pcm_sframes_t snd_pcm_lib_write(snd_pcm_substream_t *substream, const void __user *buf, snd_pcm_uframes_t size)
 {
 	snd_pcm_runtime_t *runtime;
 	int nonblock;
@@ -2239,18 +2198,18 @@ snd_pcm_sframes_t snd_pcm_lib_write(snd_pcm_substream_t *substream, const void *
 	if (runtime->access != SNDRV_PCM_ACCESS_RW_INTERLEAVED &&
 	    runtime->channels > 1)
 		return -EINVAL;
-	return snd_pcm_lib_write1(substream, buf, size, nonblock,
+	return snd_pcm_lib_write1(substream, (unsigned long)buf, size, nonblock,
 				  snd_pcm_lib_write_transfer);
 }
 
 static int snd_pcm_lib_writev_transfer(snd_pcm_substream_t *substream,
 				       unsigned int hwoff,
-				       void *data, unsigned int off,
+				       unsigned long data, unsigned int off,
 				       snd_pcm_uframes_t frames)
 {
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	int err;
-	void **bufs = data;
+	void __user **bufs = (void __user **)data;
 	int channels = runtime->channels;
 	int c;
 	if (substream->ops->copy) {
@@ -2260,7 +2219,7 @@ static int snd_pcm_lib_writev_transfer(snd_pcm_substream_t *substream,
 				if ((err = substream->ops->silence(substream, c, hwoff, frames)) < 0)
 					return err;
 			} else {
-				char *buf = *bufs + samples_to_bytes(runtime, off);
+				char __user *buf = *bufs + samples_to_bytes(runtime, off);
 				if ((err = substream->ops->copy(substream, c, hwoff, buf, frames)) < 0)
 					return err;
 			}
@@ -2274,7 +2233,7 @@ static int snd_pcm_lib_writev_transfer(snd_pcm_substream_t *substream,
 			if (*bufs == NULL) {
 				snd_pcm_format_set_silence(runtime->format, hwbuf, frames);
 			} else {
-				char *buf = *bufs + samples_to_bytes(runtime, off);
+				char __user *buf = *bufs + samples_to_bytes(runtime, off);
 				if (copy_from_user(hwbuf, buf, samples_to_bytes(runtime, frames)))
 					return -EFAULT;
 			}
@@ -2283,7 +2242,8 @@ static int snd_pcm_lib_writev_transfer(snd_pcm_substream_t *substream,
 	return 0;
 }
  
-snd_pcm_sframes_t snd_pcm_lib_writev(snd_pcm_substream_t *substream, void **bufs,
+snd_pcm_sframes_t snd_pcm_lib_writev(snd_pcm_substream_t *substream,
+				     void __user **bufs,
 				     snd_pcm_uframes_t frames)
 {
 	snd_pcm_runtime_t *runtime;
@@ -2312,18 +2272,18 @@ snd_pcm_sframes_t snd_pcm_lib_writev(snd_pcm_substream_t *substream, void **bufs
 
 	if (runtime->access != SNDRV_PCM_ACCESS_RW_NONINTERLEAVED)
 		return -EINVAL;
-	return snd_pcm_lib_write1(substream, bufs, frames, nonblock,
-				  snd_pcm_lib_writev_transfer);
+	return snd_pcm_lib_write1(substream, (unsigned long)bufs, frames,
+				  nonblock, snd_pcm_lib_writev_transfer);
 }
 
 static int snd_pcm_lib_read_transfer(snd_pcm_substream_t *substream, 
 				     unsigned int hwoff,
-				     void *data, unsigned int off,
+				     unsigned long data, unsigned int off,
 				     snd_pcm_uframes_t frames)
 {
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	int err;
-	char *buf = (char *) data + frames_to_bytes(runtime, off);
+	char __user *buf = (char __user *) data + frames_to_bytes(runtime, off);
 	if (substream->ops->copy) {
 		if ((err = substream->ops->copy(substream, -1, hwoff, buf, frames)) < 0)
 			return err;
@@ -2336,7 +2296,10 @@ static int snd_pcm_lib_read_transfer(snd_pcm_substream_t *substream,
 	return 0;
 }
 
-static snd_pcm_sframes_t snd_pcm_lib_read1(snd_pcm_substream_t *substream, void *data, snd_pcm_uframes_t size, int nonblock,
+static snd_pcm_sframes_t snd_pcm_lib_read1(snd_pcm_substream_t *substream,
+					   unsigned long data,
+					   snd_pcm_uframes_t size,
+					   int nonblock,
 					   transfer_f transfer)
 {
 	snd_pcm_runtime_t *runtime = substream->runtime;
@@ -2464,7 +2427,7 @@ static snd_pcm_sframes_t snd_pcm_lib_read1(snd_pcm_substream_t *substream, void 
 		appl_ptr = runtime->control->appl_ptr;
 		appl_ofs = appl_ptr % runtime->buffer_size;
 		snd_pcm_stream_unlock_irq(substream);
-		if ((err = transfer(substream, appl_ofs, (void *)data, offset, frames)) < 0)
+		if ((err = transfer(substream, appl_ofs, data, offset, frames)) < 0)
 			goto _end;
 		snd_pcm_stream_lock_irq(substream);
 		switch (runtime->status->state) {
@@ -2499,7 +2462,7 @@ static snd_pcm_sframes_t snd_pcm_lib_read1(snd_pcm_substream_t *substream, void 
 	return xfer > 0 ? (snd_pcm_sframes_t)xfer : err;
 }
 
-snd_pcm_sframes_t snd_pcm_lib_read(snd_pcm_substream_t *substream, void *buf, snd_pcm_uframes_t size)
+snd_pcm_sframes_t snd_pcm_lib_read(snd_pcm_substream_t *substream, void __user *buf, snd_pcm_uframes_t size)
 {
 	snd_pcm_runtime_t *runtime;
 	int nonblock;
@@ -2526,22 +2489,22 @@ snd_pcm_sframes_t snd_pcm_lib_read(snd_pcm_substream_t *substream, void *buf, sn
 #endif
 	if (runtime->access != SNDRV_PCM_ACCESS_RW_INTERLEAVED)
 		return -EINVAL;
-	return snd_pcm_lib_read1(substream, buf, size, nonblock, snd_pcm_lib_read_transfer);
+	return snd_pcm_lib_read1(substream, (unsigned long)buf, size, nonblock, snd_pcm_lib_read_transfer);
 }
 
 static int snd_pcm_lib_readv_transfer(snd_pcm_substream_t *substream,
 				      unsigned int hwoff,
-				      void *data, unsigned int off,
+				      unsigned long data, unsigned int off,
 				      snd_pcm_uframes_t frames)
 {
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	int err;
-	void **bufs = data;
+	void __user **bufs = (void __user **)data;
 	int channels = runtime->channels;
 	int c;
 	if (substream->ops->copy) {
 		for (c = 0; c < channels; ++c, ++bufs) {
-			char *buf;
+			char __user *buf;
 			if (*bufs == NULL)
 				continue;
 			buf = *bufs + samples_to_bytes(runtime, off);
@@ -2552,7 +2515,8 @@ static int snd_pcm_lib_readv_transfer(snd_pcm_substream_t *substream,
 		snd_pcm_uframes_t dma_csize = runtime->dma_bytes / channels;
 		snd_assert(runtime->dma_area, return -EFAULT);
 		for (c = 0; c < channels; ++c, ++bufs) {
-			char *hwbuf, *buf;
+			char *hwbuf;
+			char __user *buf;
 			if (*bufs == NULL)
 				continue;
 
@@ -2565,7 +2529,8 @@ static int snd_pcm_lib_readv_transfer(snd_pcm_substream_t *substream,
 	return 0;
 }
  
-snd_pcm_sframes_t snd_pcm_lib_readv(snd_pcm_substream_t *substream, void **bufs,
+snd_pcm_sframes_t snd_pcm_lib_readv(snd_pcm_substream_t *substream,
+				    void __user **bufs,
 				    snd_pcm_uframes_t frames)
 {
 	snd_pcm_runtime_t *runtime;
@@ -2594,7 +2559,7 @@ snd_pcm_sframes_t snd_pcm_lib_readv(snd_pcm_substream_t *substream, void **bufs,
 
 	if (runtime->access != SNDRV_PCM_ACCESS_RW_NONINTERLEAVED)
 		return -EINVAL;
-	return snd_pcm_lib_read1(substream, bufs, frames, nonblock, snd_pcm_lib_readv_transfer);
+	return snd_pcm_lib_read1(substream, (unsigned long)bufs, frames, nonblock, snd_pcm_lib_readv_transfer);
 }
 
 /*
@@ -2604,7 +2569,6 @@ snd_pcm_sframes_t snd_pcm_lib_readv(snd_pcm_substream_t *substream, void **bufs,
 EXPORT_SYMBOL(snd_interval_refine);
 EXPORT_SYMBOL(snd_interval_list);
 EXPORT_SYMBOL(snd_interval_ratnum);
-EXPORT_SYMBOL(snd_interval_ratden);
 EXPORT_SYMBOL(snd_interval_muldivk);
 EXPORT_SYMBOL(snd_interval_mulkdiv);
 EXPORT_SYMBOL(snd_interval_div);
@@ -2621,6 +2585,7 @@ EXPORT_SYMBOL(snd_pcm_hw_param_last);
 EXPORT_SYMBOL(snd_pcm_hw_param_near);
 EXPORT_SYMBOL(snd_pcm_hw_param_set);
 EXPORT_SYMBOL(snd_pcm_hw_refine);
+EXPORT_SYMBOL(snd_pcm_hw_params);
 EXPORT_SYMBOL(snd_pcm_hw_constraints_init);
 EXPORT_SYMBOL(snd_pcm_hw_constraints_complete);
 EXPORT_SYMBOL(snd_pcm_hw_constraint_list);
@@ -2635,10 +2600,6 @@ EXPORT_SYMBOL(snd_pcm_hw_rule_add);
 EXPORT_SYMBOL(snd_pcm_set_ops);
 EXPORT_SYMBOL(snd_pcm_set_sync);
 EXPORT_SYMBOL(snd_pcm_lib_ioctl);
-EXPORT_SYMBOL(snd_pcm_playback_ready);
-EXPORT_SYMBOL(snd_pcm_capture_ready);
-EXPORT_SYMBOL(snd_pcm_playback_data);
-EXPORT_SYMBOL(snd_pcm_capture_empty);
 EXPORT_SYMBOL(snd_pcm_stop);
 EXPORT_SYMBOL(snd_pcm_period_elapsed);
 EXPORT_SYMBOL(snd_pcm_lib_write);
@@ -2648,24 +2609,9 @@ EXPORT_SYMBOL(snd_pcm_lib_readv);
 EXPORT_SYMBOL(snd_pcm_lib_buffer_bytes);
 EXPORT_SYMBOL(snd_pcm_lib_period_bytes);
 /* pcm_memory.c */
-EXPORT_SYMBOL(snd_pcm_lib_preallocate_free);
 EXPORT_SYMBOL(snd_pcm_lib_preallocate_free_for_all);
 EXPORT_SYMBOL(snd_pcm_lib_preallocate_pages);
 EXPORT_SYMBOL(snd_pcm_lib_preallocate_pages_for_all);
+EXPORT_SYMBOL(snd_pcm_sgbuf_ops_page);
 EXPORT_SYMBOL(snd_pcm_lib_malloc_pages);
 EXPORT_SYMBOL(snd_pcm_lib_free_pages);
-#ifdef CONFIG_ISA
-EXPORT_SYMBOL(snd_pcm_lib_preallocate_isa_pages);
-EXPORT_SYMBOL(snd_pcm_lib_preallocate_isa_pages_for_all);
-#endif
-#ifdef CONFIG_PCI
-EXPORT_SYMBOL(snd_pcm_lib_preallocate_pci_pages);
-EXPORT_SYMBOL(snd_pcm_lib_preallocate_pci_pages_for_all);
-EXPORT_SYMBOL(snd_pcm_lib_preallocate_sg_pages);
-EXPORT_SYMBOL(snd_pcm_lib_preallocate_sg_pages_for_all);
-EXPORT_SYMBOL(snd_pcm_sgbuf_ops_page);
-#endif
-#ifdef CONFIG_SBUS
-EXPORT_SYMBOL(snd_pcm_lib_preallocate_sbus_pages);
-EXPORT_SYMBOL(snd_pcm_lib_preallocate_sbus_pages_for_all);
-#endif

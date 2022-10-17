@@ -11,12 +11,11 @@
  * changed to eliminate RPXLite references.
  */
 
+#include <linux/config.h>
 #include <linux/kernel.h>
-#include <linux/ioport.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/stddef.h>
-#include <linux/parport.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-8xx.h>
 #include <asm/mpc8xx.h>
@@ -51,8 +50,8 @@ rpx_iic_init(struct i2c_algo_8xx_data *data)
 	/* Allocate space for two transmit and two receive buffer
 	 * descriptors in the DP ram.
 	 */
-	data->dp_addr = m8xx_cpm_dpalloc(sizeof(cbd_t) * 4);
-
+	data->dp_addr = cpm_dpalloc(sizeof(cbd_t) * 4, 8);
+		
 	/* ptr to i2c area */
 	data->i2c = (i2c8xx_t *)&(((immap_t *)IMAP_ADDR)->im_i2c);
 }
@@ -84,7 +83,7 @@ int __init i2c_rpx_init(void)
 	rpx_iic_init(&rpx_data);
 
 	if (i2c_8xx_add_bus(&rpx_ops) < 0) {
-		printk("i2c-rpx: Unable to register with I2C\n");
+		printk(KERN_ERR "i2c-rpx: Unable to register with I2C\n");
 		return -ENODEV;
 	}
 

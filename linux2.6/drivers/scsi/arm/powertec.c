@@ -26,7 +26,7 @@
 #include <asm/pgtable.h>
 
 #include "../scsi.h"
-#include "../hosts.h"
+#include <scsi/scsi_host.h>
 #include "fas216.h"
 #include "scsi.h"
 
@@ -318,22 +318,20 @@ powertecscsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 	unsigned char *base;
 	int ret;
 
+	ret = ecard_request_resources(ec);
+	if (ret)
+		goto out;
+
 	resbase = ecard_resource_start(ec, ECARD_RES_IOCFAST);
 	reslen = ecard_resource_len(ec, ECARD_RES_IOCFAST);
-
-	if (!request_mem_region(resbase, reslen, "powertecscsi")) {
-		ret = -EBUSY;
-		goto out;
-	}
-
 	base = ioremap(resbase, reslen);
 	if (!base) {
 		ret = -ENOMEM;
 		goto out_region;
 	}
 
-	host = scsi_register(&powertecscsi_template,
-			     sizeof (struct powertec_info));
+	host = scsi_host_alloc(&powertecscsi_template,
+			       sizeof (struct powertec_info));
 	if (!host) {
 		ret = -ENOMEM;
 		goto out_unmap;
@@ -407,13 +405,13 @@ powertecscsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 
  out_free:
 	device_remove_file(&ec->dev, &dev_attr_bus_term);
-	scsi_unregister(host);
+	scsi_host_put(host);
 
  out_unmap:
 	iounmap(base);
 
  out_region:
-	release_mem_region(resbase, reslen);
+	ecard_release_resources(ec);
 
  out:
 	return ret;
@@ -423,7 +421,6 @@ static void __devexit powertecscsi_remove(struct expansion_card *ec)
 {
 	struct Scsi_Host *host = ecard_get_drvdata(ec);
 	struct powertecscsi_info *info = (struct powertecscsi_info *)host->hostdata;
-	unsigned long resbase, reslen;
 
 	ecard_set_drvdata(ec, NULL);
 	fas216_remove(host);
@@ -436,13 +433,9 @@ static void __devexit powertecscsi_remove(struct expansion_card *ec)
 
 	iounmap((void *)host->base);
 
-	resbase = ecard_resource_start(ec, ECARD_RES_IOCFAST);
-	reslen = ecard_resource_len(ec, ECARD_RES_IOCFAST);
-
-	release_mem_region(resbase, reslen);
-
 	fas216_release(host);
-	scsi_unregister(host);
+	scsi_host_put(host);
+	ecard_release_resources(ec);
 }
 
 static const struct ecard_id powertecscsi_cids[] = {

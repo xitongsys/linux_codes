@@ -11,7 +11,6 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
-#define __KERNEL_SYSCALLS__
 #include <stdarg.h>
 
 #include <linux/errno.h>
@@ -23,13 +22,13 @@
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/stddef.h>
-#include <linux/unistd.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/interrupt.h>
 #include <linux/config.h>
+#include <linux/utsname.h>
 #include <linux/delay.h>
 #include <linux/reboot.h>
 #include <linux/init.h>
@@ -58,6 +57,9 @@ asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
 
 int hlt_counter;
 
+unsigned long boot_option_idle_override = 0;
+EXPORT_SYMBOL(boot_option_idle_override);
+
 /*
  * Return saved PC of a blocked thread.
  */
@@ -70,6 +72,7 @@ unsigned long thread_saved_pc(struct task_struct *tsk)
  * Powermanagement idle function, if any..
  */
 void (*pm_idle)(void);
+static cpumask_t cpu_idle_map;
 
 void disable_hlt(void)
 {
@@ -91,12 +94,14 @@ EXPORT_SYMBOL(enable_hlt);
  */
 void default_idle(void)
 {
-	if (!hlt_counter && current_cpu_data.hlt_works_ok) {
+	if (!hlt_counter && boot_cpu_data.hlt_works_ok) {
 		local_irq_disable();
 		if (!need_resched())
 			safe_halt();
 		else
 			local_irq_enable();
+	} else {
+		cpu_relax();
 	}
 }
 
@@ -140,20 +145,43 @@ static void poll_idle (void)
  */
 void cpu_idle (void)
 {
+	int cpu = _smp_processor_id();
+
 	/* endless idle loop with no priority at all */
 	while (1) {
 		while (!need_resched()) {
-			void (*idle)(void) = pm_idle;
+			void (*idle)(void);
+
+			if (cpu_isset(cpu, cpu_idle_map))
+				cpu_clear(cpu, cpu_idle_map);
+			rmb();
+			idle = pm_idle;
 
 			if (!idle)
 				idle = default_idle;
 
-			irq_stat[smp_processor_id()].idle_timestamp = jiffies;
+			irq_stat[cpu].idle_timestamp = jiffies;
 			idle();
 		}
 		schedule();
 	}
 }
+
+void cpu_idle_wait(void)
+{
+	int cpu;
+	cpumask_t map;
+
+	for_each_online_cpu(cpu)
+		cpu_set(cpu, cpu_idle_map);
+
+	wmb();
+	do {
+		ssleep(1);
+		cpus_and(map, cpu_idle_map, cpu_online_map);
+	} while (!cpus_empty(map));
+}
+EXPORT_SYMBOL_GPL(cpu_idle_wait);
 
 /*
  * This uses new MONITOR/MWAIT instructions on P4 processors with PNI,
@@ -184,18 +212,13 @@ void __init select_idle_routine(const struct cpuinfo_x86 *c)
 		printk("monitor/mwait feature present.\n");
 		/*
 		 * Skip, if setup has overridden idle.
-		 * Also, take care of system with asymmetric CPUs.
-		 * Use, mwait_idle only if all cpus support it.
-		 * If not, we fallback to default_idle()
+		 * One CPU supports mwait => All CPUs supports mwait
 		 */
 		if (!pm_idle) {
 			printk("using mwait in idle threads.\n");
 			pm_idle = mwait_idle;
 		}
-		return;
 	}
-	pm_idle = default_idle;
-	return;
 }
 
 static int __init idle_setup (char *str)
@@ -203,11 +226,16 @@ static int __init idle_setup (char *str)
 	if (!strncmp(str, "poll", 4)) {
 		printk("using polling idle threads.\n");
 		pm_idle = poll_idle;
+#ifdef CONFIG_X86_SMP
+		if (smp_num_siblings > 1)
+			printk("WARNING: polling idle and HT enabled, performance may degrade.\n");
+#endif
 	} else if (!strncmp(str, "halt", 4)) {
 		printk("using halt in idle threads.\n");
 		pm_idle = default_idle;
 	}
 
+	boot_option_idle_override = 1;
 	return 1;
 }
 
@@ -224,7 +252,8 @@ void show_regs(struct pt_regs * regs)
 
 	if (regs->xcs & 3)
 		printk(" ESP: %04x:%08lx",0xffff & regs->xss,regs->esp);
-	printk(" EFLAGS: %08lx    %s\n",regs->eflags, print_tainted());
+	printk(" EFLAGS: %08lx    %s  (%s)\n",
+	       regs->eflags, print_tainted(), system_utsname.release);
 	printk("EAX: %08lx EBX: %08lx ECX: %08lx EDX: %08lx\n",
 		regs->eax,regs->ebx,regs->ecx,regs->edx);
 	printk("ESI: %08lx EDI: %08lx EBP: %08lx",
@@ -252,13 +281,15 @@ void show_regs(struct pt_regs * regs)
  * the "args".
  */
 extern void kernel_thread_helper(void);
-__asm__(".align 4\n"
+__asm__(".section .text\n"
+	".align 4\n"
 	"kernel_thread_helper:\n\t"
 	"movl %edx,%eax\n\t"
 	"pushl %edx\n\t"
 	"call *%ebx\n\t"
 	"pushl %eax\n\t"
-	"call do_exit");
+	"call do_exit\n"
+	".previous");
 
 /*
  * Create a kernel thread
@@ -277,7 +308,7 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	regs.orig_eax = -1;
 	regs.eip = (unsigned long) kernel_thread_helper;
 	regs.xcs = __KERNEL_CS;
-	regs.eflags = 0x286;
+	regs.eflags = X86_EFLAGS_IF | X86_EFLAGS_SF | X86_EFLAGS_PF | 0x2;
 
 	/* Ok, create the new process.. */
 	return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0, &regs, 0, NULL, NULL);
@@ -289,11 +320,24 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 void exit_thread(void)
 {
 	struct task_struct *tsk = current;
+	struct thread_struct *t = &tsk->thread;
 
 	/* The process may have allocated an io port bitmap... nuke it. */
-	if (unlikely(NULL != tsk->thread.io_bitmap_ptr)) {
-		kfree(tsk->thread.io_bitmap_ptr);
-		tsk->thread.io_bitmap_ptr = NULL;
+	if (unlikely(NULL != t->io_bitmap_ptr)) {
+		int cpu = get_cpu();
+		struct tss_struct *tss = &per_cpu(init_tss, cpu);
+
+		kfree(t->io_bitmap_ptr);
+		t->io_bitmap_ptr = NULL;
+		/*
+		 * Careful, clear this in the TSS too:
+		 */
+		memset(tss->io_bitmap, 0xff, tss->io_bitmap_max);
+		t->io_bitmap_max = 0;
+		tss->io_bitmap_owner = NULL;
+		tss->io_bitmap_max = 0;
+		tss->io_bitmap_base = INVALID_IO_BITMAP_OFFSET;
+		put_cpu();
 	}
 }
 
@@ -307,7 +351,7 @@ void flush_thread(void)
 	 * Forget coprocessor state..
 	 */
 	clear_fpu(tsk);
-	tsk->used_math = 0;
+	clear_used_math();
 }
 
 void release_thread(struct task_struct *dead_task)
@@ -323,7 +367,7 @@ void release_thread(struct task_struct *dead_task)
 		}
 	}
 
-	release_x86_irqs(dead_task);
+	release_vm86_irqs(dead_task);
 }
 
 /*
@@ -344,10 +388,9 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 	int err;
 
 	childregs = ((struct pt_regs *) (THREAD_SIZE + (unsigned long) p->thread_info)) - 1;
-	struct_cpy(childregs, regs);
+	*childregs = *regs;
 	childregs->eax = 0;
 	childregs->esp = esp;
-	p->set_child_tid = p->clear_child_tid = NULL;
 
 	p->thread.esp = (unsigned long) childregs;
 	p->thread.esp0 = (unsigned long) (childregs+1);
@@ -360,8 +403,10 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 	tsk = current;
 	if (unlikely(NULL != tsk->thread.io_bitmap_ptr)) {
 		p->thread.io_bitmap_ptr = kmalloc(IO_BITMAP_BYTES, GFP_KERNEL);
-		if (!p->thread.io_bitmap_ptr)
+		if (!p->thread.io_bitmap_ptr) {
+			p->thread.io_bitmap_max = 0;
 			return -ENOMEM;
+		}
 		memcpy(p->thread.io_bitmap_ptr, tsk->thread.io_bitmap_ptr,
 			IO_BITMAP_BYTES);
 	}
@@ -392,8 +437,10 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 
 	err = 0;
  out:
-	if (err && p->thread.io_bitmap_ptr)
+	if (err && p->thread.io_bitmap_ptr) {
 		kfree(p->thread.io_bitmap_ptr);
+		p->thread.io_bitmap_max = 0;
+	}
 	return err;
 }
 
@@ -458,6 +505,37 @@ int dump_task_regs(struct task_struct *tsk, elf_gregset_t *regs)
 	return 1;
 }
 
+static inline void
+handle_io_bitmap(struct thread_struct *next, struct tss_struct *tss)
+{
+	if (!next->io_bitmap_ptr) {
+		/*
+		 * Disable the bitmap via an invalid offset. We still cache
+		 * the previous bitmap owner and the IO bitmap contents:
+		 */
+		tss->io_bitmap_base = INVALID_IO_BITMAP_OFFSET;
+		return;
+	}
+	if (likely(next == tss->io_bitmap_owner)) {
+		/*
+		 * Previous owner of the bitmap (hence the bitmap content)
+		 * matches the next task, we dont have to do anything but
+		 * to set a valid offset in the TSS:
+		 */
+		tss->io_bitmap_base = IO_BITMAP_OFFSET;
+		return;
+	}
+	/*
+	 * Lazy TSS's I/O bitmap copy. We set an invalid offset here
+	 * and we let the task to get a GPF in case an I/O instruction
+	 * is performed.  The handler of the GPF will verify that the
+	 * faulting task has a valid I/O bitmap and, it true, does the
+	 * real copy and restart the instruction.  This will save us
+	 * redundant copies when the currently switched task does not
+	 * perform any I/O during its timeslice.
+	 */
+	tss->io_bitmap_base = INVALID_IO_BITMAP_OFFSET_LAZY;
+}
 /*
  * This special macro can be used to load a debugging register
  */
@@ -493,12 +571,12 @@ int dump_task_regs(struct task_struct *tsk, elf_gregset_t *regs)
  * the task-switch, and shows up in ret_from_fork in entry.S,
  * for example.
  */
-struct task_struct * __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
+struct task_struct fastcall * __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 {
 	struct thread_struct *prev = &prev_p->thread,
 				 *next = &next_p->thread;
 	int cpu = smp_processor_id();
-	struct tss_struct *tss = init_tss + cpu;
+	struct tss_struct *tss = &per_cpu(init_tss, cpu);
 
 	/* never put a printk in __switch_to... printk() calls wake_up*() indirectly */
 
@@ -507,7 +585,7 @@ struct task_struct * __switch_to(struct task_struct *prev_p, struct task_struct 
 	/*
 	 * Reload esp0, LDT and the page table pointer:
 	 */
-	load_esp0(tss, next->esp0);
+	load_esp0(tss, next);
 
 	/*
 	 * Load the per-thread Thread-Local Storage descriptor.
@@ -542,28 +620,9 @@ struct task_struct * __switch_to(struct task_struct *prev_p, struct task_struct 
 		loaddebug(next, 7);
 	}
 
-	if (unlikely(prev->io_bitmap_ptr || next->io_bitmap_ptr)) {
-		if (next->io_bitmap_ptr) {
-			/*
-			 * 4 cachelines copy ... not good, but not that
-			 * bad either. Anyone got something better?
-			 * This only affects processes which use ioperm().
-			 * [Putting the TSSs into 4k-tlb mapped regions
-			 * and playing VM tricks to switch the IO bitmap
-			 * is not really acceptable.]
-			 */
-			memcpy(tss->io_bitmap, next->io_bitmap_ptr,
-				IO_BITMAP_BYTES);
-			tss->io_bitmap_base = IO_BITMAP_OFFSET;
-		} else
-			/*
-			 * a bitmap offset pointing outside of the TSS limit
-			 * causes a nicely controllable SIGSEGV if a process
-			 * tries to use a port IO instruction. The first
-			 * sys_ioperm() call sets up the bitmap properly.
-			 */
-			tss->io_bitmap_base = INVALID_IO_BITMAP_OFFSET;
-	}
+	if (unlikely(prev->io_bitmap_ptr || next->io_bitmap_ptr))
+		handle_io_bitmap(next, tss);
+
 	return prev_p;
 }
 
@@ -584,7 +643,7 @@ asmlinkage int sys_clone(struct pt_regs regs)
 	child_tidptr = (int __user *)regs.edi;
 	if (!newsp)
 		newsp = regs.esp;
-	return do_fork(clone_flags & ~CLONE_IDLETASK, newsp, &regs, 0, parent_tidptr, child_tidptr);
+	return do_fork(clone_flags, newsp, &regs, 0, parent_tidptr, child_tidptr);
 }
 
 /*
@@ -619,7 +678,9 @@ asmlinkage int sys_execve(struct pt_regs regs)
 			(char __user * __user *) regs.edx,
 			&regs);
 	if (error == 0) {
+		task_lock(current);
 		current->ptrace &= ~PT_DTRACE;
+		task_unlock(current);
 		/* Make sure we don't return using sysenter.. */
 		set_thread_flag(TIF_IRET);
 	}
@@ -628,13 +689,8 @@ out:
 	return error;
 }
 
-/*
- * These bracket the sleeping functions..
- */
-extern void scheduling_functions_start_here(void);
-extern void scheduling_functions_end_here(void);
-#define first_sched	((unsigned long) scheduling_functions_start_here)
-#define last_sched	((unsigned long) scheduling_functions_end_here)
+#define top_esp                (THREAD_SIZE - sizeof(unsigned long))
+#define top_ebp                (THREAD_SIZE - 2*sizeof(unsigned long))
 
 unsigned long get_wchan(struct task_struct *p)
 {
@@ -645,22 +701,20 @@ unsigned long get_wchan(struct task_struct *p)
 		return 0;
 	stack_page = (unsigned long)p->thread_info;
 	esp = p->thread.esp;
-	if (!stack_page || esp < stack_page || esp > 8188+stack_page)
+	if (!stack_page || esp < stack_page || esp > top_esp+stack_page)
 		return 0;
 	/* include/asm-i386/system.h:switch_to() pushes ebp last. */
 	ebp = *(unsigned long *) esp;
 	do {
-		if (ebp < stack_page || ebp > 8184+stack_page)
+		if (ebp < stack_page || ebp > top_ebp+stack_page)
 			return 0;
 		eip = *(unsigned long *) (ebp+4);
-		if (eip < first_sched || eip >= last_sched)
+		if (!in_sched_functions(eip))
 			return eip;
 		ebp = *(unsigned long *) ebp;
 	} while (count++ < 16);
 	return 0;
 }
-#undef last_sched
-#undef first_sched
 
 /*
  * sys_alloc_thread_area: get a yet unused TLS descriptor index.
@@ -739,7 +793,7 @@ asmlinkage int sys_set_thread_area(struct user_desc __user *u_info)
 	((desc)->a & 0x0ffff) | \
 	 ((desc)->b & 0xf0000) )
 	
-#define GET_32BIT(desc)		(((desc)->b >> 23) & 1)
+#define GET_32BIT(desc)		(((desc)->b >> 22) & 1)
 #define GET_CONTENTS(desc)	(((desc)->b >> 10) & 3)
 #define GET_WRITABLE(desc)	(((desc)->b >>  9) & 1)
 #define GET_LIMIT_PAGES(desc)	(((desc)->b >> 23) & 1)

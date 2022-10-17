@@ -19,8 +19,8 @@
 #include <linux/buffer_head.h>
 #include <linux/vfs.h>
 #include <linux/parser.h>
+#include <linux/bitops.h>
 
-#include <asm/bitops.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 
@@ -62,7 +62,7 @@ static int adfs_checkdiscrecord(struct adfs_discrecord *dr)
 	 * are unable to represent sector offsets in
 	 * 32 bits.  This works out at 2.0 TB.
 	 */
-	if (dr->disc_size_high >> dr->log2secsize)
+	if (le32_to_cpu(dr->disc_size_high) >> dr->log2secsize)
 		return 1;
 
 	/* idlen must be no greater than 19 v2 [1.0] */
@@ -192,6 +192,7 @@ static int parse_options(struct super_block *sb, char *options)
 
 static int adfs_remount(struct super_block *sb, int *flags, char *data)
 {
+	*flags |= MS_NODIRATIME;
 	return parse_options(sb, data);
 }
 
@@ -240,7 +241,7 @@ static int init_inodecache(void)
 {
 	adfs_inode_cachep = kmem_cache_create("adfs_inode_cache",
 					     sizeof(struct adfs_inode_info),
-					     0, SLAB_HWCACHE_ALIGN|SLAB_RECLAIM_ACCOUNT,
+					     0, SLAB_RECLAIM_ACCOUNT,
 					     init_once, NULL);
 	if (adfs_inode_cachep == NULL)
 		return -ENOMEM;
@@ -299,8 +300,8 @@ static struct adfs_discmap *adfs_read_map(struct super_block *sb, struct adfs_di
 	i = zone - 1;
 	dm[0].dm_startblk = 0;
 	dm[0].dm_startbit = ADFS_DR_SIZE_BITS;
-	dm[i].dm_endbit   = (dr->disc_size_high << (32 - dr->log2bpmb)) +
-			    (dr->disc_size >> dr->log2bpmb) +
+	dm[i].dm_endbit   = (le32_to_cpu(dr->disc_size_high) << (32 - dr->log2bpmb)) +
+			    (le32_to_cpu(dr->disc_size) >> dr->log2bpmb) +
 			    (ADFS_DR_SIZE_BITS - i * zone_size);
 
 	if (adfs_checkmap(sb, dm))
@@ -333,6 +334,9 @@ static int adfs_fill_super(struct super_block *sb, void *data, int silent)
 	struct object_info root_obj;
 	unsigned char *b_data;
 	struct adfs_sb_info *asb;
+	struct inode *root;
+
+	sb->s_flags |= MS_NODIRATIME;
 
 	asb = kmalloc(sizeof(*asb), GFP_KERNEL);
 	if (!asb)
@@ -435,7 +439,7 @@ static int adfs_fill_super(struct super_block *sb, void *data, int silent)
 	 * get the root_size from the disc record.
 	 */
 	if (asb->s_version) {
-		root_obj.size = dr->root_size;
+		root_obj.size = le32_to_cpu(dr->root_size);
 		asb->s_dir     = &adfs_fplus_dir_ops;
 		asb->s_namelen = ADFS_FPLUS_NAME_LEN;
 	} else {
@@ -443,10 +447,11 @@ static int adfs_fill_super(struct super_block *sb, void *data, int silent)
 		asb->s_namelen = ADFS_F_NAME_LEN;
 	}
 
-	sb->s_root = d_alloc_root(adfs_iget(sb, &root_obj));
+	root = adfs_iget(sb, &root_obj);
+	sb->s_root = d_alloc_root(root);
 	if (!sb->s_root) {
 		int i;
-
+		iput(root);
 		for (i = 0; i < asb->s_map_size; i++)
 			brelse(asb->s_map[i].dm_bh);
 		kfree(asb->s_map);

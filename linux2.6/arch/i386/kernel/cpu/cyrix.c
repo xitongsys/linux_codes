@@ -167,7 +167,10 @@ static void __init geode_configure(void)
 	unsigned long flags;
 	u8 ccr3, ccr4;
 	local_irq_save(flags);
-	
+
+	/* Suspend on halt power saving and enable #SUSP pin */
+	setCx86(CX86_CCR2, getCx86(CX86_CCR2) | 0x88);
+
 	ccr3 = getCx86(CX86_CCR3);
 	setCx86(CX86_CCR3, (ccr3 & 0x0f) | 0x10);	/* Enable */
 	
@@ -183,6 +186,14 @@ static void __init geode_configure(void)
 	local_irq_restore(flags);
 }
 
+
+#ifdef CONFIG_PCI
+static struct pci_device_id cyrix_55x0[] = {
+	{ PCI_DEVICE(PCI_VENDOR_ID_CYRIX, PCI_DEVICE_ID_CYRIX_5510) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_CYRIX, PCI_DEVICE_ID_CYRIX_5520) },
+	{ },
+};
+#endif
 
 static void __init init_cyrix(struct cpuinfo_x86 *c)
 {
@@ -271,8 +282,7 @@ static void __init init_cyrix(struct cpuinfo_x86 *c)
 		/*
 		 *  The 5510/5520 companion chips have a funky PIT.
 		 */  
-		if (pci_find_device(PCI_VENDOR_ID_CYRIX, PCI_DEVICE_ID_CYRIX_5510, NULL) ||
-		    pci_find_device(PCI_VENDOR_ID_CYRIX, PCI_DEVICE_ID_CYRIX_5520, NULL))
+		if (pci_dev_present(cyrix_55x0))
 			pit_latch_buggy = 1;
 
 		/* GXm supports extended cpuid levels 'ala' AMD */

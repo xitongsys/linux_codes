@@ -485,7 +485,7 @@ void ptrace_break(struct task_struct *tsk, struct pt_regs *regs)
 	info.si_signo = SIGTRAP;
 	info.si_errno = 0;
 	info.si_code  = TRAP_BRKPT;
-	info.si_addr  = (void *)instruction_pointer(regs);
+	info.si_addr  = (void __user *)instruction_pointer(regs);
 
 	force_sig_info(SIGTRAP, &info, tsk);
 }
@@ -526,7 +526,7 @@ core_initcall(ptrace_break_init);
  * actually access the pt_regs stored on the kernel stack.
  */
 static int ptrace_read_user(struct task_struct *tsk, unsigned long off,
-			    unsigned long *ret)
+			    unsigned long __user *ret)
 {
 	unsigned long tmp;
 
@@ -559,7 +559,7 @@ static int ptrace_write_user(struct task_struct *tsk, unsigned long off,
 /*
  * Get all user integer registers.
  */
-static int ptrace_getregs(struct task_struct *tsk, void *uregs)
+static int ptrace_getregs(struct task_struct *tsk, void __user *uregs)
 {
 	struct pt_regs *regs = get_user_regs(tsk);
 
@@ -569,7 +569,7 @@ static int ptrace_getregs(struct task_struct *tsk, void *uregs)
 /*
  * Set all user integer registers.
  */
-static int ptrace_setregs(struct task_struct *tsk, void *uregs)
+static int ptrace_setregs(struct task_struct *tsk, void __user *uregs)
 {
 	struct pt_regs newregs;
 	int ret;
@@ -591,7 +591,7 @@ static int ptrace_setregs(struct task_struct *tsk, void *uregs)
 /*
  * Get the child FPU state.
  */
-static int ptrace_getfpregs(struct task_struct *tsk, void *ufp)
+static int ptrace_getfpregs(struct task_struct *tsk, void __user *ufp)
 {
 	return copy_to_user(ufp, &tsk->thread_info->fpstate,
 			    sizeof(struct user_fp)) ? -EFAULT : 0;
@@ -600,10 +600,11 @@ static int ptrace_getfpregs(struct task_struct *tsk, void *ufp)
 /*
  * Set the child FPU state.
  */
-static int ptrace_setfpregs(struct task_struct *tsk, void *ufp)
+static int ptrace_setfpregs(struct task_struct *tsk, void __user *ufp)
 {
-	tsk->used_math = 1;
-	return copy_from_user(&tsk->thread_info->fpstate, ufp,
+	struct thread_info *thread = tsk->thread_info;
+	thread->used_cp[1] = thread->used_cp[2] = 1;
+	return copy_from_user(&thread->fpstate, ufp,
 			      sizeof(struct user_fp)) ? -EFAULT : 0;
 }
 
@@ -621,13 +622,13 @@ static int do_ptrace(int request, struct task_struct *child, long addr, long dat
 			ret = access_process_vm(child, addr, &tmp,
 						sizeof(unsigned long), 0);
 			if (ret == sizeof(unsigned long))
-				ret = put_user(tmp, (unsigned long *) data);
+				ret = put_user(tmp, (unsigned long __user *) data);
 			else
 				ret = -EIO;
 			break;
 
 		case PTRACE_PEEKUSR:
-			ret = ptrace_read_user(child, addr, (unsigned long *)data);
+			ret = ptrace_read_user(child, addr, (unsigned long __user *)data);
 			break;
 
 		/*
@@ -676,7 +677,7 @@ static int do_ptrace(int request, struct task_struct *child, long addr, long dat
 			/* make sure single-step breakpoint is gone. */
 			child->ptrace &= ~PT_SINGLESTEP;
 			ptrace_cancel_bpt(child);
-			if (child->state != TASK_ZOMBIE) {
+			if (child->exit_state != EXIT_ZOMBIE) {
 				child->exit_code = SIGKILL;
 				wake_up_process(child);
 			}
@@ -703,19 +704,24 @@ static int do_ptrace(int request, struct task_struct *child, long addr, long dat
 			break;
 
 		case PTRACE_GETREGS:
-			ret = ptrace_getregs(child, (void *)data);
+			ret = ptrace_getregs(child, (void __user *)data);
 			break;
 
 		case PTRACE_SETREGS:
-			ret = ptrace_setregs(child, (void *)data);
+			ret = ptrace_setregs(child, (void __user *)data);
 			break;
 
 		case PTRACE_GETFPREGS:
-			ret = ptrace_getfpregs(child, (void *)data);
+			ret = ptrace_getfpregs(child, (void __user *)data);
 			break;
 		
 		case PTRACE_SETFPREGS:
-			ret = ptrace_setfpregs(child, (void *)data);
+			ret = ptrace_setfpregs(child, (void __user *)data);
+			break;
+
+		case PTRACE_GET_THREAD_AREA:
+			ret = put_user(child->thread_info->tp_value,
+				       (unsigned long __user *) data);
 			break;
 
 		default:
@@ -791,11 +797,8 @@ asmlinkage void syscall_trace(int why, struct pt_regs *regs)
 
 	/* the 0x80 provides a way for the tracing parent to distinguish
 	   between a syscall stop and SIGTRAP delivery */
-	current->exit_code = SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
-					? 0x80 : 0);
-	current->state = TASK_STOPPED;
-	notify_parent(current, SIGCHLD);
-	schedule();
+	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
+				 ? 0x80 : 0));
 	/*
 	 * this isn't the same as continuing with a signal, but it will do
 	 * for normal use.  strace only continues with a signal if the

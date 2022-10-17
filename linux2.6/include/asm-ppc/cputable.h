@@ -21,6 +21,9 @@
 #define PPC_FEATURE_HAS_MMU		0x04000000
 #define PPC_FEATURE_HAS_4xxMAC		0x02000000
 #define PPC_FEATURE_UNIFIED_CACHE	0x01000000
+#define PPC_FEATURE_HAS_SPE		0x00800000
+#define PPC_FEATURE_HAS_EFP_SINGLE	0x00400000
+#define PPC_FEATURE_HAS_EFP_DOUBLE	0x00200000
 
 #ifdef __KERNEL__
 
@@ -45,6 +48,9 @@ struct cpu_spec {
 	/* cache line sizes */
 	unsigned int	icache_bsize;
 	unsigned int	dcache_bsize;
+
+	/* number of performance monitor counters */
+	unsigned int	num_pmcs;
 
 	/* this is called to initialize various CPU bits like L1 cache,
 	 * BHT, SPD, etc... from head.S before branching to identify_machine
@@ -75,6 +81,8 @@ extern struct cpu_spec		*cur_cpu_spec[];
 #define CPU_FTR_DUAL_PLL_750FX		0x00004000
 #define CPU_FTR_NO_DPM			0x00008000
 #define CPU_FTR_HAS_HIGH_BATS		0x00010000
+#define CPU_FTR_NEED_COHERENT           0x00020000
+#define CPU_FTR_NO_BTIC			0x00040000
 
 #ifdef __ASSEMBLY__
 
@@ -90,10 +98,24 @@ extern struct cpu_spec		*cur_cpu_spec[];
 	.long 99b;				\
 	.previous
 
-#define END_FTR_SECTION_IFSET(msk)	END_FTR_SECTION((msk), (msk))
-#define END_FTR_SECTION_IFCLR(msk)	END_FTR_SECTION((msk), 0)
+#else
+
+#define BEGIN_FTR_SECTION		"98:\n"
+#define END_FTR_SECTION(msk, val)		\
+"99:\n"						\
+"	.section __ftr_fixup,\"a\";\n"		\
+"	.align 2;\n"				\
+"	.long "#msk";\n"			\
+"	.long "#val";\n"			\
+"	.long 98b;\n"			        \
+"	.long 99b;\n"	 		        \
+"	.previous\n"
+
 
 #endif /* __ASSEMBLY__ */
+
+#define END_FTR_SECTION_IFSET(msk)	END_FTR_SECTION((msk), (msk))
+#define END_FTR_SECTION_IFCLR(msk)	END_FTR_SECTION((msk), 0)
 
 #endif /* __ASM_PPC_CPUTABLE_H */
 #endif /* __KERNEL__ */

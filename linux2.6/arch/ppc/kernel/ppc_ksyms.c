@@ -15,6 +15,7 @@
 #include <linux/delay.h>
 #include <linux/ide.h>
 #include <linux/pm.h>
+#include <linux/bitops.h>
 
 #include <asm/page.h>
 #include <asm/semaphore.h>
@@ -23,7 +24,6 @@
 #include <asm/io.h>
 #include <asm/ide.h>
 #include <asm/atomic.h>
-#include <asm/bitops.h>
 #include <asm/checksum.h>
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
@@ -32,8 +32,6 @@
 #include <linux/pmu.h>
 #include <asm/prom.h>
 #include <asm/system.h>
-#define __KERNEL_SYSCALLS__
-#include <asm/unistd.h>
 #include <asm/pci-bridge.h>
 #include <asm/irq.h>
 #include <asm/pmac_feature.h>
@@ -70,11 +68,11 @@ extern int sys_sigreturn(struct pt_regs *regs);
 long long __ashrdi3(long long, int);
 long long __ashldi3(long long, int);
 long long __lshrdi3(long long, int);
-int abs(int);
 
 extern unsigned long mm_ptov (unsigned long paddr);
 
-EXPORT_SYMBOL(clear_page);
+EXPORT_SYMBOL(clear_pages);
+EXPORT_SYMBOL(clear_user_page);
 EXPORT_SYMBOL(do_signal);
 EXPORT_SYMBOL(do_syscall_trace);
 EXPORT_SYMBOL(transfer_to_handler);
@@ -86,13 +84,9 @@ EXPORT_SYMBOL(SingleStepException);
 EXPORT_SYMBOL(sys_sigreturn);
 EXPORT_SYMBOL(ppc_n_lost_interrupts);
 EXPORT_SYMBOL(ppc_lost_interrupts);
-EXPORT_SYMBOL(enable_irq);
-EXPORT_SYMBOL(disable_irq);
-EXPORT_SYMBOL(disable_irq_nosync);
-EXPORT_SYMBOL(probe_irq_mask);
 
 EXPORT_SYMBOL(ISA_DMA_THRESHOLD);
-EXPORT_SYMBOL_NOVERS(DMA_MODE_READ);
+EXPORT_SYMBOL(DMA_MODE_READ);
 EXPORT_SYMBOL(DMA_MODE_WRITE);
 #if defined(CONFIG_PPC_PREP)
 EXPORT_SYMBOL(_prep_type);
@@ -167,9 +161,9 @@ EXPORT_SYMBOL(ppc_ide_md);
 #endif
 
 #ifdef CONFIG_PCI
-EXPORT_SYMBOL_NOVERS(isa_io_base);
-EXPORT_SYMBOL_NOVERS(isa_mem_base);
-EXPORT_SYMBOL_NOVERS(pci_dram_offset);
+EXPORT_SYMBOL(isa_io_base);
+EXPORT_SYMBOL(isa_mem_base);
+EXPORT_SYMBOL(pci_dram_offset);
 EXPORT_SYMBOL(pci_alloc_consistent);
 EXPORT_SYMBOL(pci_free_consistent);
 EXPORT_SYMBOL(pci_bus_io_base);
@@ -182,45 +176,32 @@ EXPORT_SYMBOL(pci_bus_to_phys);
 #endif /* CONFIG_PCI */
 
 #ifdef CONFIG_NOT_COHERENT_CACHE
-EXPORT_SYMBOL(consistent_alloc);
-EXPORT_SYMBOL(consistent_free);
-EXPORT_SYMBOL(consistent_sync);
 EXPORT_SYMBOL(flush_dcache_all);
 #endif
 
-EXPORT_SYMBOL(open);
-EXPORT_SYMBOL(read);
-EXPORT_SYMBOL(lseek);
-EXPORT_SYMBOL(close);
 EXPORT_SYMBOL(start_thread);
 EXPORT_SYMBOL(kernel_thread);
 
 EXPORT_SYMBOL(flush_instruction_cache);
 EXPORT_SYMBOL(giveup_fpu);
-EXPORT_SYMBOL(enable_kernel_fp);
 EXPORT_SYMBOL(flush_icache_range);
 EXPORT_SYMBOL(flush_dcache_range);
 EXPORT_SYMBOL(flush_icache_user_range);
 EXPORT_SYMBOL(flush_dcache_page);
 EXPORT_SYMBOL(flush_tlb_kernel_range);
 EXPORT_SYMBOL(flush_tlb_page);
+EXPORT_SYMBOL(_tlbie);
 #ifdef CONFIG_ALTIVEC
 EXPORT_SYMBOL(last_task_used_altivec);
 EXPORT_SYMBOL(giveup_altivec);
 #endif /* CONFIG_ALTIVEC */
+#ifdef CONFIG_SPE
+EXPORT_SYMBOL(last_task_used_spe);
+EXPORT_SYMBOL(giveup_spe);
+#endif /* CONFIG_SPE */
 #ifdef CONFIG_SMP
-#ifdef CONFIG_DEBUG_SPINLOCK
-EXPORT_SYMBOL(_raw_spin_lock);
-EXPORT_SYMBOL(_raw_spin_unlock);
-EXPORT_SYMBOL(_raw_spin_trylock);
-EXPORT_SYMBOL(_raw_read_lock);
-EXPORT_SYMBOL(_raw_read_unlock);
-EXPORT_SYMBOL(_raw_write_lock);
-EXPORT_SYMBOL(_raw_write_unlock);
-#endif
 EXPORT_SYMBOL(smp_call_function);
 EXPORT_SYMBOL(smp_hw_index);
-EXPORT_SYMBOL(synchronize_irq);
 #endif
 
 EXPORT_SYMBOL(ppc_md);
@@ -236,17 +217,11 @@ EXPORT_SYMBOL(adb_try_handler_change);
 EXPORT_SYMBOL(cuda_request);
 EXPORT_SYMBOL(cuda_poll);
 #endif /* CONFIG_ADB_CUDA */
-#ifdef CONFIG_PMAC_BACKLIGHT
-EXPORT_SYMBOL(get_backlight_level);
-EXPORT_SYMBOL(set_backlight_level);
-EXPORT_SYMBOL(set_backlight_enable);
-EXPORT_SYMBOL(register_backlight_controller);
-#endif /* CONFIG_PMAC_BACKLIGHT */
 #ifdef CONFIG_PPC_MULTIPLATFORM
 EXPORT_SYMBOL(_machine);
 #endif
 #ifdef CONFIG_PPC_PMAC
-EXPORT_SYMBOL_NOVERS(sys_ctrler);
+EXPORT_SYMBOL(sys_ctrler);
 EXPORT_SYMBOL(pmac_newworld);
 #endif
 #ifdef CONFIG_PPC_OF
@@ -282,29 +257,19 @@ EXPORT_SYMBOL(note_scsi_host);
 #ifdef CONFIG_VT
 EXPORT_SYMBOL(kd_mksound);
 #endif
-#ifdef CONFIG_NVRAM
-EXPORT_SYMBOL(nvram_read_byte);
-EXPORT_SYMBOL(nvram_write_byte);
-#ifdef CONFIG_PPC_PMAC
-EXPORT_SYMBOL(pmac_xpram_read);
-EXPORT_SYMBOL(pmac_xpram_write);
-#endif
-#endif /* CONFIG_NVRAM */
 EXPORT_SYMBOL(to_tm);
 
 EXPORT_SYMBOL(pm_power_off);
 
-EXPORT_SYMBOL_NOVERS(__ashrdi3);
-EXPORT_SYMBOL_NOVERS(__ashldi3);
-EXPORT_SYMBOL_NOVERS(__lshrdi3);
-EXPORT_SYMBOL_NOVERS(memcpy);
-EXPORT_SYMBOL_NOVERS(memset);
-EXPORT_SYMBOL_NOVERS(memmove);
-EXPORT_SYMBOL_NOVERS(memscan);
-EXPORT_SYMBOL_NOVERS(memcmp);
-EXPORT_SYMBOL_NOVERS(memchr);
-
-EXPORT_SYMBOL(abs);
+EXPORT_SYMBOL(__ashrdi3);
+EXPORT_SYMBOL(__ashldi3);
+EXPORT_SYMBOL(__lshrdi3);
+EXPORT_SYMBOL(memcpy);
+EXPORT_SYMBOL(memset);
+EXPORT_SYMBOL(memmove);
+EXPORT_SYMBOL(memscan);
+EXPORT_SYMBOL(memcmp);
+EXPORT_SYMBOL(memchr);
 
 #if defined(CONFIG_FB_VGA16_MODULE)
 EXPORT_SYMBOL(screen_info);
@@ -323,8 +288,6 @@ EXPORT_SYMBOL(local_irq_restore_end);
 #endif
 EXPORT_SYMBOL(timer_interrupt);
 EXPORT_SYMBOL(irq_desc);
-void ppc_irq_dispatch_handler(struct pt_regs *, int);
-EXPORT_SYMBOL(ppc_irq_dispatch_handler);
 EXPORT_SYMBOL(tb_ticks_per_jiffy);
 EXPORT_SYMBOL(get_wchan);
 EXPORT_SYMBOL(console_drivers);
@@ -356,20 +319,17 @@ EXPORT_SYMBOL(debugger_fault_handler);
 EXPORT_SYMBOL(cpm_install_handler);
 EXPORT_SYMBOL(cpm_free_handler);
 #endif /* CONFIG_8xx */
-#if defined(CONFIG_8xx) || defined(CONFIG_4xx)
+#if defined(CONFIG_8xx) || defined(CONFIG_40x) || defined(CONFIG_85xx)
 EXPORT_SYMBOL(__res);
-#endif
-#if defined(CONFIG_8xx)
-EXPORT_SYMBOL(request_8xxirq);
 #endif
 
 EXPORT_SYMBOL(next_mmu_context);
 EXPORT_SYMBOL(set_context);
 EXPORT_SYMBOL(handle_mm_fault); /* For MOL */
-EXPORT_SYMBOL_NOVERS(disarm_decr);
+EXPORT_SYMBOL(disarm_decr);
+#ifdef CONFIG_PPC_STD_MMU
 extern long mol_trampoline;
 EXPORT_SYMBOL(mol_trampoline); /* For MOL */
-#ifdef CONFIG_PPC_STD_MMU
 EXPORT_SYMBOL(flush_hash_pages); /* For MOL */
 #ifdef CONFIG_SMP
 extern int mmu_hash_lock;
@@ -381,5 +341,9 @@ EXPORT_SYMBOL(intercept_table);
 EXPORT_SYMBOL(cur_cpu_spec);
 #ifdef CONFIG_PPC_PMAC
 extern unsigned long agp_special_page;
-EXPORT_SYMBOL_NOVERS(agp_special_page);
+EXPORT_SYMBOL(agp_special_page);
+#endif
+#if defined(CONFIG_40x) || defined(CONFIG_BOOKE)
+EXPORT_SYMBOL(__mtdcr);
+EXPORT_SYMBOL(__mfdcr);
 #endif

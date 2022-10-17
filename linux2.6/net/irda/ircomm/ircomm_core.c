@@ -62,13 +62,13 @@ static struct file_operations ircomm_proc_fops = {
 	.open           = ircomm_seq_open,
 	.read           = seq_read,
 	.llseek         = seq_lseek,
-	.release	= seq_release_private,
+	.release	= seq_release,
 };
 #endif /* CONFIG_PROC_FS */
 
 hashbin_t *ircomm = NULL;
 
-int __init ircomm_init(void)
+static int __init ircomm_init(void)
 {
 	ircomm = hashbin_new(HB_LOCK); 
 	if (ircomm == NULL) {
@@ -89,7 +89,7 @@ int __init ircomm_init(void)
 	return 0;
 }
 
-void __exit ircomm_cleanup(void)
+static void __exit ircomm_cleanup(void)
 {
 	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
 

@@ -1,9 +1,13 @@
-/* $Id: cache-sh4.c,v 1.20 2003/05/10 03:22:05 sugioka Exp $
- *
- *  linux/arch/sh/mm/cache-sh4.c
+/*
+ * arch/sh/mm/cache-sh4.c
  *
  * Copyright (C) 1999, 2000, 2002  Niibe Yutaka
- * Copyright (C) 2001, 2002, 2003  Paul Mundt
+ * Copyright (C) 2001, 2002, 2003, 2004  Paul Mundt
+ * Copyright (C) 2003  Richard Curnow
+ *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
  */
 
 #include <linux/config.h>
@@ -26,82 +30,6 @@ extern void __flush_cache_4096_all(unsigned long start);
 static void __flush_cache_4096_all_ex(unsigned long start);
 extern void __flush_dcache_all(void);
 static void __flush_dcache_all_ex(void);
-/*
- * FIXME: Add ST40STB1 probe support (and clean up the manual overdrive stuff)
- * seems to rely on some quirky PVR shifting .. stuart? ++paulm
- */
-int __init detect_cpu_and_cache_system(void)
-{
-	unsigned long pvr, prr, ccr;
-
-	pvr = (ctrl_inl(CCN_PVR) >> 8) & 0xffff;
-	prr = (ctrl_inl(CCN_PRR) >> 4) & 0xff;
-
-		/*
-	 * Setup some sane SH-4 defaults for the icache
-		 */
-	cpu_data->icache.way_shift	= 13;
-	cpu_data->icache.entry_shift	= 5;
-	cpu_data->icache.entry_mask	= 0x1fe0;
-	cpu_data->icache.sets		= 256;
-	cpu_data->icache.ways		= 1;
-	cpu_data->icache.linesz		= L1_CACHE_BYTES;
-
-	/*
-	 * And again for the dcache ..
-	 */
-	cpu_data->dcache.way_shift	= 14;
-	cpu_data->dcache.entry_shift	= 5;
-	cpu_data->dcache.entry_mask	= 0x3fe0;
-	cpu_data->dcache.sets		= 512;
-	cpu_data->dcache.ways		= 1;
-	cpu_data->dcache.linesz		= L1_CACHE_BYTES;
-
-	/*
-	 * Probe the underlying processor version/revision and
-	 * adjust cpu_data setup accordingly.
-	 */
-	switch (pvr) {
-	case 0x205:
-		cpu_data->type = CPU_SH7750;
-		break;
-	case 0x206:
-		cpu_data->type = CPU_SH7750S;
-		break;
-	case 0x1100:
-		cpu_data->type = CPU_SH7751;
-		break;
-	case 0x8000:
-		cpu_data->type = CPU_ST40RA;
-		break;
-	case 0x8100:
-		cpu_data->type = CPU_ST40GX1;
-		break;
-	case 0x500:
-		if (prr == 0x10)
-			cpu_data->type = CPU_SH7750R;
-		else
-			cpu_data->type = CPU_SH7751R;
-		jump_to_P2();
-		ccr = ctrl_inl(CCR);
-		back_to_P1();
-		if(ccr & CCR_CACHE_EMODE) {
-			cpu_data->icache.ways = 2;
-			cpu_data->dcache.ways = 2;
-		}
-		break;
-	default:
-		cpu_data->type = CPU_SH_NONE;
-		break;
-	}
-
-	/*
-	 * For now, all SH-4's have an FPU ..
-	 */
-	cpu_data->flags |= CPU_HAS_FPU;
-
-	return 0;
-}
 
 /*
  * SH-4 has virtually indexed and physically tagged cache.
@@ -198,7 +126,7 @@ static void __flush_cache_4096_all_ex(unsigned long start)
 	int i;
 
 	entry_offset = 1 << cpu_data->dcache.entry_shift;
-	for (i = 0; i < cpu_data->dcache.ways; i++, start += (1 << cpu_data->dcache.way_shift)) {
+	for (i = 0; i < cpu_data->dcache.ways; i++, start += cpu_data->dcache.way_incr) {
 		for (addr = CACHE_OC_ADDRESS_ARRAY + start;
 		     addr < CACHE_OC_ADDRESS_ARRAY + 4096 + start;
 		     addr += entry_offset) {
@@ -245,7 +173,7 @@ void flush_cache_sigtramp(unsigned long addr)
 
 	local_irq_save(flags);
 	jump_to_P2();
-	for(i = 0; i < cpu_data->icache.ways; i++, index += (1 << cpu_data->icache.way_shift))
+	for(i = 0; i < cpu_data->icache.ways; i++, index += cpu_data->icache.way_incr)
 		ctrl_outl(0, index);	/* Clear out Valid-bit */
 	back_to_P1();
 	local_irq_restore(flags);
@@ -257,20 +185,17 @@ static inline void flush_cache_4096(unsigned long start,
 	unsigned long flags; 
 	extern void __flush_cache_4096(unsigned long addr, unsigned long phys, unsigned long exec_offset);
 
-		/*
+	/*
 	 * SH7751, SH7751R, and ST40 have no restriction to handle cache.
-		 * (While SH7750 must do that at P2 area.)
-		 */
-	if ((cpu_data->type == CPU_SH7751 ||
-	     cpu_data->type == CPU_SH7751R ||
-	     cpu_data->type == CPU_ST40RA ||
-	     cpu_data->type == CPU_ST40GX1) &&
-		(start >= CACHE_OC_ADDRESS_ARRAY)) {
-		__flush_cache_4096(start | SH_CACHE_ASSOC, phys | 0x80000000, 0);
-	} else {
+	 * (While SH7750 must do that at P2 area.)
+	 */
+	if ((cpu_data->flags & CPU_HAS_P2_FLUSH_BUG)
+	   || start < CACHE_OC_ADDRESS_ARRAY) {
 		local_irq_save(flags);
-		__flush_cache_4096(start | SH_CACHE_ASSOC, phys | 0x80000000, 0x20000000);
+		__flush_cache_4096(start | SH_CACHE_ASSOC, P1SEGADDR(phys), 0x20000000);
 		local_irq_restore(flags);
+	} else {
+		__flush_cache_4096(start | SH_CACHE_ASSOC, P1SEGADDR(phys), 0);
 	}
 }
 
@@ -400,7 +325,7 @@ void flush_cache_range(struct vm_area_struct *vma, unsigned long start,
 			}
 			pte++;
 			p += PAGE_SIZE;
-		} while (p < end && (unsigned long)pte & PAGE_MASK);
+		} while (p < end && ((unsigned long)pte & ~PAGE_MASK));
 		pmd++;
 	} while (p < end);
  loop_exit:

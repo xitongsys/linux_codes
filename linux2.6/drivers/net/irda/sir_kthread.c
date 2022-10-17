@@ -19,7 +19,6 @@
 #include <linux/smp_lock.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
-#include <linux/suspend.h>
 
 #include <net/irda/irda.h>
 
@@ -137,7 +136,7 @@ static int irda_thread(void *startup)
 
 		/* make swsusp happy with our thread */
 		if (current->flags & PF_FREEZE)
-			refrigerator(PF_IOTHREAD);
+			refrigerator(PF_FREEZE);
 
 		run_irda_queue();
 	}
@@ -311,15 +310,9 @@ static void irda_config_fsm(void *data)
 			break;
 
 		case SIRDEV_STATE_SET_DTR_RTS:
-			if (dev->drv->set_dtr_rts) {
-				int	dtr, rts;
-
-				dtr = (fsm->param&0x02) ? TRUE : FALSE;
-				rts = (fsm->param&0x01) ? TRUE : FALSE;
-				ret = dev->drv->set_dtr_rts(dev,dtr,rts);
-			}
-			else
-				ret = -EINVAL;
+			ret = sirdev_set_dtr_rts(dev,
+				(fsm->param&0x02) ? TRUE : FALSE,
+				(fsm->param&0x01) ? TRUE : FALSE);
 			next_state = SIRDEV_STATE_DONE;
 			break;
 
@@ -421,7 +414,7 @@ static void irda_config_fsm(void *data)
 		fsm->state = next_state;
 	} while(!delay);
 
-	irda_queue_delayed_request(&fsm->rq, MSECS_TO_JIFFIES(delay));
+	irda_queue_delayed_request(&fsm->rq, msecs_to_jiffies(delay));
 }
 
 /* schedule some device configuration task for execution by kIrDAd
@@ -436,14 +429,13 @@ int sirdev_schedule_request(struct sir_dev *dev, int initial_state, unsigned par
 
 	IRDA_DEBUG(2, "%s - state=0x%04x / param=%u\n", __FUNCTION__, initial_state, param);
 
-	if (in_interrupt()) {
-		if (down_trylock(&fsm->sem)) {
+	if (down_trylock(&fsm->sem)) {
+		if (in_interrupt()  ||  in_atomic()  ||  irqs_disabled()) {
 			IRDA_DEBUG(1, "%s(), state machine busy!\n", __FUNCTION__);
 			return -EWOULDBLOCK;
-		}
+		} else
+			down(&fsm->sem);
 	}
-	else
-		down(&fsm->sem);
 
 	if (fsm->state == SIRDEV_STATE_DEAD) {
 		/* race with sirdev_close should never happen */

@@ -25,6 +25,7 @@
 /* Partialy rewriten by Oleg I. Vdovikin for mmapped support of 
    for Alpha Processor Inc. UP-2000(+) boards */
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/ioport.h>
 #include <linux/module.h>
@@ -50,7 +51,6 @@ static int irq;
 static int clock  = 0x1c;
 static int own    = 0x55;
 static int mmapped;
-static int i2c_debug;
 
 /* vdovikin: removed static struct i2c_pcf_isa gpi; code - 
   this module in real supports only one device, due to missing arguments
@@ -59,12 +59,7 @@ static int i2c_debug;
 
 static wait_queue_head_t pcf_wait;
 static int pcf_pending;
-
-/* ----- global defines -----------------------------------------------	*/
-#define DEB(x)	if (i2c_debug>=1) x
-#define DEB2(x) if (i2c_debug>=2) x
-#define DEB3(x) if (i2c_debug>=3) x
-#define DEBE(x)	x	/* error messages 				*/
+static spinlock_t lock;
 
 /* ----- local functions ----------------------------------------------	*/
 
@@ -77,7 +72,7 @@ static void pcf_isa_setbyte(void *data, int ctl, int val)
 		val |= I2C_PCF_ENI;
 	}
 
-	DEB3(printk(KERN_DEBUG "i2c-elektor: Write 0x%X 0x%02X\n", address, val & 255));
+	pr_debug("i2c-elektor: Write 0x%X 0x%02X\n", address, val & 255);
 
 	switch (mmapped) {
 	case 0: /* regular I/O */
@@ -85,10 +80,10 @@ static void pcf_isa_setbyte(void *data, int ctl, int val)
 		break;
 	case 2: /* double mapped I/O needed for UP2000 board,
                    I don't know why this... */
-		writeb(val, address);
+		writeb(val, (void *)address);
 		/* fall */
 	case 1: /* memory mapped I/O */
-		writeb(val, address);
+		writeb(val, (void *)address);
 		break;
 	}
 }
@@ -96,9 +91,9 @@ static void pcf_isa_setbyte(void *data, int ctl, int val)
 static int pcf_isa_getbyte(void *data, int ctl)
 {
 	int address = ctl ? (base + 1) : base;
-	int val = mmapped ? readb(address) : inb(address);
+	int val = mmapped ? readb((void *)address) : inb(address);
 
-	DEB3(printk(KERN_DEBUG "i2c-elektor: Read 0x%X 0x%02X\n", address, val));
+	pr_debug("i2c-elektor: Read 0x%X 0x%02X\n", address, val);
 
 	return (val);
 }
@@ -117,14 +112,24 @@ static int pcf_isa_getclock(void *data)
 static void pcf_isa_waitforpin(void) {
 
 	int timeout = 2;
+	long flags;
 
 	if (irq > 0) {
-		cli();
+		spin_lock_irqsave(&lock, flags);
 		if (pcf_pending == 0) {
-			interruptible_sleep_on_timeout(&pcf_wait, timeout*HZ );
-		} else
+			spin_unlock_irqrestore(&lock, flags);
+			if (interruptible_sleep_on_timeout(&pcf_wait,
+								timeout*HZ)) {
+				spin_lock_irqsave(&lock, flags);
+				if (pcf_pending == 1) {
+					pcf_pending = 0;
+				}
+				spin_unlock_irqrestore(&lock, flags);
+			}
+		} else {
 			pcf_pending = 0;
-		sti();
+			spin_unlock_irqrestore(&lock, flags);
+		}
 	} else {
 		udelay(100);
 	}
@@ -132,7 +137,9 @@ static void pcf_isa_waitforpin(void) {
 
 
 static irqreturn_t pcf_isa_handler(int this_irq, void *dev_id, struct pt_regs *regs) {
+	spin_lock(&lock);
 	pcf_pending = 1;
+	spin_unlock(&lock);
 	wake_up_interruptible(&pcf_wait);
 	return IRQ_HANDLED;
 }
@@ -140,6 +147,7 @@ static irqreturn_t pcf_isa_handler(int this_irq, void *dev_id, struct pt_regs *r
 
 static int pcf_isa_init(void)
 {
+	spin_lock_init(&lock);
 	if (!mmapped) {
 		if (!request_region(base, 2, "i2c (isa bus adapter)")) {
 			printk(KERN_ERR
@@ -149,7 +157,7 @@ static int pcf_isa_init(void)
 		}
 	}
 	if (irq > 0) {
-		if (request_irq(irq, pcf_isa_handler, 0, "PCF8584", 0) < 0) {
+		if (request_irq(irq, pcf_isa_handler, 0, "PCF8584", NULL) < 0) {
 			printk(KERN_ERR "i2c-elektor: Request irq%d failed\n", irq);
 			irq = 0;
 		} else
@@ -186,17 +194,16 @@ static int __init i2c_pcfisa_init(void)
 	/* check to see we have memory mapped PCF8584 connected to the 
 	Cypress cy82c693 PCI-ISA bridge as on UP2000 board */
 	if (base == 0) {
+		struct pci_dev *cy693_dev;
 		
-		struct pci_dev *cy693_dev =
-                    pci_find_device(PCI_VENDOR_ID_CONTAQ, 
-		                    PCI_DEVICE_ID_CONTAQ_82C693, NULL);
-
+		cy693_dev = pci_get_device(PCI_VENDOR_ID_CONTAQ, 
+					   PCI_DEVICE_ID_CONTAQ_82C693, NULL);
 		if (cy693_dev) {
 			char config;
 			/* yeap, we've found cypress, let's check config */
 			if (!pci_read_config_byte(cy693_dev, 0x47, &config)) {
 				
-				DEB3(printk(KERN_DEBUG "i2c-elektor: found cy82c693, config register 0x47 = 0x%02x.\n", config));
+				pr_debug("i2c-elektor: found cy82c693, config register 0x47 = 0x%02x.\n", config);
 
 				/* UP2000 board has this register set to 0xe1,
                                    but the most significant bit as seems can be 
@@ -221,6 +228,7 @@ static int __init i2c_pcfisa_init(void)
 					printk(KERN_INFO "i2c-elektor: found API UP2000 like board, will probe PCF8584 later.\n");
 				}
 			}
+			pci_dev_put(cy693_dev);
 		}
 	}
 #endif
@@ -250,7 +258,7 @@ static int __init i2c_pcfisa_init(void)
  fail:
 	if (irq > 0) {
 		disable_irq(irq);
-		free_irq(irq, 0);
+		free_irq(irq, NULL);
 	}
 
 	if (!mmapped)
@@ -264,7 +272,7 @@ static void i2c_pcfisa_exit(void)
 
 	if (irq > 0) {
 		disable_irq(irq);
-		free_irq(irq, 0);
+		free_irq(irq, NULL);
 	}
 
 	if (!mmapped)
@@ -275,12 +283,11 @@ MODULE_AUTHOR("Hans Berglund <hb@spacetec.no>");
 MODULE_DESCRIPTION("I2C-Bus adapter routines for PCF8584 ISA bus adapter");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(base, "i");
-MODULE_PARM(irq, "i");
-MODULE_PARM(clock, "i");
-MODULE_PARM(own, "i");
-MODULE_PARM(mmapped, "i");
-MODULE_PARM(i2c_debug, "i");
+module_param(base, int, 0);
+module_param(irq, int, 0);
+module_param(clock, int, 0);
+module_param(own, int, 0);
+module_param(mmapped, int, 0);
 
 module_init(i2c_pcfisa_init);
 module_exit(i2c_pcfisa_exit);

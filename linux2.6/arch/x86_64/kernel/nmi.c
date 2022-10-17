@@ -24,6 +24,7 @@
 #include <linux/module.h>
 #include <linux/sysdev.h>
 #include <linux/nmi.h>
+#include <linux/sysctl.h>
 
 #include <asm/smp.h>
 #include <asm/mtrr.h>
@@ -33,19 +34,35 @@
 #include <asm/proto.h>
 #include <asm/kdebug.h>
 
+/*
+ * lapic_nmi_owner tracks the ownership of the lapic NMI hardware:
+ * - it may be reserved by some other driver, or not
+ * - when not reserved by some other driver, it may be used for
+ *   the NMI watchdog, or not
+ *
+ * This is maintained separately from nmi_active because the NMI
+ * watchdog may also be driven from the I/O APIC timer.
+ */
+static DEFINE_SPINLOCK(lapic_nmi_owner_lock);
+static unsigned int lapic_nmi_owner;
+#define LAPIC_NMI_WATCHDOG	(1<<0)
+#define LAPIC_NMI_RESERVED	(1<<1)
+
 /* nmi_active:
  * +1: the lapic NMI watchdog is active, but can be disabled
  *  0: the lapic NMI watchdog has not been set up, and cannot
  *     be enabled
  * -1: the lapic NMI watchdog is disabled, but can be enabled
  */
-static int nmi_active;
-static int panic_on_timeout;
+int nmi_active;		/* oprofile uses this */
+int panic_on_timeout;
 
-unsigned int nmi_watchdog = NMI_LOCAL_APIC;
+unsigned int nmi_watchdog = NMI_DEFAULT;
 static unsigned int nmi_hz = HZ;
 unsigned int nmi_perfctr_msr;	/* the MSR to reset in NMI handler */
-int nmi_watchdog_disabled;
+
+/* Note that these events don't tick when the CPU idles. This means
+   the frequency varies with CPU load. */
 
 #define K7_EVNTSEL_ENABLE	(1 << 22)
 #define K7_EVNTSEL_INT		(1 << 20)
@@ -60,6 +77,27 @@ int nmi_watchdog_disabled;
 #define P6_EVNTSEL_USR		(1 << 16)
 #define P6_EVENT_CPU_CLOCKS_NOT_HALTED	0x79
 #define P6_NMI_EVENT		P6_EVENT_CPU_CLOCKS_NOT_HALTED
+
+/* Run after command line and cpu_init init, but before all other checks */
+void __init nmi_watchdog_default(void)
+{
+	if (nmi_watchdog != NMI_DEFAULT)
+		return;
+
+	/* For some reason the IO APIC watchdog doesn't work on the AMD
+	   8111 chipset. For now switch to local APIC mode using
+	   perfctr0 there.  On Intel CPUs we don't have code to handle
+	   the perfctr and the IO-APIC seems to work, so use that.  */
+
+	if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD) {
+		nmi_watchdog = NMI_LOCAL_APIC; 
+		printk(KERN_INFO 
+              "Using local APIC NMI watchdog using perfctr0\n");
+	} else {
+		printk(KERN_INFO "Using IO APIC NMI watchdog\n");
+		nmi_watchdog = NMI_IO_APIC;
+	}
+}
 
 /* Why is there no CPUID flag for this? */
 static __init int cpu_has_lapic(void)
@@ -92,13 +130,18 @@ int __init check_nmi_watchdog (void)
 	mdelay((10*1000)/nmi_hz); // wait 10 ticks
 
 	for (cpu = 0; cpu < NR_CPUS; cpu++) {
-		if (!cpu_online(cpu))
+#ifdef CONFIG_SMP
+		/* Check cpu_callin_map here because that is set
+		   after the timer is started. */
+		if (!cpu_isset(cpu, cpu_callin_map))
 			continue;
+#endif
 		if (cpu_pda[cpu].__nmi_count - counts[cpu] <= 5) {
 			printk("CPU#%d: NMI appears to be stuck (%d)!\n", 
 			       cpu,
 			       cpu_pda[cpu].__nmi_count);
 			nmi_active = 0;
+			lapic_nmi_owner &= ~LAPIC_NMI_WATCHDOG;
 			return -1;
 		}
 	}
@@ -112,7 +155,7 @@ int __init check_nmi_watchdog (void)
 	return 0;
 }
 
-static int __init setup_nmi_watchdog(char *str)
+int __init setup_nmi_watchdog(char *str)
 {
 	int nmi;
 
@@ -134,7 +177,7 @@ static int __init setup_nmi_watchdog(char *str)
 
 __setup("nmi_watchdog=", setup_nmi_watchdog);
 
-void disable_lapic_nmi_watchdog(void)
+static void disable_lapic_nmi_watchdog(void)
 {
 	if (nmi_active <= 0)
 		return;
@@ -151,12 +194,39 @@ void disable_lapic_nmi_watchdog(void)
 	nmi_watchdog = 0;
 }
 
-void enable_lapic_nmi_watchdog(void)
+static void enable_lapic_nmi_watchdog(void)
 {
 	if (nmi_active < 0) {
 		nmi_watchdog = NMI_LOCAL_APIC;
 		setup_apic_nmi_watchdog();
 	}
+}
+
+int reserve_lapic_nmi(void)
+{
+	unsigned int old_owner;
+
+	spin_lock(&lapic_nmi_owner_lock);
+	old_owner = lapic_nmi_owner;
+	lapic_nmi_owner |= LAPIC_NMI_RESERVED;
+	spin_unlock(&lapic_nmi_owner_lock);
+	if (old_owner & LAPIC_NMI_RESERVED)
+		return -EBUSY;
+	if (old_owner & LAPIC_NMI_WATCHDOG)
+		disable_lapic_nmi_watchdog();
+	return 0;
+}
+
+void release_lapic_nmi(void)
+{
+	unsigned int new_owner;
+
+	spin_lock(&lapic_nmi_owner_lock);
+	new_owner = lapic_nmi_owner & ~LAPIC_NMI_RESERVED;
+	lapic_nmi_owner = new_owner;
+	spin_unlock(&lapic_nmi_owner_lock);
+	if (new_owner & LAPIC_NMI_WATCHDOG)
+		enable_lapic_nmi_watchdog();
 }
 
 void disable_timer_nmi_watchdog(void)
@@ -213,12 +283,12 @@ static int __init init_lapic_nmi_sysfs(void)
 {
 	int error;
 
-	if (nmi_active == 0)
+	if (nmi_active == 0 || nmi_watchdog != NMI_LOCAL_APIC)
 		return 0;
 
 	error = sysdev_class_register(&nmi_sysclass);
 	if (!error)
-		error = sys_device_register(&device_lapic_nmi);
+		error = sysdev_register(&device_lapic_nmi);
 	return error;
 }
 /* must come after the local APIC's device_initcall() */
@@ -235,6 +305,9 @@ static void setup_k7_watchdog(void)
 {
 	int i;
 	unsigned int evntsel;
+
+	/* No check, so can start with slow frequency */
+	nmi_hz = 1; 
 
 	/* XXX should check these in EFER */
 
@@ -253,14 +326,13 @@ static void setup_k7_watchdog(void)
 		| K7_NMI_EVENT;
 
 	wrmsr(MSR_K7_EVNTSEL0, evntsel, 0);
-	printk(KERN_INFO "watchdog: setting K7_PERFCTR0 to %08x\n", -(cpu_khz/nmi_hz*1000));
-	wrmsr(MSR_K7_PERFCTR0, -(cpu_khz/nmi_hz*1000), -1);
+	wrmsrl(MSR_K7_PERFCTR0, -((u64)cpu_khz*1000) / nmi_hz);
 	apic_write(APIC_LVTPC, APIC_DM_NMI);
 	evntsel |= K7_EVNTSEL_ENABLE;
 	wrmsr(MSR_K7_EVNTSEL0, evntsel, 0);
 }
 
-void setup_apic_nmi_watchdog (void)
+void setup_apic_nmi_watchdog(void)
 {
 	switch (boot_cpu_data.x86_vendor) {
 	case X86_VENDOR_AMD:
@@ -273,10 +345,9 @@ void setup_apic_nmi_watchdog (void)
 	default:
 		return;
 	}
+	lapic_nmi_owner = LAPIC_NMI_WATCHDOG;
 	nmi_active = 1;
 }
-
-static spinlock_t nmi_print_lock = SPIN_LOCK_UNLOCKED;
 
 /*
  * the best way to detect whether a CPU has a 'hard lockup' problem
@@ -311,11 +382,9 @@ void touch_nmi_watchdog (void)
 
 void nmi_watchdog_tick (struct pt_regs * regs, unsigned reason)
 {
-	if (nmi_watchdog_disabled)
-		return;
+	int sum, cpu;
 
-	int sum, cpu = safe_smp_processor_id();
-
+	cpu = safe_smp_processor_id();
 	sum = read_pda(apic_timer_irqs);
 	if (last_irq_sums[cpu] == sum) {
 		/*
@@ -324,25 +393,12 @@ void nmi_watchdog_tick (struct pt_regs * regs, unsigned reason)
 		 */
 		alert_counter[cpu]++;
 		if (alert_counter[cpu] == 5*nmi_hz) {
-			if (notify_die(DIE_NMI, "nmi", regs, reason, 2, SIGINT) == NOTIFY_BAD) { 
+			if (notify_die(DIE_NMI, "nmi", regs, reason, 2, SIGINT)
+							== NOTIFY_STOP) {
 				alert_counter[cpu] = 0; 
 				return;
 			} 
-			spin_lock(&nmi_print_lock);
-			/*
-			 * We are in trouble anyway, lets at least try
-			 * to get a message out.
-			 */
-			bust_spinlocks(1);
-			printk("NMI Watchdog detected LOCKUP on CPU%d, registers:\n", cpu);
-			show_registers(regs);
-			if (panic_on_timeout)
-				panic("nmi watchdog");
-			printk("console shuts up ...\n");
-			console_silent();
-			spin_unlock(&nmi_print_lock);
-			bust_spinlocks(0);
-			do_exit(SIGSEGV);
+			die_nmi("NMI Watchdog detected LOCKUP on CPU%d", regs);
 		}
 	} else {
 		last_irq_sums[cpu] = sum;
@@ -380,9 +436,53 @@ void unset_nmi_callback(void)
 	nmi_callback = dummy_nmi_callback;
 }
 
+#ifdef CONFIG_SYSCTL
+
+static int unknown_nmi_panic_callback(struct pt_regs *regs, int cpu)
+{
+	unsigned char reason = get_nmi_reason();
+	char buf[64];
+
+	if (!(reason & 0xc0)) {
+		sprintf(buf, "NMI received for unknown reason %02x\n", reason);
+		die_nmi(buf,regs);
+	}
+	return 0;
+}
+
+/*
+ * proc handler for /proc/sys/kernel/unknown_nmi_panic
+ */
+int proc_unknown_nmi_panic(struct ctl_table *table, int write, struct file *file,
+			void __user *buffer, size_t *length, loff_t *ppos)
+{
+	int old_state;
+
+	old_state = unknown_nmi_panic;
+	proc_dointvec(table, write, file, buffer, length, ppos);
+	if (!!old_state == !!unknown_nmi_panic)
+		return 0;
+
+	if (unknown_nmi_panic) {
+		if (reserve_lapic_nmi() < 0) {
+			unknown_nmi_panic = 0;
+			return -EBUSY;
+		} else {
+			set_nmi_callback(unknown_nmi_panic_callback);
+		}
+	} else {
+		release_lapic_nmi();
+		unset_nmi_callback();
+	}
+	return 0;
+}
+
+#endif
+
+EXPORT_SYMBOL(nmi_active);
 EXPORT_SYMBOL(nmi_watchdog);
-EXPORT_SYMBOL(disable_lapic_nmi_watchdog);
-EXPORT_SYMBOL(enable_lapic_nmi_watchdog);
+EXPORT_SYMBOL(reserve_lapic_nmi);
+EXPORT_SYMBOL(release_lapic_nmi);
 EXPORT_SYMBOL(disable_timer_nmi_watchdog);
 EXPORT_SYMBOL(enable_timer_nmi_watchdog);
 EXPORT_SYMBOL(touch_nmi_watchdog);

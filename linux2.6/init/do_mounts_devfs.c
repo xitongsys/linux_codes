@@ -5,11 +5,6 @@
 
 #include "do_mounts.h"
 
-extern asmlinkage long sys_symlink(const char *old, const char *new);
-extern asmlinkage long sys_access(const char * filename, int mode);
-extern asmlinkage long sys_getdents64(unsigned int fd, void * dirent,
-				      unsigned int count);
-
 void __init mount_devfs(void)
 {
 	sys_mount("devfs", "/dev", "devfs", 0, NULL);
@@ -28,10 +23,11 @@ static int __init do_read_dir(int fd, void *buf, int len)
 {
 	long bytes, n;
 	char *p = buf;
-	lseek(fd, 0, 0);
+	sys_lseek(fd, 0, 0);
 
 	for (bytes = 0; bytes < len; bytes += n) {
-		n = sys_getdents64(fd, p + bytes, len - bytes);
+		n = sys_getdents64(fd, (struct linux_dirent64 *)(p + bytes),
+					len - bytes);
 		if (n < 0)
 			return n;
 		if (n == 0)
@@ -48,7 +44,7 @@ static int __init do_read_dir(int fd, void *buf, int len)
 static void * __init read_dir(char *path, int *len)
 {
 	int size;
-	int fd = open(path, 0, 0);
+	int fd = sys_open(path, 0, 0);
 
 	*len = 0;
 	if (fd < 0)
@@ -61,7 +57,7 @@ static void * __init read_dir(char *path, int *len)
 			break;
 		n = do_read_dir(fd, p, size);
 		if (n > 0) {
-			close(fd);
+			sys_close(fd);
 			*len = n;
 			return p;
 		}
@@ -71,7 +67,7 @@ static void * __init read_dir(char *path, int *len)
 		if (n < 0)
 			break;
 	}
-	close(fd);
+	sys_close(fd);
 	return NULL;
 }
 

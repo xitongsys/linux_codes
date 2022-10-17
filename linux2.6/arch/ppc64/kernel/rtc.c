@@ -34,12 +34,13 @@
 #include <linux/proc_fs.h>
 #include <linux/spinlock.h>
 #include <linux/bcd.h>
+#include <linux/interrupt.h>
 
-#include <asm/hardirq.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/time.h>
+#include <asm/rtas.h>
 
 #include <asm/iSeries/LparData.h>
 #include <asm/iSeries/mf.h>
@@ -55,9 +56,7 @@ extern int piranha_simulator;
  *	ioctls.
  */
 
-static loff_t rtc_llseek(struct file *file, loff_t offset, int origin);
-
-static ssize_t rtc_read(struct file *file, char *buf,
+static ssize_t rtc_read(struct file *file, char __user *buf,
 			size_t count, loff_t *ppos);
 
 static int rtc_ioctl(struct inode *inode, struct file *file,
@@ -80,12 +79,7 @@ static const unsigned char days_in_mo[] =
  *	Now all the various file operations that we export.
  */
 
-static loff_t rtc_llseek(struct file *file, loff_t offset, int origin)
-{
-	return -ESPIPE;
-}
-
-static ssize_t rtc_read(struct file *file, char *buf,
+static ssize_t rtc_read(struct file *file, char __user *buf,
 			size_t count, loff_t *ppos)
 {
 	return -EIO;
@@ -99,6 +93,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	switch (cmd) {
 	case RTC_RD_TIME:	/* Read the time/date from RTC	*/
 	{
+		memset(&wtime, 0, sizeof(struct rtc_time));
 		ppc_md.get_rtc_time(&wtime);
 		break;
 	}
@@ -111,7 +106,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		if (!capable(CAP_SYS_TIME))
 			return -EACCES;
 
-		if (copy_from_user(&rtc_tm, (struct rtc_time*)arg,
+		if (copy_from_user(&rtc_tm, (struct rtc_time __user *)arg,
 				   sizeof(struct rtc_time)))
 			return -EFAULT;
 
@@ -145,7 +140,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	}
 	case RTC_EPOCH_READ:	/* Read the epoch.	*/
 	{
-		return put_user (epoch, (unsigned long *)arg);
+		return put_user (epoch, (unsigned long __user *)arg);
 	}
 	case RTC_EPOCH_SET:	/* Set the epoch.	*/
 	{
@@ -164,11 +159,12 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	default:
 		return -EINVAL;
 	}
-	return copy_to_user((void *)arg, &wtime, sizeof wtime) ? -EFAULT : 0;
+	return copy_to_user((void __user *)arg, &wtime, sizeof wtime) ? -EFAULT : 0;
 }
 
 static int rtc_open(struct inode *inode, struct file *file)
 {
+	nonseekable_open(inode, file);
 	return 0;
 }
 
@@ -182,18 +178,17 @@ static int rtc_release(struct inode *inode, struct file *file)
  */
 static struct file_operations rtc_fops = {
 	.owner =	THIS_MODULE,
-	.llseek =	rtc_llseek,
+	.llseek =	no_llseek,
 	.read =		rtc_read,
 	.ioctl =	rtc_ioctl,
 	.open =		rtc_open,
 	.release =	rtc_release,
 };
 
-static struct miscdevice rtc_dev=
-{
-	RTC_MINOR,
-	"rtc",
-	&rtc_fops
+static struct miscdevice rtc_dev = {
+	.minor =	RTC_MINOR,
+	.name =		"rtc",
+	.fops =		&rtc_fops
 };
 
 static int __init rtc_init(void)
@@ -205,9 +200,11 @@ static int __init rtc_init(void)
 		return retval;
 
 #ifdef CONFIG_PROC_FS
-	if(create_proc_read_entry ("driver/rtc", 0, 0, rtc_read_proc, NULL) == NULL)
+	if (create_proc_read_entry("driver/rtc", 0, NULL, rtc_read_proc, NULL)
+			== NULL) {
 		misc_deregister(&rtc_dev);
 		return -ENOMEM;
+	}
 #endif
 
 	printk(KERN_INFO "i/pSeries Real Time Clock Driver v" RTC_VERSION "\n");
@@ -279,7 +276,7 @@ void iSeries_get_rtc_time(struct rtc_time *rtc_tm)
 	if (piranha_simulator)
 		return;
 
-	mf_getRtc(rtc_tm);
+	mf_get_rtc(rtc_tm);
 	rtc_tm->tm_mon--;
 }
 
@@ -289,7 +286,7 @@ void iSeries_get_rtc_time(struct rtc_time *rtc_tm)
  */
 int iSeries_set_rtc_time(struct rtc_time *tm)
 {
-	mf_setRtc(tm);
+	mf_set_rtc(tm);
 	return 0;
 }
 
@@ -345,13 +342,13 @@ void iSeries_get_boot_time(struct rtc_time *tm)
 #define RTAS_CLOCK_BUSY (-2)
 void pSeries_get_boot_time(struct rtc_time *rtc_tm)
 {
-	unsigned long ret[8];
+	int ret[8];
 	int error, wait_time;
 	unsigned long max_wait_tb;
 
 	max_wait_tb = __get_tb() + tb_ticks_per_usec * 1000 * MAX_RTC_WAIT;
 	do {
-		error = rtas_call(rtas_token("get-time-of-day"), 0, 8, (void *)&ret);
+		error = rtas_call(rtas_token("get-time-of-day"), 0, 8, ret);
 		if (error == RTAS_CLOCK_BUSY || rtas_is_extended_busy(error)) {
 			wait_time = rtas_extended_busy_delay_time(error);
 			/* This is boot time so we spin. */
@@ -360,7 +357,7 @@ void pSeries_get_boot_time(struct rtc_time *rtc_tm)
 		}
 	} while (error == RTAS_CLOCK_BUSY && (__get_tb() < max_wait_tb));
 
-	if (error != 0) {
+	if (error != 0 && printk_ratelimit()) {
 		printk(KERN_WARNING "error: reading the clock failed (%d)\n",
 			error);
 		return;
@@ -380,15 +377,15 @@ void pSeries_get_boot_time(struct rtc_time *rtc_tm)
  */
 void pSeries_get_rtc_time(struct rtc_time *rtc_tm)
 {
-        unsigned long ret[8];
+        int ret[8];
 	int error, wait_time;
 	unsigned long max_wait_tb;
 
 	max_wait_tb = __get_tb() + tb_ticks_per_usec * 1000 * MAX_RTC_WAIT;
 	do {
-		error = rtas_call(rtas_token("get-time-of-day"), 0, 8, (void *)&ret);
+		error = rtas_call(rtas_token("get-time-of-day"), 0, 8, ret);
 		if (error == RTAS_CLOCK_BUSY || rtas_is_extended_busy(error)) {
-			if (in_interrupt()) {
+			if (in_interrupt() && printk_ratelimit()) {
 				printk(KERN_WARNING "error: reading clock would delay interrupt\n");
 				return;	/* delay not allowed */
 			}
@@ -399,7 +396,7 @@ void pSeries_get_rtc_time(struct rtc_time *rtc_tm)
 		}
 	} while (error == RTAS_CLOCK_BUSY && (__get_tb() < max_wait_tb));
 
-        if (error != 0) {
+        if (error != 0 && printk_ratelimit()) {
                 printk(KERN_WARNING "error: reading the clock failed (%d)\n",
 		       error);
 		return;
@@ -434,7 +431,7 @@ int pSeries_set_rtc_time(struct rtc_time *tm)
 		}
 	} while (error == RTAS_CLOCK_BUSY && (__get_tb() < max_wait_tb));
 
-        if (error != 0)
+        if (error != 0 && printk_ratelimit())
                 printk(KERN_WARNING "error: setting the clock failed (%d)\n",
 		       error); 
 

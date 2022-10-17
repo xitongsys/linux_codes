@@ -96,12 +96,13 @@ struct raw3215_info {
 	int msg_dstat;		      /* dstat for pending message */
 	int msg_cstat;		      /* cstat for pending message */
 	int line_pos;		      /* position on the line (for tabs) */
+	char ubuffer[80];	      /* copy_from_user buffer */
 };
 
 /* array of 3215 devices structures */
 static struct raw3215_info *raw3215[NR_3215];
 /* spinlock to protect the raw3215 array */
-static spinlock_t raw3215_device_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(raw3215_device_lock);
 /* list of free request structures */
 static struct raw3215_req *raw3215_freelist;
 /* spinlock to protect free list */
@@ -365,10 +366,7 @@ raw3215_tasklet(void *data)
 	tty = raw->tty;
 	if (tty != NULL &&
 	    RAW3215_BUFFER_SIZE - raw->count >= RAW3215_MIN_SPACE) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
+	    	tty_wakeup(tty);
 	}
 }
 
@@ -453,7 +451,7 @@ raw3215_irq(struct ccw_device *cdev, unsigned long intparm, struct irb *irb)
 				memcpy(tty->flip.char_buf_ptr,
 				       raw->inbuf, count);
 				if (count < 2 ||
-				    (strncmp(raw->inbuf+count-2, "^n", 2) ||
+				    (strncmp(raw->inbuf+count-2, "^n", 2) &&
 				    strncmp(raw->inbuf+count-2, "\252n", 2)) ) {
 					/* don't add the auto \n */
 					tty->flip.char_buf_ptr[count] = '\n';
@@ -532,15 +530,12 @@ raw3215_make_room(struct raw3215_info *raw, unsigned int length)
 /*
  * String write routine for 3215 devices
  */
-static int
-raw3215_write(struct raw3215_info *raw, const char *str,
-	      int from_user, unsigned int length)
+static void
+raw3215_write(struct raw3215_info *raw, const char *str, unsigned int length)
 {
 	unsigned long flags;
-	int ret, c;
-	int count;
+	int c, count;
 
-	ret = 0;
 	while (length > 0) {
 		spin_lock_irqsave(raw->lock, flags);
 		count = (length > RAW3215_BUFFER_SIZE) ?
@@ -550,46 +545,19 @@ raw3215_write(struct raw3215_info *raw, const char *str,
 		raw3215_make_room(raw, count);
 
 		/* copy string to output buffer and convert it to EBCDIC */
-		if (from_user) {
-			while (1) {
-				c = min_t(int, count,
-					min(RAW3215_BUFFER_SIZE - raw->count,
-					    RAW3215_BUFFER_SIZE - raw->head));
-				if (c <= 0)
-					break;
-				c -= copy_from_user(raw->buffer + raw->head,
-						    str, c);
-				if (c == 0) {
-					if (!ret)
-						ret = -EFAULT;
-					break;
-				}
-				ASCEBC(raw->buffer + raw->head, c);
-				raw->head = (raw->head + c) &
-					    (RAW3215_BUFFER_SIZE - 1);
-				raw->count += c;
-				raw->line_pos += c;
-				str += c;
-				count -= c;
-				ret += c;
-			}
-		} else {
-			while (1) {
-				c = min_t(int, count,
-					min(RAW3215_BUFFER_SIZE - raw->count,
-					    RAW3215_BUFFER_SIZE - raw->head));
-				if (c <= 0)
-					break;
-				memcpy(raw->buffer + raw->head, str, c);
-				ASCEBC(raw->buffer + raw->head, c);
-				raw->head = (raw->head + c) &
-					    (RAW3215_BUFFER_SIZE - 1);
-				raw->count += c;
-				raw->line_pos += c;
-				str += c;
-				count -= c;
-				ret += c;
-			}
+		while (1) {
+			c = min_t(int, count,
+				  min(RAW3215_BUFFER_SIZE - raw->count,
+				      RAW3215_BUFFER_SIZE - raw->head));
+			if (c <= 0)
+				break;
+			memcpy(raw->buffer + raw->head, str, c);
+			ASCEBC(raw->buffer + raw->head, c);
+			raw->head = (raw->head + c) & (RAW3215_BUFFER_SIZE - 1);
+			raw->count += c;
+			raw->line_pos += c;
+			str += c;
+			count -= c;
 		}
 		if (!(raw->flags & RAW3215_WORKING)) {
 			raw3215_mk_write_req(raw);
@@ -598,8 +566,6 @@ raw3215_write(struct raw3215_info *raw, const char *str,
 		}
 		spin_unlock_irqrestore(raw->lock, flags);
 	}
-
-	return ret;
 }
 
 /*
@@ -752,11 +718,12 @@ raw3215_probe (struct ccw_device *cdev)
 	return 0;
 }
 
-static int
+static void
 raw3215_remove (struct ccw_device *cdev)
 {
 	struct raw3215_info *raw;
 
+	ccw_device_set_offline(cdev);
 	raw = cdev->dev.driver_data;
 	if (raw) {
 		cdev->dev.driver_data = NULL;
@@ -764,7 +731,6 @@ raw3215_remove (struct ccw_device *cdev)
 			kfree(raw->buffer);
 		kfree(raw);
 	}
-	return 0;
 }
 
 static int
@@ -825,7 +791,7 @@ con3215_write(struct console *co, const char *str, unsigned int count)
 		for (i = 0; i < count; i++)
 			if (str[i] == '\t' || str[i] == '\n')
 				break;
-		raw3215_write(raw, str, 0, i);
+		raw3215_write(raw, str, i);
 		count -= i;
 		str += i;
 		if (count > 0) {
@@ -1017,17 +983,16 @@ tty3215_write_room(struct tty_struct *tty)
  * String write routine for 3215 ttys
  */
 static int
-tty3215_write(struct tty_struct * tty, int from_user,
+tty3215_write(struct tty_struct * tty,
 	      const unsigned char *buf, int count)
 {
 	struct raw3215_info *raw;
-	int ret = 0;
 
 	if (!tty)
 		return 0;
 	raw = (struct raw3215_info *) tty->driver_data;
-	ret = raw3215_write(raw, buf, from_user, count);
-	return ret;
+	raw3215_write(raw, buf, count);
+	return count;
 }
 
 /*
@@ -1068,10 +1033,7 @@ tty3215_flush_buffer(struct tty_struct *tty)
 
 	raw = (struct raw3215_info *) tty->driver_data;
 	raw3215_flush_buffer(raw);
-	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 }
 
 /*

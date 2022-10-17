@@ -10,6 +10,7 @@
  *              IPI based ptc implementation and A-step IPI implementation.
  */
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -87,7 +88,7 @@ wrap_mmu_context (struct mm_struct *mm)
 void
 ia64_global_tlb_purge (unsigned long start, unsigned long end, unsigned long nbits)
 {
-	static spinlock_t ptcg_lock = SPIN_LOCK_UNLOCKED;
+	static DEFINE_SPINLOCK(ptcg_lock);
 
 	/* HW requires global serialization of ptc.ga.  */
 	spin_lock(&ptcg_lock);
@@ -126,6 +127,7 @@ local_flush_tlb_all (void)
 	local_irq_restore(flags);
 	ia64_srlz_i();			/* srlz.i implies srlz.d */
 }
+EXPORT_SYMBOL(local_flush_tlb_all);
 
 void
 flush_tlb_range (struct vm_area_struct *vma, unsigned long start, unsigned long end)
@@ -162,8 +164,9 @@ flush_tlb_range (struct vm_area_struct *vma, unsigned long start, unsigned long 
 
 	ia64_srlz_i();			/* srlz.i implies srlz.d */
 }
+EXPORT_SYMBOL(flush_tlb_range);
 
-void __init
+void __devinit
 ia64_tlb_init (void)
 {
 	ia64_ptce_info_t ptce_info;
@@ -173,7 +176,7 @@ ia64_tlb_init (void)
 	if ((status = ia64_pal_vm_page_size(&tr_pgbits, &purge.mask)) != 0) {
 		printk(KERN_ERR "PAL_VM_PAGE_SIZE failed with status=%ld;"
 		       "defaulting to architected purge page-sizes.\n", status);
-		purge.mask = 0x115557000;
+		purge.mask = 0x115557000UL;
 	}
 	purge.max_bits = ia64_fls(purge.mask);
 

@@ -26,6 +26,7 @@
 #include <linux/mm.h>
 #include <linux/generic_serial.h>
 #include <linux/interrupt.h>
+#include <linux/delay.h>
 #include <asm/semaphore.h>
 #include <asm/uaccess.h>
 
@@ -45,7 +46,7 @@ static int gs_debug;
 #define func_enter() gs_dprintk (GS_DEBUG_FLOW, "gs: enter %s\n", __FUNCTION__)
 #define func_exit()  gs_dprintk (GS_DEBUG_FLOW, "gs: exit  %s\n", __FUNCTION__)
 
-#if NEW_WRITE_LOCKING
+#ifdef NEW_WRITE_LOCKING
 #define DECL      /* Nothing */
 #define LOCKIT    down (& port->port_write_sem);
 #define RELEASEIT up (&port->port_write_sem);
@@ -57,7 +58,7 @@ static int gs_debug;
 
 #define RS_EVENT_WRITE_WAKEUP	1
 
-MODULE_PARM(gs_debug, "i");
+module_param(gs_debug, int, 0644);
 
 
 void gs_put_char(struct tty_struct * tty, unsigned char ch)
@@ -102,7 +103,7 @@ void gs_put_char(struct tty_struct * tty, unsigned char ch)
 >       -3- Other processes that are also trying to do a "write". 
 */
 
-int gs_write(struct tty_struct * tty, int from_user, 
+int gs_write(struct tty_struct * tty, 
                     const unsigned char *buf, int count)
 {
 	struct gs_port *port;
@@ -143,15 +144,8 @@ int gs_write(struct tty_struct * tty, int from_user,
  
 		/* Can't copy more? break out! */
 		if (c <= 0) break;
-		if (from_user) {
-			if (copy_from_user (port->xmit_buf + port->xmit_head, 
-					    buf, c)) {
-				up (& port->port_write_sem);
-				return -EFAULT;
-			}
 
-		} else
-			memcpy (port->xmit_buf + port->xmit_head, buf, c);
+		memcpy (port->xmit_buf + port->xmit_head, buf, c);
 
 		port -> xmit_cnt += c;
 		port -> xmit_head = (port->xmit_head + c) & (SERIAL_XMIT_SIZE -1);
@@ -182,7 +176,7 @@ int gs_write(struct tty_struct * tty, int from_user,
 >       -3- Other processes that are also trying to do a "write". 
 */
 
-int gs_write(struct tty_struct * tty, int from_user, 
+int gs_write(struct tty_struct * tty,
                     const unsigned char *buf, int count)
 {
 	struct gs_port *port;
@@ -215,79 +209,35 @@ int gs_write(struct tty_struct * tty, int from_user,
 		return -EIO;
 
 	save_flags(flags);
-	if (from_user) {
-		down(&tmp_buf_sem);
-		while (1) {
-			c = count;
+	while (1) {
+		cli();
+		c = count;
 
-			/* This is safe because we "OWN" the "head". Noone else can 
-			   change the "head": we own the port_write_sem. */
-			/* Don't overrun the end of the buffer */
-			t = SERIAL_XMIT_SIZE - port->xmit_head;
-			if (t < c) c = t;
- 
-			/* This is safe because the xmit_cnt can only decrease. This 
-			   would increase "t", so we might copy too little chars. */
-			/* Don't copy past the "head" of the buffer */
-			t = SERIAL_XMIT_SIZE - 1 - port->xmit_cnt;
-			if (t < c) c = t;	 
+		/* This is safe because we "OWN" the "head". Noone else can 
+		   change the "head": we own the port_write_sem. */
+		/* Don't overrun the end of the buffer */
+		t = SERIAL_XMIT_SIZE - port->xmit_head;
+		if (t < c) c = t;
 
-			/* Can't copy more? break out! */
-			if (c <= 0) break;
+		/* This is safe because the xmit_cnt can only decrease. This 
+		   would increase "t", so we might copy too little chars. */
+		/* Don't copy past the "head" of the buffer */
+		t = SERIAL_XMIT_SIZE - 1 - port->xmit_cnt;
+		if (t < c) c = t;
 
-			c -= copy_from_user(tmp_buf, buf, c);
-			if (!c) {
-				if (!total)
-					total = -EFAULT;
-				break;
-			}
-			cli();
-			t = SERIAL_XMIT_SIZE - port->xmit_head;
-			if (t < c) c = t;
-			t = SERIAL_XMIT_SIZE - 1 - port->xmit_cnt;
-			if (t < c) c = t;
-
-			memcpy(port->xmit_buf + port->xmit_head, tmp_buf, c);
-			port->xmit_head = ((port->xmit_head + c) &
-			                   (SERIAL_XMIT_SIZE-1));
-			port->xmit_cnt += c;
+		/* Can't copy more? break out! */
+		if (c <= 0) {
 			restore_flags(flags);
-			buf += c;
-			count -= c;
-			total += c;
+			break;
 		}
-		up(&tmp_buf_sem);
-	} else {
-		while (1) {
-			cli();
-			c = count;
-
-			/* This is safe because we "OWN" the "head". Noone else can 
-			   change the "head": we own the port_write_sem. */
-			/* Don't overrun the end of the buffer */
-			t = SERIAL_XMIT_SIZE - port->xmit_head;
-			if (t < c) c = t;
- 
-			/* This is safe because the xmit_cnt can only decrease. This 
-			   would increase "t", so we might copy too little chars. */
-			/* Don't copy past the "head" of the buffer */
-			t = SERIAL_XMIT_SIZE - 1 - port->xmit_cnt;
-			if (t < c) c = t;
- 
-			/* Can't copy more? break out! */
-			if (c <= 0) {
-				restore_flags(flags);
-				break;
-			}
-			memcpy(port->xmit_buf + port->xmit_head, buf, c);
-			port->xmit_head = ((port->xmit_head + c) &
-			                   (SERIAL_XMIT_SIZE-1));
-			port->xmit_cnt += c;
-			restore_flags(flags);
-			buf += c;
-			count -= c;
-			total += c;
-		}
+		memcpy(port->xmit_buf + port->xmit_head, buf, c);
+		port->xmit_head = ((port->xmit_head + c) &
+		                   (SERIAL_XMIT_SIZE-1));
+		port->xmit_cnt += c;
+		restore_flags(flags);
+		buf += c;
+		count -= c;
+		total += c;
 	}
 
 	if (port->xmit_cnt && 
@@ -329,7 +279,7 @@ int gs_chars_in_buffer(struct tty_struct *tty)
 }
 
 
-int gs_real_chars_in_buffer(struct tty_struct *tty)
+static int gs_real_chars_in_buffer(struct tty_struct *tty)
 {
 	struct gs_port *port;
 	func_enter ();
@@ -399,8 +349,7 @@ static int gs_wait_tx_flushed (void * ptr, int timeout)
 		gs_dprintk (GS_DEBUG_FLUSH, "Expect to finish in %d jiffies "
 			    "(%d chars).\n", jiffies_to_transmit, charsleft); 
 
-		set_current_state (TASK_INTERRUPTIBLE);
-		schedule_timeout(jiffies_to_transmit);
+		msleep_interruptible(jiffies_to_msecs(jiffies_to_transmit));
 		if (signal_pending (current)) {
 			gs_dprintk (GS_DEBUG_FLUSH, "Signal pending. Bombing out: "); 
 			rv = -EINTR;
@@ -436,9 +385,7 @@ void gs_flush_buffer(struct tty_struct *tty)
 	restore_flags(flags);
 
 	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 	func_exit ();
 }
 
@@ -510,7 +457,7 @@ void gs_start(struct tty_struct * tty)
 }
 
 
-void gs_shutdown_port (struct gs_port *port)
+static void gs_shutdown_port (struct gs_port *port)
 {
 	unsigned long flags;
 
@@ -526,7 +473,7 @@ void gs_shutdown_port (struct gs_port *port)
 
 	if (port->xmit_buf) {
 		free_page((unsigned long) port->xmit_buf);
-		port->xmit_buf = 0;
+		port->xmit_buf = NULL;
 	}
 
 	if (port->tty)
@@ -560,29 +507,6 @@ void gs_hangup(struct tty_struct *tty)
 	port->count = 0;
 
 	wake_up_interruptible(&port->open_wait);
-	func_exit ();
-}
-
-
-void gs_do_softint(void *private_)
-{
-	struct gs_port *port = private_;
-	struct tty_struct *tty;
-
-	func_enter ();
-
-	if (!port) return;
-
-	tty = port->tty;
-
-	if (!tty) return;
-
-	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event)) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
-	}
 	func_exit ();
 }
 
@@ -694,7 +618,7 @@ void gs_close(struct tty_struct * tty, struct file * filp)
 {
 	unsigned long flags;
 	struct gs_port *port;
-
+	
 	func_enter ();
 
 	if (!tty) return;
@@ -760,19 +684,18 @@ void gs_close(struct tty_struct * tty, struct file * filp)
 
 	if (tty->driver->flush_buffer)
 		tty->driver->flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+		
+	tty_ldisc_flush(tty);
 	tty->closing = 0;
 
 	port->event = 0;
 	port->rd->close (port);
 	port->rd->shutdown_port (port);
-	port->tty = 0;
+	port->tty = NULL;
 
 	if (port->blocked_open) {
 		if (port->close_delay) {
-			set_current_state (TASK_INTERRUPTIBLE);
-			schedule_timeout(port->close_delay);
+			msleep_interruptible(jiffies_to_msecs(port->close_delay));
 		}
 		wake_up_interruptible(&port->open_wait);
 	}
@@ -967,7 +890,7 @@ int gs_init_port(struct gs_port *port)
 }
 
 
-int gs_setserial(struct gs_port *port, struct serial_struct *sp)
+int gs_setserial(struct gs_port *port, struct serial_struct __user *sp)
 {
 	struct serial_struct sio;
 
@@ -1002,7 +925,7 @@ int gs_setserial(struct gs_port *port, struct serial_struct *sp)
  *      Generate the serial struct info.
  */
 
-int gs_getserial(struct gs_port *port, struct serial_struct *sp)
+int gs_getserial(struct gs_port *port, struct serial_struct __user *sp)
 {
 	struct serial_struct    sio;
 
@@ -1052,7 +975,6 @@ EXPORT_SYMBOL(gs_flush_chars);
 EXPORT_SYMBOL(gs_stop);
 EXPORT_SYMBOL(gs_start);
 EXPORT_SYMBOL(gs_hangup);
-EXPORT_SYMBOL(gs_do_softint);
 EXPORT_SYMBOL(gs_block_til_ready);
 EXPORT_SYMBOL(gs_close);
 EXPORT_SYMBOL(gs_set_termios);

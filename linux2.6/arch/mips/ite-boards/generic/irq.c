@@ -32,7 +32,6 @@
  *  with this program; if not, write  to the Free Software Foundation, Inc.,
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/irq.h>
@@ -47,8 +46,8 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/serial_reg.h>
+#include <linux/bitops.h>
 
-#include <asm/bitops.h>
 #include <asm/bootinfo.h>
 #include <asm/io.h>
 #include <asm/mipsregs.h>
@@ -57,26 +56,12 @@
 #include <asm/it8172/it8172_int.h>
 #include <asm/it8172/it8172_dbg.h>
 
-#undef DEBUG_IRQ
-#ifdef DEBUG_IRQ
-/* note: prints function name for you */
-#define DPRINTK(fmt, args...) printk("%s: " fmt, __FUNCTION__ , ## args)
-#else
-#define DPRINTK(fmt, args...)
-#endif
-
-#ifdef CONFIG_KGDB
-extern void breakpoint(void);
-#endif
-
 /* revisit */
 #define EXT_IRQ0_TO_IP 2 /* IP 2 */
 #define EXT_IRQ5_TO_IP 7 /* IP 7 */
 
 #define ALLINTS_NOTIMER (IE_IRQ0 | IE_IRQ1 | IE_IRQ2 | IE_IRQ3 | IE_IRQ4)
 
-unsigned int local_bh_count[NR_CPUS];
-unsigned int local_irq_count[NR_CPUS];
 void disable_it8172_irq(unsigned int irq_nr);
 void enable_it8172_irq(unsigned int irq_nr);
 
@@ -84,114 +69,53 @@ extern void set_debug_traps(void);
 extern void mips_timer_interrupt(int irq, struct pt_regs *regs);
 extern asmlinkage void it8172_IRQ(void);
 
-struct it8172_intc_regs volatile *it8172_hw0_icregs
-	= (struct it8172_intc_regs volatile *)(KSEG1ADDR(IT8172_PCI_IO_BASE + IT_INTC_BASE));
+struct it8172_intc_regs volatile *it8172_hw0_icregs =
+	(struct it8172_intc_regs volatile *)(KSEG1ADDR(IT8172_PCI_IO_BASE + IT_INTC_BASE));
 
-/* Function for careful CP0 interrupt mask access */
-static inline void modify_cp0_intmask(unsigned clr_mask, unsigned set_mask)
+static void disable_it8172_irq(unsigned int irq_nr)
 {
-        unsigned long status = read_c0_status();
-        status &= ~((clr_mask & 0xFF) << 8);
-        status |=   (set_mask & 0xFF) << 8;
-        write_c0_status(status);
-}
-
-static inline void mask_irq(unsigned int irq_nr)
-{
-        modify_cp0_intmask(irq_nr, 0);
-}
-
-static inline void unmask_irq(unsigned int irq_nr)
-{
-        modify_cp0_intmask(0, irq_nr);
-}
-
-void local_disable_irq(unsigned int irq_nr)
-{
-        unsigned long flags;
-
-        local_irq_save(flags);
-	disable_it8172_irq(irq_nr);
-        local_irq_restore(flags);
-}
-
-void local_enable_irq(unsigned int irq_nr)
-{
-	unsigned long flags;
-
-        local_irq_save(flags);
-	enable_it8172_irq(irq_nr);
-        local_irq_restore(flags);
-}
-
-
-void disable_it8172_irq(unsigned int irq_nr)
-{
-	DPRINTK("disable_it8172_irq %d\n", irq_nr);
-
 	if ( (irq_nr >= IT8172_LPC_IRQ_BASE) && (irq_nr <= IT8172_SERIRQ_15)) {
 		/* LPC interrupt */
-		DPRINTK("DB lpc_mask  %x\n", it8172_hw0_icregs->lpc_mask);
 		it8172_hw0_icregs->lpc_mask |=
 			(1 << (irq_nr - IT8172_LPC_IRQ_BASE));
-		DPRINTK("DA lpc_mask  %x\n", it8172_hw0_icregs->lpc_mask);
-	}
-	else if ( (irq_nr >= IT8172_LB_IRQ_BASE) && (irq_nr <= IT8172_IOCHK_IRQ)) {
+	} else if ( (irq_nr >= IT8172_LB_IRQ_BASE) && (irq_nr <= IT8172_IOCHK_IRQ)) {
 		/* Local Bus interrupt */
-		DPRINTK("DB lb_mask  %x\n", it8172_hw0_icregs->lb_mask);
 		it8172_hw0_icregs->lb_mask |=
 			(1 << (irq_nr - IT8172_LB_IRQ_BASE));
-		DPRINTK("DA lb_mask  %x\n", it8172_hw0_icregs->lb_mask);
-	}
-	else if ( (irq_nr >= IT8172_PCI_DEV_IRQ_BASE) && (irq_nr <= IT8172_DMA_IRQ)) {
+	} else if ( (irq_nr >= IT8172_PCI_DEV_IRQ_BASE) && (irq_nr <= IT8172_DMA_IRQ)) {
 		/* PCI and other interrupts */
-		DPRINTK("DB pci_mask  %x\n", it8172_hw0_icregs->pci_mask);
 		it8172_hw0_icregs->pci_mask |=
 			(1 << (irq_nr - IT8172_PCI_DEV_IRQ_BASE));
-		DPRINTK("DA pci_mask  %x\n", it8172_hw0_icregs->pci_mask);
-	}
-	else if ( (irq_nr >= IT8172_NMI_IRQ_BASE) && (irq_nr <= IT8172_POWER_NMI_IRQ)) {
+	} else if ( (irq_nr >= IT8172_NMI_IRQ_BASE) && (irq_nr <= IT8172_POWER_NMI_IRQ)) {
 		/* NMI interrupts */
-		DPRINTK("DB nmi_mask  %x\n", it8172_hw0_icregs->nmi_mask);
 		it8172_hw0_icregs->nmi_mask |=
 			(1 << (irq_nr - IT8172_NMI_IRQ_BASE));
-		DPRINTK("DA nmi_mask  %x\n", it8172_hw0_icregs->nmi_mask);
-	}
-	else {
+	} else {
 		panic("disable_it8172_irq: bad irq %d", irq_nr);
 	}
 }
 
-void enable_it8172_irq(unsigned int irq_nr)
+static void enable_it8172_irq(unsigned int irq_nr)
 {
-	DPRINTK("enable_it8172_irq %d\n", irq_nr);
 	if ( (irq_nr >= IT8172_LPC_IRQ_BASE) && (irq_nr <= IT8172_SERIRQ_15)) {
 		/* LPC interrupt */
-		DPRINTK("EB before lpc_mask  %x\n", it8172_hw0_icregs->lpc_mask);
 		it8172_hw0_icregs->lpc_mask &=
 			~(1 << (irq_nr - IT8172_LPC_IRQ_BASE));
-		DPRINTK("EA after lpc_mask  %x\n", it8172_hw0_icregs->lpc_mask);
 	}
 	else if ( (irq_nr >= IT8172_LB_IRQ_BASE) && (irq_nr <= IT8172_IOCHK_IRQ)) {
 		/* Local Bus interrupt */
-		DPRINTK("EB lb_mask  %x\n", it8172_hw0_icregs->lb_mask);
 		it8172_hw0_icregs->lb_mask &=
 			~(1 << (irq_nr - IT8172_LB_IRQ_BASE));
-		DPRINTK("EA lb_mask  %x\n", it8172_hw0_icregs->lb_mask);
 	}
 	else if ( (irq_nr >= IT8172_PCI_DEV_IRQ_BASE) && (irq_nr <= IT8172_DMA_IRQ)) {
 		/* PCI and other interrupts */
-		DPRINTK("EB pci_mask  %x\n", it8172_hw0_icregs->pci_mask);
 		it8172_hw0_icregs->pci_mask &=
 			~(1 << (irq_nr - IT8172_PCI_DEV_IRQ_BASE));
-		DPRINTK("EA pci_mask  %x\n", it8172_hw0_icregs->pci_mask);
 	}
 	else if ( (irq_nr >= IT8172_NMI_IRQ_BASE) && (irq_nr <= IT8172_POWER_NMI_IRQ)) {
 		/* NMI interrupts */
-		DPRINTK("EB nmi_mask  %x\n", it8172_hw0_icregs->nmi_mask);
 		it8172_hw0_icregs->nmi_mask &=
 			~(1 << (irq_nr - IT8172_NMI_IRQ_BASE));
-		DPRINTK("EA nmi_mask  %x\n", it8172_hw0_icregs->nmi_mask);
 	}
 	else {
 		panic("enable_it8172_irq: bad irq %d", irq_nr);
@@ -244,26 +168,22 @@ static struct hw_interrupt_type cp0_irq_type = {
 	end_none
 };
 
-
 void enable_cpu_timer(void)
 {
         unsigned long flags;
 
         local_irq_save(flags);
-	unmask_irq(1<<EXT_IRQ5_TO_IP); /* timer interrupt */
+	set_c0_status(0x100 << EXT_IRQ5_TO_IP);
         local_irq_restore(flags);
 }
 
-
-void __init init_IRQ(void)
+void __init arch_init_irq(void)
 {
 	int i;
         unsigned long flags;
 
         memset(irq_desc, 0, sizeof(irq_desc));
         set_except_vector(0, it8172_IRQ);
-
-	init_generic_irq();
 
 	/* mask all interrupts */
 	it8172_hw0_icregs->lb_mask  = 0xffff;
@@ -301,13 +221,6 @@ void __init init_IRQ(void)
 	}
 	irq_desc[MIPS_CPU_TIMER_IRQ].handler = &cp0_irq_type;
 	set_c0_status(ALLINTS_NOTIMER);
-
-#ifdef CONFIG_KGDB
-	/* If local serial I/O used for debug port, enter kgdb at once */
-	puts("Waiting for kgdb to connect...");
-	set_debug_traps();
-	breakpoint();
-#endif
 }
 
 void mips_spurious_interrupt(struct pt_regs *regs)
@@ -322,7 +235,6 @@ void mips_spurious_interrupt(struct pt_regs *regs)
 	cause = read_c0_cause();
 	printk("status %x cause %x\n", status, cause);
 	printk("epc %x badvaddr %x \n", regs->cp0_epc, regs->cp0_badvaddr);
-//	while(1);
 #endif
 }
 
@@ -334,8 +246,7 @@ void it8172_hw0_irqdispatch(struct pt_regs *regs)
 	intstatus = it8172_hw0_icregs->intstatus;
 	if (intstatus & 0x8) {
 		panic("Got NMI interrupt");
-	}
-	else if (intstatus & 0x4) {
+	} else if (intstatus & 0x4) {
 		/* PCI interrupt */
 		irq = 0;
 		status |= it8172_hw0_icregs->pci_req;
@@ -344,9 +255,7 @@ void it8172_hw0_irqdispatch(struct pt_regs *regs)
 			status >>= 1;
 		}
 		irq += IT8172_PCI_DEV_IRQ_BASE;
-		//printk("pci int %d\n", irq);
-	}
-	else if (intstatus & 0x1) {
+	} else if (intstatus & 0x1) {
 		/* Local Bus interrupt */
 		irq = 0;
 		status |= it8172_hw0_icregs->lb_req;
@@ -355,9 +264,7 @@ void it8172_hw0_irqdispatch(struct pt_regs *regs)
 			status >>= 1;
 		}
 		irq += IT8172_LB_IRQ_BASE;
-		//printk("lb int %d\n", irq);
-	}
-	else if (intstatus & 0x2) {
+	} else if (intstatus & 0x2) {
 		/* LPC interrupt */
 		/* Since some lpc interrupts are edge triggered,
 		 * we could lose an interrupt this way because
@@ -371,11 +278,9 @@ void it8172_hw0_irqdispatch(struct pt_regs *regs)
 			status >>= 1;
 		}
 		irq += IT8172_LPC_IRQ_BASE;
-		//printk("LPC int %d\n", irq);
-	}
-	else {
+	} else
 		return;
-	}
+
 	do_IRQ(irq, regs);
 }
 

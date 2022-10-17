@@ -2,8 +2,10 @@
 #define _ASM_IA64_SIGINFO_H
 
 /*
- * Copyright (C) 1998-2002 Hewlett-Packard Co
- *	David Mosberger-Tang <davidm@hpl.hp.com>
+ * Based on <asm-i386/siginfo.h>.
+ *
+ * Modified 1998-2002
+ *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
  */
 
 #define SI_PAD_SIZE	((SI_MAX_SIZE/sizeof(int)) - 4)
@@ -58,7 +60,7 @@ typedef struct siginfo {
 
 		/* SIGILL, SIGFPE, SIGSEGV, SIGBUS */
 		struct {
-			void *_addr;		/* faulting insn/memory ref. */
+			void __user *_addr;	/* faulting insn/memory ref. */
 			int _imm;		/* immediate value for "break" */
 			unsigned int _flags;	/* see below */
 			unsigned long _isr;	/* isr */
@@ -133,8 +135,6 @@ copy_siginfo (siginfo_t *to, siginfo_t *from)
 		/* _sigchld is currently the largest know union member */
 		memcpy(to, from, 4*sizeof(int) + sizeof(from->_sifields._sigchld));
 }
-
-extern int copy_siginfo_from_user(siginfo_t *to, siginfo_t *from);
 
 #endif /* __KERNEL__ */
 

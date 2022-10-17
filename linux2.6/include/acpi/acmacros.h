@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,11 +48,14 @@
 /*
  * Data manipulation macros
  */
-
 #define ACPI_LOWORD(l)                  ((u16)(u32)(l))
 #define ACPI_HIWORD(l)                  ((u16)((((u32)(l)) >> 16) & 0xFFFF))
 #define ACPI_LOBYTE(l)                  ((u8)(u16)(l))
 #define ACPI_HIBYTE(l)                  ((u8)((((u16)(l)) >> 8) & 0xFF))
+
+#define ACPI_SET_BIT(target,bit)        ((target) |= (bit))
+#define ACPI_CLEAR_BIT(target,bit)      ((target) &= ~(bit))
+#define ACPI_MIN(a,b)                   (((a)<(b))?(a):(b))
 
 
 #if ACPI_MACHINE_WIDTH == 16
@@ -94,10 +97,18 @@
 #endif
 #endif
 
- /*
-  * Extract a byte of data using a pointer.  Any more than a byte and we
-  * get into potential aligment issues -- see the STORE macros below
-  */
+/*
+ * printf() format helpers
+ */
+
+/* Split 64-bit integer into two 32-bit values. Use with %8.8X%8.8X */
+
+#define ACPI_FORMAT_UINT64(i)           ACPI_HIDWORD(i),ACPI_LODWORD(i)
+
+/*
+ * Extract a byte of data using a pointer.  Any more than a byte and we
+ * get into potential aligment issues -- see the STORE macros below
+ */
 #define ACPI_GET8(addr)                 (*(u8*)(addr))
 
 /* Pointer arithmetic */
@@ -129,7 +140,6 @@
  * If the hardware supports the transfer of unaligned data, just do the store.
  * Otherwise, we have to move one byte at a time.
  */
-
 #ifdef ACPI_BIG_ENDIAN
 /*
  * Macros for big-endian machines
@@ -299,7 +309,6 @@
 /*
  * Fast power-of-two math macros for non-optimized compilers
  */
-
 #define _ACPI_DIV(value,power_of2)      ((u32) ((value) >> (power_of2)))
 #define _ACPI_MUL(value,power_of2)      ((u32) ((value) << (power_of2)))
 #define _ACPI_MOD(value,divisor)        ((u32) ((value) & ((divisor) -1)))
@@ -355,24 +364,6 @@
 #define ACPI_MASK_BITS_BELOW(position)       ((ACPI_INTEGER_MAX) << ((u32) (position)))
 
 #define ACPI_IS_OCTAL_DIGIT(d)               (((char)(d) >= '0') && ((char)(d) <= '7'))
-
-/* Macros for GAS addressing */
-
-#if ACPI_MACHINE_WIDTH != 16
-
-#define ACPI_PCI_DEVICE(a)              (u16) ((ACPI_HIDWORD ((a))) & 0x0000FFFF)
-#define ACPI_PCI_FUNCTION(a)            (u16) ((ACPI_LODWORD ((a))) >> 16)
-#define ACPI_PCI_REGISTER(a)            (u16) ((ACPI_LODWORD ((a))) & 0x0000FFFF)
-
-#else
-
-/* No support for GAS and PCI IDs in 16-bit mode  */
-
-#define ACPI_PCI_FUNCTION(a)            (u16) ((a) & 0xFFFF0000)
-#define ACPI_PCI_DEVICE(a)              (u16) ((a) & 0x0000FFFF)
-#define ACPI_PCI_REGISTER(a)            (u16) ((a) & 0x0000FFFF)
-
-#endif
 
 
 /* Bitfields within ACPI registers */
@@ -443,7 +434,6 @@
 /*
  * Reporting macros that are never compiled out
  */
-
 #define ACPI_PARAM_LIST(pl)                 pl
 
 /*
@@ -451,7 +441,6 @@
  * _THIS_MODULE gets compiled out when ACPI_DEBUG_OUTPUT isn't defined, only
  * use it in debug mode.
  */
-
 #ifdef ACPI_DEBUG_OUTPUT
 
 #define ACPI_REPORT_INFO(fp)                {acpi_ut_report_info(_THIS_MODULE,__LINE__,_COMPONENT); \
@@ -490,7 +479,6 @@
 /*
  * Debug macros that are conditionally compiled
  */
-
 #ifdef ACPI_DEBUG_OUTPUT
 
 #define ACPI_MODULE_NAME(name)               static char ACPI_UNUSED_VAR *_THIS_MODULE = name;
@@ -500,20 +488,19 @@
  * The first parameter should be the procedure name as a quoted string.  This is declared
  * as a local string ("_proc_name) so that it can be also used by the function exit macros below.
  */
-
-#define ACPI_FUNCTION_NAME(a)               struct acpi_debug_print_info _dbg; \
-												_dbg.component_id = _COMPONENT; \
-												_dbg.proc_name   = a; \
-												_dbg.module_name = _THIS_MODULE;
+#define ACPI_FUNCTION_NAME(a)               struct acpi_debug_print_info _debug_info; \
+												_debug_info.component_id = _COMPONENT; \
+												_debug_info.proc_name  = a; \
+												_debug_info.module_name = _THIS_MODULE;
 
 #define ACPI_FUNCTION_TRACE(a)              ACPI_FUNCTION_NAME(a) \
-												acpi_ut_trace(__LINE__,&_dbg)
+												acpi_ut_trace(__LINE__,&_debug_info)
 #define ACPI_FUNCTION_TRACE_PTR(a,b)        ACPI_FUNCTION_NAME(a) \
-												acpi_ut_trace_ptr(__LINE__,&_dbg,(void *)b)
+												acpi_ut_trace_ptr(__LINE__,&_debug_info,(void *)b)
 #define ACPI_FUNCTION_TRACE_U32(a,b)        ACPI_FUNCTION_NAME(a) \
-												acpi_ut_trace_u32(__LINE__,&_dbg,(u32)b)
+												acpi_ut_trace_u32(__LINE__,&_debug_info,(u32)b)
 #define ACPI_FUNCTION_TRACE_STR(a,b)        ACPI_FUNCTION_NAME(a) \
-												acpi_ut_trace_str(__LINE__,&_dbg,(char *)b)
+												acpi_ut_trace_str(__LINE__,&_debug_info,(char *)b)
 
 #define ACPI_FUNCTION_ENTRY()               acpi_ut_track_stack_ptr()
 
@@ -530,10 +517,10 @@
 #define ACPI_DO_WHILE0(a)               a
 #endif
 
-#define return_VOID                     ACPI_DO_WHILE0 ({acpi_ut_exit(__LINE__,&_dbg);return;})
-#define return_ACPI_STATUS(s)           ACPI_DO_WHILE0 ({acpi_ut_status_exit(__LINE__,&_dbg,(s));return((s));})
-#define return_VALUE(s)                 ACPI_DO_WHILE0 ({acpi_ut_value_exit(__LINE__,&_dbg,(acpi_integer)(s));return((s));})
-#define return_PTR(s)                   ACPI_DO_WHILE0 ({acpi_ut_ptr_exit(__LINE__,&_dbg,(u8 *)(s));return((s));})
+#define return_VOID                     ACPI_DO_WHILE0 ({acpi_ut_exit(__LINE__,&_debug_info);return;})
+#define return_ACPI_STATUS(s)           ACPI_DO_WHILE0 ({acpi_ut_status_exit(__LINE__,&_debug_info,(s));return((s));})
+#define return_VALUE(s)                 ACPI_DO_WHILE0 ({acpi_ut_value_exit(__LINE__,&_debug_info,(acpi_integer)(s));return((s));})
+#define return_PTR(s)                   ACPI_DO_WHILE0 ({acpi_ut_ptr_exit(__LINE__,&_debug_info,(u8 *)(s));return((s));})
 
 /* Conditional execution */
 
@@ -547,12 +534,16 @@
 
 /* Stack and buffer dumping */
 
-#define ACPI_DUMP_STACK_ENTRY(a)        acpi_ex_dump_operand(a)
+#define ACPI_DUMP_STACK_ENTRY(a)        acpi_ex_dump_operand((a),0)
 #define ACPI_DUMP_OPERANDS(a,b,c,d,e)   acpi_ex_dump_operands(a,b,c,d,e,_THIS_MODULE,__LINE__)
 
 
 #define ACPI_DUMP_ENTRY(a,b)            acpi_ns_dump_entry (a,b)
+
+#ifdef ACPI_FUTURE_USAGE
 #define ACPI_DUMP_TABLES(a,b)           acpi_ns_dump_tables(a,b)
+#endif
+
 #define ACPI_DUMP_PATHNAME(a,b,c,d)     acpi_ns_dump_pathname(a,b,c,d)
 #define ACPI_DUMP_RESOURCE_LIST(a)      acpi_rs_dump_resource_list(a)
 #define ACPI_DUMP_BUFFER(a,b)           acpi_ut_dump_buffer((u8 *)a,b,DB_BYTE_DISPLAY,_COMPONENT)
@@ -562,7 +553,6 @@
 /*
  * Generate INT3 on ACPI_ERROR (Debug only!)
  */
-
 #define ACPI_ERROR_BREAK
 #ifdef  ACPI_ERROR_BREAK
 #define ACPI_BREAK_ON_ERROR(lvl)        if ((lvl)&ACPI_ERROR) \
@@ -577,7 +567,6 @@
  *    1) Debug print for the current component is enabled
  *    2) Debug error level or trace level for the print statement is enabled
  */
-
 #define ACPI_DEBUG_PRINT(pl)            acpi_ut_debug_print ACPI_PARAM_LIST(pl)
 #define ACPI_DEBUG_PRINT_RAW(pl)        acpi_ut_debug_print_raw ACPI_PARAM_LIST(pl)
 
@@ -587,7 +576,6 @@
  * This is the non-debug case -- make everything go away,
  * leaving no executable debug code!
  */
-
 #define ACPI_MODULE_NAME(name)
 #define _THIS_MODULE ""
 
@@ -608,7 +596,11 @@
 #define ACPI_DUMP_STACK_ENTRY(a)
 #define ACPI_DUMP_OPERANDS(a,b,c,d,e)
 #define ACPI_DUMP_ENTRY(a,b)
+
+#ifdef ACPI_FUTURE_USAGE
 #define ACPI_DUMP_TABLES(a,b)
+#endif
+
 #define ACPI_DUMP_PATHNAME(a,b,c,d)
 #define ACPI_DUMP_RESOURCE_LIST(a)
 #define ACPI_DUMP_BUFFER(a,b)
@@ -662,7 +654,6 @@
 /*
  * Memory allocation tracking (DEBUG ONLY)
  */
-
 #ifndef ACPI_DBG_TRACK_ALLOCATIONS
 
 /* Memory allocation */
@@ -683,8 +674,5 @@
 #define ACPI_MEM_TRACKING(a)            a
 
 #endif /* ACPI_DBG_TRACK_ALLOCATIONS */
-
-
-#define ACPI_GET_STACK_POINTER          _asm {mov eax, ebx}
 
 #endif /* ACMACROS_H */

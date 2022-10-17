@@ -21,24 +21,48 @@
 #include <linux/skbuff.h>
 #include <linux/netlink.h>
 #include <linux/ptrace.h>
+#include <linux/xattr.h>
+#include <linux/hugetlb.h>
+
+int cap_netlink_send(struct sock *sk, struct sk_buff *skb)
+{
+	NETLINK_CB(skb).eff_cap = current->cap_effective;
+	return 0;
+}
+
+EXPORT_SYMBOL(cap_netlink_send);
+
+int cap_netlink_recv(struct sk_buff *skb)
+{
+	if (!cap_raised(NETLINK_CB(skb).eff_cap, CAP_NET_ADMIN))
+		return -EPERM;
+	return 0;
+}
+
+EXPORT_SYMBOL(cap_netlink_recv);
 
 int cap_capable (struct task_struct *tsk, int cap)
 {
 	/* Derived from include/linux/sched.h:capable. */
-	if (cap_raised (tsk->cap_effective, cap))
+	if (cap_raised(tsk->cap_effective, cap))
 		return 0;
-	else
+	return -EPERM;
+}
+
+int cap_settime(struct timespec *ts, struct timezone *tz)
+{
+	if (!capable(CAP_SYS_TIME))
 		return -EPERM;
+	return 0;
 }
 
 int cap_ptrace (struct task_struct *parent, struct task_struct *child)
 {
 	/* Derived from arch/i386/kernel/ptrace.c:sys_ptrace. */
 	if (!cap_issubset (child->cap_permitted, current->cap_permitted) &&
-	    !capable (CAP_SYS_PTRACE))
+	    !capable(CAP_SYS_PTRACE))
 		return -EPERM;
-	else
-		return 0;
+	return 0;
 }
 
 int cap_capget (struct task_struct *target, kernel_cap_t *effective,
@@ -113,13 +137,7 @@ int cap_bprm_set_security (struct linux_binprm *bprm)
 	return 0;
 }
 
-/* Copied from fs/exec.c */
-static inline int must_not_trace_exec (struct task_struct *p)
-{
-	return (p->ptrace & PT_PTRACED) && !(p->ptrace & PT_PTRACE_CAP);
-}
-
-void cap_bprm_compute_creds (struct linux_binprm *bprm)
+void cap_bprm_apply_creds (struct linux_binprm *bprm, int unsafe)
 {
 	/* Derived from fs/exec.c:compute_creds. */
 	kernel_cap_t new_permitted, working;
@@ -129,21 +147,24 @@ void cap_bprm_compute_creds (struct linux_binprm *bprm)
 				 current->cap_inheritable);
 	new_permitted = cap_combine (new_permitted, working);
 
-	task_lock(current);
-	if (!cap_issubset (new_permitted, current->cap_permitted)) {
+	if (bprm->e_uid != current->uid || bprm->e_gid != current->gid ||
+	    !cap_issubset (new_permitted, current->cap_permitted)) {
 		current->mm->dumpable = 0;
 
-		if (must_not_trace_exec (current)
-		    || atomic_read (&current->fs->count) > 1
-		    || atomic_read (&current->files->count) > 1
-		    || atomic_read (&current->sighand->count) > 1) {
+		if (unsafe & ~LSM_UNSAFE_PTRACE_CAP) {
+			if (!capable(CAP_SETUID)) {
+				bprm->e_uid = current->uid;
+				bprm->e_gid = current->gid;
+			}
 			if (!capable (CAP_SETPCAP)) {
 				new_permitted = cap_intersect (new_permitted,
-							       current->
-							       cap_permitted);
+							current->cap_permitted);
 			}
 		}
 	}
+
+	current->suid = current->euid = current->fsuid = bprm->e_uid;
+	current->sgid = current->egid = current->fsgid = bprm->e_gid;
 
 	/* For init, we want to retain the capabilities set
 	 * in the init_task struct. Thus we skip the usual
@@ -155,7 +176,6 @@ void cap_bprm_compute_creds (struct linux_binprm *bprm)
 	}
 
 	/* AUD: Audit candidate if current->cap_effective is set */
-	task_unlock(current);
 
 	current->keep_capabilities = 0;
 }
@@ -169,6 +189,25 @@ int cap_bprm_secureexec (struct linux_binprm *bprm)
 	   the old userland. */
 	return (current->euid != current->uid ||
 		current->egid != current->gid);
+}
+
+int cap_inode_setxattr(struct dentry *dentry, char *name, void *value,
+		       size_t size, int flags)
+{
+	if (!strncmp(name, XATTR_SECURITY_PREFIX,
+		     sizeof(XATTR_SECURITY_PREFIX) - 1)  &&
+	    !capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	return 0;
+}
+
+int cap_inode_removexattr(struct dentry *dentry, char *name)
+{
+	if (!strncmp(name, XATTR_SECURITY_PREFIX,
+		     sizeof(XATTR_SECURITY_PREFIX) - 1)  &&
+	    !capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	return 0;
 }
 
 /* moved from kernel/sys.c. */
@@ -272,78 +311,31 @@ void cap_task_reparent_to_init (struct task_struct *p)
 
 int cap_syslog (int type)
 {
-	if ((type != 3) && !capable(CAP_SYS_ADMIN))
+	if ((type != 3 && type != 10) && !capable(CAP_SYS_ADMIN))
 		return -EPERM;
 	return 0;
 }
 
-/*
- * Check that a process has enough memory to allocate a new virtual
- * mapping. 0 means there is enough memory for the allocation to
- * succeed and -ENOMEM implies there is not.
- *
- * We currently support three overcommit policies, which are set via the
- * vm.overcommit_memory sysctl.  See Documentation/vm/overcommit-acounting
- *
- * Strict overcommit modes added 2002 Feb 26 by Alan Cox.
- * Additional code 2002 Jul 20 by Robert Love.
- */
 int cap_vm_enough_memory(long pages)
 {
-	unsigned long free, allowed;
+	int cap_sys_admin = 0;
 
-	vm_acct_memory(pages);
-
-        /*
-	 * Sometimes we want to use more memory than we have
-	 */
-	if (sysctl_overcommit_memory == 1)
-		return 0;
-
-	if (sysctl_overcommit_memory == 0) {
-		free = get_page_cache_size();
-		free += nr_free_pages();
-		free += nr_swap_pages;
-
-		/*
-		 * Any slabs which are created with the
-		 * SLAB_RECLAIM_ACCOUNT flag claim to have contents
-		 * which are reclaimable, under pressure.  The dentry
-		 * cache and most inode caches should fall into this
-		 */
-		free += atomic_read(&slab_reclaim_pages);
-
-		/*
-		 * Leave the last 3% for root
-		 */
-		if (!capable(CAP_SYS_ADMIN))
-			free -= free / 32;
-
-		if (free > pages)
-			return 0;
-		vm_unacct_memory(pages);
-		return -ENOMEM;
-	}
-
-	allowed = totalram_pages * sysctl_overcommit_ratio / 100;
-	allowed += total_swap_pages;
-
-	if (atomic_read(&vm_committed_space) < allowed)
-		return 0;
-
-	vm_unacct_memory(pages);
-
-	return -ENOMEM;
+	if (cap_capable(current, CAP_SYS_ADMIN) == 0)
+		cap_sys_admin = 1;
+	return __vm_enough_memory(pages, cap_sys_admin);
 }
 
 EXPORT_SYMBOL(cap_capable);
+EXPORT_SYMBOL(cap_settime);
 EXPORT_SYMBOL(cap_ptrace);
 EXPORT_SYMBOL(cap_capget);
 EXPORT_SYMBOL(cap_capset_check);
 EXPORT_SYMBOL(cap_capset_set);
 EXPORT_SYMBOL(cap_bprm_set_security);
-EXPORT_SYMBOL(cap_bprm_compute_creds);
+EXPORT_SYMBOL(cap_bprm_apply_creds);
 EXPORT_SYMBOL(cap_bprm_secureexec);
+EXPORT_SYMBOL(cap_inode_setxattr);
+EXPORT_SYMBOL(cap_inode_removexattr);
 EXPORT_SYMBOL(cap_task_post_setuid);
 EXPORT_SYMBOL(cap_task_reparent_to_init);
 EXPORT_SYMBOL(cap_syslog);

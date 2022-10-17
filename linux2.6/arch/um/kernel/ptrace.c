@@ -16,20 +16,18 @@
 #include "asm/uaccess.h"
 #include "kern_util.h"
 #include "ptrace_user.h"
+#include "skas_ptrace.h"
 
 /*
  * Called by kernel/ptrace.c when detaching..
  */
 void ptrace_disable(struct task_struct *child)
 { 
+	child->ptrace &= ~PT_DTRACE;
+	child->thread.singlestep_syscall = 0;
 }
 
-extern long do_mmap2(struct task_struct *task, unsigned long addr, 
-		     unsigned long len, unsigned long prot, 
-		     unsigned long flags, unsigned long fd,
-		     unsigned long pgoff);
-
-int sys_ptrace(long request, long pid, long addr, long data)
+long sys_ptrace(long request, long pid, long addr, long data)
 {
 	struct task_struct *child;
 	int i, ret;
@@ -83,7 +81,7 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
 		if (copied != sizeof(tmp))
 			break;
-		ret = put_user(tmp,(unsigned long *) data);
+		ret = put_user(tmp, (unsigned long __user *) data);
 		break;
 	}
 
@@ -96,7 +94,7 @@ int sys_ptrace(long request, long pid, long addr, long data)
 			break;
 
 		tmp = 0;  /* Default return condition */
-		if(addr < FRAME_SIZE_OFFSET){
+		if(addr < MAX_REG_OFFSET){
 			tmp = getreg(child, addr);
 		}
 		else if((addr >= offsetof(struct user, u_debugreg[0])) &&
@@ -105,7 +103,7 @@ int sys_ptrace(long request, long pid, long addr, long data)
 			addr = addr >> 2;
 			tmp = child->thread.arch.debugregs[addr];
 		}
-		ret = put_user(tmp, (unsigned long *) data);
+		ret = put_user(tmp, (unsigned long __user *) data);
 		break;
 	}
 
@@ -124,10 +122,11 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		if ((addr & 3) || addr < 0)
 			break;
 
-		if (addr < FRAME_SIZE_OFFSET) {
+		if (addr < MAX_REG_OFFSET) {
 			ret = putreg(child, addr, data);
 			break;
 		}
+#if 0 /* XXX x86_64 */
 		else if((addr >= offsetof(struct user, u_debugreg[0])) &&
 			(addr <= offsetof(struct user, u_debugreg[7]))){
 			  addr -= offsetof(struct user, u_debugreg[0]);
@@ -136,6 +135,7 @@ int sys_ptrace(long request, long pid, long addr, long data)
 			  child->thread.arch.debugregs[addr] = data;
 			  ret = 0;
 		}
+#endif
 
 		break;
 
@@ -144,6 +144,9 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		ret = -EIO;
 		if ((unsigned long) data > _NSIG)
 			break;
+
+		child->ptrace &= ~PT_DTRACE;
+		child->thread.singlestep_syscall = 0;
 		if (request == PTRACE_SYSCALL) {
 			set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 		}
@@ -163,8 +166,11 @@ int sys_ptrace(long request, long pid, long addr, long data)
  */
 	case PTRACE_KILL: {
 		ret = 0;
-		if (child->state == TASK_ZOMBIE)	/* already dead */
+		if (child->exit_state == EXIT_ZOMBIE)	/* already dead */
 			break;
+
+		child->ptrace &= ~PT_DTRACE;
+		child->thread.singlestep_syscall = 0;
 		child->exit_code = SIGKILL;
 		wake_up_process(child);
 		break;
@@ -176,6 +182,7 @@ int sys_ptrace(long request, long pid, long addr, long data)
 			break;
 		clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 		child->ptrace |= PT_DTRACE;
+		child->thread.singlestep_syscall = 0;
 		child->exit_code = data;
 		/* give it a chance to run. */
 		wake_up_process(child);
@@ -191,12 +198,13 @@ int sys_ptrace(long request, long pid, long addr, long data)
 #ifdef PTRACE_GETREGS
 	case PTRACE_GETREGS: { /* Get all gp regs from the child. */
 	  	if (!access_ok(VERIFY_WRITE, (unsigned long *)data, 
-			       FRAME_SIZE_OFFSET)) {
+			       MAX_REG_OFFSET)) {
 			ret = -EIO;
 			break;
 		}
-		for ( i = 0; i < FRAME_SIZE_OFFSET; i += sizeof(long) ) {
-			__put_user(getreg(child, i), (unsigned long *) data);
+		for ( i = 0; i < MAX_REG_OFFSET; i += sizeof(long) ) {
+			__put_user(getreg(child, i),
+				   (unsigned long __user *) data);
 			data += sizeof(long);
 		}
 		ret = 0;
@@ -207,12 +215,12 @@ int sys_ptrace(long request, long pid, long addr, long data)
 	case PTRACE_SETREGS: { /* Set all gp regs in the child. */
 		unsigned long tmp = 0;
 	  	if (!access_ok(VERIFY_READ, (unsigned *)data, 
-			       FRAME_SIZE_OFFSET)) {
+			       MAX_REG_OFFSET)) {
 			ret = -EIO;
 			break;
 		}
-		for ( i = 0; i < FRAME_SIZE_OFFSET; i += sizeof(long) ) {
-			__get_user(tmp, (unsigned long *) data);
+		for ( i = 0; i < MAX_REG_OFFSET; i += sizeof(long) ) {
+			__get_user(tmp, (unsigned long __user *) data);
 			putreg(child, i, tmp);
 			data += sizeof(long);
 		}
@@ -246,14 +254,14 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		fault = ((struct ptrace_faultinfo) 
 			{ .is_write	= child->thread.err,
 			  .addr		= child->thread.cr2 });
-		ret = copy_to_user((unsigned long *) data, &fault, 
+		ret = copy_to_user((unsigned long __user *) data, &fault,
 				   sizeof(fault));
 		if(ret)
 			break;
 		break;
 	}
 	case PTRACE_SIGPENDING:
-		ret = copy_to_user((unsigned long *) data, 
+		ret = copy_to_user((unsigned long __user *) data,
 				   &child->pending.signal,
 				   sizeof(child->pending.signal));
 		break;
@@ -261,7 +269,7 @@ int sys_ptrace(long request, long pid, long addr, long data)
 	case PTRACE_LDT: {
 		struct ptrace_ldt ldt;
 
-		if(copy_from_user(&ldt, (unsigned long *) data, 
+		if(copy_from_user(&ldt, (unsigned long __user *) data,
 				  sizeof(ldt))){
 			ret = -EIO;
 			break;
@@ -292,7 +300,7 @@ int sys_ptrace(long request, long pid, long addr, long data)
 	}
 #endif
 	default:
-		ret = -EIO;
+		ret = ptrace_request(child, request, addr, data);
 		break;
 	}
  out_tsk:
@@ -302,23 +310,58 @@ int sys_ptrace(long request, long pid, long addr, long data)
 	return ret;
 }
 
-void syscall_trace(void)
+void send_sigtrap(struct task_struct *tsk, union uml_pt_regs *regs,
+		  int error_code)
 {
+	struct siginfo info;
+
+	memset(&info, 0, sizeof(info));
+	info.si_signo = SIGTRAP;
+	info.si_code = TRAP_BRKPT;
+
+	/* User-mode eip? */
+	info.si_addr = UPT_IS_USER(regs) ? (void __user *) UPT_IP(regs) : NULL;
+
+	/* Send us the fakey SIGTRAP */
+	force_sig_info(SIGTRAP, &info, tsk);
+}
+
+/* XXX Check PT_DTRACE vs TIF_SINGLESTEP for singlestepping check and
+ * PT_PTRACED vs TIF_SYSCALL_TRACE for syscall tracing check
+ */
+void syscall_trace(union uml_pt_regs *regs, int entryexit)
+{
+	int is_singlestep = (current->ptrace & PT_DTRACE) && entryexit;
+	int tracesysgood;
+
+	if (unlikely(current->audit_context)) {
+		if (!entryexit)
+			audit_syscall_entry(current, regs->orig_eax,
+					    regs->ebx, regs->ecx,
+					    regs->edx, regs->esi);
+		else
+			audit_syscall_exit(current, regs->eax);
+	}
+
+	/* Fake a debug trap */
+	if (is_singlestep)
+		send_sigtrap(current, regs, 0);
+
 	if (!test_thread_flag(TIF_SYSCALL_TRACE))
 		return;
+
 	if (!(current->ptrace & PT_PTRACED))
 		return;
 
 	/* the 0x80 provides a way for the tracing parent to distinguish
 	   between a syscall stop and SIGTRAP delivery */
- 	current->exit_code = SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
- 					? 0x80 : 0);
-	current->state = TASK_STOPPED;
-	notify_parent(current, SIGCHLD);
-	schedule();
+	tracesysgood = (current->ptrace & PT_TRACESYSGOOD);
+	ptrace_notify(SIGTRAP | (tracesysgood ? 0x80 : 0));
 
-	/*
-	 * this isn't the same as continuing with a signal, but it will do
+	if (entryexit) /* force do_signal() --> is_syscall() */
+		set_thread_flag(TIF_SIGPENDING);
+
+	/* this isn't the same as continuing with a signal, but it will do
 	 * for normal use.  strace only continues with a signal if the
 	 * stopping signal is not SIGTRAP.  -brl
 	 */

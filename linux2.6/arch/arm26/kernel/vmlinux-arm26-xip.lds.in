@@ -34,9 +34,6 @@ SECTIONS
 		__early_begin = .;
 			*(__early_param)
 		__early_end = .;
-		__start___param = .;
-			*(__param)
-		__stop___param = .;
 		__initcall_start = .;
 			*(.initcall1.init)
 			*(.initcall2.init)
@@ -66,6 +63,8 @@ SECTIONS
 	.text : {			/* Real text segment		*/
 		_text = .;		/* Text and read-only data	*/
 			*(.text)
+			SCHED_TEXT
+			LOCK_TEXT       /* FIXME - borrowed from arm32 - check*/
 			*(.fixup)
 			*(.gnu.warning)
 			*(.rodata)
@@ -93,9 +92,11 @@ SECTIONS
 	_sdata = .;
 
 	.data : {
+		. = ALIGN(8192);
 		/*
 		 * first, the init thread union, aligned
-		 * to an 8192 byte boundary.
+		 * to an 8192 byte boundary. (see arm26/kernel/init_task.c)
+		 * FIXME - sould this be 32K aligned on arm26?
 		 */
 		*(.init.task)
 

@@ -63,48 +63,50 @@
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
+#include <linux/gameport.h>
+#include <linux/moduleparam.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/rawmidi.h>
 #include <sound/mpu401.h>
 #include <sound/opl3.h>
 #include <sound/sb.h>
-#define SNDRV_GET_ID
 #include <sound/initval.h>
 
 MODULE_AUTHOR("Bart Hartgers <bart@etpmod.phys.tue.nl>");
 MODULE_DESCRIPTION("Avance Logic ALS4000");
 MODULE_LICENSE("GPL");
-MODULE_CLASSES("{sound}");
-MODULE_DEVICES("{{Avance Logic,ALS4000}}");
+MODULE_SUPPORTED_DEVICE("{{Avance Logic,ALS4000}}");
+
+#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
+#define SUPPORT_JOYSTICK 1
+#endif
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
 static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;	/* Enable this card */
-static int joystick_port[SNDRV_CARDS] =
-#ifdef CONFIG_ISA
-	{0x200};	/* enable as default */
-#else
-	{0};	/* disabled */
+#ifdef SUPPORT_JOYSTICK
+static int joystick_port[SNDRV_CARDS];
 #endif
 
-MODULE_PARM(index, "1-" __MODULE_STRING(SNDRV_CARDS) "i");
+module_param_array(index, int, NULL, 0444);
 MODULE_PARM_DESC(index, "Index value for ALS4000 soundcard.");
-MODULE_PARM_SYNTAX(index, SNDRV_INDEX_DESC);
-MODULE_PARM(id, "1-" __MODULE_STRING(SNDRV_CARDS) "s");
+module_param_array(id, charp, NULL, 0444);
 MODULE_PARM_DESC(id, "ID string for ALS4000 soundcard.");
-MODULE_PARM_SYNTAX(id, SNDRV_ID_DESC);
-MODULE_PARM(enable, "1-" __MODULE_STRING(SNDRV_CARDS) "i");
+module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable ALS4000 soundcard.");
-MODULE_PARM_SYNTAX(enable, SNDRV_INDEX_DESC);
-MODULE_PARM(joystick_port, "1-" __MODULE_STRING(SNDRV_CARDS) "i");
+#ifdef SUPPORT_JOYSTICK
+module_param_array(joystick_port, int, NULL, 0444);
 MODULE_PARM_DESC(joystick_port, "Joystick port address for ALS4000 soundcard. (0 = disabled)");
-MODULE_PARM_SYNTAX(joystick_port, SNDRV_ENABLED);
-
-#define chip_t sb_t
+#endif
 
 typedef struct {
+	struct pci_dev *pci;
 	unsigned long gcr;
+#ifdef SUPPORT_JOYSTICK
+	struct gameport gameport;
+	struct resource *res_joystick;
+#endif
 } snd_card_als4000_t;
 
 static struct pci_device_id snd_als4000_ids[] = {
@@ -294,11 +296,10 @@ static int snd_als4000_playback_prepare(snd_pcm_substream_t *substream)
 
 static int snd_als4000_capture_trigger(snd_pcm_substream_t * substream, int cmd)
 {
-	unsigned long flags;
 	sb_t *chip = snd_pcm_substream_chip(substream);
 	int result = 0;
 	
-	spin_lock_irqsave(&chip->mixer_lock, flags);
+	spin_lock(&chip->mixer_lock);
 	if (cmd == SNDRV_PCM_TRIGGER_START) {
 		chip->mode |= SB_RATE_LOCK_CAPTURE;
 		snd_sbmixer_write(chip, 0xde, capture_cmd(chip));
@@ -308,17 +309,16 @@ static int snd_als4000_capture_trigger(snd_pcm_substream_t * substream, int cmd)
 	} else {
 		result = -EINVAL;
 	}
-	spin_unlock_irqrestore(&chip->mixer_lock, flags);
+	spin_unlock(&chip->mixer_lock);
 	return result;
 }
 
 static int snd_als4000_playback_trigger(snd_pcm_substream_t * substream, int cmd)
 {
-	unsigned long flags;
 	sb_t *chip = snd_pcm_substream_chip(substream);
 	int result = 0;
 
-	spin_lock_irqsave(&chip->reg_lock, flags);
+	spin_lock(&chip->reg_lock);
 	if (cmd == SNDRV_PCM_TRIGGER_START) {
 		chip->mode |= SB_RATE_LOCK_PLAYBACK;
 		snd_sbdsp_command(chip, playback_cmd(chip).dma_on);
@@ -328,38 +328,35 @@ static int snd_als4000_playback_trigger(snd_pcm_substream_t * substream, int cmd
 	} else {
 		result = -EINVAL;
 	}
-	spin_unlock_irqrestore(&chip->reg_lock, flags);
+	spin_unlock(&chip->reg_lock);
 	return result;
 }
 
 static snd_pcm_uframes_t snd_als4000_capture_pointer(snd_pcm_substream_t * substream)
 {
-	unsigned long flags;
 	sb_t *chip = snd_pcm_substream_chip(substream);
 	unsigned int result;
 
-	spin_lock_irqsave(&chip->reg_lock, flags);	
+	spin_lock(&chip->reg_lock);	
 	result = snd_als4000_gcr_read(chip, 0xa4) & 0xffff;
-	spin_unlock_irqrestore(&chip->reg_lock, flags);
+	spin_unlock(&chip->reg_lock);
 	return bytes_to_frames( substream->runtime, result );
 }
 
 static snd_pcm_uframes_t snd_als4000_playback_pointer(snd_pcm_substream_t * substream)
 {
-	unsigned long flags;
 	sb_t *chip = snd_pcm_substream_chip(substream);
 	unsigned result;
 
-	spin_lock_irqsave(&chip->reg_lock, flags);	
+	spin_lock(&chip->reg_lock);	
 	result = snd_als4000_gcr_read(chip, 0xa0) & 0xffff;
-	spin_unlock_irqrestore(&chip->reg_lock, flags);
+	spin_unlock(&chip->reg_lock);
 	return bytes_to_frames( substream->runtime, result );
 }
 
 static irqreturn_t snd_als4000_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-	sb_t *chip = snd_magic_cast(sb_t, dev_id, return IRQ_NONE);
-	unsigned long flags;
+	sb_t *chip = dev_id;
 	unsigned gcr_status;
 	unsigned sb_status;
 
@@ -375,9 +372,9 @@ static irqreturn_t snd_als4000_interrupt(int irq, void *dev_id, struct pt_regs *
 	/* release the gcr */
 	outb(gcr_status, chip->alt_port + 0xe);
 	
-	spin_lock_irqsave(&chip->mixer_lock, flags);
+	spin_lock(&chip->mixer_lock);
 	sb_status = snd_sbmixer_read(chip, SB_DSP4_IRQSTATUS);
-	spin_unlock_irqrestore(&chip->mixer_lock, flags);
+	spin_unlock(&chip->mixer_lock);
 	
 	if (sb_status & SB_IRQTYPE_8BIT) 
 		snd_sb_ack_8bit(chip);
@@ -496,7 +493,7 @@ static snd_pcm_ops_t snd_als4000_capture_ops = {
 
 static void snd_als4000_pcm_free(snd_pcm_t *pcm)
 {
-	sb_t *chip = snd_magic_cast(sb_t, pcm->private_data, return);
+	sb_t *chip = pcm->private_data;
 	chip->pcm = NULL;
 	snd_pcm_lib_preallocate_free_for_all(pcm);
 }
@@ -514,7 +511,8 @@ static int __devinit snd_als4000_pcm(sb_t *chip, int device)
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_als4000_playback_ops);
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_als4000_capture_ops);
 
-	snd_pcm_lib_preallocate_pci_pages_for_all(chip->pci, pcm, 64*1024, 64*1024);
+	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(chip->pci),
+					      64*1024, 64*1024);
 
 	chip->pcm = pcm;
 
@@ -523,7 +521,7 @@ static int __devinit snd_als4000_pcm(sb_t *chip, int device)
 
 /******************************************************************/
 
-static void __devinit snd_als4000_set_addr(unsigned long gcr,
+static void snd_als4000_set_addr(unsigned long gcr,
 					unsigned int sb,
 					unsigned int mpu,
 					unsigned int opl,
@@ -546,27 +544,26 @@ static void __devinit snd_als4000_set_addr(unsigned long gcr,
 
 static void __devinit snd_als4000_configure(sb_t *chip)
 {
-	unsigned long flags;
 	unsigned tmp;
 	int i;
 
 	/* do some more configuration */
-	spin_lock_irqsave(&chip->mixer_lock, flags);
+	spin_lock_irq(&chip->mixer_lock);
 	tmp = snd_sbmixer_read(chip, 0xc0);
 	snd_sbmixer_write(chip, 0xc0, tmp|0x80);
 	/* always select DMA channel 0, since we do not actually use DMA */
 	snd_sbmixer_write(chip, SB_DSP4_DMASETUP, SB_DMASETUP_DMA0);
 	snd_sbmixer_write(chip, 0xc0, tmp&0x7f);
-	spin_unlock_irqrestore(&chip->mixer_lock, flags);
+	spin_unlock_irq(&chip->mixer_lock);
 	
-	spin_lock_irqsave(&chip->reg_lock,flags);
+	spin_lock_irq(&chip->reg_lock);
 	/* magic number. Enables interrupts(?) */
 	snd_als4000_gcr_write(chip, 0x8c, 0x28000);
 	for(i = 0x91; i <= 0x96; ++i)
 		snd_als4000_gcr_write(chip, i, 0);
 	
 	snd_als4000_gcr_write(chip, 0x99, snd_als4000_gcr_read(chip, 0x99));
-	spin_unlock_irqrestore(&chip->reg_lock,flags);
+	spin_unlock_irq(&chip->reg_lock);
 }
 
 static void snd_card_als4000_free( snd_card_t *card )
@@ -574,6 +571,18 @@ static void snd_card_als4000_free( snd_card_t *card )
 	snd_card_als4000_t * acard = (snd_card_als4000_t *)card->private_data;
 	/* make sure that interrupts are disabled */
 	snd_als4000_gcr_write_addr( acard->gcr, 0x8c, 0);
+	/* free resources */
+#ifdef SUPPORT_JOYSTICK
+	if (acard->res_joystick) {
+		if (acard->gameport.io)
+			gameport_unregister_port(&acard->gameport);
+		snd_als4000_set_addr(acard->gcr, 0, 0, 0, 0); /* disable joystick */
+		release_resource(acard->res_joystick);
+		kfree_nocheck(acard->res_joystick);
+	}
+#endif
+	pci_release_regions(acard->pci);
+	pci_disable_device(acard->pci);
 }
 
 static int __devinit snd_card_als4000_probe(struct pci_dev *pci,
@@ -583,11 +592,11 @@ static int __devinit snd_card_als4000_probe(struct pci_dev *pci,
 	snd_card_t *card;
 	snd_card_als4000_t *acard;
 	unsigned long gcr;
-	struct resource *res_gcr_port;
 	sb_t *chip;
 	opl3_t *opl3;
 	unsigned short word;
 	int err;
+	int joystick = 0;
 
 	if (dev >= SNDRV_CARDS)
 		return -ENODEV;
@@ -601,37 +610,56 @@ static int __devinit snd_card_als4000_probe(struct pci_dev *pci,
 		return err;
 	}
 	/* check, if we can restrict PCI DMA transfers to 24 bits */
-	if (!pci_dma_supported(pci, 0x00ffffff)) {
+	if (pci_set_dma_mask(pci, 0x00ffffff) < 0 ||
+	    pci_set_consistent_dma_mask(pci, 0x00ffffff) < 0) {
 		snd_printk("architecture does not support 24bit PCI busmaster DMA\n");
+		pci_disable_device(pci);
 		return -ENXIO;
 	}
-	pci_set_dma_mask(pci, 0x00ffffff);
 
-	gcr = pci_resource_start(pci, 0);
-	if ((res_gcr_port = request_region(gcr, 0x40, "ALS4000")) == NULL) {
-		snd_printk("unable to grab region 0x%lx-0x%lx\n", gcr, gcr + 0x40 - 1);
-		return -EBUSY;
+	if ((err = pci_request_regions(pci, "ALS4000")) < 0) {
+		pci_disable_device(pci);
+		return err;
 	}
+	gcr = pci_resource_start(pci, 0);
 
 	pci_read_config_word(pci, PCI_COMMAND, &word);
 	pci_write_config_word(pci, PCI_COMMAND, word | PCI_COMMAND_IO);
 	pci_set_master(pci);
 	
-	/* disable all legacy ISA stuff except for joystick */
-	snd_als4000_set_addr(gcr, 0, 0, 0, joystick_port[dev]);
-	
 	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 
 			    sizeof( snd_card_als4000_t ) );
 	if (card == NULL) {
-		release_resource(res_gcr_port);
-		kfree_nocheck(res_gcr_port);
+		pci_release_regions(pci);
+		pci_disable_device(pci);
 		return -ENOMEM;
 	}
 
 	acard = (snd_card_als4000_t *)card->private_data;
+	acard->pci = pci;
 	acard->gcr = gcr;
 	card->private_free = snd_card_als4000_free;
 
+	/* disable all legacy ISA stuff except for joystick */
+#ifdef SUPPORT_JOYSTICK
+	if (joystick_port[dev] == 1) {
+		/* auto-detect */
+		long p;
+		for (p = 0x200; p <= 0x218; p += 8) {
+			if ((acard->res_joystick = request_region(p, 8, "ALS4000 gameport")) != NULL) {
+				joystick_port[dev] = p;
+				break;
+			}
+		}
+	} else if (joystick_port[dev] > 0)
+		acard->res_joystick = request_region(joystick_port[dev], 8, "ALS4000 gameport");
+	if (acard->res_joystick)
+		joystick = joystick_port[dev];
+	else
+		joystick = 0;
+#endif
+	snd_als4000_set_addr(gcr, 0, 0, 0, joystick);
+	
 	if ((err = snd_sbdsp_create(card,
 				    gcr + 0x10,
 				    pci->irq,
@@ -640,18 +668,21 @@ static int __devinit snd_card_als4000_probe(struct pci_dev *pci,
 				    -1,
 				    SB_HW_ALS4000,
 				    &chip)) < 0) {
-		release_resource(res_gcr_port);
-		kfree_nocheck(res_gcr_port);
 		snd_card_free(card);
 		return err;
 	}
 
 	chip->pci = pci;
 	chip->alt_port = gcr;
-	chip->res_alt_port = res_gcr_port;
+	snd_card_set_dev(card, &pci->dev);
 
 	snd_als4000_configure(chip);
-	
+
+	strcpy(card->driver, "ALS4000");
+	strcpy(card->shortname, "Avance Logic ALS4000");
+	sprintf(card->longname, "%s at 0x%lx, irq %i",
+		card->shortname, chip->alt_port, chip->irq);
+
 	if ((err = snd_mpu401_uart_new( card, 0, MPU401_HW_ALS4000,
 				        gcr+0x30, 1, pci->irq, 0,
 				        &chip->rmidi)) < 0) {
@@ -680,10 +711,12 @@ static int __devinit snd_card_als4000_probe(struct pci_dev *pci,
 		}
 	}
 
-	strcpy(card->driver, "ALS4000");
-	strcpy(card->shortname, "Avance Logic ALS4000");
-	sprintf(card->longname, "%s at 0x%lx, irq %i",
-		card->shortname, chip->alt_port, chip->irq);
+#ifdef SUPPORT_JOYSTICK
+	if (acard->res_joystick) {
+		acard->gameport.io = joystick;
+		gameport_register_port(&acard->gameport);
+	}
+#endif
 
 	if ((err = snd_card_register(card)) < 0) {
 		snd_card_free(card);
@@ -709,15 +742,7 @@ static struct pci_driver driver = {
 
 static int __init alsa_card_als4000_init(void)
 {
-	int err;
-	
-	if ((err = pci_module_init(&driver)) < 0) {
-#ifdef MODULE
-		printk(KERN_ERR "no ALS4000 based soundcards found or device busy\n");
-#endif
-		return err;
-	}
-	return 0;
+	return pci_module_init(&driver);
 }
 
 static void __exit alsa_card_als4000_exit(void)
@@ -727,24 +752,3 @@ static void __exit alsa_card_als4000_exit(void)
 
 module_init(alsa_card_als4000_init)
 module_exit(alsa_card_als4000_exit)
-
-#ifndef MODULE
-
-/* format is: snd-als4000=enable,index,id */
-
-static int __init alsa_card_als4000_setup(char *str)
-{
-	static unsigned __initdata nr_dev = 0;
-
-	if (nr_dev >= SNDRV_CARDS)
-		return 0;
-	(void)(get_option(&str,&enable[nr_dev]) == 2 &&
-	       get_option(&str,&index[nr_dev]) == 2 &&
-	       get_id(&str,&id[nr_dev]) == 2);
-	nr_dev++;
-	return 1;
-}
-
-__setup("snd-als4000=", alsa_card_als4000_setup);
-
-#endif /* ifndef MODULE */

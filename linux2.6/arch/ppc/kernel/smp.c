@@ -17,8 +17,6 @@
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
 #include <linux/delay.h>
-#define __KERNEL_SYSCALLS__
-#include <linux/unistd.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
 #include <linux/cache.h>
@@ -28,7 +26,6 @@
 #include <asm/irq.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/hardirq.h>
 #include <asm/io.h>
 #include <asm/prom.h>
 #include <asm/smp.h>
@@ -45,8 +42,6 @@ struct cpuinfo_PPC cpu_data[NR_CPUS];
 struct klock_info_struct klock_info = { KLOCK_CLEAR, 0 };
 atomic_t ipi_recv;
 atomic_t ipi_sent;
-DEFINE_PER_CPU(unsigned int, prof_multiplier);
-DEFINE_PER_CPU(unsigned int, prof_counter);
 unsigned long cache_decay_ticks = HZ/100;
 cpumask_t cpu_online_map;
 cpumask_t cpu_possible_map;
@@ -54,6 +49,7 @@ int smp_hw_index[NR_CPUS];
 struct thread_info *secondary_ti;
 
 EXPORT_SYMBOL(cpu_online_map);
+EXPORT_SYMBOL(cpu_possible_map);
 
 /* SMP operations for this machine */
 static struct smp_ops_t *smp_ops;
@@ -61,12 +57,7 @@ static struct smp_ops_t *smp_ops;
 /* all cpu mappings are 1-1 -- Cort */
 volatile unsigned long cpu_callin_map[NR_CPUS];
 
-#define TB_SYNC_PASSES 4
-volatile unsigned long __initdata tb_sync_flag = 0;
-volatile unsigned long __initdata tb_offset = 0;
-
 int start_secondary(void *);
-extern int cpu_idle(void *unused);
 void smp_call_function_interrupt(void);
 static int __smp_call_function(void (*func) (void *info), void *info,
 			       int wait, int target);
@@ -83,25 +74,18 @@ extern void __save_cpu_setup(void);
 #define PPC_MSG_INVALIDATE_TLB	2
 #define PPC_MSG_XMON_BREAK	3
 
-#define smp_message_pass(t,m,d,w) \
-    do { if (smp_ops) \
-	     atomic_inc(&ipi_sent); \
-	     smp_ops->message_pass((t),(m),(d),(w)); \
-       } while(0)
+static inline void
+smp_message_pass(int target, int msg, unsigned long data, int wait)
+{
+	if (smp_ops){
+		atomic_inc(&ipi_sent);
+		smp_ops->message_pass(target,msg,data,wait);
+	}
+}
 
 /*
  * Common functions
  */
-void smp_local_timer_interrupt(struct pt_regs * regs)
-{
-	int cpu = smp_processor_id();
-
-	if (!--per_cpu(prof_counter, cpu)) {
-		update_process_times(user_mode(regs));
-		per_cpu(prof_counter, cpu) = per_cpu(prof_multiplier, cpu);
-	}
-}
-
 void smp_message_recv(int msg, struct pt_regs *regs)
 {
 	atomic_inc(&ipi_recv);
@@ -179,7 +163,7 @@ void smp_send_stop(void)
  * static memory requirements. It also looks cleaner.
  * Stolen from the i386 version.
  */
-static spinlock_t call_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(call_lock);
 
 static struct call_data_struct {
 	void (*func) (void *info);
@@ -213,6 +197,8 @@ int smp_call_function(void (*func) (void *info), void *info, int nonatomic,
            bitmask. --RR */
 	if (num_online_cpus() <= 1)
 		return 0;
+	/* Can deadlock when called with interrupts disabled */
+	WARN_ON(irqs_disabled());
 	return __smp_call_function(func, info, wait, MSG_ALL_BUT_SELF);
 }
 
@@ -291,41 +277,6 @@ void smp_call_function_interrupt(void)
 		atomic_inc(&call_data->finished);
 }
 
-/* FIXME: Do this properly for all archs --RR */
-static spinlock_t timebase_lock = SPIN_LOCK_UNLOCKED;
-static unsigned int timebase_upper = 0, timebase_lower = 0;
-
-void __devinit
-smp_generic_give_timebase(void)
-{
-	spin_lock(&timebase_lock);
-	do {
-		timebase_upper = get_tbu();
-		timebase_lower = get_tbl();
-	} while (timebase_upper != get_tbu());
-	spin_unlock(&timebase_lock);
-
-	while (timebase_upper || timebase_lower)
-		rmb();
-}
-
-void __devinit
-smp_generic_take_timebase(void)
-{
-	int done = 0;
-
-	while (!done) {
-		spin_lock(&timebase_lock);
-		if (timebase_upper || timebase_lower) {
-			set_tb(timebase_upper, timebase_lower);
-			timebase_upper = 0;
-			timebase_lower = 0;
-			done = 1;
-		}
-		spin_unlock(&timebase_lock);
-	}
-}
-
 static void __devinit smp_store_cpu_info(int id)
 {
         struct cpuinfo_PPC *c = &cpu_data[id];
@@ -333,8 +284,6 @@ static void __devinit smp_store_cpu_info(int id)
 	/* assume bogomips are same for everything */
         c->loops_per_jiffy = loops_per_jiffy;
         c->pvr = mfspr(PVR);
-	per_cpu(prof_counter, id) = 1;
-	per_cpu(prof_multiplier, id) = 1;
 }
 
 void __init smp_prepare_cpus(unsigned int max_cpus)
@@ -394,27 +343,21 @@ int __devinit start_secondary(void *unused)
 	smp_ops->take_timebase();
 	printk("CPU %i done timebase take...\n", cpu);
 
-	return cpu_idle(NULL);
+	cpu_idle();
+	return 0;
 }
 
 int __cpu_up(unsigned int cpu)
 {
-	struct pt_regs regs;
 	struct task_struct *p;
 	char buf[32];
 	int c;
 
 	/* create a process for the processor */
 	/* only regs.msr is actually used, and 0 is OK for it */
-	memset(&regs, 0, sizeof(struct pt_regs));
-	p = copy_process(CLONE_VM|CLONE_IDLETASK, 0, &regs, 0, NULL, NULL);
+	p = fork_idle(cpu);
 	if (IS_ERR(p))
 		panic("failed fork for CPU %u: %li", cpu, PTR_ERR(p));
-	wake_up_forked_process(p);
-
-	init_idle(p, cpu);
-	unhash_process(p);
-
 	secondary_ti = p->thread_info;
 	p->thread_info->cpu = cpu;
 

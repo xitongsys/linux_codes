@@ -3,6 +3,11 @@
 
 #ifdef __KERNEL__
 
+#include <linux/if.h>
+#include <linux/netdevice.h>
+#include <linux/rcupdate.h>
+#include <linux/timer.h>
+
 struct ipv4_devconf
 {
 	int	accept_redirects;
@@ -18,9 +23,12 @@ struct ipv4_devconf
 	int	mc_forwarding;
 	int	tag;
 	int     arp_filter;
+	int	arp_announce;
+	int	arp_ignore;
 	int	medium_id;
 	int	no_xfrm;
 	int	no_policy;
+	int	force_igmp_version;
 	void	*sysctl;
 };
 
@@ -28,13 +36,13 @@ extern struct ipv4_devconf ipv4_devconf;
 
 struct in_device
 {
-	struct net_device		*dev;
+	struct net_device	*dev;
 	atomic_t		refcnt;
-	rwlock_t		lock;
 	int			dead;
 	struct in_ifaddr	*ifa_list;	/* IP ifaddr chain		*/
+	rwlock_t		mc_list_lock;
 	struct ip_mc_list	*mc_list;	/* IP multicast filter chain    */
-	rwlock_t		mc_lock;	/* for mc_tomb */
+	spinlock_t		mc_tomb_lock;
 	struct ip_mc_list	*mc_tomb;
 	unsigned long		mr_v1_seen;
 	unsigned long		mr_v2_seen;
@@ -47,6 +55,7 @@ struct in_device
 
 	struct neigh_parms	*arp_parms;
 	struct ipv4_devconf	cnf;
+	struct rcu_head		rcu_head;
 };
 
 #define IN_DEV_FORWARD(in_dev)		((in_dev)->cnf.forwarding)
@@ -70,11 +79,14 @@ struct in_device
 	  (ipv4_devconf.accept_redirects || (in_dev)->cnf.accept_redirects)))
 
 #define IN_DEV_ARPFILTER(in_dev)	(ipv4_devconf.arp_filter || (in_dev)->cnf.arp_filter)
+#define IN_DEV_ARP_ANNOUNCE(in_dev)	(max(ipv4_devconf.arp_announce, (in_dev)->cnf.arp_announce))
+#define IN_DEV_ARP_IGNORE(in_dev)	(max(ipv4_devconf.arp_ignore, (in_dev)->cnf.arp_ignore))
 
 struct in_ifaddr
 {
 	struct in_ifaddr	*ifa_next;
 	struct in_device	*ifa_dev;
+	struct rcu_head		rcu_head;
 	u32			ifa_local;
 	u32			ifa_address;
 	u32			ifa_mask;
@@ -91,11 +103,12 @@ extern int unregister_inetaddr_notifier(struct notifier_block *nb);
 
 extern struct net_device 	*ip_dev_find(u32 addr);
 extern int		inet_addr_onlink(struct in_device *in_dev, u32 a, u32 b);
-extern int		devinet_ioctl(unsigned int cmd, void *);
+extern int		devinet_ioctl(unsigned int cmd, void __user *);
 extern void		devinet_init(void);
 extern struct in_device *inetdev_init(struct net_device *dev);
 extern struct in_device	*inetdev_by_index(int);
 extern u32		inet_select_addr(const struct net_device *dev, u32 dst, int scope);
+extern u32		inet_confirm_addr(const struct net_device *dev, u32 dst, u32 local, int scope);
 extern struct in_ifaddr *inet_ifa_byprefix(struct in_device *in_dev, u32 prefix, u32 mask);
 extern void		inet_forward_change(void);
 
@@ -127,19 +140,16 @@ static __inline__ int bad_mask(u32 mask, u32 addr)
 
 #define endfor_ifa(in_dev) }
 
-extern rwlock_t inetdev_lock;
-
-
 static __inline__ struct in_device *
 in_dev_get(const struct net_device *dev)
 {
 	struct in_device *in_dev;
 
-	read_lock(&inetdev_lock);
+	rcu_read_lock();
 	in_dev = dev->ip_ptr;
 	if (in_dev)
 		atomic_inc(&in_dev->refcnt);
-	read_unlock(&inetdev_lock);
+	rcu_read_unlock();
 	return in_dev;
 }
 
@@ -151,8 +161,7 @@ __in_dev_get(const struct net_device *dev)
 
 extern void in_dev_finish_destroy(struct in_device *idev);
 
-static __inline__ void
-in_dev_put(struct in_device *idev)
+static inline void in_dev_put(struct in_device *idev)
 {
 	if (atomic_dec_and_test(&idev->refcnt))
 		in_dev_finish_destroy(idev);

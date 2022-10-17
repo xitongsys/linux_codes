@@ -16,7 +16,7 @@
 #define _NET_IPV6_H
 
 #include <linux/ipv6.h>
-#include <asm/hardirq.h>
+#include <linux/hardirq.h>
 #include <net/ndisc.h>
 #include <net/flow.h>
 #include <net/snmp.h>
@@ -108,9 +108,10 @@ struct frag_hdr {
 
 /* sysctls */
 extern int sysctl_ipv6_bindv6only;
+extern int sysctl_mld_max_msf;
 
 /* MIBs */
-DECLARE_SNMP_STAT(struct ipv6_mib, ipv6_statistics);
+DECLARE_SNMP_STAT(struct ipstats_mib, ipv6_statistics);
 #define IP6_INC_STATS(field)		SNMP_INC_STATS(ipv6_statistics, field)
 #define IP6_INC_STATS_BH(field)		SNMP_INC_STATS_BH(ipv6_statistics, field)
 #define IP6_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(ipv6_statistics, field)
@@ -148,6 +149,8 @@ extern atomic_t			inet6_sock_nr;
 
 int snmp6_register_dev(struct inet6_dev *idev);
 int snmp6_unregister_dev(struct inet6_dev *idev);
+int snmp6_alloc_dev(struct inet6_dev *idev);
+int snmp6_free_dev(struct inet6_dev *idev);
 int snmp6_mib_init(void *ptr[2], size_t mibsize, size_t mibalign);
 void snmp6_mib_free(void *ptr[2]);
 
@@ -214,7 +217,7 @@ extern struct ipv6_txoptions	*fl6_merge_options(struct ipv6_txoptions * opt_spac
 						   struct ip6_flowlabel * fl,
 						   struct ipv6_txoptions * fopt);
 extern void			fl6_free_socklist(struct sock *sk);
-extern int			ipv6_flowlabel_opt(struct sock *sk, char *optval, int optlen);
+extern int			ipv6_flowlabel_opt(struct sock *sk, char __user *optval, int optlen);
 extern void			ip6_flowlabel_init(void);
 extern void			ip6_flowlabel_cleanup(void);
 
@@ -227,8 +230,6 @@ static inline void fl6_sock_release(struct ip6_flowlabel *fl)
 extern int 			ip6_ra_control(struct sock *sk, int sel,
 					       void (*destructor)(struct sock *));
 
-
-extern int			ip6_call_ra_chain(struct sk_buff *skb, int sel);
 
 extern int			ipv6_parse_hopopts(struct sk_buff *skb, int);
 
@@ -295,6 +296,15 @@ static inline void ipv6_addr_set(struct in6_addr *addr,
 }
 #endif
 
+static inline int ipv6_addr_equal(const struct in6_addr *a1,
+				  const struct in6_addr *a2)
+{
+	return (a1->s6_addr32[0] == a2->s6_addr32[0] &&
+		a1->s6_addr32[1] == a2->s6_addr32[1] &&
+		a1->s6_addr32[2] == a2->s6_addr32[2] &&
+		a1->s6_addr32[3] == a2->s6_addr32[3]);
+}
+
 static inline int ipv6_addr_any(const struct in6_addr *a)
 {
 	return ((a->s6_addr32[0] | a->s6_addr32[1] | 
@@ -329,13 +339,6 @@ extern int			ip6_nd_hdr(struct sock *sk,
 					   struct in6_addr *daddr,
 					   int proto, int len);
 
-extern int			ip6_build_xmit(struct sock *sk,
-					       inet_getfrag_t getfrag,
-					       const void *data,
-					       struct flowi *fl,
-					       unsigned length,
-					       struct ipv6_txoptions *opt,
-					       int hlimit, int flags);
 extern int			ip6_find_1stfragopt(struct sk_buff *skb, u8 **nexthdr);
 
 extern int			ip6_append_data(struct sock *sk,
@@ -386,7 +389,7 @@ extern void			ipv6_push_frag_opts(struct sk_buff *skb,
 						    struct ipv6_txoptions *opt,
 						    u8 *proto);
 
-extern int			ipv6_skip_exthdr(struct sk_buff *, int start,
+extern int			ipv6_skip_exthdr(const struct sk_buff *, int start,
 					         u8 *nexthdrp, int len);
 
 extern int 			ipv6_ext_hdr(u8 nexthdr);
@@ -400,19 +403,20 @@ extern struct ipv6_txoptions *	ipv6_invert_rthdr(struct sock *sk,
  */
 
 extern int			ipv6_setsockopt(struct sock *sk, int level, 
-						int optname, char *optval, 
+						int optname,
+						char __user *optval, 
 						int optlen);
 extern int			ipv6_getsockopt(struct sock *sk, int level, 
-						int optname, char *optval, 
-						int *optlen);
+						int optname,
+						char __user *optval, 
+						int __user *optlen);
 
 extern void			ipv6_packet_init(void);
 
-extern void			ipv6_netdev_notif_init(void);
-
 extern void			ipv6_packet_cleanup(void);
 
-extern void			ipv6_netdev_notif_cleanup(void);
+extern int			ip6_datagram_connect(struct sock *sk, 
+						     struct sockaddr *addr, int addr_len);
 
 extern int 			ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len);
 extern void			ipv6_icmp_error(struct sock *sk, struct sk_buff *skb, int err, u16 port,

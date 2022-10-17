@@ -95,6 +95,10 @@ struct atm_dev_stats {
 					/* set backend handler */
 #define ATM_NEWBACKENDIF _IOW('a',ATMIOC_SPECIAL+3,atm_backend_t)
 					/* use backend to make new if */
+#define ATM_ADDPARTY  	_IOW('a', ATMIOC_SPECIAL+4,struct atm_iobuf)
+ 					/* add party to p2mp call */
+#define ATM_DROPPARTY 	_IOW('a', ATMIOC_SPECIAL+5,int)
+					/* drop party from p2mp call */
 
 /*
  * These are backend handkers that can be set via the ATM_SETBACKEND call
@@ -147,7 +151,7 @@ struct atm_dev_stats {
 
 struct atm_iobuf {
 	int length;
-	void *buffer;
+	void __user *buffer;
 };
 
 /* for ATM_GETCIRANGE / ATM_SETCIRANGE */
@@ -155,8 +159,8 @@ struct atm_iobuf {
 #define ATM_CI_MAX      -1              /* use maximum range of VPI/VCI */
  
 struct atm_cirange {
-	char	vpi_bits;		/* 1..8, ATM_CI_MAX (-1) for maximum */
-	char	vci_bits;		/* 1..16, ATM_CI_MAX (-1) for maximum */
+	signed char	vpi_bits;	/* 1..8, ATM_CI_MAX (-1) for maximum */
+	signed char	vci_bits;	/* 1..16, ATM_CI_MAX (-1) for maximum */
 };
 
 /* for ATM_SETSC; actually taken from the ATM_VF number space */
@@ -200,9 +204,7 @@ struct atm_cirange {
     "SESSION",	"HASSAP",	"BOUND",	"CLOSE"
 
 
-#ifndef __KERNEL__
-#undef __AAL_STAT_ITEMS
-#else
+#ifdef __KERNEL__
 
 #include <linux/wait.h> /* wait_queue_head_t */
 #include <linux/time.h> /* struct timeval */
@@ -311,7 +313,7 @@ struct atm_vcc {
 
 struct atm_dev_addr {
 	struct sockaddr_atmsvc addr;	/* ATM address */
-	struct atm_dev_addr *next;	/* next address */
+	struct list_head entry;		/* next address */
 };
 
 struct atm_dev {
@@ -323,7 +325,7 @@ struct atm_dev {
 	void		*dev_data;	/* per-device data */
 	void		*phy_data;	/* private PHY date */
 	unsigned long	flags;		/* device flags (ATM_DF_*) */
-	struct atm_dev_addr *local;	/* local ATM addresses */
+	struct list_head local;		/* local ATM addresses */
 	unsigned char	esi[ESI_LEN];	/* ESI ("MAC" addr) */
 	struct atm_cirange ci_range;	/* VPI/VCI range */
 	struct k_atm_dev_stats stats;	/* statistics */
@@ -353,11 +355,11 @@ struct atmdev_ops { /* only send is required */
 	void (*dev_close)(struct atm_dev *dev);
 	int (*open)(struct atm_vcc *vcc);
 	void (*close)(struct atm_vcc *vcc);
-	int (*ioctl)(struct atm_dev *dev,unsigned int cmd,void *arg);
+	int (*ioctl)(struct atm_dev *dev,unsigned int cmd,void __user *arg);
 	int (*getsockopt)(struct atm_vcc *vcc,int level,int optname,
-	    void *optval,int optlen);
+	    void __user *optval,int optlen);
 	int (*setsockopt)(struct atm_vcc *vcc,int level,int optname,
-	    void *optval,int optlen);
+	    void __user *optval,int optlen);
 	int (*send)(struct atm_vcc *vcc,struct sk_buff *skb);
 	int (*send_oam)(struct atm_vcc *vcc,void *cell,int flags);
 	void (*phy_put)(struct atm_dev *dev,unsigned char value,
@@ -370,7 +372,7 @@ struct atmdev_ops { /* only send is required */
 
 struct atmphy_ops {
 	int (*start)(struct atm_dev *dev);
-	int (*ioctl)(struct atm_dev *dev,unsigned int cmd,void *arg);
+	int (*ioctl)(struct atm_dev *dev,unsigned int cmd,void __user *arg);
 	void (*interrupt)(struct atm_dev *dev);
 	int (*stop)(struct atm_dev *dev);
 };
@@ -393,7 +395,6 @@ struct atm_dev *atm_dev_lookup(int number);
 void atm_dev_deregister(struct atm_dev *dev);
 void shutdown_atm_dev(struct atm_dev *dev);
 void vcc_insert_socket(struct sock *sk);
-void vcc_remove_socket(struct sock *sk);
 
 
 /*
@@ -401,9 +402,9 @@ void vcc_remove_socket(struct sock *sk);
  *
  */
 
-static inline int atm_guess_pdu2truesize(int pdu_size)
+static inline int atm_guess_pdu2truesize(int size)
 {
-	return ((pdu_size+15) & ~15) + sizeof(struct sk_buff);
+	return (SKB_DATA_ALIGN(size) + sizeof(struct skb_shared_info));
 }
 
 

@@ -59,7 +59,7 @@ snd_gf1_mem_block_t *snd_gf1_mem_xalloc(snd_gf1_mem_t * alloc,
 			else
 				nblock->prev->next = nblock;
 			up(&alloc->memory_mutex);
-			return 0;
+			return NULL;
 		}
 		pblock = pblock->next;
 	}
@@ -100,8 +100,7 @@ int snd_gf1_mem_xfree(snd_gf1_mem_t * alloc, snd_gf1_mem_block_t * block)
 		if (block->prev)
 			block->prev->next = block->next;
 	}
-	if (block->name)
-		kfree(block->name);
+	kfree(block->name);
 	kfree(block);
 	return 0;
 }
@@ -265,7 +264,7 @@ int snd_gf1_mem_init(snd_gus_card_t * gus)
 		return -ENOMEM;
 #ifdef CONFIG_SND_DEBUG
 	if (! snd_card_proc_new(gus->card, "gusmem", &entry)) {
-		snd_info_set_text_ops(entry, gus, snd_gf1_mem_info_read);
+		snd_info_set_text_ops(entry, gus, 1024, snd_gf1_mem_info_read);
 		entry->c.text.read_size = 256 * 1024;
 	}
 #endif
@@ -297,7 +296,7 @@ static void snd_gf1_mem_info_read(snd_info_entry_t *entry,
 	unsigned int total, used;
 	int i;
 
-	gus = snd_magic_cast(snd_gus_card_t, entry->private_data, return);
+	gus = entry->private_data;
 	alloc = &gus->gf1.mem_alloc;
 	down(&alloc->memory_mutex);
 	snd_iprintf(buffer, "8-bit banks       : \n    ");

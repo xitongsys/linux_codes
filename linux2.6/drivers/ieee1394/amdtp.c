@@ -82,6 +82,7 @@
 #include <linux/poll.h>
 #include <linux/ioctl32.h>
 #include <linux/compat.h>
+#include <linux/cdev.h>
 #include <asm/uaccess.h>
 #include <asm/atomic.h>
 
@@ -318,7 +319,7 @@ void ohci1394_stop_it_ctx(struct ti_ohci *ohci, int ctx, int synchronous)
 			control = reg_read(ohci, OHCI1394_IsoXmitContextControlSet + ctx * 16);
 			if ((control & OHCI1394_CONTEXT_ACTIVE) == 0)
 				break;
-			
+
 			set_current_state(TASK_INTERRUPTIBLE);
 			schedule_timeout(1);
 		}
@@ -407,7 +408,7 @@ static void stream_shift_packet_lists(unsigned long l)
 
 	/* Now that we know the list is non-empty, we can get the head
 	 * of the list without locking, because the process context
-	 * only adds to the tail.  
+	 * only adds to the tail.
 	 */
 	pl = list_entry(s->dma_packet_lists.next, struct packet_list, link);
 	last = &pl->packets[PACKET_LIST_SIZE - 1];
@@ -423,7 +424,7 @@ static void stream_shift_packet_lists(unsigned long l)
 	if (last->db->payload_desc.status == 0) {
 		HPSB_INFO("weird interrupt...");
 		return;
-	}		
+	}
 
 	/* If the last descriptor block does not specify a branch
 	 * address, we have a sample underflow.
@@ -468,7 +469,7 @@ static struct packet *stream_current_packet(struct stream *s)
 
 	return &s->current_packet_list->packets[s->current_packet];
 }
-	
+
 static void stream_queue_packet(struct stream *s)
 {
 	s->current_packet++;
@@ -542,13 +543,13 @@ void packet_initialize(struct packet *p, struct packet *next)
 		DMA_CTL_OUTPUT_MORE | DMA_CTL_IMMEDIATE | 8;
 
 	if (next) {
-		p->db->payload_desc.control = 
+		p->db->payload_desc.control =
 			DMA_CTL_OUTPUT_LAST | DMA_CTL_BRANCH;
 		p->db->payload_desc.branch = next->db_bus | 3;
 		p->db->header_desc.skip = next->db_bus | 3;
 	}
 	else {
-		p->db->payload_desc.control = 
+		p->db->payload_desc.control =
 			DMA_CTL_OUTPUT_LAST | DMA_CTL_BRANCH |
 			DMA_CTL_UPDATE | DMA_CTL_IRQ;
 		p->db->payload_desc.branch = 0;
@@ -579,7 +580,7 @@ struct packet_list *packet_list_alloc(struct stream *s)
 	for (i = 0; i < PACKET_LIST_SIZE; i++) {
 		if (i < PACKET_LIST_SIZE - 1)
 			next = &pl->packets[i + 1];
-		else 
+		else
 			next = NULL;
 		packet_initialize(&pl->packets[i], next);
 	}
@@ -694,7 +695,7 @@ static u32 get_header_bits(struct stream *s, int sub_frame, u32 sample)
 	case AMDTP_FORMAT_IEC958_PCM:
 	case AMDTP_FORMAT_IEC958_AC3:
 		return get_iec958_header_bits(s, sub_frame, sample);
-		
+
 	case AMDTP_FORMAT_RAW:
 		return 0x40;
 
@@ -738,18 +739,18 @@ static void fill_packet(struct stream *s, struct packet *packet, int nevents)
 
 	/* Fill IEEE1394 headers */
 	packet->db->header_desc.header[0] =
-		(IEEE1394_SPEED_100 << 16) | (0x01 << 14) | 
+		(IEEE1394_SPEED_100 << 16) | (0x01 << 14) |
 		(s->iso_channel << 8) | (TCODE_ISO_DATA << 4);
 	packet->db->header_desc.header[1] = size << 16;
-	
+
 	/* Calculate synchronization timestamp (syt). First we
 	 * determine syt_index, that is, the index in the packet of
 	 * the sample for which the timestamp is valid. */
 	syt_index = (s->syt_interval - s->dbc) & (s->syt_interval - 1);
 	if (syt_index < nevents) {
-		syt = ((atomic_read(&s->cycle_count) << 12) | 
+		syt = ((atomic_read(&s->cycle_count) << 12) |
 		       s->cycle_offset.integer) & 0xffff;
-		fraction_add(&s->cycle_offset, 
+		fraction_add(&s->cycle_offset,
 			     &s->cycle_offset, &s->ticks_per_syt_offset);
 
 		/* This next addition should be modulo 8000 (0x1f40),
@@ -762,7 +763,7 @@ static void fill_packet(struct stream *s, struct packet *packet, int nevents)
 		syt = 0xffff;
 
 	atomic_inc(&s->cycle_count2);
-	
+
 	/* Fill cip header */
 	packet->payload->eoh0 = 0;
 	packet->payload->sid = s->host->host->node_id & 0x3f;
@@ -861,14 +862,14 @@ static int stream_alloc_packet_lists(struct stream *s)
 
 static void stream_free_packet_lists(struct stream *s)
 {
-	struct list_head *lh, *next;
+	struct packet_list *packet_l, *packet_l_next;
 
 	if (s->current_packet_list != NULL)
 		packet_list_free(s->current_packet_list, s);
-	list_for_each_safe(lh, next, &s->dma_packet_lists)
-		packet_list_free(list_entry(lh, struct packet_list, link), s);
-	list_for_each_safe(lh, next, &s->free_packet_lists)
-		packet_list_free(list_entry(lh, struct packet_list, link), s);
+	list_for_each_entry_safe(packet_l, packet_l_next, &s->dma_packet_lists, link)
+		packet_list_free(packet_l, s);
+	list_for_each_entry_safe(packet_l, packet_l_next, &s->free_packet_lists, link)
+		packet_list_free(packet_l, s);
 	if (s->packet_pool != NULL)
 		pci_pool_destroy(s->packet_pool);
 
@@ -1071,7 +1072,7 @@ void stream_free(struct stream *s)
 	 * that sometimes generates an it transmit interrupt if we
 	 * later re-enable the context.
 	 */
-	wait_event_interruptible(s->packet_list_wait, 
+	wait_event_interruptible(s->packet_list_wait,
 				 list_empty(&s->dma_packet_lists));
 
 	ohci1394_stop_it_ctx(s->host->ohci, s->iso_tasklet.context, 1);
@@ -1094,14 +1095,14 @@ void stream_free(struct stream *s)
 
 /* File operations */
 
-static ssize_t amdtp_write(struct file *file, const char *buffer, size_t count,
+static ssize_t amdtp_write(struct file *file, const char __user *buffer, size_t count,
 			   loff_t *offset_is_ignored)
 {
 	struct stream *s = file->private_data;
 	unsigned char *p;
 	int i;
 	size_t length;
-	
+
 	if (s->packet_pool == NULL)
 		return -EBADFD;
 
@@ -1122,16 +1123,16 @@ static ssize_t amdtp_write(struct file *file, const char *buffer, size_t count,
 			return -EFAULT;
 		if (s->input->length < s->input->size)
 			continue;
-		
+
 		stream_flush(s);
-		
+
 		if (s->current_packet_list != NULL)
 			continue;
 
 		if (file->f_flags & O_NONBLOCK)
 			return i + length > 0 ? i + length : -EAGAIN;
 
-		if (wait_event_interruptible(s->packet_list_wait, 
+		if (wait_event_interruptible(s->packet_list_wait,
 					     !list_empty(&s->free_packet_lists)))
 			return -EINTR;
 	}
@@ -1139,24 +1140,28 @@ static ssize_t amdtp_write(struct file *file, const char *buffer, size_t count,
 	return count;
 }
 
-static int amdtp_ioctl(struct inode *inode, struct file *file,
-			   unsigned int cmd, unsigned long arg)
+static long amdtp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct stream *s = file->private_data;
 	struct amdtp_ioctl cfg;
-
+	int err;
+	lock_kernel();
 	switch(cmd)
 	{
 	case AMDTP_IOC_PLUG:
 	case AMDTP_IOC_CHANNEL:
-		if (copy_from_user(&cfg, (struct amdtp_ioctl *) arg, sizeof cfg))
-			return -EFAULT;
-		else 
-			return stream_configure(s, cmd, &cfg);
+		if (copy_from_user(&cfg, (struct amdtp_ioctl __user *) arg, sizeof cfg))
+			err = -EFAULT;
+		else
+			err = stream_configure(s, cmd, &cfg);
+		break;
 
 	default:
-		return -EINVAL;
+		err = -EINVAL;
+		break;
 	}
+	unlock_kernel();
+	return err;
 }
 
 static unsigned int amdtp_poll(struct file *file, poll_table *pt)
@@ -1196,12 +1201,14 @@ static int amdtp_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static struct cdev amdtp_cdev;
 static struct file_operations amdtp_fops =
 {
 	.owner =	THIS_MODULE,
 	.write =	amdtp_write,
 	.poll =		amdtp_poll,
-	.ioctl =	amdtp_ioctl,
+	.unlocked_ioctl = amdtp_ioctl,
+	.compat_ioctl = amdtp_ioctl, /* All amdtp ioctls are compatible */
 	.open =		amdtp_open,
 	.release =	amdtp_release
 };
@@ -1225,15 +1232,15 @@ static void amdtp_add_host(struct hpsb_host *host)
 	ah->host = host;
 	ah->ohci = host->hostdata;
 
-	hpsb_set_hostinfo_key(&amdtp_highlevel, host, ah->ohci->id);
+	hpsb_set_hostinfo_key(&amdtp_highlevel, host, ah->host->id);
 
-	minor = IEEE1394_MINOR_BLOCK_AMDTP * 16 + ah->ohci->id;
+	minor = IEEE1394_MINOR_BLOCK_AMDTP * 16 + ah->host->id;
 
 	INIT_LIST_HEAD(&ah->stream_list);
 	spin_lock_init(&ah->stream_list_lock);
 
 	devfs_mk_cdev(MKDEV(IEEE1394_MAJOR, minor),
-			S_IFCHR|S_IRUSR|S_IWUSR, "amdtp/%d", ah->ohci->id);
+			S_IFCHR|S_IRUSR|S_IWUSR, "amdtp/%d", ah->host->id);
 }
 
 static void amdtp_remove_host(struct hpsb_host *host)
@@ -1241,7 +1248,7 @@ static void amdtp_remove_host(struct hpsb_host *host)
 	struct amdtp_host *ah = hpsb_get_hostinfo(&amdtp_highlevel, host);
 
 	if (ah)
-		devfs_remove("amdtp/%d", ah->ohci->id);
+		devfs_remove("amdtp/%d", ah->host->id);
 
 	return;
 }
@@ -1262,27 +1269,17 @@ MODULE_LICENSE("GPL");
 
 static int __init amdtp_init_module (void)
 {
-	int ret;
-
-	ret = ieee1394_register_chardev(IEEE1394_MINOR_BLOCK_AMDTP,
-					THIS_MODULE, &amdtp_fops);
-	if (ret) {
-		HPSB_ERR("amdtp: unable to get minor device block");
+	cdev_init(&amdtp_cdev, &amdtp_fops);
+	amdtp_cdev.owner = THIS_MODULE;
+	kobject_set_name(&amdtp_cdev.kobj, "amdtp");
+	if (cdev_add(&amdtp_cdev, IEEE1394_AMDTP_DEV, 16)) {
+		HPSB_ERR("amdtp: unable to add char device");
  		return -EIO;
  	}
 
 	devfs_mk_dir("amdtp");
 
 	hpsb_register_highlevel(&amdtp_highlevel);
-
-#ifdef CONFIG_COMPAT
-	ret = register_ioctl32_conversion(AMDTP_IOC_CHANNEL, NULL);
-	ret |= register_ioctl32_conversion(AMDTP_IOC_PLUG, NULL);
-	ret |= register_ioctl32_conversion(AMDTP_IOC_PING, NULL);
-	ret |= register_ioctl32_conversion(AMDTP_IOC_ZAP, NULL);
-	if (ret)
-		HPSB_ERR("amdtp: Error registering ioctl32 translations");
-#endif
 
 	HPSB_INFO("Loaded AMDTP driver");
 
@@ -1291,23 +1288,13 @@ static int __init amdtp_init_module (void)
 
 static void __exit amdtp_exit_module (void)
 {
-#ifdef CONFIG_COMPAT
-	int ret;
-
-	ret = unregister_ioctl32_conversion(AMDTP_IOC_CHANNEL);
-	ret |= unregister_ioctl32_conversion(AMDTP_IOC_PLUG);
-	ret |= unregister_ioctl32_conversion(AMDTP_IOC_PING);
-	ret |= unregister_ioctl32_conversion(AMDTP_IOC_ZAP);
-	if (ret)
-		HPSB_ERR("amdtp: Error unregistering ioctl32 translations");
-#endif
-
         hpsb_unregister_highlevel(&amdtp_highlevel);
 	devfs_remove("amdtp");
-        ieee1394_unregister_chardev(IEEE1394_MINOR_BLOCK_AMDTP);
+	cdev_del(&amdtp_cdev);
 
 	HPSB_INFO("Unloaded AMDTP driver");
 }
 
 module_init(amdtp_init_module);
 module_exit(amdtp_exit_module);
+MODULE_ALIAS_CHARDEV(IEEE1394_MAJOR, IEEE1394_MINOR_BLOCK_AMDTP * 16);

@@ -1,8 +1,9 @@
 /*======================================================================
 
-    drivers/mtd/maps/armflash.c: ARM Flash Layout/Partitioning
+    drivers/mtd/maps/integrator-flash.c: ARM Integrator flash map driver
   
     Copyright (C) 2000 ARM Limited
+    Copyright (C) 2003 Deep Blue Solutions Ltd.
   
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -21,7 +22,7 @@
    This is access code for flashes using ARM's flash partitioning 
    standards.
 
-   $Id: integrator-flash.c,v 1.12 2003/05/20 20:59:30 dwmw2 Exp $
+   $Id: integrator-flash.c,v 1.18 2004/11/01 13:26:15 rmk Exp $
 
 ======================================================================*/
 
@@ -64,7 +65,7 @@ static void armflash_set_vpp(struct map_info *map, int on)
 		info->plat->set_vpp(on);
 }
 
-static const char *probes[] = { "RedBoot", "afs", NULL };
+static const char *probes[] = { "cmdlinepart", "RedBoot", "afs", NULL };
 
 static int armflash_probe(struct device *_dev)
 {
@@ -74,7 +75,7 @@ static int armflash_probe(struct device *_dev)
 	unsigned int size = res->end - res->start + 1;
 	struct armflash_info *info;
 	int err;
-	void *base;
+	void __iomem *base;
 
 	info = kmalloc(sizeof(struct armflash_info), GFP_KERNEL);
 	if (!info) {
@@ -107,9 +108,9 @@ static int armflash_probe(struct device *_dev)
 	 * look for CFI based flash parts fitted to this board
 	 */
 	info->map.size		= size;
-	info->map.buswidth	= plat->width;
+	info->map.bankwidth	= plat->width;
 	info->map.phys		= res->start;
-	info->map.virt		= (unsigned long) base;
+	info->map.virt		= base;
 	info->map.name		= dev->dev.bus_id;
 	info->map.set_vpp	= armflash_set_vpp;
 
@@ -178,7 +179,7 @@ static int armflash_remove(struct device *_dev)
 		if (info->parts)
 			kfree(info->parts);
 
-		iounmap((void *)info->map.virt);
+		iounmap(info->map.virt);
 		release_resource(info->res);
 		kfree(info->res);
 

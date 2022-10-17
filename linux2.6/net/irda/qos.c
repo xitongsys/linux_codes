@@ -96,6 +96,10 @@ static int irlap_param_additional_bofs(void *instance, irda_param_t *parm,
 static int irlap_param_min_turn_time(void *instance, irda_param_t *param, 
 				     int get);
 
+#ifndef CONFIG_IRDA_DYNAMIC_WINDOW
+static __u32 irlap_requested_line_capacity(struct qos_info *qos);
+#endif
+
 static __u32 min_turn_times[]  = { 10000, 5000, 1000, 500, 100, 50, 10, 0 }; /* us */
 static __u32 baud_rates[]      = { 2400, 9600, 19200, 38400, 57600, 115200, 576000, 
 				   1152000, 4000000, 16000000 };           /* bps */
@@ -209,17 +213,6 @@ static int msb_index (__u16 word)
 		index--;
 	}
 	return index;
-}
-
-static inline __u32 byte_value(__u8 byte, __u32 *array) 
-{
-	int index;
-
-	ASSERT(array != NULL, return -1;);
-
-	index = msb_index(byte);
-
-	return index_value(index, array);
 }
 
 /*
@@ -336,6 +329,7 @@ void irda_init_max_qos_capabilies(struct qos_info *qos)
 	qos->link_disc_time.bits &= 0xff;
 	qos->additional_bofs.bits = 0xff;
 }
+EXPORT_SYMBOL(irda_init_max_qos_capabilies);
 
 /*
  * Function irlap_adjust_qos_settings (qos)
@@ -343,7 +337,7 @@ void irda_init_max_qos_capabilies(struct qos_info *qos)
  *     Adjust QoS settings in case some values are not possible to use because
  *     of other settings
  */
-void irlap_adjust_qos_settings(struct qos_info *qos)
+static void irlap_adjust_qos_settings(struct qos_info *qos)
 {
 	__u32 line_capacity;
 	int index;
@@ -733,19 +727,22 @@ __u32 irlap_max_line_capacity(__u32 speed, __u32 max_turn_time)
 	return line_capacity;
 }
 
-__u32 irlap_requested_line_capacity(struct qos_info *qos)
-{	__u32 line_capacity;
-	
-	line_capacity = qos->window_size.value * 
+#ifndef CONFIG_IRDA_DYNAMIC_WINDOW
+static __u32 irlap_requested_line_capacity(struct qos_info *qos)
+{
+	__u32 line_capacity;
+
+	line_capacity = qos->window_size.value *
 		(qos->data_size.value + 6 + qos->additional_bofs.value) +
-		irlap_min_turn_time_in_bytes(qos->baud_rate.value, 
+		irlap_min_turn_time_in_bytes(qos->baud_rate.value,
 					     qos->min_turn_time.value);
-	
+
 	IRDA_DEBUG(2, "%s(), requested line capacity=%d\n",
 		   __FUNCTION__, line_capacity);
-	
-	return line_capacity;			       		  
+
+	return line_capacity;
 }
+#endif
 
 void irda_qos_bits_to_value(struct qos_info *qos)
 {
@@ -774,3 +771,4 @@ void irda_qos_bits_to_value(struct qos_info *qos)
 	index = msb_index(qos->additional_bofs.bits);
 	qos->additional_bofs.value = add_bofs[index];
 }
+EXPORT_SYMBOL(irda_qos_bits_to_value);

@@ -78,6 +78,7 @@
 #include <asm/pgtable.h>
 #include <asm/io.h>
 #include <asm/processor.h>
+#include "internal.h"
 
 /* Gcc optimizes away "strlen(x)" for constant x */
 #define ADDBUF(buffer, string) \
@@ -88,10 +89,13 @@ static inline char * task_name(struct task_struct *p, char * buf)
 {
 	int i;
 	char * name;
+	char tcomm[sizeof(p->comm)];
+
+	get_task_comm(tcomm, p);
 
 	ADDBUF(buf, "Name:\t");
-	name = p->comm;
-	i = sizeof(p->comm);
+	name = tcomm;
+	i = sizeof(tcomm);
 	do {
 		unsigned char c = *name;
 		name++;
@@ -127,17 +131,20 @@ static const char *task_state_array[] = {
 	"S (sleeping)",		/*  1 */
 	"D (disk sleep)",	/*  2 */
 	"T (stopped)",		/*  4 */
-	"Z (zombie)",		/*  8 */
-	"X (dead)"		/* 16 */
+	"T (tracing stop)",	/*  8 */
+	"Z (zombie)",		/* 16 */
+	"X (dead)"		/* 32 */
 };
 
 static inline const char * get_task_state(struct task_struct *tsk)
 {
-	unsigned int state = tsk->state & (TASK_RUNNING |
-					   TASK_INTERRUPTIBLE |
-					   TASK_UNINTERRUPTIBLE |
-					   TASK_ZOMBIE |
-					   TASK_STOPPED);
+	unsigned int state = (tsk->state & (TASK_RUNNING |
+					    TASK_INTERRUPTIBLE |
+					    TASK_UNINTERRUPTIBLE |
+					    TASK_STOPPED |
+					    TASK_TRACED)) |
+			(tsk->exit_state & (EXIT_ZOMBIE |
+					    EXIT_DEAD));
 	const char **p = &task_state_array[0];
 
 	while (state) {
@@ -149,6 +156,7 @@ static inline const char * get_task_state(struct task_struct *tsk)
 
 static inline char * task_state(struct task_struct *p, char *buffer)
 {
+	struct group_info *group_info;
 	int g;
 
 	read_lock(&tasklist_lock);
@@ -162,22 +170,26 @@ static inline char * task_state(struct task_struct *p, char *buffer)
 		"Uid:\t%d\t%d\t%d\t%d\n"
 		"Gid:\t%d\t%d\t%d\t%d\n",
 		get_task_state(p),
-		(p->sleep_avg/1024)*100/(1000000000/1024),
+		(p->sleep_avg/1024)*100/(1020000000/1024),
 	       	p->tgid,
-		p->pid, p->pid ? p->real_parent->pid : 0,
-		p->pid && p->ptrace ? p->parent->pid : 0,
+		p->pid, pid_alive(p) ? p->group_leader->real_parent->tgid : 0,
+		pid_alive(p) && p->ptrace ? p->parent->pid : 0,
 		p->uid, p->euid, p->suid, p->fsuid,
 		p->gid, p->egid, p->sgid, p->fsgid);
-	read_unlock(&tasklist_lock);	
+	read_unlock(&tasklist_lock);
 	task_lock(p);
 	buffer += sprintf(buffer,
 		"FDSize:\t%d\n"
 		"Groups:\t",
 		p->files ? p->files->max_fds : 0);
+
+	group_info = p->group_info;
+	get_group_info(group_info);
 	task_unlock(p);
 
-	for (g = 0; g < p->ngroups; g++)
-		buffer += sprintf(buffer, "%d ", p->groups[g]);
+	for (g = 0; g < min(group_info->ngroups,NGROUPS_SMALL); g++)
+		buffer += sprintf(buffer, "%d ", GROUP_AT(group_info,g));
+	put_group_info(group_info);
 
 	buffer += sprintf(buffer, "\n");
 	return buffer;
@@ -269,7 +281,6 @@ static inline char *task_cap(struct task_struct *p, char *buffer)
 			    cap_t(p->cap_effective));
 }
 
-extern char *task_mem(struct mm_struct *, char *);
 int proc_pid_status(struct task_struct *task, char * buffer)
 {
 	char * orig = buffer;
@@ -290,88 +301,130 @@ int proc_pid_status(struct task_struct *task, char * buffer)
 	return buffer - orig;
 }
 
-extern unsigned long task_vsize(struct mm_struct *);
-int proc_pid_stat(struct task_struct *task, char * buffer)
+static int do_task_stat(struct task_struct *task, char * buffer, int whole)
 {
-	unsigned long vsize, eip, esp, wchan;
+	unsigned long vsize, eip, esp, wchan = ~0UL;
 	long priority, nice;
 	int tty_pgrp = -1, tty_nr = 0;
 	sigset_t sigign, sigcatch;
 	char state;
 	int res;
-	pid_t ppid;
+ 	pid_t ppid, pgid = -1, sid = -1;
 	int num_threads = 0;
 	struct mm_struct *mm;
+	unsigned long long start_time;
+	unsigned long cmin_flt = 0, cmaj_flt = 0;
+	unsigned long  min_flt = 0,  maj_flt = 0;
+	cputime_t cutime, cstime, utime, stime;
+	unsigned long rsslim = 0;
+	struct task_struct *t;
+	char tcomm[sizeof(task->comm)];
 
 	state = *get_task_state(task);
 	vsize = eip = esp = 0;
-	task_lock(task);
-	mm = task->mm;
-	if(mm)
-		mm = mmgrab(mm);
-	if (task->tty) {
-		tty_pgrp = task->tty->pgrp;
-		tty_nr = new_encode_dev(tty_devnum(task->tty));
-	}
-	task_unlock(task);
+	mm = get_task_mm(task);
 	if (mm) {
-		down_read(&mm->mmap_sem);
 		vsize = task_vsize(mm);
 		eip = KSTK_EIP(task);
 		esp = KSTK_ESP(task);
-		up_read(&mm->mmap_sem);
 	}
 
-	wchan = get_wchan(task);
+	get_task_comm(tcomm, task);
 
 	sigemptyset(&sigign);
 	sigemptyset(&sigcatch);
+	cutime = cstime = utime = stime = cputime_zero;
 	read_lock(&tasklist_lock);
 	if (task->sighand) {
 		spin_lock_irq(&task->sighand->siglock);
 		num_threads = atomic_read(&task->signal->count);
 		collect_sigign_sigcatch(task, &sigign, &sigcatch);
+
+		/* add up live thread stats at the group level */
+		if (whole) {
+			t = task;
+			do {
+				min_flt += t->min_flt;
+				maj_flt += t->maj_flt;
+				utime = cputime_add(utime, t->utime);
+				stime = cputime_add(stime, t->stime);
+				t = next_thread(t);
+			} while (t != task);
+		}
+
 		spin_unlock_irq(&task->sighand->siglock);
 	}
-	read_unlock(&tasklist_lock);		
+	if (task->signal) {
+		if (task->signal->tty) {
+			tty_pgrp = task->signal->tty->pgrp;
+			tty_nr = new_encode_dev(tty_devnum(task->signal->tty));
+		}
+		pgid = process_group(task);
+		sid = task->signal->session;
+		cmin_flt = task->signal->cmin_flt;
+		cmaj_flt = task->signal->cmaj_flt;
+		cutime = task->signal->cutime;
+		cstime = task->signal->cstime;
+		rsslim = task->signal->rlim[RLIMIT_RSS].rlim_cur;
+		if (whole) {
+			min_flt += task->signal->min_flt;
+			maj_flt += task->signal->maj_flt;
+			utime = cputime_add(utime, task->signal->utime);
+			stime = cputime_add(stime, task->signal->stime);
+		}
+	}
+	ppid = pid_alive(task) ? task->group_leader->real_parent->tgid : 0;
+	read_unlock(&tasklist_lock);
+
+	if (!whole || num_threads<2)
+		wchan = get_wchan(task);
+	if (!whole) {
+		min_flt = task->min_flt;
+		maj_flt = task->maj_flt;
+		utime = task->utime;
+		stime = task->stime;
+	}
 
 	/* scale priority and nice values from timeslices to -20..20 */
 	/* to make it look like a "normal" Unix priority/nice value  */
 	priority = task_prio(task);
 	nice = task_nice(task);
 
-	read_lock(&tasklist_lock);
-	ppid = task->pid ? task->real_parent->pid : 0;
-	read_unlock(&tasklist_lock);
+	/* Temporary variable needed for gcc-2.96 */
+	/* convert timespec -> nsec*/
+	start_time = (unsigned long long)task->start_time.tv_sec * NSEC_PER_SEC
+				+ task->start_time.tv_nsec;
+	/* convert nsec -> ticks */
+	start_time = nsec_to_clock_t(start_time);
+
 	res = sprintf(buffer,"%d (%s) %c %d %d %d %d %d %lu %lu \
 %lu %lu %lu %lu %lu %ld %ld %ld %ld %d %ld %llu %lu %ld %lu %lu %lu %lu %lu \
 %lu %lu %lu %lu %lu %lu %lu %lu %d %d %lu %lu\n",
 		task->pid,
-		task->comm,
+		tcomm,
 		state,
 		ppid,
-		process_group(task),
-		task->session,
+		pgid,
+		sid,
 		tty_nr,
 		tty_pgrp,
 		task->flags,
-		task->min_flt,
-		task->cmin_flt,
-		task->maj_flt,
-		task->cmaj_flt,
-		jiffies_to_clock_t(task->utime),
-		jiffies_to_clock_t(task->stime),
-		jiffies_to_clock_t(task->cutime),
-		jiffies_to_clock_t(task->cstime),
+		min_flt,
+		cmin_flt,
+		maj_flt,
+		cmaj_flt,
+		cputime_to_clock_t(utime),
+		cputime_to_clock_t(stime),
+		cputime_to_clock_t(cutime),
+		cputime_to_clock_t(cstime),
 		priority,
 		nice,
 		num_threads,
 		jiffies_to_clock_t(task->it_real_value),
-		(unsigned long long)
-		    jiffies_64_to_clock_t(task->start_time - INITIAL_JIFFIES),
+		start_time,
 		vsize,
 		mm ? mm->rss : 0, /* you might want to shift this left 3 */
-		task->rlim[RLIMIT_RSS].rlim_cur,
+	        rsslim,
 		mm ? mm->start_code : 0,
 		mm ? mm->end_code : 0,
 		mm ? mm->start_stack : 0,
@@ -386,8 +439,8 @@ int proc_pid_stat(struct task_struct *task, char * buffer)
 		sigign      .sig[0] & 0x7fffffffUL,
 		sigcatch    .sig[0] & 0x7fffffffUL,
 		wchan,
-		task->nswap,
-		task->cnswap,
+		0UL,
+		0UL,
 		task->exit_signal,
 		task_cpu(task),
 		task->rt_priority,
@@ -397,17 +450,23 @@ int proc_pid_stat(struct task_struct *task, char * buffer)
 	return res;
 }
 
-extern int task_statm(struct mm_struct *, int *, int *, int *, int *);
+int proc_tid_stat(struct task_struct *task, char * buffer)
+{
+	return do_task_stat(task, buffer, 0);
+}
+
+int proc_tgid_stat(struct task_struct *task, char * buffer)
+{
+	return do_task_stat(task, buffer, 1);
+}
+
 int proc_pid_statm(struct task_struct *task, char *buffer)
 {
 	int size = 0, resident = 0, shared = 0, text = 0, lib = 0, data = 0;
 	struct mm_struct *mm = get_task_mm(task);
 	
 	if (mm) {
-		down_read(&mm->mmap_sem);
 		size = task_statm(mm, &shared, &text, &data, &resident);
-		up_read(&mm->mmap_sem);
-
 		mmput(mm);
 	}
 

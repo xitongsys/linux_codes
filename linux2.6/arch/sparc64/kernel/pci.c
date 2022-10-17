@@ -7,6 +7,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/sched.h>
@@ -40,7 +41,6 @@ asmlinkage int sys_pciconfig_write(unsigned long bus, unsigned long dfn,
 #else
 
 /* List of all PCI controllers found in the system. */
-spinlock_t pci_controller_lock = SPIN_LOCK_UNLOCKED;
 struct pci_controller_info *pci_controller_root = NULL;
 
 /* Each PCI controller found gets a unique index. */
@@ -56,7 +56,7 @@ volatile int pci_poke_in_progress;
 volatile int pci_poke_cpu = -1;
 volatile int pci_poke_faulted;
 
-static spinlock_t pci_poke_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(pci_poke_lock);
 
 void pci_config_read8(u8 *addr, u8 *ret)
 {
@@ -297,12 +297,9 @@ static void __init pci_controller_probe(void)
 static void __init pci_scan_each_controller_bus(void)
 {
 	struct pci_controller_info *p;
-	unsigned long flags;
 
-	spin_lock_irqsave(&pci_controller_lock, flags);
 	for (p = pci_controller_root; p; p = p->next)
 		p->scan_bus(p);
-	spin_unlock_irqrestore(&pci_controller_lock, flags);
 }
 
 /* Reorder the pci_dev chain, so that onboard devices come first
@@ -349,10 +346,6 @@ static int __init pcibios_init(void)
 }
 
 subsys_initcall(pcibios_init);
-
-struct pci_fixup pcibios_fixups[] = {
-	{ 0 }
-};
 
 void pcibios_fixup_bus(struct pci_bus *pbus)
 {
@@ -732,7 +725,7 @@ static int __pci_mmap_make_offset(struct pci_dev *dev, struct vm_area_struct *vm
 static void __pci_mmap_set_flags(struct pci_dev *dev, struct vm_area_struct *vma,
 					    enum pci_mmap_state mmap_state)
 {
-	vma->vm_flags |= (VM_SHM | VM_LOCKED);
+	vma->vm_flags |= (VM_IO | VM_RESERVED);
 }
 
 /* Set vm_page_prot of VMA, as appropriate for this architecture, for a pci
@@ -799,6 +792,7 @@ int pci_domain_nr(struct pci_bus *pbus)
 
 	return ret;
 }
+EXPORT_SYMBOL(pci_domain_nr);
 
 int pci_name_bus(char *name, struct pci_bus *bus)
 {

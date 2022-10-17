@@ -7,7 +7,7 @@
 	This software may be used and distributed according to the terms
 	of the GNU General Public License, incorporated herein by reference.
 
-	Please refer to Documentation/DocBook/tulip.{pdf,ps,html}
+	Please refer to Documentation/DocBook/tulip-user.{pdf,ps,html}
 	for more information on this driver, or visit the project
 	Web page at http://sourceforge.net/projects/tulip/
 
@@ -64,6 +64,8 @@ enum tbl_flag {
 	COMET_MAC_ADDR		= 0x0800,
 	HAS_PCI_MWI		= 0x1000,
 	HAS_PHY_IRQ		= 0x2000,
+	HAS_SWAPPED_SEEPROM	= 0x4000,
+	NEEDS_FAKE_MEDIA_TABLE	= 0x8000,
 };
 
 
@@ -86,6 +88,7 @@ enum chips {
 	I21145,
 	DM910X,
 	CONEXANT,
+	ULI526X
 };
 
 
@@ -126,6 +129,7 @@ enum pci_cfg_driver_reg {
 	CFDD_Snooze = (1 << 30),
 };
 
+#define RxPollInt (RxIntr|RxNoBuf|RxDied|RxJabber)
 
 /* The bits in the CSR5 status registers, mostly interrupt sources. */
 enum status_bits {
@@ -146,6 +150,9 @@ enum status_bits {
 	TxIntr = 0x01,
 };
 
+/* bit mask for CSR5 TX/RX process state */
+#define CSR5_TS	0x00700000
+#define CSR5_RS	0x000e0000
 
 enum tulip_mode_bits {
 	TxThreshold		= (1 << 22),
@@ -251,9 +258,9 @@ enum t21143_csr6_bits {
    Making the Tx ring too large decreases the effectiveness of channel
    bonding and packet priority.
    There are no ill effects from too-large receive rings. */
-#define TX_RING_SIZE	16
-#define RX_RING_SIZE	32
 
+#define TX_RING_SIZE	32
+#define RX_RING_SIZE	128 
 #define MEDIA_MASK     31
 
 #define PKT_BUF_SZ		1536	/* Size of each temporary Rx buffer. */
@@ -343,17 +350,15 @@ struct tulip_private {
 	int flags;
 	struct net_device_stats stats;
 	struct timer_list timer;	/* Media selection timer. */
+	struct timer_list oom_timer;    /* Out of memory timer. */
 	u32 mc_filter[2];
 	spinlock_t lock;
 	spinlock_t mii_lock;
 	unsigned int cur_rx, cur_tx;	/* The next free ring entry */
 	unsigned int dirty_rx, dirty_tx;	/* The ring entries to be free()ed. */
 
-#ifdef CONFIG_NET_HW_FLOWCONTROL
-#define RX_A_NBF_STOP 0xffffff3f /* To disable RX and RX-NOBUF ints. */
-        int fc_bit;
-        int mit_sel;
-        int mit_change; /* Signal for Interrupt Mitigtion */
+#ifdef 	CONFIG_TULIP_NAPI_HW_MITIGATION
+        int mit_on;
 #endif
 	unsigned int full_duplex:1;	/* Full-duplex operation requested. */
 	unsigned int full_duplex_lock:1;
@@ -378,7 +383,7 @@ struct tulip_private {
 	int ttimer;
 	int susp_rx;
 	unsigned long nir;
-	unsigned long base_addr;
+	void __iomem *base_addr;
 	int csr12_shadow;
 	int pad0;		/* Used for 8-byte alignment */
 };
@@ -408,13 +413,17 @@ void pnic2_lnk_change(struct net_device *dev, int csr5);
 
 /* eeprom.c */
 void tulip_parse_eeprom(struct net_device *dev);
-int tulip_read_eeprom(long ioaddr, int location, int addr_len);
+int tulip_read_eeprom(struct net_device *dev, int location, int addr_len);
 
 /* interrupt.c */
 extern unsigned int tulip_max_interrupt_work;
 extern int tulip_rx_copybreak;
 irqreturn_t tulip_interrupt(int irq, void *dev_instance, struct pt_regs *regs);
 int tulip_refill_rx(struct net_device *dev);
+#ifdef CONFIG_TULIP_NAPI
+int tulip_poll(struct net_device *dev, int *budget);
+#endif
+
 
 /* media.c */
 int tulip_mdio_read(struct net_device *dev, int phy_id, int location);
@@ -438,49 +447,46 @@ extern int tulip_debug;
 extern const char * const medianame[];
 extern const char tulip_media_cap[];
 extern struct tulip_chip_table tulip_tbl[];
+void oom_timer(unsigned long data);
 extern u8 t21040_csr13[];
-
-#ifndef USE_IO_OPS
-#undef inb
-#undef inw
-#undef inl
-#undef outb
-#undef outw
-#undef outl
-#define inb(addr) readb((void*)(addr))
-#define inw(addr) readw((void*)(addr))
-#define inl(addr) readl((void*)(addr))
-#define outb(val,addr) writeb((val), (void*)(addr))
-#define outw(val,addr) writew((val), (void*)(addr))
-#define outl(val,addr) writel((val), (void*)(addr))
-#endif /* !USE_IO_OPS */
-
-
 
 static inline void tulip_start_rxtx(struct tulip_private *tp)
 {
-	long ioaddr = tp->base_addr;
-	outl(tp->csr6 | RxTx, ioaddr + CSR6);
+	void __iomem *ioaddr = tp->base_addr;
+	iowrite32(tp->csr6 | RxTx, ioaddr + CSR6);
 	barrier();
-	(void) inl(ioaddr + CSR6); /* mmio sync */
+	(void) ioread32(ioaddr + CSR6); /* mmio sync */
 }
 
 static inline void tulip_stop_rxtx(struct tulip_private *tp)
 {
-	long ioaddr = tp->base_addr;
-	u32 csr6 = inl(ioaddr + CSR6);
+	void __iomem *ioaddr = tp->base_addr;
+	u32 csr6 = ioread32(ioaddr + CSR6);
 
 	if (csr6 & RxTx) {
-		outl(csr6 & ~RxTx, ioaddr + CSR6);
+		unsigned i=1300/10;
+		iowrite32(csr6 & ~RxTx, ioaddr + CSR6);
 		barrier();
-		(void) inl(ioaddr + CSR6); /* mmio sync */
+		/* wait until in-flight frame completes.
+		 * Max time @ 10BT: 1500*8b/10Mbps == 1200us (+ 100us margin)
+		 * Typically expect this loop to end in < 50 us on 100BT.
+		 */
+		while (--i && (ioread32(ioaddr + CSR5) & (CSR5_TS|CSR5_RS)))
+			udelay(10);
+
+		if (!i)
+			printk(KERN_DEBUG "%s: tulip_stop_rxtx() failed\n",
+					tp->pdev->slot_name);
 	}
 }
 
 static inline void tulip_restart_rxtx(struct tulip_private *tp)
 {
-	tulip_stop_rxtx(tp);
-	udelay(5);
+	if(!(tp->chip_id == ULI526X && 
+		(tp->revision == 0x40 || tp->revision == 0x50))) {
+		tulip_stop_rxtx(tp);
+		udelay(5);
+	}
 	tulip_start_rxtx(tp);
 }
 

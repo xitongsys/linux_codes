@@ -1,7 +1,7 @@
 #ifndef _LINUX_SWSUSP_H
 #define _LINUX_SWSUSP_H
 
-#ifdef CONFIG_X86
+#if defined(CONFIG_X86) || defined(CONFIG_FRV)
 #include <asm/suspend.h>
 #endif
 #include <linux/swap.h>
@@ -10,7 +10,6 @@
 #include <linux/init.h>
 #include <linux/pm.h>
 
-#ifdef CONFIG_PM
 /* page backup entry */
 typedef struct pbe {
 	unsigned long address;		/* address of the copy */
@@ -23,19 +22,6 @@ typedef struct pbe {
 
 #define SWAP_FILENAME_MAXLENGTH	32
 
-struct suspend_header {
-	__u32 version_code;
-	unsigned long num_physpages;
-	char machine[8];
-	char version[20];
-	int num_cpus;
-	int page_size;
-	suspend_pagedir_t *suspend_pagedir;
-	unsigned int num_pbes;
-	struct swap_location {
-		char filename[SWAP_FILENAME_MAXLENGTH];
-	} swap_location[MAX_SWAPFILES];
-};
 
 #define SUSPEND_PD_PAGES(x)     (((x)*sizeof(struct pbe))/PAGE_SIZE+1)
    
@@ -44,32 +30,35 @@ extern int shrink_mem(void);
 
 /* mm/page_alloc.c */
 extern void drain_local_pages(void);
-
-extern unsigned int nr_copy_pages __nosavedata;
-extern suspend_pagedir_t *pagedir_nosave __nosavedata;
-#endif /* CONFIG_PM */
-
-#ifdef CONFIG_SOFTWARE_SUSPEND
-
-extern unsigned char software_suspend_enabled;
-
-extern void software_suspend(void);
-#else	/* CONFIG_SOFTWARE_SUSPEND */
-static inline void software_suspend(void)
-{
-	printk("Warning: fake suspend called\n");
-}
-#endif	/* CONFIG_SOFTWARE_SUSPEND */
-
+extern void mark_free_pages(struct zone *zone);
 
 #ifdef CONFIG_PM
-extern void refrigerator(unsigned long);
+/* kernel/power/swsusp.c */
+extern int software_suspend(void);
+
+extern int pm_prepare_console(void);
+extern void pm_restore_console(void);
 
 #else
-static inline void refrigerator(unsigned long flag)
+static inline int software_suspend(void)
 {
-
+	printk("Warning: fake suspend called\n");
+	return -EPERM;
 }
-#endif	/* CONFIG_PM */
+#endif
+
+#ifdef CONFIG_SMP
+extern void disable_nonboot_cpus(void);
+extern void enable_nonboot_cpus(void);
+#else
+static inline void disable_nonboot_cpus(void) {}
+static inline void enable_nonboot_cpus(void) {}
+#endif
+
+void save_processor_state(void);
+void restore_processor_state(void);
+struct saved_context;
+void __save_processor_state(struct saved_context *ctxt);
+void __restore_processor_state(struct saved_context *ctxt);
 
 #endif /* _LINUX_SWSUSP_H */

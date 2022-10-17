@@ -28,6 +28,9 @@
 #define GREG_CFG_IBURST		0x00000001	/* Infinite Burst		*/
 #define GREG_CFG_TXDMALIM	0x0000003e	/* TX DMA grant limit		*/
 #define GREG_CFG_RXDMALIM	0x000007c0	/* RX DMA grant limit		*/
+#define GREG_CFG_RONPAULBIT	0x00000800	/* Use mem read multiple for PCI read
+						 * after infinite burst (Apple) */
+#define GREG_CFG_ENBUG2FIX	0x00001000	/* Fix Rx hang after overflow */
 
 /* Global Interrupt Status Register.
  *
@@ -56,6 +59,9 @@
 #define GREG_STAT_ABNORMAL	(GREG_STAT_RXNOBUF | GREG_STAT_RXTAGERR | \
 				 GREG_STAT_PCS | GREG_STAT_TXMAC | GREG_STAT_RXMAC | \
 				 GREG_STAT_MAC | GREG_STAT_MIF | GREG_STAT_PCIERR)
+
+#define GREG_STAT_NAPI		(GREG_STAT_TXALL  | GREG_STAT_TXINTME | \
+				 GREG_STAT_RXDONE | GREG_STAT_ABNORMAL)
 
 /* The layout of GREG_IMASK and GREG_IACK is identical to GREG_STAT.
  * Bits set in GREG_IMASK will prevent that interrupt type from being
@@ -908,7 +914,7 @@ struct gem_rxd {
 	  (GP)->tx_old - (GP)->tx_new - 1)
 
 #define RX_OFFSET          2
-#define RX_BUF_ALLOC_SIZE(gp)	((gp)->dev->mtu + 46 + RX_OFFSET + 64)
+#define RX_BUF_ALLOC_SIZE(gp)	((gp)->rx_buf_sz + 28 + RX_OFFSET + 64)
 
 #define RX_COPY_THRESHOLD  256
 
@@ -947,7 +953,8 @@ enum link_state {
 
 struct gem {
 	spinlock_t lock;
-	unsigned long regs;
+	spinlock_t tx_lock;
+	void __iomem *regs;
 	int rx_new, rx_old;
 	int tx_new, tx_old;
 
@@ -966,6 +973,7 @@ struct gem {
 	struct sk_buff *tx_skbs[RX_RING_SIZE];
 
 	u32			msg_enable;
+	u32			status;
 
 	struct net_device_stats net_stats;
 
@@ -976,6 +984,7 @@ struct gem {
 	int			rx_fifo_sz;
 	int			rx_pause_off;
 	int			rx_pause_on;
+	int			rx_buf_sz;
 	int			mii_phy_addr;
 
 	u32			mac_rx_cfg;

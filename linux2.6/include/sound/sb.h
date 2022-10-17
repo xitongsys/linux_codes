@@ -63,8 +63,6 @@ enum sb_hw_type {
 struct _snd_sb {
 	unsigned long port;		/* base port of DSP chip */
 	struct resource *res_port;
-	unsigned long alt_port;		/* alternate port (ALS4000) */
-	struct resource *res_alt_port;
 	unsigned long mpu_port;		/* MPU port for SB DSP 4.0+ */
 	int irq;			/* IRQ number of DSP chip */
 	int dma8;			/* 8-bit DMA */
@@ -72,6 +70,7 @@ struct _snd_sb {
 	unsigned short version;		/* version of DSP chip */
 	enum sb_hw_type hardware;	/* see to SB_HW_XXXX */
 
+	unsigned long alt_port;		/* alternate port (ALS4000) */
 	struct pci_dev *pci;		/* ALS4000 */
 
 	unsigned int open;		/* see to SB_OPEN_XXXX for sb8 */
@@ -312,10 +311,6 @@ const snd_pcm_ops_t *snd_sb16dsp_get_pcm_ops(int direction);
 int snd_sb16dsp_configure(sb_t *chip);
 /* sb16.c */
 irqreturn_t snd_sb16dsp_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-int snd_sb16_playback_open(snd_pcm_substream_t *substream);
-int snd_sb16_capture_open(snd_pcm_substream_t *substream);
-int snd_sb16_playback_close(snd_pcm_substream_t *substream);
-int snd_sb16_capture_close(snd_pcm_substream_t *substream);
 
 /* exported mixer stuffs */
 enum {

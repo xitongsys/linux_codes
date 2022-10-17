@@ -64,6 +64,10 @@ static void irttp_todo_expired(unsigned long data);
 static int irttp_param_max_sdu_size(void *instance, irda_param_t *param, 
 				    int get);
 
+static void irttp_flow_indication(void *instance, void *sap, LOCAL_FLOW flow);
+static void irttp_status_indication(void *instance,
+				    LINK_STATUS link, LOCK_STATUS lock);
+
 /* Information for parsing parameters in IrTTP */
 static pi_minor_info_t pi_minor_call_table[] = {
 	{ NULL, 0 },                                             /* 0x00 */
@@ -450,6 +454,7 @@ struct tsap_cb *irttp_open_tsap(__u8 stsap_sel, int credit, notify_t *notify)
 
 	return self;
 }
+EXPORT_SYMBOL(irttp_open_tsap);
 
 /*
  * Function irttp_close (handle)
@@ -525,6 +530,7 @@ int irttp_close_tsap(struct tsap_cb *self)
 
 	return 0;
 }
+EXPORT_SYMBOL(irttp_close_tsap);
 
 /*
  * Function irttp_udata_request (self, skb)
@@ -562,6 +568,8 @@ err:
 	dev_kfree_skb(skb);
 	return -1;
 }
+EXPORT_SYMBOL(irttp_udata_request);
+
 
 /*
  * Function irttp_data_request (handle, skb)
@@ -672,6 +680,7 @@ err:
 	dev_kfree_skb(skb);
 	return ret;
 }
+EXPORT_SYMBOL(irttp_data_request);
 
 /*
  * Function irttp_run_tx_queue (self)
@@ -956,8 +965,8 @@ static int irttp_data_indication(void *instance, void *sap,
  *    Status_indication, just pass to the higher layer...
  *
  */
-void irttp_status_indication(void *instance,
-			     LINK_STATUS link, LOCK_STATUS lock)
+static void irttp_status_indication(void *instance,
+				    LINK_STATUS link, LOCK_STATUS lock)
 {
 	struct tsap_cb *self;
 
@@ -988,7 +997,7 @@ void irttp_status_indication(void *instance,
  *    Flow_indication : IrLAP tells us to send more data.
  *
  */
-void irttp_flow_indication(void *instance, void *sap, LOCAL_FLOW flow)
+static void irttp_flow_indication(void *instance, void *sap, LOCAL_FLOW flow)
 {
 	struct tsap_cb *self;
 
@@ -1058,6 +1067,7 @@ void irttp_flow_request(struct tsap_cb *self, LOCAL_FLOW flow)
 		IRDA_DEBUG(1, "%s(), Unknown flow command!\n", __FUNCTION__);
 	}
 }
+EXPORT_SYMBOL(irttp_flow_request);
 
 /*
  * Function irttp_connect_request (self, dtsap_sel, daddr, qos)
@@ -1153,6 +1163,7 @@ int irttp_connect_request(struct tsap_cb *self, __u8 dtsap_sel,
 	return irlmp_connect_request(self->lsap, dtsap_sel, saddr, daddr, qos,
 				     tx_skb);
 }
+EXPORT_SYMBOL(irttp_connect_request);
 
 /*
  * Function irttp_connect_confirm (handle, qos, skb)
@@ -1264,7 +1275,7 @@ void irttp_connect_indication(void *instance, void *sap, struct qos_info *qos,
 
 	lsap = (struct lsap_cb *) sap;
 
-	self->max_seg_size = max_seg_size - TTP_HEADER;;
+	self->max_seg_size = max_seg_size - TTP_HEADER;
 	self->max_header_size = max_header_size+TTP_HEADER;
 
 	IRDA_DEBUG(4, "%s(), TSAP sel=%02x\n", __FUNCTION__, self->stsap_sel);
@@ -1397,6 +1408,7 @@ int irttp_connect_response(struct tsap_cb *self, __u32 max_sdu_size,
 
 	return ret;
 }
+EXPORT_SYMBOL(irttp_connect_response);
 
 /*
  * Function irttp_dup (self, instance)
@@ -1455,6 +1467,7 @@ struct tsap_cb *irttp_dup(struct tsap_cb *orig, void *instance)
 
 	return new;
 }
+EXPORT_SYMBOL(irttp_dup);
 
 /*
  * Function irttp_disconnect_request (self)
@@ -1549,6 +1562,7 @@ int irttp_disconnect_request(struct tsap_cb *self, struct sk_buff *userdata,
 
 	return ret;
 }
+EXPORT_SYMBOL(irttp_disconnect_request);
 
 /*
  * Function irttp_disconnect_indication (self, reason)
@@ -1603,7 +1617,7 @@ void irttp_disconnect_indication(void *instance, void *sap, LM_REASON reason,
  *    for some reason should fail. We mark rx sdu as busy to apply back
  *    pressure is necessary.
  */
-void irttp_do_data_indication(struct tsap_cb *self, struct sk_buff *skb)
+static void irttp_do_data_indication(struct tsap_cb *self, struct sk_buff *skb)
 {
 	int err;
 

@@ -32,16 +32,16 @@
 #define SCLP_VT220_MAJOR		TTY_MAJOR
 #define SCLP_VT220_MINOR		65
 #define SCLP_VT220_DRIVER_NAME		"sclp_vt220"
-#define SCLP_VT220_DEVICE_NAME		"sclp_vt"
+#define SCLP_VT220_DEVICE_NAME		"ttysclp"
 #define SCLP_VT220_CONSOLE_NAME		"ttyS"
 #define SCLP_VT220_CONSOLE_INDEX	1	/* console=ttyS1 */
+#define SCLP_VT220_BUF_SIZE		80
 
 /* Representation of a single write request */
 struct sclp_vt220_request {
 	struct list_head list;
 	struct sclp_req sclp_req;
 	int retry_count;
-	struct timer_list retry_timer;
 };
 
 /* VT220 SCCB */
@@ -95,7 +95,7 @@ static int sclp_vt220_initialized = 0;
 static int sclp_vt220_flush_later;
 
 static void sclp_vt220_receiver_fn(struct evbuf_header *evbuf);
-static void __sclp_vt220_emit(struct sclp_vt220_request *request);
+static int __sclp_vt220_emit(struct sclp_vt220_request *request);
 static void sclp_vt220_emit_current(void);
 
 /* Registration structure for our interest in SCLP event buffers */
@@ -115,55 +115,33 @@ static void
 sclp_vt220_process_queue(struct sclp_vt220_request *request)
 {
 	unsigned long flags;
-	struct sclp_vt220_request *next;
 	void *page;
 
-	/* Put buffer back to list of empty buffers */
-	page = request->sclp_req.sccb;
-	spin_lock_irqsave(&sclp_vt220_lock, flags);
-	/* Move request from outqueue to empty queue */
-	list_del(&request->list);
-	sclp_vt220_outqueue_count--;
-	list_add_tail((struct list_head *) page, &sclp_vt220_empty);
-	/* Check if there is a pending buffer on the out queue. */
-	next = NULL;
-	if (!list_empty(&sclp_vt220_outqueue))
-		next = list_entry(sclp_vt220_outqueue.next,
-				  struct sclp_vt220_request, list);
-	spin_unlock_irqrestore(&sclp_vt220_lock, flags);
-	if (next != NULL)
-		__sclp_vt220_emit(next);
-	else if (sclp_vt220_flush_later)
+	do {
+		/* Put buffer back to list of empty buffers */
+		page = request->sclp_req.sccb;
+		spin_lock_irqsave(&sclp_vt220_lock, flags);
+		/* Move request from outqueue to empty queue */
+		list_del(&request->list);
+		sclp_vt220_outqueue_count--;
+		list_add_tail((struct list_head *) page, &sclp_vt220_empty);
+		/* Check if there is a pending buffer on the out queue. */
+		request = NULL;
+		if (!list_empty(&sclp_vt220_outqueue))
+			request = list_entry(sclp_vt220_outqueue.next,
+					     struct sclp_vt220_request, list);
+		spin_unlock_irqrestore(&sclp_vt220_lock, flags);
+	} while (request && __sclp_vt220_emit(request));
+	if (request == NULL && sclp_vt220_flush_later)
 		sclp_vt220_emit_current();
 	wake_up(&sclp_vt220_waitq);
 	/* Check if the tty needs a wake up call */
 	if (sclp_vt220_tty != NULL) {
-		if ((sclp_vt220_tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    (sclp_vt220_tty->ldisc.write_wakeup != NULL))
-			(sclp_vt220_tty->ldisc.write_wakeup)(sclp_vt220_tty);
-		wake_up_interruptible(&sclp_vt220_tty->write_wait);
+		tty_wakeup(sclp_vt220_tty);
 	}
 }
 
-/*
- * Retry sclp write request after waiting some time for an sclp equipment
- * check to pass.
- */
-static void
-sclp_vt220_retry(unsigned long data)
-{
-	struct sclp_vt220_request *request;
-	struct sclp_vt220_sccb *sccb;
-
-	request = (struct sclp_vt220_request *) data;
-	request->sclp_req.status = SCLP_REQ_FILLED;
-	sccb = (struct sclp_vt220_sccb *) request->sclp_req.sccb;
-	sccb->header.response_code = 0x0000;
-	sclp_add_request(&request->sclp_req);
-}
-
-#define SCLP_BUFFER_MAX_RETRY		5
-#define	SCLP_BUFFER_RETRY_INTERVAL	2
+#define SCLP_BUFFER_MAX_RETRY		1
 
 /*
  * Callback through which the result of a write request is reported by the
@@ -191,29 +169,26 @@ sclp_vt220_callback(struct sclp_req *request, void *data)
 		break;
 
 	case 0x0340: /* Contained SCLP equipment check */
-		if (vt220_request->retry_count++ > SCLP_BUFFER_MAX_RETRY)
+		if (++vt220_request->retry_count > SCLP_BUFFER_MAX_RETRY)
 			break;
 		/* Remove processed buffers and requeue rest */
 		if (sclp_remove_processed((struct sccb_header *) sccb) > 0) {
 			/* Not all buffers were processed */
 			sccb->header.response_code = 0x0000;
 			vt220_request->sclp_req.status = SCLP_REQ_FILLED;
-			sclp_add_request(request);
-			return;
+			if (sclp_add_request(request) == 0)
+				return;
 		}
 		break;
 
 	case 0x0040: /* SCLP equipment check */
-		if (vt220_request->retry_count++ > SCLP_BUFFER_MAX_RETRY)
+		if (++vt220_request->retry_count > SCLP_BUFFER_MAX_RETRY)
 			break;
-		/* Wait some time, then retry request */
-		vt220_request->retry_timer.function = sclp_vt220_retry;
-		vt220_request->retry_timer.data =
-			(unsigned long) vt220_request;
-		vt220_request->retry_timer.expires =
-			jiffies + SCLP_BUFFER_RETRY_INTERVAL*HZ;
-		add_timer(&vt220_request->retry_timer);
-		return;
+		sccb->header.response_code = 0x0000;
+		vt220_request->sclp_req.status = SCLP_REQ_FILLED;
+		if (sclp_add_request(request) == 0)
+			return;
+		break;
 
 	default:
 		break;
@@ -222,22 +197,22 @@ sclp_vt220_callback(struct sclp_req *request, void *data)
 }
 
 /*
- * Emit vt220 request buffer to SCLP.
+ * Emit vt220 request buffer to SCLP. Return zero on success, non-zero
+ * otherwise.
  */
-static void
+static int
 __sclp_vt220_emit(struct sclp_vt220_request *request)
 {
 	if (!(sclp_vt220_register.sclp_send_mask & EvTyp_VT220Msg_Mask)) {
 		request->sclp_req.status = SCLP_REQ_FAILED;
-		sclp_vt220_callback(&request->sclp_req, (void *) request);
-		return;
+		return -EIO;
 	}
 	request->sclp_req.command = SCLP_CMDW_WRITEDATA;
 	request->sclp_req.status = SCLP_REQ_FILLED;
 	request->sclp_req.callback = sclp_vt220_callback;
 	request->sclp_req.callback_data = (void *) request;
 
-	sclp_add_request(&request->sclp_req);
+	return sclp_add_request(&request->sclp_req);
 }
 
 /*
@@ -255,12 +230,12 @@ sclp_vt220_emit(struct sclp_vt220_request *request)
 	spin_unlock_irqrestore(&sclp_vt220_lock, flags);
 	/* Emit only the first buffer immediately - callback takes care of
 	 * the rest */
-	if (count == 0)
-		__sclp_vt220_emit(request);
+	if (count == 0 && __sclp_vt220_emit(request))
+		sclp_vt220_process_queue(request);
 }
 
 /*
- * Queue and emit current request.
+ * Queue and emit current request. Return zero on success, non-zero otherwise.
  */
 static void
 sclp_vt220_emit_current(void)
@@ -302,7 +277,6 @@ sclp_vt220_initialize_page(void *page)
 	/* Place request structure at end of page */
 	request = ((struct sclp_vt220_request *)
 			((addr_t) page + PAGE_SIZE)) - 1;
-	init_timer(&request->retry_timer);
 	request->retry_count = 0;
 	request->sclp_req.sccb = page;
 	/* SCCB goes at start of page */
@@ -336,12 +310,11 @@ sclp_vt220_chars_stored(struct sclp_vt220_request *request)
 
 /*
  * Add msg to buffer associated with request. Return the number of characters
- * added or -EFAULT on error.
+ * added.
  */
 static int
 sclp_vt220_add_msg(struct sclp_vt220_request *request,
-		   const unsigned char *msg, int count, int from_user,
-		   int convertlf)
+		   const unsigned char *msg, int count, int convertlf)
 {
 	struct sclp_vt220_sccb *sccb;
 	void *buffer;
@@ -363,11 +336,7 @@ sclp_vt220_add_msg(struct sclp_vt220_request *request,
 		     (from < count) && (to < sclp_vt220_space_left(request));
 		     from++) {
 			/* Retrieve character */
-			if (from_user) {
-				if (get_user(c, msg + from) != 0)
-					return -EFAULT;
-			} else
-				c = msg[from];
+			c = msg[from];
 			/* Perform conversion */
 			if (c == 0x0a) {
 				if (to + 1 < sclp_vt220_space_left(request)) {
@@ -383,12 +352,7 @@ sclp_vt220_add_msg(struct sclp_vt220_request *request,
 		sccb->evbuf.length += to;
 		return from;
 	} else {
-		if (from_user) {
-			if (copy_from_user(buffer, (void *) msg, count) != 0)
-				return -EFAULT;
-		}
-		else
-			memcpy(buffer, (const void *) msg, count);
+		memcpy(buffer, (const void *) msg, count);
 		sccb->header.length += count;
 		sccb->evbuf.length += count;
 		return count;
@@ -408,7 +372,7 @@ sclp_vt220_timeout(unsigned long data)
 
 /* 
  * Internal implementation of the write function. Write COUNT bytes of data
- * from memory at BUF which may reside in user space (specified by FROM_USER)
+ * from memory at BUF
  * to the SCLP interface. In case that the data does not fit into the current
  * write buffer, emit the current one and allocate a new one. If there are no
  * more empty buffers available, wait until one gets emptied. If DO_SCHEDULE
@@ -419,8 +383,8 @@ sclp_vt220_timeout(unsigned long data)
  * of bytes written.
  */
 static int
-__sclp_vt220_write(int from_user, const unsigned char *buf, int count,
-		   int do_schedule, int convertlf)
+__sclp_vt220_write(const unsigned char *buf, int count, int do_schedule,
+		   int convertlf)
 {
 	unsigned long flags;
 	void *page;
@@ -451,10 +415,9 @@ __sclp_vt220_write(int from_user, const unsigned char *buf, int count,
 		}
 		/* Try to write the string to the current request buffer */
 		written = sclp_vt220_add_msg(sclp_vt220_current_request,
-				buf, count, from_user, convertlf);
-		if (written > 0)
-			overall_written += written;
-		if (written == -EFAULT || written == count)
+					     buf, count, convertlf);
+		overall_written += written;
+		if (written == count)
 			break;
 		/*
 		 * Not all characters could be written to the current
@@ -486,10 +449,9 @@ __sclp_vt220_write(int from_user, const unsigned char *buf, int count,
  * number of characters actually accepted for writing.
  */
 static int
-sclp_vt220_write(struct tty_struct *tty, int from_user,
-		 const unsigned char *buf, int count)
+sclp_vt220_write(struct tty_struct *tty, const unsigned char *buf, int count)
 {
-	return __sclp_vt220_write(from_user, buf, count, 1, 0);
+	return __sclp_vt220_write(buf, count, 1, 0);
 }
 
 #define SCLP_VT220_SESSION_ENDED	0x01
@@ -541,9 +503,13 @@ sclp_vt220_receiver_fn(struct evbuf_header *evbuf)
 static int
 sclp_vt220_open(struct tty_struct *tty, struct file *filp)
 {
-	sclp_vt220_tty = tty;
-	tty->driver_data = NULL;
-	tty->low_latency = 0;
+	if (tty->count == 1) {
+		sclp_vt220_tty = tty;
+		tty->driver_data = kmalloc(SCLP_VT220_BUF_SIZE, GFP_KERNEL);
+		if (tty->driver_data == NULL)
+			return -ENOMEM;
+		tty->low_latency = 0;
+	}
 	return 0;
 }
 
@@ -553,9 +519,11 @@ sclp_vt220_open(struct tty_struct *tty, struct file *filp)
 static void
 sclp_vt220_close(struct tty_struct *tty, struct file *filp)
 {
-	if (tty->count > 1)
-		return;
-	sclp_vt220_tty = NULL;
+	if (tty->count == 1) {
+		sclp_vt220_tty = NULL;
+		kfree(tty->driver_data);
+		tty->driver_data = NULL;
+	}
 }
 
 /*
@@ -571,7 +539,7 @@ sclp_vt220_close(struct tty_struct *tty, struct file *filp)
 static void
 sclp_vt220_put_char(struct tty_struct *tty, unsigned char ch)
 {
-	__sclp_vt220_write(0, &ch, 1, 0, 0);
+	__sclp_vt220_write(&ch, 1, 0, 0);
 }
 
 /*
@@ -765,7 +733,7 @@ module_init(sclp_vt220_tty_init);
 static void
 sclp_vt220_con_write(struct console *con, const char *buf, unsigned int count)
 {
-	__sclp_vt220_write(0, (const unsigned char *) buf, count, 1, 1);
+	__sclp_vt220_write((const unsigned char *) buf, count, 1, 1);
 }
 
 static struct tty_driver *

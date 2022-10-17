@@ -36,15 +36,18 @@
  * xfs_bulkstat() is used to fill in xfs_bstat structures as well as dm_stat
  * structures (by the dmi library). This is a pointer to a formatter function
  * that will iget the inode and fill in the appropriate structure.
- * see xfs_bulkstat_one() and dm_bulkstat_one() in dmi_xfs.c
+ * see xfs_bulkstat_one() and xfs_dm_bulkstat_one() in dmapi_xfs.c
  */
 typedef int (*bulkstat_one_pf)(struct xfs_mount	*mp,
-			       struct xfs_trans	*tp,
 			       xfs_ino_t	ino,
-			       void		*buffer,
+			       void		__user *buffer,
+			       int		ubsize,
+			       void		*private_data,
 			       xfs_daddr_t	bno,
+			       int		*ubused,
 			       void		*dip,
 			       int		*stat);
+
 /*
  * Values for stat return value.
  */
@@ -65,12 +68,12 @@ typedef int (*bulkstat_one_pf)(struct xfs_mount	*mp,
 int					/* error status */
 xfs_bulkstat(
 	xfs_mount_t	*mp,		/* mount point for filesystem */
-	xfs_trans_t	*tp,		/* transaction pointer */
 	xfs_ino_t	*lastino,	/* last inode returned */
 	int		*count,		/* size of buffer/count returned */
 	bulkstat_one_pf formatter,	/* func that'd fill a single buf */
+	void		*private_data,	/* private data for formatter */
 	size_t		statstruct_size,/* sizeof struct that we're filling */
-	xfs_caddr_t	ubuffer,	/* buffer with inode stats */
+	char		__user *ubuffer,/* buffer with inode stats */
 	int		flags,		/* flag to control access method */
 	int		*done);		/* 1 if there're more stats to get */
 
@@ -78,25 +81,26 @@ int
 xfs_bulkstat_single(
 	xfs_mount_t		*mp,
 	xfs_ino_t		*lastinop,
-	xfs_caddr_t		buffer,
+	char			__user *buffer,
 	int			*done);
 
 int
 xfs_bulkstat_one(
 	xfs_mount_t		*mp,
-	xfs_trans_t		*tp,
 	xfs_ino_t		ino,
-	void			*buffer,
+	void			__user *buffer,
+	int			ubsize,
+	void			*private_data,
 	xfs_daddr_t		bno,
+	int			*ubused,
 	void			*dibuff,
 	int			*stat);
 
 int					/* error status */
 xfs_inumbers(
 	xfs_mount_t		*mp,	/* mount point for filesystem */
-	xfs_trans_t		*tp,	/* transaction pointer */
 	xfs_ino_t		*last,	/* last inode returned */
 	int			*count,	/* size of buffer/count returned */
-	xfs_caddr_t		buffer);/* buffer with inode descriptions */
+	xfs_inogrp_t		__user *buffer);/* buffer with inode info */
 
 #endif	/* __XFS_ITABLE_H__ */

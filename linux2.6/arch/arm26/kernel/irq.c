@@ -50,7 +50,7 @@ void __init arc_init_irq(void);
 #define MAX_IRQ_CNT	100000
 
 static volatile unsigned long irq_err_count;
-static spinlock_t irq_controller_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(irq_controller_lock);
 
 struct irqdesc irq_desc[NR_IRQS];
 
@@ -135,10 +135,10 @@ void enable_irq(unsigned int irq)
 
 int show_interrupts(struct seq_file *p, void *v)
 {
-	int i;
+	int i = *(loff_t *) v;
 	struct irqaction * action;
 
-	for (i = 0 ; i < NR_IRQS ; i++) {
+	if (i < NR_IRQS) {
 	    	action = irq_desc[i].action;
 		if (!action)
 			continue;
@@ -148,10 +148,10 @@ int show_interrupts(struct seq_file *p, void *v)
 			seq_printf(p, ", %s", action->name);
 		}
 		seq_putc(p, '\n');
+	} else if (i == NR_IRQS) {
+		show_fiq_list(p, v);
+		seq_printf(p, "Err: %10lu\n", irq_err_count);
 	}
-
-	show_fiq_list(p, v);
-	seq_printf(p, "Err: %10lu\n", irq_err_count);
 	return 0;
 }
 
@@ -187,6 +187,7 @@ static void
 __do_irq(unsigned int irq, struct irqaction *action, struct pt_regs *regs)
 {
 	unsigned int status;
+	int ret;
 
 	spin_unlock(&irq_controller_lock);
 	if (!(action->flags & SA_INTERRUPT))
@@ -194,8 +195,9 @@ __do_irq(unsigned int irq, struct irqaction *action, struct pt_regs *regs)
 
 	status = 0;
 	do {
-		status |= action->flags;
-		action->handler(irq, action->dev_id, regs);
+		ret = action->handler(irq, action->dev_id, regs);
+		if (ret == IRQ_HANDLED)
+			status |= action->flags;
 		action = action->next;
 	} while (action);
 
@@ -549,7 +551,7 @@ int request_irq(unsigned int irq, irqreturn_t (*handler)(int, void *, struct pt_
 
 	action->handler = handler;
 	action->flags = irq_flags;
-	action->mask = 0;
+	cpus_clear(action->mask);
 	action->name = devname;
 	action->next = NULL;
 	action->dev_id = dev_id;

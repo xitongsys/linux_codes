@@ -50,7 +50,7 @@
 #include <linux/if.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
-#include <asm/bitops.h>
+#include <linux/bitops.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <linux/interrupt.h>
@@ -1192,7 +1192,7 @@ static void __exit yam_cleanup_driver(void)
 		struct net_device *dev = yam_devs[i];
 		if (dev) {
 			unregister_netdev(dev);
-			kfree(dev);
+			free_netdev(dev);
 		}
 	}
 

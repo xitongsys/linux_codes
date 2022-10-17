@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -88,14 +88,29 @@ acpi_ev_is_notify_object (
  *
  * FUNCTION:    acpi_ev_queue_notify_request
  *
- * PARAMETERS:
+ * PARAMETERS:  Node            - NS node for the notified object
+ *              notify_value    - Value from the Notify() request
  *
- * RETURN:      None.
+ * RETURN:      Status
  *
  * DESCRIPTION: Dispatch a device notification event to a previously
  *              installed handler.
  *
  ******************************************************************************/
+
+#ifdef ACPI_DEBUG_OUTPUT
+static const char                *acpi_notify_value_names[] =
+{
+	"Bus Check",
+	"Device Check",
+	"Device Wake",
+	"Eject request",
+	"Device Check Light",
+	"Frequency Mismatch",
+	"Bus Mode Mismatch",
+	"Power Fault"
+};
+#endif
 
 acpi_status
 acpi_ev_queue_notify_request (
@@ -112,7 +127,7 @@ acpi_ev_queue_notify_request (
 
 
 	/*
-	 * For value 1 (Ejection Request), some device method may need to be run.
+	 * For value 3 (Ejection Request), some device method may need to be run.
 	 * For value 2 (Device Wake) if _PRW exists, the _PS0 method may need to be run.
 	 * For value 0x80 (Status Change) on the power button or sleep button,
 	 * initiate soft-off or sleep operation?
@@ -120,31 +135,17 @@ acpi_ev_queue_notify_request (
 	ACPI_DEBUG_PRINT ((ACPI_DB_INFO,
 		"Dispatching Notify(%X) on node %p\n", notify_value, node));
 
-	switch (notify_value) {
-	case 0:
-		ACPI_DEBUG_PRINT ((ACPI_DB_INFO, "Notify value: Re-enumerate Devices\n"));
-		break;
-
-	case 1:
-		ACPI_DEBUG_PRINT ((ACPI_DB_INFO, "Notify value: Ejection Request\n"));
-		break;
-
-	case 2:
-		ACPI_DEBUG_PRINT ((ACPI_DB_INFO, "Notify value: Device Wake\n"));
-		break;
-
-	case 0x80:
-		ACPI_DEBUG_PRINT ((ACPI_DB_INFO, "Notify value: Status Change\n"));
-		break;
-
-	default:
-		ACPI_DEBUG_PRINT ((ACPI_DB_INFO, "Unknown Notify Value: %X \n", notify_value));
-		break;
+	if (notify_value <= 7) {
+		ACPI_DEBUG_PRINT ((ACPI_DB_INFO, "Notify value: %s\n",
+				acpi_notify_value_names[notify_value]));
+	}
+	else {
+		ACPI_DEBUG_PRINT ((ACPI_DB_INFO, "Notify value: 0x%2.2X **Device Specific**\n",
+				notify_value));
 	}
 
-	/*
-	 * Get the notify object attached to the NS Node
-	 */
+	/* Get the notify object attached to the NS Node */
+
 	obj_desc = acpi_ns_get_attached_object (node);
 	if (obj_desc) {
 		/* We have the notify object, Get the right handler */
@@ -192,10 +193,13 @@ acpi_ev_queue_notify_request (
 	}
 
 	if (!handler_obj) {
-		/* There is no per-device notify handler for this device */
-
+		/*
+		 * There is no per-device notify handler for this device.
+		 * This may or may not be a problem.
+		 */
 		ACPI_DEBUG_PRINT ((ACPI_DB_INFO,
-			"No notify handler for [%4.4s] node %p\n", node->name.ascii, node));
+			"No notify handler for Notify(%4.4s, %X) node %p\n",
+			acpi_ut_get_node_name (node), notify_value, node));
 	}
 
 	return (status);
@@ -206,7 +210,7 @@ acpi_ev_queue_notify_request (
  *
  * FUNCTION:    acpi_ev_notify_dispatch
  *
- * PARAMETERS:
+ * PARAMETERS:  Context         - To be passsed to the notify handler
  *
  * RETURN:      None.
  *
@@ -273,6 +277,8 @@ acpi_ev_notify_dispatch (
  *
  * FUNCTION:    acpi_ev_global_lock_thread
  *
+ * PARAMETERS:  Context         - From thread interface, not used
+ *
  * RETURN:      None
  *
  * DESCRIPTION: Invoked by SCI interrupt handler upon acquisition of the
@@ -306,7 +312,9 @@ acpi_ev_global_lock_thread (
  *
  * FUNCTION:    acpi_ev_global_lock_handler
  *
- * RETURN:      Status
+ * PARAMETERS:  Context         - From thread interface, not used
+ *
+ * RETURN:      ACPI_INTERRUPT_HANDLED or ACPI_INTERRUPT_NOT_HANDLED
  *
  * DESCRIPTION: Invoked directly from the SCI handler when a global lock
  *              release interrupt occurs.  Grab the global lock and queue
@@ -353,6 +361,8 @@ acpi_ev_global_lock_handler (
  *
  * FUNCTION:    acpi_ev_init_global_lock_handler
  *
+ * PARAMETERS:  None
+ *
  * RETURN:      Status
  *
  * DESCRIPTION: Install a handler for the global lock release event
@@ -391,6 +401,8 @@ acpi_ev_init_global_lock_handler (void)
 /******************************************************************************
  *
  * FUNCTION:    acpi_ev_acquire_global_lock
+ *
+ * PARAMETERS:  Timeout         - Max time to wait for the lock, in millisec.
  *
  * RETURN:      Status
  *
@@ -458,6 +470,10 @@ acpi_ev_acquire_global_lock (
 /*******************************************************************************
  *
  * FUNCTION:    acpi_ev_release_global_lock
+ *
+ * PARAMETERS:  None
+ *
+ * RETURN:      Status
  *
  * DESCRIPTION: Releases ownership of the Global Lock.
  *
@@ -545,7 +561,7 @@ acpi_ev_terminate (void)
 
 		/* Disable all GPEs in all GPE blocks */
 
-		status = acpi_ev_walk_gpe_list (acpi_hw_disable_gpe_block);
+		status = acpi_ev_walk_gpe_list (acpi_hw_disable_gpe_block, ACPI_NOT_ISR);
 
 		/* Remove SCI handler */
 
@@ -554,6 +570,10 @@ acpi_ev_terminate (void)
 			ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "Could not remove SCI handler\n"));
 		}
 	}
+
+	/* Deallocate all handler objects installed within GPE info structs */
+
+	status = acpi_ev_walk_gpe_list (acpi_ev_delete_gpe_handlers, ACPI_NOT_ISR);
 
 	/* Return to original mode if necessary */
 

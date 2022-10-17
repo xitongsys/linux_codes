@@ -40,9 +40,7 @@ pgd_free(pgd_t *pgd)
 static inline pmd_t *
 pmd_alloc_one(struct mm_struct *mm, unsigned long address)
 {
-	pmd_t *ret = (pmd_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT);
-	if (ret)
-		clear_page(ret);
+	pmd_t *ret = (pmd_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT|__GFP_ZERO);
 	return ret;
 }
 
@@ -63,7 +61,10 @@ pte_free_kernel(pte_t *pte)
 static inline struct page *
 pte_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
-	return virt_to_page(pte_alloc_one_kernel(mm, addr));
+	pte_t *pte = pte_alloc_one_kernel(mm, addr);
+	if (pte)
+		return virt_to_page(pte);
+	return NULL;
 }
 
 static inline void

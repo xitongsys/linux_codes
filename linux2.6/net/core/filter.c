@@ -183,9 +183,10 @@ int sk_run_filter(struct sk_buff *skb, struct sock_filter *filter, int flen)
 					continue;
 				}
 			} else {
-				u32 tmp;
-				if (!skb_copy_bits(skb, k, &tmp, 4)) {
-					A = ntohl(tmp);
+				u32 _tmp, *p;
+				p = skb_header_pointer(skb, k, 4, &_tmp);
+				if (p != NULL) {
+					A = ntohl(*p);
 					continue;
 				}
 			}
@@ -208,9 +209,10 @@ int sk_run_filter(struct sk_buff *skb, struct sock_filter *filter, int flen)
 					continue;
 				}
 			} else {
-				u16 tmp;
-				if (!skb_copy_bits(skb, k, &tmp, 2)) {
-					A = ntohs(tmp);
+				u16 _tmp, *p;
+				p = skb_header_pointer(skb, k, 2, &_tmp);
+				if (p != NULL) {
+					A = ntohs(*p);
 					continue;
 				}
 			}
@@ -233,9 +235,10 @@ load_b:
 					continue;
 				}
 			} else {
-				u8 tmp;
-				if (!skb_copy_bits(skb, k, &tmp, 1)) {
-					A = tmp;
+				u8 _tmp, *p;
+				p = skb_header_pointer(skb, k, 1, &_tmp);
+				if (p != NULL) {
+					A = *p;
 					continue;
 				}
 			}
@@ -332,7 +335,7 @@ int sk_chk_filter(struct sock_filter *filter, int flen)
 	struct sock_filter *ftest;
 	int pc;
 
-	if ((unsigned int)flen >= (~0U / sizeof(struct sock_filter)))
+	if (((unsigned int)flen >= (~0U / sizeof(struct sock_filter))) || flen == 0)
 		return -EINVAL;
 
 	/* check the filter code now */

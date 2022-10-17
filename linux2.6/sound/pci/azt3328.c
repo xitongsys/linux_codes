@@ -97,21 +97,25 @@
 #include <linux/pci.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
+#include <linux/gameport.h>
+#include <linux/moduleparam.h>
 #include <sound/core.h>
 #include <sound/control.h>
 #include <sound/pcm.h>
 #include <sound/rawmidi.h>
 #include <sound/mpu401.h>
 #include <sound/opl3.h>
-#define SNDRV_GET_ID
 #include <sound/initval.h>
 #include "azt3328.h"
 
 MODULE_AUTHOR("Andreas Mohr <hw7oshyuv3001@sneakemail.com>");
 MODULE_DESCRIPTION("Aztech AZF3328 (PCI168)");
 MODULE_LICENSE("GPL");
-MODULE_CLASSES("{sound}");
-MODULE_DEVICES("{{Aztech,AZF3328}}");
+MODULE_SUPPORTED_DEVICE("{{Aztech,AZF3328}}");
+
+#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
+#define SUPPORT_JOYSTICK 1
+#endif
 
 #define DEBUG_MISC	0
 #define DEBUG_CALLS	0
@@ -158,39 +162,36 @@ MODULE_DEVICES("{{Aztech,AZF3328}}");
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
 static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;	/* Enable this card */
-static int joystick[SNDRV_CARDS] =
-	{-1};	/* "unset" as default */
+#ifdef SUPPORT_JOYSTICK
+static int joystick[SNDRV_CARDS];
+#endif
 
-MODULE_PARM(index, "1-" __MODULE_STRING(SNDRV_CARDS) "i");
+module_param_array(index, int, NULL, 0444);
 MODULE_PARM_DESC(index, "Index value for AZF3328 soundcard.");
-MODULE_PARM_SYNTAX(index, SNDRV_INDEX_DESC);
-MODULE_PARM(id, "1-" __MODULE_STRING(SNDRV_CARDS) "s");
+module_param_array(id, charp, NULL, 0444);
 MODULE_PARM_DESC(id, "ID string for AZF3328 soundcard.");
-MODULE_PARM_SYNTAX(id, SNDRV_ID_DESC);
-MODULE_PARM(enable, "1-" __MODULE_STRING(SNDRV_CARDS) "i");
+module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable AZF3328 soundcard.");
-MODULE_PARM_SYNTAX(enable, SNDRV_INDEX_DESC);
-MODULE_PARM(joystick, "1-" __MODULE_STRING(SNDRV_CARDS) "i");
-MODULE_PARM_DESC(joystick, "Forced joystick port enable for AZF3328 soundcard. (0 = force disable)");
-MODULE_PARM_SYNTAX(joystick, SNDRV_ENABLED);
+#ifdef SUPPORT_JOYSTICK
+module_param_array(joystick, bool, NULL, 0444);
+MODULE_PARM_DESC(joystick, "Enable joystick for AZF3328 soundcard.");
+#endif
 
 typedef struct _snd_azf3328 azf3328_t;
-#define chip_t azf3328_t
 
 struct _snd_azf3328 {
 	int irq;
 
 	unsigned long codec_port;
-	struct resource *res_codec_port;
 	unsigned long io2_port;
-	struct resource *res_io2_port;
 	unsigned long mpu_port;
-	struct resource *res_mpu_port;
 	unsigned long synth_port;
-	struct resource *res_synth_port;
 	unsigned long mixer_port;
-	struct resource *res_mixer_port;
-	unsigned long game_port;
+
+#ifdef SUPPORT_JOYSTICK
+	struct gameport gameport;
+	struct resource *res_joystick;
+#endif
 
 	struct pci_dev *pci;
 	snd_card_t *card;
@@ -213,17 +214,17 @@ static struct pci_device_id snd_azf3328_ids[] = {
 
 MODULE_DEVICE_TABLE(pci, snd_azf3328_ids);
 
-void snd_azf3328_io2_write(azf3328_t *chip, int reg, unsigned char value)
+static inline void snd_azf3328_io2_write(azf3328_t *chip, int reg, unsigned char value)
 {
 	outb(value, chip->io2_port + reg);
 }
 
-unsigned char snd_azf3328_io2_read(azf3328_t *chip, int reg)
+static inline unsigned char snd_azf3328_io2_read(azf3328_t *chip, int reg)
 {
 	return inb(chip->io2_port + reg);
 }
 
-void snd_azf3328_mixer_write(azf3328_t *chip, int reg, unsigned long value, int type)
+static void snd_azf3328_mixer_write(azf3328_t *chip, int reg, unsigned long value, int type)
 {
 	switch(type) {
 	case WORD_VALUE:
@@ -238,26 +239,7 @@ void snd_azf3328_mixer_write(azf3328_t *chip, int reg, unsigned long value, int 
 	}
 }
 
-unsigned long snd_azf3328_mixer_read(azf3328_t *chip, int reg, int type)
-{
-	unsigned long res = 0;
-
-	switch(type) {
-	case WORD_VALUE:
-		res = (unsigned long)inw(chip->mixer_port + reg);
-		break;
-	case DWORD_VALUE:
-		res = (unsigned long)inl(chip->mixer_port + reg);
-		break;
-	case BYTE_VALUE:
-		res = (unsigned long)inb(chip->mixer_port + reg);
-		break;
-	}
-
-	return res;
-}
-
-void snd_azf3328_mixer_set_mute(azf3328_t *chip, int reg, int do_mute)
+static void snd_azf3328_mixer_set_mute(azf3328_t *chip, int reg, int do_mute)
 {
 	unsigned char oldval;
 
@@ -271,7 +253,7 @@ void snd_azf3328_mixer_set_mute(azf3328_t *chip, int reg, int do_mute)
 	outb(oldval, chip->mixer_port + reg + 1);
 }
 
-void snd_azf3328_mixer_write_volume_gradually(azf3328_t *chip, int reg, unsigned char dst_vol_left, unsigned char dst_vol_right, int chan_sel, int delay)
+static void snd_azf3328_mixer_write_volume_gradually(azf3328_t *chip, int reg, unsigned char dst_vol_left, unsigned char dst_vol_right, int chan_sel, int delay)
 {
 	unsigned char curr_vol_left = 0, curr_vol_right = 0;
 	int left_done = 0, right_done = 0;
@@ -540,8 +522,6 @@ static int snd_azf3328_put_mixer_enum(snd_kcontrol_t * kcontrol, snd_ctl_elem_va
 	return (nreg != oreg);
 }
 
-#define NUM_CONTROLS(ary) (sizeof(ary) / sizeof(snd_kcontrol_new_t))
-
 static snd_kcontrol_new_t snd_azf3328_mixer_controls[] __devinitdata = {
 	AZF3328_MIXER_SWITCH("Master Playback Switch", IDX_MIXER_PLAY_MASTER, 15, 1),
 	AZF3328_MIXER_VOL_STEREO("Master Playback Volume", IDX_MIXER_PLAY_MASTER, 0x1f, 1),
@@ -637,7 +617,7 @@ static int __devinit snd_azf3328_mixer_new(azf3328_t *chip)
 	
 	/* add mixer controls */
 	sw = snd_azf3328_mixer_controls;
-	for (idx = 0; idx < NUM_CONTROLS(snd_azf3328_mixer_controls); idx++, sw++) {
+	for (idx = 0; idx < ARRAY_SIZE(snd_azf3328_mixer_controls); idx++, sw++) {
 		if ((err = snd_ctl_add(chip->card, snd_ctl_new1(sw, chip))) < 0)
 			return err;
 	}
@@ -800,7 +780,6 @@ static int snd_azf3328_capture_prepare(snd_pcm_substream_t * substream)
 
 static int snd_azf3328_playback_trigger(snd_pcm_substream_t * substream, int cmd)
 {
-	unsigned long flags;
 	azf3328_t *chip = snd_pcm_substream_chip(substream);
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	int result = 0;
@@ -817,7 +796,7 @@ static int snd_azf3328_playback_trigger(snd_pcm_substream_t * substream, int cmd
 
 		snd_azf3328_setfmt(chip, IDX_IO_PLAY_SOUNDFORMAT, runtime->rate, snd_pcm_format_width(runtime->format), runtime->channels);
 
-		spin_lock_irqsave(&chip->reg_lock, flags);
+		spin_lock(&chip->reg_lock);
 		/* stop playback */
 		status1 = inw(chip->codec_port+IDX_IO_PLAY_FLAGS);
 		status1 &= ~DMA_RESUME;
@@ -825,12 +804,12 @@ static int snd_azf3328_playback_trigger(snd_pcm_substream_t * substream, int cmd
 	    
 		/* FIXME: clear interrupts or what??? */
 		outw(0xffff, chip->codec_port+IDX_IO_PLAY_IRQMASK);
-		spin_unlock_irqrestore(&chip->reg_lock, flags);
+		spin_unlock(&chip->reg_lock);
 
 		snd_azf3328_setdmaa(chip, runtime->dma_addr, snd_pcm_lib_period_bytes(substream), snd_pcm_lib_buffer_bytes(substream), 0);
 
-		spin_lock_irqsave(&chip->reg_lock, flags);
-#if WIN9X
+		spin_lock(&chip->reg_lock);
+#ifdef WIN9X
 		/* FIXME: enable playback/recording??? */
 		status1 |= DMA_PLAY_SOMETHING1 | DMA_PLAY_SOMETHING2;
 		outw(status1, chip->codec_port+IDX_IO_PLAY_FLAGS);
@@ -845,7 +824,7 @@ static int snd_azf3328_playback_trigger(snd_pcm_substream_t * substream, int cmd
 		outw(DMA_PLAY_SOMETHING1|DMA_PLAY_SOMETHING2, chip->codec_port+IDX_IO_PLAY_FLAGS);
 		outw(DMA_RESUME|SOMETHING_ALMOST_ALWAYS_SET|DMA_EPILOGUE_SOMETHING|DMA_SOMETHING_ELSE, chip->codec_port+IDX_IO_PLAY_FLAGS);
 #endif
-		spin_unlock_irqrestore(&chip->reg_lock, flags);
+		spin_unlock(&chip->reg_lock);
 
 		/* now unmute WaveOut */
 		snd_azf3328_mixer_set_mute(chip, IDX_MIXER_WAVEOUT, 0);
@@ -857,7 +836,7 @@ static int snd_azf3328_playback_trigger(snd_pcm_substream_t * substream, int cmd
 		/* mute WaveOut */
 		snd_azf3328_mixer_set_mute(chip, IDX_MIXER_WAVEOUT, 1);
 
-		spin_lock_irqsave(&chip->reg_lock, flags);
+		spin_lock(&chip->reg_lock);
 		/* stop playback */
 		status1 = inw(chip->codec_port+IDX_IO_PLAY_FLAGS);
 
@@ -869,7 +848,7 @@ static int snd_azf3328_playback_trigger(snd_pcm_substream_t * substream, int cmd
 
 		status1 &= ~DMA_PLAY_SOMETHING1;
 		outw(status1, chip->codec_port+IDX_IO_PLAY_FLAGS);
-		spin_unlock_irqrestore(&chip->reg_lock, flags);
+		spin_unlock(&chip->reg_lock);
 	    
 		/* now unmute WaveOut */
 		snd_azf3328_mixer_set_mute(chip, IDX_MIXER_WAVEOUT, 0);
@@ -893,7 +872,6 @@ static int snd_azf3328_playback_trigger(snd_pcm_substream_t * substream, int cmd
  * should actually be triggered like that */
 static int snd_azf3328_capture_trigger(snd_pcm_substream_t * substream, int cmd)
 {
-	unsigned long flags;
 	azf3328_t *chip = snd_pcm_substream_chip(substream);
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	int result = 0;
@@ -907,7 +885,7 @@ static int snd_azf3328_capture_trigger(snd_pcm_substream_t * substream, int cmd)
 
 		snd_azf3328_setfmt(chip, IDX_IO_REC_SOUNDFORMAT, runtime->rate, snd_pcm_format_width(runtime->format), runtime->channels);
 
-		spin_lock_irqsave(&chip->reg_lock, flags);
+		spin_lock(&chip->reg_lock);
 		/* stop recording */
 		status1 = inw(chip->codec_port+IDX_IO_REC_FLAGS);
 		status1 &= ~DMA_RESUME;
@@ -915,12 +893,12 @@ static int snd_azf3328_capture_trigger(snd_pcm_substream_t * substream, int cmd)
 	    
 		/* FIXME: clear interrupts or what??? */
 		outw(0xffff, chip->codec_port+IDX_IO_REC_IRQMASK);
-		spin_unlock_irqrestore(&chip->reg_lock, flags);
+		spin_unlock(&chip->reg_lock);
 
 		snd_azf3328_setdmaa(chip, runtime->dma_addr, snd_pcm_lib_period_bytes(substream), snd_pcm_lib_buffer_bytes(substream), 1);
 
-		spin_lock_irqsave(&chip->reg_lock, flags);
-#if WIN9X
+		spin_lock(&chip->reg_lock);
+#ifdef WIN9X
 		/* FIXME: enable playback/recording??? */
 		status1 |= DMA_PLAY_SOMETHING1 | DMA_PLAY_SOMETHING2;
 		outw(status1, chip->codec_port+IDX_IO_REC_FLAGS);
@@ -935,13 +913,13 @@ static int snd_azf3328_capture_trigger(snd_pcm_substream_t * substream, int cmd)
 		outw(DMA_PLAY_SOMETHING1|DMA_PLAY_SOMETHING2, chip->codec_port+IDX_IO_REC_FLAGS);
 		outw(DMA_RESUME|SOMETHING_ALMOST_ALWAYS_SET|DMA_EPILOGUE_SOMETHING|DMA_SOMETHING_ELSE, chip->codec_port+IDX_IO_REC_FLAGS);
 #endif
-		spin_unlock_irqrestore(&chip->reg_lock, flags);
+		spin_unlock(&chip->reg_lock);
 
 		snd_azf3328_dbgio(chip, "trigger2");
 		chip->is_playing = 1;
 		break;
         case SNDRV_PCM_TRIGGER_STOP:
-		spin_lock_irqsave(&chip->reg_lock, flags);
+		spin_lock(&chip->reg_lock);
 		/* stop recording */
 		status1 = inw(chip->codec_port+IDX_IO_REC_FLAGS);
 
@@ -953,7 +931,7 @@ static int snd_azf3328_capture_trigger(snd_pcm_substream_t * substream, int cmd)
 
 		status1 &= ~DMA_PLAY_SOMETHING1;
 		outw(status1, chip->codec_port+IDX_IO_REC_FLAGS);
-		spin_unlock_irqrestore(&chip->reg_lock, flags);
+		spin_unlock(&chip->reg_lock);
 	    
 		chip->is_playing = 0;
 		break;
@@ -977,16 +955,13 @@ static snd_pcm_uframes_t snd_azf3328_playback_pointer(snd_pcm_substream_t * subs
 	unsigned long bufptr, playptr;
 	unsigned long result;
 	snd_pcm_uframes_t frmres;
-	unsigned long flags;
 
-	spin_lock_irqsave(&chip->reg_lock, flags);
-#if QUERY_HARDWARE
+#ifdef QUERY_HARDWARE
 	bufptr = inl(chip->codec_port+IDX_IO_PLAY_DMA_START_1);
 #else
 	bufptr = substream->runtime->dma_addr;
 #endif
 	playptr = inl(chip->codec_port+IDX_IO_PLAY_DMA_CURRPOS);
-	spin_unlock_irqrestore(&chip->reg_lock, flags);
 
 	result = playptr - bufptr;
 	frmres = bytes_to_frames( substream->runtime, result );
@@ -1000,16 +975,13 @@ static snd_pcm_uframes_t snd_azf3328_capture_pointer(snd_pcm_substream_t * subst
 	unsigned long bufptr, recptr;
 	unsigned long result;
 	snd_pcm_uframes_t frmres;
-	unsigned long flags;
 
-	spin_lock_irqsave(&chip->reg_lock, flags);
-#if QUERY_HARDWARE
+#ifdef QUERY_HARDWARE
 	bufptr = inl(chip->codec_port+IDX_IO_REC_DMA_START_1);
 #else
 	bufptr = substream->runtime->dma_addr;
 #endif
 	recptr = inl(chip->codec_port+IDX_IO_REC_DMA_CURRPOS);
-	spin_unlock_irqrestore(&chip->reg_lock, flags);
 
 	result = recptr - bufptr;
 	frmres = bytes_to_frames( substream->runtime, result );
@@ -1019,7 +991,7 @@ static snd_pcm_uframes_t snd_azf3328_capture_pointer(snd_pcm_substream_t * subst
 
 static irqreturn_t snd_azf3328_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-	azf3328_t *chip = snd_magic_cast(azf3328_t, dev_id, return IRQ_NONE);
+	azf3328_t *chip = dev_id;
 	unsigned int status, which;
 	static unsigned long count;
 
@@ -1219,7 +1191,7 @@ static snd_pcm_ops_t snd_azf3328_capture_ops = {
 
 static void snd_azf3328_pcm_free(snd_pcm_t *pcm)
 {
-	azf3328_t *chip = snd_magic_cast(azf3328_t, pcm->private_data, return);
+	azf3328_t *chip = pcm->private_data;
 	chip->pcm = NULL;
 	snd_pcm_lib_preallocate_free_for_all(pcm);
 }
@@ -1241,7 +1213,8 @@ static int __devinit snd_azf3328_pcm(azf3328_t *chip, int device)
 	strcpy(pcm->name, chip->card->shortname);
 	chip->pcm = pcm;
 
-	snd_pcm_lib_preallocate_pci_pages_for_all(chip->pci, pcm, 64*1024, 64*1024);
+	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
+					      snd_dma_pci_data(chip->pci), 64*1024, 64*1024);
 
 	snd_azf3328_dbgcallleave();
 	return 0;
@@ -1254,41 +1227,37 @@ static int snd_azf3328_free(azf3328_t *chip)
         if (chip->irq < 0)
                 goto __end_hw;
 
+	/* reset (close) mixer */
+	snd_azf3328_mixer_set_mute(chip, IDX_MIXER_PLAY_MASTER, 1); /* first mute master volume */
+	snd_azf3328_mixer_write(chip, IDX_MIXER_RESET, 0x0, WORD_VALUE);
+
         /* interrupt setup - mask everything */
 	/* FIXME */
 
         synchronize_irq(chip->irq);
       __end_hw:
-        if (chip->res_codec_port) {
-		release_resource(chip->res_codec_port);
-		kfree_nocheck(chip->res_codec_port);
+#ifdef SUPPORT_JOYSTICK
+	if (chip->res_joystick) {
+		gameport_unregister_port(&chip->gameport);
+		/* disable gameport */
+		snd_azf3328_io2_write(chip, IDX_IO2_LEGACY_ADDR,
+				      snd_azf3328_io2_read(chip, IDX_IO2_LEGACY_ADDR) & ~LEGACY_JOY);
+		release_resource(chip->res_joystick);
+		kfree_nocheck(chip->res_joystick);
 	}
-        if (chip->res_io2_port) {
-		release_resource(chip->res_io2_port);
-		kfree_nocheck(chip->res_io2_port);
-	}
-        if (chip->res_mpu_port) {
-		release_resource(chip->res_mpu_port);
-		kfree_nocheck(chip->res_mpu_port);
-	}
-        if (chip->res_synth_port) {
-		release_resource(chip->res_synth_port);
-		kfree_nocheck(chip->res_synth_port);
-	}
-        if (chip->res_mixer_port) {
-		release_resource(chip->res_mixer_port);
-		kfree_nocheck(chip->res_mixer_port);
-	}
+#endif
         if (chip->irq >= 0)
 		free_irq(chip->irq, (void *)chip);
+	pci_release_regions(chip->pci);
+	pci_disable_device(chip->pci);
 
-        snd_magic_kfree(chip);
+        kfree(chip);
         return 0;
 }
 
 static int snd_azf3328_dev_free(snd_device_t *device)
 {
-	azf3328_t *chip = snd_magic_cast(azf3328_t, device->device_data, return -ENXIO);
+	azf3328_t *chip = device->device_data;
 	return snd_azf3328_free(chip);
 }
 
@@ -1317,7 +1286,6 @@ static int __devinit snd_azf3328_create(snd_card_t * card,
                                          unsigned long device_type,
                                          azf3328_t ** rchip)
 {
-	unsigned long flags;
 	azf3328_t *chip;
 	int err;
 	static snd_device_ops_t ops = {
@@ -1330,51 +1298,35 @@ static int __devinit snd_azf3328_create(snd_card_t * card,
 	if ((err = pci_enable_device(pci)) < 0)
 		return err;
 
-	chip = snd_magic_kcalloc(azf3328_t, 0, GFP_KERNEL);
-	if (chip == NULL)
+	chip = kcalloc(1, sizeof(*chip), GFP_KERNEL);
+	if (chip == NULL) {
+		pci_disable_device(pci);
 		return -ENOMEM;
+	}
 	spin_lock_init(&chip->reg_lock);
 	chip->card = card;
 	chip->pci = pci;
 	chip->irq = -1;
 
 	/* check if we can restrict PCI DMA transfers to 24 bits */
-	if (!pci_dma_supported(pci, 0x00ffffff)) {
+	if (pci_set_dma_mask(pci, 0x00ffffff) < 0 ||
+	    pci_set_consistent_dma_mask(pci, 0x00ffffff) < 0) {
 		snd_printk("architecture does not support 24bit PCI busmaster DMA\n");
+		pci_disable_device(pci);
 		return -ENXIO;
 	}
-	pci_set_dma_mask(pci, 0x00ffffff);
+
+	if ((err = pci_request_regions(pci, "Aztech AZF3328")) < 0) {
+		kfree(chip);
+		pci_disable_device(pci);
+		return err;
+	}
 
 	chip->codec_port = pci_resource_start(pci, 0);
-	if ((chip->res_codec_port = request_region(chip->codec_port, 0x80, "Aztech AZF3328 I/O")) == NULL) {
-		snd_printk("unable to grab I/O port at 0x%lx-0x%lx\n", chip->codec_port, chip->codec_port + 0x80 - 1);
-		snd_azf3328_free(chip);
-		return -EBUSY;
-	}
 	chip->io2_port = pci_resource_start(pci, 1);
-	if ((chip->res_io2_port = request_region(chip->io2_port, 0x08, "Aztech AZF3328 I/O 2")) == NULL) {
-		snd_printk("unable to grab I/O 2 port at 0x%lx-0x%lx\n", chip->io2_port, chip->io2_port + 0x08 - 1);
-		snd_azf3328_free(chip);
-		return -EBUSY;
-	}
 	chip->mpu_port = pci_resource_start(pci, 2);
-	if ((chip->res_mpu_port = request_region(chip->mpu_port, 0x04, "Aztech AZF3328 MPU401")) == NULL) {
-		snd_printk("unable to grab MPU401 port at 0x%lx-0x%lx\n", chip->mpu_port, chip->mpu_port + 0x04 - 1);
-		snd_azf3328_free(chip);
-		return -EBUSY;
-	}
 	chip->synth_port = pci_resource_start(pci, 3);
-	if ((chip->res_synth_port = request_region(chip->synth_port, 0x08, "Aztech AZF3328 OPL3")) == NULL) {
-		snd_printk("unable to grab OPL3 port at 0x%lx-0x%lx\n", chip->synth_port, chip->synth_port + 0x08 - 1);
-		snd_azf3328_free(chip);
-		return -EBUSY;
-	}
 	chip->mixer_port = pci_resource_start(pci, 4);
-	if ((chip->res_mixer_port = request_region(chip->mixer_port, 0x40, "Aztech AZF3328 Mixer")) == NULL) {
-                snd_printk("unable to grab mixer port at 0x%lx-0x%lx\n", chip->mixer_port, chip->mixer_port + 0x40 - 1);
-		snd_azf3328_free(chip);
-		return -EBUSY;
-	}
 
 	if (request_irq(pci->irq, snd_azf3328_interrupt, SA_INTERRUPT|SA_SHIRQ, card->shortname, (void *)chip)) {
 		snd_printk("unable to grab IRQ %d\n", pci->irq);
@@ -1392,14 +1344,14 @@ static int __devinit snd_azf3328_create(snd_card_t * card,
 	for (tmp=0; tmp <= 0x01; tmp += 1)
 		snd_azf3328_dbgmisc("0x%02x: opl 0x%04x, mpu300 0x%04x, mpu310 0x%04x, mpu320 0x%04x, mpu330 0x%04x\n", tmp, inb(0x388 + tmp), inb(0x300 + tmp), inb(0x310 + tmp), inb(0x320 + tmp), inb(0x330 + tmp));
 
-	/* create mixer interface & switches */
-	if ((err = snd_azf3328_mixer_new(chip)) < 0)
-		return err;
-
 	if ((err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops)) < 0) {
 		snd_azf3328_free(chip);
 		return err;
 	}
+
+	/* create mixer interface & switches */
+	if ((err = snd_azf3328_mixer_new(chip)) < 0)
+		return err;
 
 #if 0
 	/* set very low bitrate to reduce noise and power consumption? */
@@ -1407,65 +1359,41 @@ static int __devinit snd_azf3328_create(snd_card_t * card,
 #endif
 
 	/* standard chip init stuff */
-	spin_lock_irqsave(&chip->reg_lock, flags);
+	spin_lock_irq(&chip->reg_lock);
 	outb(DMA_PLAY_SOMETHING2|DMA_EPILOGUE_SOMETHING|DMA_SOMETHING_ELSE, chip->codec_port + IDX_IO_PLAY_FLAGS);
 	outb(DMA_PLAY_SOMETHING2|DMA_EPILOGUE_SOMETHING|DMA_SOMETHING_ELSE, chip->codec_port + IDX_IO_SOMETHING_FLAGS);
 	outb(DMA_PLAY_SOMETHING2|DMA_EPILOGUE_SOMETHING|DMA_SOMETHING_ELSE, chip->codec_port + IDX_IO_REC_FLAGS);
 	outb(0x0, chip->codec_port + IDX_IO_IRQ63H);
 
-	spin_unlock_irqrestore(&chip->reg_lock, flags);
+	spin_unlock_irq(&chip->reg_lock);
+
+	snd_card_set_dev(card, &pci->dev);
 
 	*rchip = chip;
 	return 0;
 }
 
+#ifdef SUPPORT_JOYSTICK
 static void __devinit snd_azf3328_config_joystick(azf3328_t *chip, int joystick)
 {
-	int i, detected = 0, activate = 0;
-	char *msg = NULL;
 	unsigned char val;
 
-	if (joystick == -1) /* auto detection/activation */
-	{
-		for (i=0x200; i <= 0x207; i++)
-			if (inb(i) != 0xff)
-				detected = 1; /* other joy found, don't activate */
+	if (joystick == 1) {
+		if ((chip->res_joystick = request_region(0x200, 8, "AZF3328 gameport")) != NULL)
+			chip->gameport.io = 0x200;
 	}
 
-	if ((joystick == -1) && (detected == 1))
-	{
-		activate = 0;
-		msg = "DISABLED (address occupied by another joystick port)";
-	}
-	else
-	if ((joystick == -1) && (detected == 0))
-	{
-		activate = 1;
-		msg = "ENABLED (via autodetect)";
-	}
-	else
-	if (joystick == 0)
-	{
-		activate = 0;
-		msg = "DISABLED (forced)";
-	}
-	else
-	if (joystick == 1)
-	{
-		activate = 1;
-		msg = "ENABLED (Warning: forced!)";
-	}
 	val = inb(chip->io2_port + IDX_IO2_LEGACY_ADDR);
-	if (activate)
-	    val |= LEGACY_JOY;
+	if (chip->res_joystick)
+		val |= LEGACY_JOY;
 	else
-	    val &= ~LEGACY_JOY;
+		val &= ~LEGACY_JOY;
 
 	outb(val, chip->io2_port + IDX_IO2_LEGACY_ADDR);
-#ifdef MODULE
-	printk("azt3328: Joystick port: %s.\n", msg);
-#endif
+	if (chip->res_joystick)
+		gameport_register_port(&chip->gameport);
 }
+#endif
 
 static int __devinit snd_azf3328_probe(struct pci_dev *pci,
 					  const struct pci_device_id *pci_id)
@@ -1537,9 +1465,11 @@ static int __devinit snd_azf3328_probe(struct pci_dev *pci,
 "azt3328: Feel free to contact hw7oshyuv3001@sneakemail.com for bug reports etc.!\n");
 #endif
 
+#ifdef SUPPORT_JOYSTICK
 	snd_azf3328_config_joystick(chip, joystick[dev]);
+#endif
 
-	pci_set_drvdata(pci, chip);
+	pci_set_drvdata(pci, card);
 	dev++;
 
 	snd_azf3328_dbgcallleave();
@@ -1548,16 +1478,8 @@ static int __devinit snd_azf3328_probe(struct pci_dev *pci,
 
 static void __devexit snd_azf3328_remove(struct pci_dev *pci)
 {
-        azf3328_t *chip = snd_magic_cast(azf3328_t, pci_get_drvdata(pci), return);
-	
 	snd_azf3328_dbgcallenter();
-
-	/* reset (close) mixer */
-	snd_azf3328_mixer_set_mute(chip, IDX_MIXER_PLAY_MASTER, 1); /* first mute master volume */
-	snd_azf3328_mixer_write(chip, IDX_MIXER_RESET, 0x0, WORD_VALUE);
-
-        if (chip)
-		snd_card_free(chip->card);
+	snd_card_free(pci_get_drvdata(pci));
 	pci_set_drvdata(pci, NULL);
 	snd_azf3328_dbgcallleave();
 }
@@ -1572,18 +1494,10 @@ static struct pci_driver driver = {
 static int __init alsa_card_azf3328_init(void)
 {
 	int err;
-	
 	snd_azf3328_dbgcallenter();
-
-	if ((err = pci_module_init(&driver)) < 0)
-	{
-#ifdef MODULE
-		printk(KERN_ERR "azt3328: no AZF3328 based soundcards found or device busy\n");
-#endif
-		return err;
-	}
+	err = pci_module_init(&driver);
 	snd_azf3328_dbgcallleave();
-	return 0;
+	return err;
 }
 
 static void __exit alsa_card_azf3328_exit(void)
@@ -1595,27 +1509,3 @@ static void __exit alsa_card_azf3328_exit(void)
 
 module_init(alsa_card_azf3328_init)
 module_exit(alsa_card_azf3328_exit)
-
-#ifndef MODULE
-
-/* format is: snd-azf3328=enable,index,id */
-
-static int __init alsa_card_azf3328_setup(char *str)
-{
-	static unsigned __initdata nr_dev = 0;
-
-	snd_azf3328_dbgcallenter();
-
-	if (nr_dev >= SNDRV_CARDS)
-		return 0;
-	(void)(get_option(&str,&enable[nr_dev]) == 2 &&
-	       get_option(&str,&index[nr_dev]) == 2 &&
-	       get_id(&str,&id[nr_dev]) == 2);
-	nr_dev++;
-	snd_azf3328_dbgcallleave();
-	return 1;
-}
-
-__setup("snd-azf3328=", alsa_card_azf3328_setup);
-
-#endif /* ifndef MODULE */

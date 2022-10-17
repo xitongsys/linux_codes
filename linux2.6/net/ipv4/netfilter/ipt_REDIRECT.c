@@ -1,4 +1,12 @@
 /* Redirect.  Simple mapping which alters dst to a local IP address. */
+/* (C) 1999-2001 Paul `Rusty' Russell
+ * (C) 2002-2004 Netfilter Core Team <coreteam@netfilter.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
 #include <linux/types.h>
 #include <linux/ip.h>
 #include <linux/timer.h>
@@ -30,7 +38,7 @@ redirect_check(const char *tablename,
 	       unsigned int targinfosize,
 	       unsigned int hook_mask)
 {
-	const struct ip_nat_multi_range *mr = targinfo;
+	const struct ip_nat_multi_range_compat *mr = targinfo;
 
 	if (strcmp(tablename, "nat") != 0) {
 		DEBUGP("redirect_check: bad table `%s'.\n", table);
@@ -66,8 +74,8 @@ redirect_target(struct sk_buff **pskb,
 	struct ip_conntrack *ct;
 	enum ip_conntrack_info ctinfo;
 	u_int32_t newdst;
-	const struct ip_nat_multi_range *mr = targinfo;
-	struct ip_nat_multi_range newrange;
+	const struct ip_nat_multi_range_compat *mr = targinfo;
+	struct ip_nat_range newrange;
 
 	IP_NF_ASSERT(hooknum == NF_IP_PRE_ROUTING
 		     || hooknum == NF_IP_LOCAL_OUT);
@@ -91,10 +99,10 @@ redirect_target(struct sk_buff **pskb,
 	}
 
 	/* Transfer from original range. */
-	newrange = ((struct ip_nat_multi_range)
-		{ 1, { { mr->range[0].flags | IP_NAT_RANGE_MAP_IPS,
-			 newdst, newdst,
-			 mr->range[0].min, mr->range[0].max } } });
+	newrange = ((struct ip_nat_range)
+		{ mr->range[0].flags | IP_NAT_RANGE_MAP_IPS,
+		  newdst, newdst,
+		  mr->range[0].min, mr->range[0].max });
 
 	/* Hand modified range to generic setup. */
 	return ip_nat_setup_info(ct, &newrange, hooknum);

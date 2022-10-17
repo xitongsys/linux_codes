@@ -2,6 +2,7 @@
  * Internal header file for device mapper
  *
  * Copyright (C) 2001, 2002 Sistina Software
+ * Copyright (C) 2004 Red Hat, Inc. All rights reserved.
  *
  * This file is released under the LGPL.
  */
@@ -19,6 +20,9 @@
 #define DMERR(f, x...) printk(KERN_ERR DM_NAME ": " f "\n" , ## x)
 #define DMINFO(f, x...) printk(KERN_INFO DM_NAME ": " f "\n" , ## x)
 
+#define DMEMIT(x...) sz += ((sz >= maxlen) ? \
+			  0 : scnprintf(result + sz, maxlen - sz, x))
+
 /*
  * FIXME: I think this should be with the definition of sector_t
  * in types.h.
@@ -30,8 +34,6 @@
 #endif
 
 #define SECTOR_SHIFT 9
-
-extern struct block_device_operations dm_blk_dops;
 
 /*
  * List of devices that a metadevice uses and should open/close.
@@ -53,6 +55,8 @@ struct mapped_device;
  *---------------------------------------------------------------*/
 int dm_create(struct mapped_device **md);
 int dm_create_with_minor(unsigned int minor, struct mapped_device **md);
+void dm_set_mdptr(struct mapped_device *md, void *ptr);
+void *dm_get_mdptr(dev_t dev);
 
 /*
  * Reference counting for md.
@@ -81,9 +85,7 @@ struct dm_table *dm_get_table(struct mapped_device *md);
  * Event functions.
  */
 uint32_t dm_get_event_nr(struct mapped_device *md);
-int dm_add_wait_queue(struct mapped_device *md, wait_queue_t *wq,
-		      uint32_t event_nr);
-void dm_remove_wait_queue(struct mapped_device *md, wait_queue_t *wq);
+int dm_wait_event(struct mapped_device *md, int event_nr);
 
 /*
  * Info functions.
@@ -95,7 +97,7 @@ int dm_suspended(struct mapped_device *md);
  * Functions for manipulating a table.  Tables are also reference
  * counted.
  *---------------------------------------------------------------*/
-int dm_table_create(struct dm_table **result, int mode);
+int dm_table_create(struct dm_table **result, int mode, unsigned num_targets);
 
 void dm_table_get(struct dm_table *t);
 void dm_table_put(struct dm_table *t);
@@ -113,8 +115,12 @@ void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q);
 unsigned int dm_table_get_num_targets(struct dm_table *t);
 struct list_head *dm_table_get_devices(struct dm_table *t);
 int dm_table_get_mode(struct dm_table *t);
-void dm_table_suspend_targets(struct dm_table *t);
+void dm_table_presuspend_targets(struct dm_table *t);
+void dm_table_postsuspend_targets(struct dm_table *t);
 void dm_table_resume_targets(struct dm_table *t);
+int dm_table_any_congested(struct dm_table *t, int bdi_bits);
+void dm_table_unplug_all(struct dm_table *t);
+int dm_table_flush_all(struct dm_table *t);
 
 /*-----------------------------------------------------------------
  * A registry of target types.
@@ -123,6 +129,8 @@ int dm_target_init(void);
 void dm_target_exit(void);
 struct target_type *dm_get_target_type(const char *name);
 void dm_put_target_type(struct target_type *t);
+int dm_target_iterate(void (*iter_func)(struct target_type *tt,
+					void *param), void *param);
 
 
 /*-----------------------------------------------------------------
@@ -135,21 +143,34 @@ static inline int array_too_big(unsigned long fixed, unsigned long obj,
 }
 
 /*
- * ceiling(n / size) * size
+ * Ceiling(n / sz)
  */
-static inline unsigned long dm_round_up(unsigned long n, unsigned long size)
-{
-	unsigned long r = n % size;
-	return n + (r ? (size - r) : 0);
-}
+#define dm_div_up(n, sz) (((n) + (sz) - 1) / (sz))
+
+#define dm_sector_div_up(n, sz) ( \
+{ \
+	sector_t _r = ((n) + (sz) - 1); \
+	sector_div(_r, (sz)); \
+	_r; \
+} \
+)
 
 /*
- * Ceiling(n / size)
+ * ceiling(n / size) * size
  */
-static inline unsigned long dm_div_up(unsigned long n, unsigned long size)
+#define dm_round_up(n, sz) (dm_div_up((n), (sz)) * (sz))
+
+static inline sector_t to_sector(unsigned long n)
 {
-	return dm_round_up(n, size) / size;
+	return (n >> 9);
 }
+
+static inline unsigned long to_bytes(sector_t n)
+{
+	return (n << 9);
+}
+
+int dm_split_args(int *argc, char ***argvp, char *input);
 
 /*
  * The device-mapper can be driven through one of two interfaces;
@@ -166,5 +187,7 @@ void dm_linear_exit(void);
 
 int dm_stripe_init(void);
 void dm_stripe_exit(void);
+
+void *dm_vcalloc(unsigned long nmemb, unsigned long elem_size);
 
 #endif

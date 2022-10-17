@@ -131,7 +131,6 @@ struct serial_uart_config {
 
 /* Internal flags used only by kernel/chr_drv/serial.c */
 #define ASYNC_INITIALIZED	0x80000000 /* Serial port was initialized */
-#define ASYNC_CALLOUT_ACTIVE	0x40000000 /* Call out device is active */
 #define ASYNC_NORMAL_ACTIVE	0x20000000 /* Normal device is active */
 #define ASYNC_BOOT_AUTOCONF	0x10000000 /* Autoconfigure port on bootup */
 #define ASYNC_CLOSING		0x08000000 /* Serial port is closing */
@@ -182,6 +181,8 @@ extern void unregister_serial(int line);
 /* Allow architectures to override entries in serial8250_ports[] at run time: */
 struct uart_port;	/* forward declaration */
 extern int early_serial_setup(struct uart_port *port);
+extern int early_serial_console_init(char *options);
+extern int serial8250_start_console(struct uart_port *port, char *options);
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_SERIAL_H */

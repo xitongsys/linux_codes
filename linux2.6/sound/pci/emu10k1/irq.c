@@ -32,7 +32,7 @@
 
 irqreturn_t snd_emu10k1_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-	emu10k1_t *emu = snd_magic_cast(emu10k1_t, dev_id, return IRQ_NONE);
+	emu10k1_t *emu = dev_id;
 	unsigned int status, orig_status;
 	int handled = 0;
 
@@ -112,8 +112,8 @@ irqreturn_t snd_emu10k1_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			status &= ~(IPR_A_MIDITRANSBUFEMPTY2|IPR_A_MIDIRECVBUFEMPTY2);
 		}
 		if (status & IPR_INTERVALTIMER) {
-			if (emu->timer_interrupt)
-				emu->timer_interrupt(emu);
+			if (emu->timer)
+				snd_timer_interrupt(emu->timer, emu->timer->sticks);
 			else
 				snd_emu10k1_intr_disable(emu, INTE_INTERVALTIMERENB);
 			status &= ~IPR_INTERVALTIMER;

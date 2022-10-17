@@ -19,8 +19,11 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
+#define DEBUG
+
 #include <linux/config.h>
 #include <linux/kernel.h>
+#include <linux/dma-mapping.h>
 #include <asm/processor.h>
 #include <asm/mmu.h>
 #include <asm/page.h>
@@ -29,121 +32,99 @@
 #include <asm/abs_addr.h>
 #include <asm/mmu_context.h>
 #include <asm/ppcdebug.h>
-#include <asm/pci_dma.h>
-#include <linux/pci.h>
-#include <asm/naca.h>
+#include <asm/iommu.h>
 #include <asm/tlbflush.h>
 #include <asm/tlb.h>
-#include <asm/hvcall.h>
+#include <asm/prom.h>
+#include <asm/abs_addr.h>
+#include <asm/cputable.h>
+#include <asm/plpar_wrappers.h>
 
-long plpar_pte_remove(unsigned long flags,
-		      unsigned long ptex,
-		      unsigned long avpn,
-		      unsigned long *old_pteh_ret, unsigned long *old_ptel_ret)
-{
-	unsigned long dummy;
-	return plpar_hcall(H_REMOVE, flags, ptex, avpn, 0,
-			   old_pteh_ret, old_ptel_ret, &dummy);
-}
+#ifdef DEBUG
+#define DBG(fmt...) udbg_printf(fmt)
+#else
+#define DBG(fmt...)
+#endif
 
-long plpar_pte_read(unsigned long flags,
-		    unsigned long ptex,
-		    unsigned long *old_pteh_ret, unsigned long *old_ptel_ret)
-{
-	unsigned long dummy;
-	return plpar_hcall(H_READ, flags, ptex, 0, 0,
-			   old_pteh_ret, old_ptel_ret, &dummy);
-}
+/* in pSeries_hvCall.S */
+EXPORT_SYMBOL(plpar_hcall);
+EXPORT_SYMBOL(plpar_hcall_4out);
+EXPORT_SYMBOL(plpar_hcall_norets);
+EXPORT_SYMBOL(plpar_hcall_8arg_2ret);
 
-long plpar_pte_protect(unsigned long flags,
-		       unsigned long ptex,
-		       unsigned long avpn)
-{
-	return plpar_hcall_norets(H_PROTECT, flags, ptex, avpn);
-}
+extern void fw_feature_init(void);
+extern void pSeries_find_serial_port(void);
 
-long plpar_tce_get(unsigned long liobn,
-		   unsigned long ioba,
-		   unsigned long *tce_ret)
-{
-	unsigned long dummy;
-	return plpar_hcall(H_GET_TCE, liobn, ioba, 0, 0,
-			   tce_ret, &dummy, &dummy);
-}
-
-long plpar_tce_put(unsigned long liobn,
-		   unsigned long ioba,
-		   unsigned long tceval)
-{
-	return plpar_hcall_norets(H_PUT_TCE, liobn, ioba, tceval);
-}
-
-long plpar_get_term_char(unsigned long termno,
-			 unsigned long *len_ret,
-			 char *buf_ret)
-{
-	unsigned long *lbuf = (unsigned long *)buf_ret;  /* ToDo: alignment? */
-	return plpar_hcall(H_GET_TERM_CHAR, termno, 0, 0, 0,
-			   len_ret, lbuf+0, lbuf+1);
-}
-
-long plpar_put_term_char(unsigned long termno,
-			 unsigned long len,
-			 const char *buffer)
-{
-	unsigned long *lbuf = (unsigned long *)buffer;  /* ToDo: alignment? */
-	return plpar_hcall_norets(H_PUT_TERM_CHAR, termno, len, lbuf[0],
-				  lbuf[1]);
-}
-
-static void tce_build_pSeriesLP(struct TceTable *tbl, long tcenum, 
-				unsigned long uaddr, int direction )
-{
-	u64 set_tce_rc;
-	union Tce tce;
-	
-	PPCDBG(PPCDBG_TCE, "build_tce: uaddr = 0x%lx\n", uaddr);
-	PPCDBG(PPCDBG_TCE, "\ttcenum = 0x%lx, tbl = 0x%lx, index=%lx\n", 
-	       tcenum, tbl, tbl->index);
-
-	tce.wholeTce = 0;
-	tce.tceBits.rpn = (virt_to_absolute(uaddr)) >> PAGE_SHIFT;
-
-	tce.tceBits.readWrite = 1;
-	if ( direction != PCI_DMA_TODEVICE ) tce.tceBits.pciWrite = 1;
-
-	set_tce_rc = plpar_tce_put((u64)tbl->index, 
-				 (u64)tcenum << 12, 
-				 tce.wholeTce );
-
-	if(set_tce_rc) {
-		printk("tce_build_pSeriesLP: plpar_tce_put failed. rc=%ld\n", set_tce_rc);
-		printk("\tindex   = 0x%lx\n", (u64)tbl->index);
-		printk("\ttcenum  = 0x%lx\n", (u64)tcenum);
-		printk("\ttce val = 0x%lx\n", tce.wholeTce );
-	}
-}
-
-static void tce_free_one_pSeriesLP(struct TceTable *tbl, long tcenum)
-{
-	u64 set_tce_rc;
-	union Tce tce;
-
-	tce.wholeTce = 0;
-	set_tce_rc = plpar_tce_put((u64)tbl->index, 
-				 (u64)tcenum << 12,
-				 tce.wholeTce );
-	if ( set_tce_rc ) {
-		printk("tce_free_one_pSeriesLP: plpar_tce_put failed\n");
-		printk("\trc      = %ld\n", set_tce_rc);
-		printk("\tindex   = 0x%lx\n", (u64)tbl->index);
-		printk("\ttcenum  = 0x%lx\n", (u64)tcenum);
-		printk("\ttce val = 0x%lx\n", tce.wholeTce );
-	}
-
-}
 
 int vtermno;	/* virtual terminal# for udbg  */
+
+#define __ALIGNED__ __attribute__((__aligned__(sizeof(long))))
+static void udbg_hvsi_putc(unsigned char c)
+{
+	/* packet's seqno isn't used anyways */
+	uint8_t packet[] __ALIGNED__ = { 0xff, 5, 0, 0, c };
+	int rc;
+
+	if (c == '\n')
+		udbg_hvsi_putc('\r');
+
+	do {
+		rc = plpar_put_term_char(vtermno, sizeof(packet), packet);
+	} while (rc == H_Busy);
+}
+
+static long hvsi_udbg_buf_len;
+static uint8_t hvsi_udbg_buf[256];
+
+static int udbg_hvsi_getc_poll(void)
+{
+	unsigned char ch;
+	int rc, i;
+
+	if (hvsi_udbg_buf_len == 0) {
+		rc = plpar_get_term_char(vtermno, &hvsi_udbg_buf_len, hvsi_udbg_buf);
+		if (rc != H_Success || hvsi_udbg_buf[0] != 0xff) {
+			/* bad read or non-data packet */
+			hvsi_udbg_buf_len = 0;
+		} else {
+			/* remove the packet header */
+			for (i = 4; i < hvsi_udbg_buf_len; i++)
+				hvsi_udbg_buf[i-4] = hvsi_udbg_buf[i];
+			hvsi_udbg_buf_len -= 4;
+		}
+	}
+
+	if (hvsi_udbg_buf_len <= 0 || hvsi_udbg_buf_len > 256) {
+		/* no data ready */
+		hvsi_udbg_buf_len = 0;
+		return -1;
+	}
+
+	ch = hvsi_udbg_buf[0];
+	/* shift remaining data down */
+	for (i = 1; i < hvsi_udbg_buf_len; i++) {
+		hvsi_udbg_buf[i-1] = hvsi_udbg_buf[i];
+	}
+	hvsi_udbg_buf_len--;
+
+	return ch;
+}
+
+static unsigned char udbg_hvsi_getc(void)
+{
+	int ch;
+	for (;;) {
+		ch = udbg_hvsi_getc_poll();
+		if (ch == -1) {
+			/* This shouldn't be needed...but... */
+			volatile unsigned long delay;
+			for (delay=0; delay < 2000000; delay++)
+				;
+		} else {
+			return ch;
+		}
+	}
+}
 
 static void udbg_putcLP(unsigned char c)
 {
@@ -206,102 +187,93 @@ static unsigned char udbg_getcLP(void)
 	}
 }
 
-void pSeries_lpar_mm_init(void);
-
-/* This is called early in setup.c.
- * Use it to setup page table ppc_md stuff as well as udbg.
+/* call this from early_init() for a working debug console on
+ * vterm capable LPAR machines
  */
-void pSeriesLP_init_early(void)
+void udbg_init_debug_lpar(void)
 {
-	struct device_node *np;
-
-	pSeries_lpar_mm_init();
-
-	ppc_md.tce_build	 = tce_build_pSeriesLP;
-	ppc_md.tce_free_one	 = tce_free_one_pSeriesLP;
-
-#ifdef CONFIG_SMP
-	smp_init_pSeries();
-#endif
-
-	/* The keyboard is not useful in the LPAR environment.
-	 * Leave all the interfaces NULL.
-	 */
-
-	/* lookup the first virtual terminal number in case we don't have a
-	 * com port. Zero is probably correct in case someone calls udbg
-	 * before the init. The property is a pair of numbers.  The first
-	 * is the starting termno (the one we use) and the second is the
-	 * number of terminals.
-	 */
-	np = find_path_device("/rtas");
-	if (np) {
-		u32 *termno = (u32 *)get_property(np, "ibm,termno", 0);
-		if (termno)
-			vtermno = termno[0];
-	}
+	vtermno = 0;
 	ppc_md.udbg_putc = udbg_putcLP;
 	ppc_md.udbg_getc = udbg_getcLP;
 	ppc_md.udbg_getc_poll = udbg_getc_pollLP;
 }
 
-int hvc_get_chars(int index, char *buf, int count)
+/* returns 0 if couldn't find or use /chosen/stdout as console */
+int find_udbg_vterm(void)
 {
-	unsigned long got;
+	struct device_node *stdout_node;
+	u32 *termno;
+	char *name;
+	int found = 0;
 
-	if (plpar_hcall(H_GET_TERM_CHAR, index, 0, 0, 0, &got,
-		(unsigned long *)buf, (unsigned long *)buf+1) == H_Success) {
-		/*
-		 * Work around a HV bug where it gives us a null
-		 * after every \r.  -- paulus
-		 */
-		if (got > 0) {
-			int i;
-			for (i = 1; i < got; ++i) {
-				if (buf[i] == 0 && buf[i-1] == '\r') {
-					--got;
-					if (i < got)
-						memmove(&buf[i], &buf[i+1],
-							got - i);
-				}
+	/* find the boot console from /chosen/stdout */
+	if (!of_chosen)
+		return 0;
+	name = (char *)get_property(of_chosen, "linux,stdout-path", NULL);
+	if (name == NULL)
+		return 0;
+	stdout_node = of_find_node_by_path(name);
+	if (!stdout_node)
+		return 0;
+
+	/* now we have the stdout node; figure out what type of device it is. */
+	name = (char *)get_property(stdout_node, "name", NULL);
+	if (!name) {
+		printk(KERN_WARNING "stdout node missing 'name' property!\n");
+		goto out;
+	}
+
+	if (strncmp(name, "vty", 3) == 0) {
+		if (device_is_compatible(stdout_node, "hvterm1")) {
+			termno = (u32 *)get_property(stdout_node, "reg", NULL);
+			if (termno) {
+				vtermno = termno[0];
+				ppc_md.udbg_putc = udbg_putcLP;
+				ppc_md.udbg_getc = udbg_getcLP;
+				ppc_md.udbg_getc_poll = udbg_getc_pollLP;
+				found = 1;
+			}
+		} else if (device_is_compatible(stdout_node, "hvterm-protocol")) {
+			termno = (u32 *)get_property(stdout_node, "reg", NULL);
+			if (termno) {
+				vtermno = termno[0];
+				ppc_md.udbg_putc = udbg_hvsi_putc;
+				ppc_md.udbg_getc = udbg_hvsi_getc;
+				ppc_md.udbg_getc_poll = udbg_hvsi_getc_poll;
+				found = 1;
 			}
 		}
-		return got;
+	} else if (strncmp(name, "serial", 6)) {
+		/* XXX fix ISA serial console */
+		printk(KERN_WARNING "serial stdout on LPAR ('%s')! "
+				"can't print udbg messages\n",
+		       stdout_node->full_name);
+	} else {
+		printk(KERN_WARNING "don't know how to print to stdout '%s'\n",
+		       stdout_node->full_name);
 	}
-	return 0;
+
+out:
+	of_node_put(stdout_node);
+	return found;
 }
 
-int hvc_put_chars(int index, const char *buf, int count)
+void vpa_init(int cpu)
 {
-	unsigned long *lbuf = (unsigned long *) buf;
+	int hwcpu = get_hard_smp_processor_id(cpu);
+	unsigned long vpa = (unsigned long)&(paca[cpu].lppaca);
 	long ret;
+	unsigned long flags;
 
-	ret = plpar_hcall_norets(H_PUT_TERM_CHAR, index, count, lbuf[0],
-				 lbuf[1]);
-	if (ret == H_Success)
-		return count;
-	if (ret == H_Busy)
-		return 0;
-	return -1;
+	/* Register the Virtual Processor Area (VPA) */
+	flags = 1UL << (63 - 18);
+	ret = register_vpa(flags, hwcpu, __pa(vpa));
+
+	if (ret)
+		printk(KERN_ERR "WARNING: vpa_init: VPA registration for "
+				"cpu %d (hw %d) of area %lx returns %ld\n",
+				cpu, hwcpu, __pa(vpa), ret);
 }
-
-int hvc_count(int *start_termno)
-{
-	u32 *termno;
-	struct device_node *dn;
-
-	if ((dn = find_path_device("/rtas")) != NULL) {
-		if ((termno = (u32 *)get_property(dn, "ibm,termno", 0)) != NULL) {
-			if (start_termno)
-				*start_termno = termno[0];
-			return termno[1];
-		}
-	}
-	return 0;
-}
-
-
-
 
 long pSeries_lpar_hpte_insert(unsigned long hpte_group,
 			      unsigned long va, unsigned long prpn,
@@ -346,7 +318,7 @@ long pSeries_lpar_hpte_insert(unsigned long hpte_group,
 	lpar_rc = plpar_hcall(H_ENTER, flags, hpte_group, lhpte.dw0.dword0,
 			      lhpte.dw1.dword1, &slot, &dummy0, &dummy1);
 
-	if (lpar_rc == H_PTEG_Full)
+	if (unlikely(lpar_rc == H_PTEG_Full))
 		return -1;
 
 	/*
@@ -354,13 +326,16 @@ long pSeries_lpar_hpte_insert(unsigned long hpte_group,
 	 * will fail. However we must catch the failure in hash_page
 	 * or we will loop forever, so return -2 in this case.
 	 */
-	if (lpar_rc != H_Success)
+	if (unlikely(lpar_rc != H_Success))
 		return -2;
 
-	return slot;
+	/* Because of iSeries, we have to pass down the secondary
+	 * bucket bit here as well
+	 */
+	return (slot & 7) | (secondary << 3);
 }
 
-static spinlock_t pSeries_lpar_tlbie_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(pSeries_lpar_tlbie_lock);
 
 static long pSeries_lpar_hpte_remove(unsigned long hpte_group)
 {
@@ -381,15 +356,25 @@ static long pSeries_lpar_hpte_remove(unsigned long hpte_group)
 		if (lpar_rc == H_Success)
 			return i;
 
-		if (lpar_rc != H_Not_Found)
-			panic("Bad return code from pte remove rc = %lx\n",
-			      lpar_rc);
+		BUG_ON(lpar_rc != H_Not_Found);
 
 		slot_offset++;
 		slot_offset &= 0x7;
 	}
 
 	return -1;
+}
+
+static void pSeries_lpar_hptab_clear(void)
+{
+	unsigned long size_bytes = 1UL << ppc64_pft_size;
+	unsigned long hpte_count = size_bytes >> 4;
+	unsigned long dummy1, dummy2;
+	int i;
+
+	/* TODO: Use bulk call */
+	for (i = 0; i < hpte_count; i++)
+		plpar_pte_remove(0, i, 0, &dummy1, &dummy2);
 }
 
 /*
@@ -410,13 +395,10 @@ static long pSeries_lpar_hpte_updatepp(unsigned long slot, unsigned long newpp,
 
 	lpar_rc = plpar_pte_protect(flags, slot, (avpn << 7));
 
-	if (lpar_rc == H_Not_Found) {
-		udbg_printf("updatepp missed\n");
+	if (lpar_rc == H_Not_Found)
 		return -1;
-	}
 
-	if (lpar_rc != H_Success)
-		panic("bad return code from pte protect rc = %lx\n", lpar_rc);
+	BUG_ON(lpar_rc != H_Success);
 
 	return 0;
 }
@@ -432,11 +414,10 @@ static unsigned long pSeries_lpar_hpte_getword0(unsigned long slot)
 	/* Do not need RPN to logical page translation */
 	/* No cross CEC PFT access                     */
 	flags = 0;
-	
+
 	lpar_rc = plpar_pte_read(flags, slot, &dword0, &dummy_word1);
 
-	if (lpar_rc != H_Success)
-		panic("Error on pte read in get_hpte0 rc = %lx\n", lpar_rc);
+	BUG_ON(lpar_rc != H_Success);
 
 	return dword0;
 }
@@ -455,7 +436,7 @@ static long pSeries_lpar_hpte_find(unsigned long vpn)
 	hash = hpt_hash(vpn, 0);
 
 	for (j = 0; j < 2; j++) {
-		slot = (hash & htab_data.htab_hash_mask) * HPTES_PER_GROUP;
+		slot = (hash & htab_hash_mask) * HPTES_PER_GROUP;
 		for (i = 0; i < HPTES_PER_GROUP; i++) {
 			hpte_dw0.dword0 = pSeries_lpar_hpte_getword0(slot);
 			dw0 = hpte_dw0.dw0;
@@ -487,15 +468,12 @@ static void pSeries_lpar_hpte_updateboltedpp(unsigned long newpp,
 	vpn = va >> PAGE_SHIFT;
 
 	slot = pSeries_lpar_hpte_find(vpn);
-	if (slot == -1)
-		panic("updateboltedpp: Could not find page to bolt\n");
+	BUG_ON(slot == -1);
 
 	flags = newpp & 3;
 	lpar_rc = plpar_pte_protect(flags, slot, 0);
 
-	if (lpar_rc != H_Success)
-		panic("Bad return code from pte bolted protect rc = %lx\n",
-		      lpar_rc); 
+	BUG_ON(lpar_rc != H_Success);
 }
 
 static void pSeries_lpar_hpte_invalidate(unsigned long slot, unsigned long va,
@@ -511,13 +489,10 @@ static void pSeries_lpar_hpte_invalidate(unsigned long slot, unsigned long va,
 	lpar_rc = plpar_pte_remove(H_AVPN, slot, (avpn << 7), &dummy1,
 				   &dummy2);
 
-	if (lpar_rc == H_Not_Found) {
-		udbg_printf("invalidate missed\n");
+	if (lpar_rc == H_Not_Found)
 		return;
-	}
 
-	if (lpar_rc != H_Success)
-		panic("Bad return code from invalidate rc = %lx\n", lpar_rc);
+	BUG_ON(lpar_rc != H_Success);
 }
 
 /*
@@ -528,18 +503,21 @@ void pSeries_lpar_flush_hash_range(unsigned long context, unsigned long number,
 				   int local)
 {
 	int i;
-	unsigned long flags;
-	struct ppc64_tlb_batch *batch = &ppc64_tlb_batch[smp_processor_id()];
+	unsigned long flags = 0;
+	struct ppc64_tlb_batch *batch = &__get_cpu_var(ppc64_tlb_batch);
+	int lock_tlbie = !(cur_cpu_spec->cpu_features & CPU_FTR_LOCKLESS_TLBIE);
 
-	spin_lock_irqsave(&pSeries_lpar_tlbie_lock, flags);
+	if (lock_tlbie)
+		spin_lock_irqsave(&pSeries_lpar_tlbie_lock, flags);
 
 	for (i = 0; i < number; i++)
 		flush_hash_page(context, batch->addr[i], batch->pte[i], local);
 
-	spin_unlock_irqrestore(&pSeries_lpar_tlbie_lock, flags);
+	if (lock_tlbie)
+		spin_unlock_irqrestore(&pSeries_lpar_tlbie_lock, flags);
 }
 
-void pSeries_lpar_mm_init(void)
+void hpte_init_lpar(void)
 {
 	ppc_md.hpte_invalidate	= pSeries_lpar_hpte_invalidate;
 	ppc_md.hpte_updatepp	= pSeries_lpar_hpte_updatepp;
@@ -547,4 +525,7 @@ void pSeries_lpar_mm_init(void)
 	ppc_md.hpte_insert	= pSeries_lpar_hpte_insert;
 	ppc_md.hpte_remove	= pSeries_lpar_hpte_remove;
 	ppc_md.flush_hash_range	= pSeries_lpar_flush_hash_range;
+	ppc_md.hpte_clear_all   = pSeries_lpar_hptab_clear;
+
+	htab_finish_init();
 }

@@ -32,14 +32,14 @@ ENTRY(v3_flush_kern_cache_all)
 	/* FALLTHROUGH */
 
 /*
- *	flush_user_cache_range(start, end, vm_flags)
+ *	flush_user_cache_range(start, end, flags)
  *
  *	Invalidate a range of cache entries in the specified
  *	address space.
  *
  *	- start - start address (may not be aligned)
  *	- end	- end address (exclusive, may not be aligned)
- *	- vma	- vma_area_struct describing address space
+ *	- flags	- vma_area_struct flags describing address space
  */
 ENTRY(v3_flush_user_cache_range)
 	mov	ip, #0
@@ -57,6 +57,19 @@ ENTRY(v3_flush_user_cache_range)
  *	- end	 - virtual end address
  */
 ENTRY(v3_coherent_kern_range)
+	/* FALLTHROUGH */
+
+/*
+ *	coherent_user_range(start, end)
+ *
+ *	Ensure coherency between the Icache and the Dcache in the
+ *	region described by start.  If you have non-snooping
+ *	Harvard caches, you need to implement this function.
+ *
+ *	- start  - virtual start address
+ *	- end	 - virtual end address
+ */
+ENTRY(v3_coherent_user_range)
 	mov	pc, lr
 
 /*
@@ -116,6 +129,7 @@ ENTRY(v3_cache_fns)
 	.long	v3_flush_user_cache_all
 	.long	v3_flush_user_cache_range
 	.long	v3_coherent_kern_range
+	.long	v3_coherent_user_range
 	.long	v3_flush_kern_dcache_page
 	.long	v3_dma_inv_range
 	.long	v3_dma_clean_range

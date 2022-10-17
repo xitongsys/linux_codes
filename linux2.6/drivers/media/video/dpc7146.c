@@ -55,11 +55,10 @@
 #define DPC_BOARD_CAN_DO_VBI(dev)   (dev->revision != 0) 
 
 static int debug = 0;
-MODULE_PARM(debug,"i");
+module_param(debug, int, 0);
 MODULE_PARM_DESC(debug, "debug verbosity");
 
-/* global variables */
-int dpc_num = 0;
+static int dpc_num = 0;
 
 #define DPC_INPUTS	2
 static struct v4l2_input dpc_inputs[DPC_INPUTS] = {
@@ -79,8 +78,8 @@ static struct saa7146_extension_ioctls ioctls[] = {
 
 struct dpc
 {
-	struct video_device	video_dev;
-	struct video_device	vbi_dev;
+	struct video_device	*video_dev;
+	struct video_device	*vbi_dev;
 
 	struct i2c_adapter	i2c_adapter;	
 	struct i2c_client	*saa7111a;
@@ -91,7 +90,7 @@ struct dpc
 /* fixme: add vbi stuff here */
 static int dpc_probe(struct saa7146_dev* dev)
 {
-	struct dpc* dpc = 0;	
+	struct dpc* dpc = NULL;	
 	struct i2c_client *client;
 	struct list_head *item;
 
@@ -106,6 +105,10 @@ static int dpc_probe(struct saa7146_dev* dev)
 	   video port pins should be enabled here ?! */
 	saa7146_write(dev, MC1, (MASK_08 | MASK_24 | MASK_10 | MASK_26));
 
+	dpc->i2c_adapter = (struct i2c_adapter) {
+		.class = I2C_CLASS_TV_ANALOG,
+		.name = "dpc7146",
+	};
 	saa7146_i2c_adapter_prepare(dev, &dpc->i2c_adapter, SAA7146_I2C_BUS_BIT_RATE_480);
 	if(i2c_add_adapter(&dpc->i2c_adapter) < 0) {
 		DEB_S(("cannot register i2c-device. skipping.\n"));
@@ -123,6 +126,7 @@ static int dpc_probe(struct saa7146_dev* dev)
 	/* check if all devices are present */
 	if( 0 == dpc->saa7111a ) {
 		DEB_D(("dpc_v4l2.o: dpc_attach failed for this device.\n"));	
+		i2c_del_adapter(&dpc->i2c_adapter);
 		kfree(dpc);
 		return -ENODEV;
 	}
@@ -131,7 +135,7 @@ static int dpc_probe(struct saa7146_dev* dev)
 	DEB_D(("dpc_v4l2.o: dpc_probe succeeded for this device.\n"));	
 
 	/* we store the pointer in our private data field */
-	(struct dpc*)dev->ext_priv = dpc;
+	dev->ext_priv = dpc;
 
 	return 0;
 }
@@ -312,18 +316,18 @@ static int std_callback(struct saa7146_dev* dev, struct saa7146_standard *std)
 static struct saa7146_standard standard[] = {
 	{
 		.name	= "PAL", 	.id	= V4L2_STD_PAL,
-		.v_offset	= 0x17,	.v_field 	= 288,	.v_calc		= 576,
-		.h_offset	= 0x14,	.h_pixels 	= 680,	.h_calc		= 680+1,
+		.v_offset	= 0x17,	.v_field 	= 288,
+		.h_offset	= 0x14,	.h_pixels 	= 680,
 		.v_max_out	= 576,	.h_max_out	= 768,
 	}, {
 		.name	= "NTSC", 	.id	= V4L2_STD_NTSC,
-		.v_offset	= 0x16,	.v_field 	= 240,	.v_calc		= 480,
-		.h_offset	= 0x06,	.h_pixels 	= 708,	.h_calc		= 708+1,
+		.v_offset	= 0x16,	.v_field 	= 240,
+		.h_offset	= 0x06,	.h_pixels 	= 708,
 		.v_max_out	= 480,	.h_max_out	= 640,
 	}, {
 		.name	= "SECAM", 	.id	= V4L2_STD_SECAM,
-		.v_offset	= 0x14,	.v_field 	= 288,	.v_calc		= 576,
-		.h_offset	= 0x14,	.h_pixels 	= 720,	.h_calc		= 720+1,
+		.v_offset	= 0x14,	.v_field 	= 288,
+		.h_offset	= 0x14,	.h_pixels 	= 720,
 		.v_max_out	= 576,	.h_max_out	= 768,
 	}
 };
@@ -374,7 +378,7 @@ static struct saa7146_extension extension = {
 	.irq_func	= NULL,
 };	
 
-int __init dpc_init_module(void) 
+static int __init dpc_init_module(void)
 {
 	if( 0 != saa7146_register_extension(&extension)) {
 		DEB_S(("failed to register extension.\n"));
@@ -384,7 +388,7 @@ int __init dpc_init_module(void)
 	return 0;
 }
 
-void __exit dpc_cleanup_module(void) 
+static void __exit dpc_cleanup_module(void)
 {
 	saa7146_unregister_extension(&extension);
 }

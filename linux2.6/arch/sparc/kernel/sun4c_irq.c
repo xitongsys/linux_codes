@@ -50,7 +50,7 @@ static struct resource sun4c_intr_eb = { "sun4c_intr" };
  *
  * so don't go making it static, like I tried. sigh.
  */
-unsigned char *interrupt_enable = 0;
+unsigned char *interrupt_enable = NULL;
 
 static int sun4c_pil_map[] = { 0, 1, 2, 3, 5, 7, 8, 9 };
 
@@ -68,7 +68,7 @@ static void sun4c_disable_irq(unsigned int irq_nr)
 	unsigned long flags;
 	unsigned char current_mask, new_mask;
     
-	save_and_cli(flags);
+	local_irq_save(flags);
 	irq_nr &= (NR_IRQS - 1);
 	current_mask = *interrupt_enable;
 	switch(irq_nr) {
@@ -85,11 +85,11 @@ static void sun4c_disable_irq(unsigned int irq_nr)
 		new_mask = ((current_mask) & (~(SUN4C_INT_E14)));
 		break;
 	default:
-		restore_flags(flags);
+		local_irq_restore(flags);
 		return;
 	}
 	*interrupt_enable = new_mask;
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 static void sun4c_enable_irq(unsigned int irq_nr)
@@ -97,7 +97,7 @@ static void sun4c_enable_irq(unsigned int irq_nr)
 	unsigned long flags;
 	unsigned char current_mask, new_mask;
     
-	save_and_cli(flags);
+	local_irq_save(flags);
 	irq_nr &= (NR_IRQS - 1);
 	current_mask = *interrupt_enable;
 	switch(irq_nr) {
@@ -114,11 +114,11 @@ static void sun4c_enable_irq(unsigned int irq_nr)
 		new_mask = ((current_mask) | SUN4C_INT_E14);
 		break;
 	default:
-		restore_flags(flags);
+		local_irq_restore(flags);
 		return;
 	}
 	*interrupt_enable = new_mask;
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 #define TIMER_IRQ  	10    /* Also at level 14, but we ignore that one. */
@@ -217,13 +217,18 @@ void __init sun4c_init_IRQ(void)
 			panic("Cannot find /interrupt-enable node");
 
 		/* Depending on the "address" property is bad news... */
-		prom_getproperty(ie_node, "reg", (char *) int_regs, sizeof(int_regs));
-		memset(&phyres, 0, sizeof(struct resource));
-		phyres.flags = int_regs[0].which_io;
-		phyres.start = int_regs[0].phys_addr;
-		interrupt_enable = (char *) sbus_ioremap(&phyres, 0,
-		    int_regs[0].reg_size, "sun4c_intr");
+		interrupt_enable = NULL;
+		if (prom_getproperty(ie_node, "reg", (char *) int_regs,
+				     sizeof(int_regs)) != -1) {
+			memset(&phyres, 0, sizeof(struct resource));
+			phyres.flags = int_regs[0].which_io;
+			phyres.start = int_regs[0].phys_addr;
+			interrupt_enable = (char *) sbus_ioremap(&phyres, 0,
+			    int_regs[0].reg_size, "sun4c_intr");
+		}
 	}
+	if (!interrupt_enable)
+		panic("Cannot map interrupt_enable");
 
 	BTFIXUPSET_CALL(sbint_to_irq, sun4c_sbint_to_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(enable_irq, sun4c_enable_irq, BTFIXUPCALL_NORM);

@@ -64,11 +64,8 @@ smb_readpage_sync(struct dentry *dentry, struct page *page)
 		DENTRY_PATH(dentry), count, offset, rsize);
 
 	result = smb_open(dentry, SMB_O_RDONLY);
-	if (result < 0) {
-		PARANOIA("%s/%s open failed, error=%d\n",
-			 DENTRY_PATH(dentry), result);
+	if (result < 0)
 		goto io_error;
-	}
 
 	do {
 		if (count < rsize)
@@ -81,7 +78,8 @@ smb_readpage_sync(struct dentry *dentry, struct page *page)
 		count -= result;
 		offset += result;
 		buffer += result;
-		dentry->d_inode->i_atime = CURRENT_TIME;
+		dentry->d_inode->i_atime =
+			current_fs_time(dentry->d_inode->i_sb);
 		if (result < rsize)
 			break;
 	} while (count);
@@ -124,43 +122,45 @@ smb_writepage_sync(struct inode *inode, struct page *page,
 	char *buffer = kmap(page) + pageoffset;
 	struct smb_sb_info *server = server_from_inode(inode);
 	unsigned int wsize = smb_get_wsize(server);
-	int result, written = 0;
+	int ret = 0;
 
 	offset = ((loff_t)page->index << PAGE_CACHE_SHIFT) + pageoffset;
 	VERBOSE("file ino=%ld, fileid=%d, count=%d@%Ld, wsize=%d\n",
 		inode->i_ino, SMB_I(inode)->fileid, count, offset, wsize);
 
 	do {
+		int write_ret;
+
 		if (count < wsize)
 			wsize = count;
 
-		result = server->ops->write(inode, offset, wsize, buffer);
-		if (result < 0) {
-			PARANOIA("failed write, wsize=%d, result=%d\n",
-				 wsize, result);
+		write_ret = server->ops->write(inode, offset, wsize, buffer);
+		if (write_ret < 0) {
+			PARANOIA("failed write, wsize=%d, write_ret=%d\n",
+				 wsize, write_ret);
+			ret = write_ret;
 			break;
 		}
 		/* N.B. what if result < wsize?? */
 #ifdef SMBFS_PARANOIA
-		if (result < wsize)
-			PARANOIA("short write, wsize=%d, result=%d\n",
-				 wsize, result);
+		if (write_ret < wsize)
+			PARANOIA("short write, wsize=%d, write_ret=%d\n",
+				 wsize, write_ret);
 #endif
 		buffer += wsize;
 		offset += wsize;
-		written += wsize;
 		count -= wsize;
 		/*
 		 * Update the inode now rather than waiting for a refresh.
 		 */
-		inode->i_mtime = inode->i_atime = CURRENT_TIME;
+		inode->i_mtime = inode->i_atime = current_fs_time(inode->i_sb);
 		SMB_I(inode)->flags |= SMB_F_LOCALWRITE;
 		if (offset > inode->i_size)
 			inode->i_size = offset;
 	} while (count);
 
 	kunmap(page);
-	return written ? written : result;
+	return ret;
 }
 
 /*
@@ -216,7 +216,7 @@ smb_updatepage(struct file *file, struct page *page, unsigned long offset,
 }
 
 static ssize_t
-smb_file_read(struct file * file, char * buf, size_t count, loff_t *ppos)
+smb_file_read(struct file * file, char __user * buf, size_t count, loff_t *ppos)
 {
 	struct dentry * dentry = file->f_dentry;
 	ssize_t	status;
@@ -260,6 +260,27 @@ out:
 	return status;
 }
 
+static ssize_t
+smb_file_sendfile(struct file *file, loff_t *ppos,
+		  size_t count, read_actor_t actor, void *target)
+{
+	struct dentry *dentry = file->f_dentry;
+	ssize_t status;
+
+	VERBOSE("file %s/%s, pos=%Ld, count=%d\n",
+		DENTRY_PATH(dentry), *ppos, count);
+
+	status = smb_revalidate_inode(dentry);
+	if (status) {
+		PARANOIA("%s/%s validation failed, error=%Zd\n",
+			 DENTRY_PATH(dentry), status);
+		goto out;
+	}
+	status = generic_file_sendfile(file, ppos, count, actor, target);
+out:
+	return status;
+}
+
 /*
  * This does the "real" work of the write. The generic routine has
  * allocated the page, locked it, done all the page alignment stuff
@@ -298,7 +319,7 @@ struct address_space_operations smb_file_aops = {
  * Write to a file (through the page cache).
  */
 static ssize_t
-smb_file_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
+smb_file_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
 	struct dentry * dentry = file->f_dentry;
 	ssize_t	result;
@@ -342,7 +363,7 @@ smb_file_open(struct inode *inode, struct file * file)
 	SMB_I(inode)->openers++;
 out:
 	unlock_kernel();
-	return 0;
+	return result;
 }
 
 static int
@@ -391,6 +412,7 @@ struct file_operations smb_file_operations =
 	.open		= smb_file_open,
 	.release	= smb_file_release,
 	.fsync		= smb_fsync,
+	.sendfile	= smb_file_sendfile,
 };
 
 struct inode_operations smb_file_inode_operations =

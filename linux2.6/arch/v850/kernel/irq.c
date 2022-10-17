@@ -1,8 +1,8 @@
 /*
  * arch/v850/kernel/irq.c -- High-level interrupt handling
  *
- *  Copyright (C) 2001,02,03  NEC Electronics Corporation
- *  Copyright (C) 2001,02,03  Miles Bader <miles@gnu.org>
+ *  Copyright (C) 2001,02,03,04  NEC Electronics Corporation
+ *  Copyright (C) 2001,02,03,04  Miles Bader <miles@gnu.org>
  *  Copyright (C) 1994-2000  Ralf Baechle
  *  Copyright (C) 1992  Linus Torvalds
  *
@@ -40,7 +40,10 @@ irq_desc_t irq_desc[NR_IRQS] __cacheline_aligned = {
  * Special irq handlers.
  */
 
-irqreturn_t no_action(int cpl, void *dev_id, struct pt_regs *regs) { }
+irqreturn_t no_action(int cpl, void *dev_id, struct pt_regs *regs)
+{
+	return IRQ_NONE;
+}
 
 /*
  * Generic no controller code
@@ -81,16 +84,18 @@ volatile unsigned long irq_err_count, spurious_count;
 
 int show_interrupts(struct seq_file *p, void *v)
 {
-	int i;
+	int i = *(loff_t *) v;
 	struct irqaction * action;
 	unsigned long flags;
 
-	seq_puts(p, "           ");
-	for (i=0; i < 1 /*smp_num_cpus*/; i++)
-		seq_printf(p, "CPU%d       ", i);
-	seq_putc(p, '\n');
+	if (i == 0) {
+		seq_puts(p, "           ");
+		for (i=0; i < 1 /*smp_num_cpus*/; i++)
+			seq_printf(p, "CPU%d       ", i);
+		seq_putc(p, '\n');
+	}
 
-	for (i = 0 ; i < NR_IRQS ; i++) {
+	if (i < NR_IRQS) {
 		int j, count, num;
 		const char *type_name = irq_desc[i].handler->typename;
 		spin_lock_irqsave(&irq_desc[j].lock, flags);
@@ -121,8 +126,8 @@ int show_interrupts(struct seq_file *p, void *v)
 		seq_putc(p, '\n');
 skip:
 		spin_unlock_irqrestore(&irq_desc[j].lock, flags);
-	}
-	seq_printf(p, "ERR: %10lu\n", irq_err_count);
+	} else if (i == NR_IRQS)
+		seq_printf(p, "ERR: %10lu\n", irq_err_count);
 	return 0;
 }
 
@@ -136,13 +141,15 @@ skip:
 int handle_IRQ_event(unsigned int irq, struct pt_regs * regs, struct irqaction * action)
 {
 	int status = 1; /* Force the "do bottom halves" bit */
+	int ret;
 
 	if (!(action->flags & SA_INTERRUPT))
 		local_irq_enable();
 
 	do {
-		status |= action->flags;
-		action->handler(irq, action->dev_id, regs);
+		ret = action->handler(irq, action->dev_id, regs);
+		if (ret == IRQ_HANDLED)
+			status |= action->flags;
 		action = action->next;
 	} while (action);
 	if (status & SA_SAMPLE_RANDOM)
@@ -390,7 +397,7 @@ int request_irq(unsigned int irq,
 
 	action->handler = handler;
 	action->flags = irqflags;
-	action->mask = 0;
+	cpus_clear(action->mask);
 	action->name = devname;
 	action->next = NULL;
 	action->dev_id = dev_id;

@@ -13,7 +13,7 @@
 #include <linux/config.h>
 
 #define fd_inb(port)			inb_p(port)
-#define fd_outb(port,value)		outb_p(port,value)
+#define fd_outb(value,port)		outb_p(value,port)
 
 #define fd_enable_dma()         enable_dma(FLOPPY_DMA)
 #define fd_disable_dma()        disable_dma(FLOPPY_DMA)
@@ -108,10 +108,11 @@ static int FDC2 = -1;
  * on that platform... ;-}
  */
 
-#define CROSS_64KB(a,s)						\
-({ unsigned long __s64 = (unsigned long)(a);			\
-   unsigned long __e64 = __s64 + (unsigned long)(s) - 1;	\
-   (__s64 ^ __e64) & ~0xfffful; })
+static inline unsigned long CROSS_64KB(void *a, unsigned long s)
+{
+	unsigned long p = (unsigned long)a;
+	return ((p + s - 1) ^ p) & ~0xffffUL;
+}
 
 #define EXTRA_FLOPPY_PARAMS
 

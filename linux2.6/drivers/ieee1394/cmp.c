@@ -77,6 +77,25 @@ enum {
 
 static struct hpsb_highlevel cmp_highlevel;
 
+static void cmp_add_host(struct hpsb_host *host);
+static void cmp_host_reset(struct hpsb_host *host);
+static int pcr_read(struct hpsb_host *host, int nodeid, quadlet_t *buf,
+		    u64 addr, size_t length, u16 flags);
+static int pcr_lock(struct hpsb_host *host, int nodeid, quadlet_t *store,
+		    u64 addr, quadlet_t data, quadlet_t arg, int extcode, u16 flags);
+
+static struct hpsb_highlevel cmp_highlevel = {
+	.name =		"cmp",
+	.add_host =	cmp_add_host,
+	.host_reset =	cmp_host_reset,
+};
+
+static struct hpsb_address_ops pcr_ops = {
+	.read =	pcr_read,
+	.lock =	pcr_lock,
+};
+
+
 struct cmp_pcr *
 cmp_register_opcr(struct hpsb_host *host, int opcr_number, int payload,
 		  void (*update)(struct cmp_pcr *pcr, void *data),
@@ -137,6 +156,10 @@ static void cmp_add_host(struct hpsb_host *host)
 		return;
 	}
 
+	hpsb_register_addrspace(&cmp_highlevel, host, &pcr_ops,
+				CSR_REGISTER_BASE + CSR_PCR_MAP,
+				CSR_REGISTER_BASE + CSR_PCR_MAP_END);
+
 	ch->host = host;
 	ch->u.ompr.rate = IEEE1394_SPEED_100;
 	ch->u.ompr.bcast_channel_base = 63;
@@ -164,14 +187,14 @@ static int pcr_read(struct hpsb_host *host, int nodeid, quadlet_t *buf,
 	int csraddr = addr - CSR_REGISTER_BASE;
 	int plug;
 	struct cmp_host *ch;
-	
+
 	if (length != 4)
 		return RCODE_TYPE_ERROR;
 
 	ch = hpsb_get_hostinfo(&cmp_highlevel, host);
 	if (csraddr == 0x900) {
 		*buf = cpu_to_be32(ch->u.ompr_quadlet);
-		return RCODE_COMPLETE;   
+		return RCODE_COMPLETE;
 	}
 	else if (csraddr < 0x904 + ch->u.ompr.nplugs * 4) {
 		plug = (csraddr - 0x904) / 4;
@@ -183,7 +206,7 @@ static int pcr_read(struct hpsb_host *host, int nodeid, quadlet_t *buf,
 	}
 	else if (csraddr == 0x980) {
 		*buf = cpu_to_be32(ch->v.impr_quadlet);
-		return RCODE_COMPLETE;   
+		return RCODE_COMPLETE;
 	}
 	else if (csraddr < 0x984 + ch->v.impr.nplugs * 4) {
 		plug = (csraddr - 0x984) / 4;
@@ -202,10 +225,10 @@ static int pcr_lock(struct hpsb_host *host, int nodeid, quadlet_t *store,
 	struct cmp_host *ch;
 
 	ch = hpsb_get_hostinfo(&cmp_highlevel, host);
-	
-	if (extcode != EXTCODE_COMPARE_SWAP) 
+
+	if (extcode != EXTCODE_COMPARE_SWAP)
 		return RCODE_TYPE_ERROR;
-	
+
 	if (csraddr == 0x900) {
 		/* FIXME: Ignore writes to bits 30-31 and 0-7 */
 		*store = cpu_to_be32(ch->u.ompr_quadlet);
@@ -258,17 +281,6 @@ static int pcr_lock(struct hpsb_host *host, int nodeid, quadlet_t *store,
 }
 
 
-static struct hpsb_highlevel cmp_highlevel = {
-	.name =		"cmp",
-	.add_host =	cmp_add_host,
-        .host_reset =	cmp_host_reset,
-};
-
-static struct hpsb_address_ops pcr_ops = {
-	.read =	pcr_read,
-        .lock =	pcr_lock,
-};
-
 /* Module interface */
 
 MODULE_AUTHOR("Kristian Hogsberg <hogsberg@users.sf.net>");
@@ -282,10 +294,6 @@ EXPORT_SYMBOL(cmp_unregister_opcr);
 static int __init cmp_init_module (void)
 {
 	hpsb_register_highlevel (&cmp_highlevel);
-
-	hpsb_register_addrspace(&cmp_highlevel, &pcr_ops,
-				CSR_REGISTER_BASE + CSR_PCR_MAP,
-				CSR_REGISTER_BASE + CSR_PCR_MAP_END);
 
 	HPSB_INFO("Loaded CMP driver");
 

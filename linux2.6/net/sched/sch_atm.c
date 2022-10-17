@@ -5,6 +5,7 @@
 
 #include <linux/config.h>
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/skbuff.h>
@@ -55,7 +56,7 @@ extern struct socket *sockfd_lookup(int fd, int *err); /* @@@ fix this */
  */
 
 
-#define PRIV(sch) ((struct atm_qdisc_data *) (sch)->data)
+#define PRIV(sch) qdisc_priv(sch)
 #define VCC2FLOW(vcc) ((struct atm_flow_data *) ((vcc)->user_back))
 
 
@@ -68,7 +69,9 @@ struct atm_flow_data {
 	struct socket		*sock;		/* for closing */
 	u32			classid;	/* x:y type ID */
 	int			ref;		/* reference count */
-	struct tc_stats		stats;
+	struct gnet_stats_basic	bstats;
+	struct gnet_stats_queue	qstats;
+	spinlock_t		*stats_lock;
 	struct atm_flow_data	*next;
 	struct atm_flow_data	*excess;	/* flow for excess traffic;
 						   NULL to set CLP instead */
@@ -102,9 +105,10 @@ static int find_flow(struct atm_qdisc_data *qdisc,struct atm_flow_data *flow)
 static __inline__ struct atm_flow_data *lookup_flow(struct Qdisc *sch,
     u32 classid)
 {
+	struct atm_qdisc_data *p = PRIV(sch);
 	struct atm_flow_data *flow;
 
-        for (flow = PRIV(sch)->flows; flow; flow = flow->next)
+        for (flow = p->flows; flow; flow = flow->next)
 		if (flow->classid == classid) break;
 	return flow;
 }
@@ -162,7 +166,7 @@ static void destroy_filters(struct atm_flow_data *flow)
 	while ((filter = flow->filter_list)) {
 		DPRINTK("destroy_filters: destroying filter %p\n",filter);
 		flow->filter_list = filter->next;
-		filter->ops->destroy(filter);
+		tcf_destroy(filter);
 	}
 }
 
@@ -251,8 +255,8 @@ static int atm_tc_change(struct Qdisc *sch, u32 classid, u32 parent,
 	 * later.)
 	 */
 	if (flow) return -EBUSY;
-	if (opt == NULL || rtattr_parse(tb,TCA_ATM_MAX,RTA_DATA(opt),
-	    RTA_PAYLOAD(opt))) return -EINVAL;
+	if (opt == NULL || rtattr_parse_nested(tb, TCA_ATM_MAX, opt))
+		return -EINVAL;
 	if (!tb[TCA_ATM_FD-1] || RTA_PAYLOAD(tb[TCA_ATM_FD-1]) < sizeof(fd))
 		return -EINVAL;
 	fd = *(int *) RTA_DATA(tb[TCA_ATM_FD-1]);
@@ -446,14 +450,14 @@ static int atm_tc_enqueue(struct sk_buff *skb,struct Qdisc *sch)
 	    result == TC_POLICE_SHOT ||
 #endif
 	    (ret = flow->q->enqueue(skb,flow->q)) != 0) {
-		sch->stats.drops++;
-		if (flow) flow->stats.drops++;
+		sch->qstats.drops++;
+		if (flow) flow->qstats.drops++;
 		return ret;
 	}
-	sch->stats.bytes += skb->len;
-	sch->stats.packets++;
-	flow->stats.bytes += skb->len;
-	flow->stats.packets++;
+	sch->bstats.bytes += skb->len;
+	sch->bstats.packets++;
+	flow->bstats.bytes += skb->len;
+	flow->bstats.packets++;
 	/*
 	 * Okay, this may seem weird. We pretend we've dropped the packet if
 	 * it goes via ATM. The reason for this is that the outer qdisc
@@ -542,10 +546,12 @@ static int atm_tc_requeue(struct sk_buff *skb,struct Qdisc *sch)
 
 	D2PRINTK("atm_tc_requeue(skb %p,sch %p,[qdisc %p])\n",skb,sch,p);
 	ret = p->link.q->ops->requeue(skb,p->link.q);
-	if (!ret) sch->q.qlen++;
-	else {
-		sch->stats.drops++;
-		p->link.stats.drops++;
+	if (!ret) {
+        sch->q.qlen++;
+        sch->qstats.requeues++;
+    } else {
+		sch->qstats.drops++;
+		p->link.qstats.drops++;
 	}
 	return ret;
 }
@@ -570,7 +576,6 @@ static int atm_tc_init(struct Qdisc *sch,struct rtattr *opt)
 	struct atm_qdisc_data *p = PRIV(sch);
 
 	DPRINTK("atm_tc_init(sch %p,[qdisc %p],opt %p)\n",sch,p,opt);
-	memset(p,0,sizeof(*p));
 	p->flows = &p->link;
 	if(!(p->link.q = qdisc_create_dflt(sch->dev,&pfifo_qdisc_ops)))
 		p->link.q = &noop_qdisc;
@@ -662,6 +667,20 @@ rtattr_failure:
 	skb_trim(skb,b-skb->data);
 	return -1;
 }
+static int
+atm_tc_dump_class_stats(struct Qdisc *sch, unsigned long arg,
+	struct gnet_dump *d)
+{
+	struct atm_flow_data *flow = (struct atm_flow_data *) arg;
+
+	flow->qstats.qlen = flow->q->q.qlen;
+
+	if (gnet_stats_copy_basic(d, &flow->bstats) < 0 ||
+	    gnet_stats_copy_queue(d, &flow->qstats) < 0)
+		return -1;
+
+	return 0;
+}
 
 static int atm_tc_dump(struct Qdisc *sch, struct sk_buff *skb)
 {
@@ -680,9 +699,10 @@ static struct Qdisc_class_ops atm_class_ops = {
 	.bind_tcf	=	atm_tc_bind_filter,
 	.unbind_tcf	=	atm_tc_put,
 	.dump		=	atm_tc_dump_class,
+	.dump_stats	=	atm_tc_dump_class_stats,
 };
 
-struct Qdisc_ops atm_qdisc_ops = {
+static struct Qdisc_ops atm_qdisc_ops = {
 	.next		=	NULL,
 	.cl_ops		=	&atm_class_ops,
 	.id		=	"atm",
@@ -700,15 +720,16 @@ struct Qdisc_ops atm_qdisc_ops = {
 };
 
 
-#ifdef MODULE
-int init_module(void)
+static int __init atm_init(void)
 {
 	return register_qdisc(&atm_qdisc_ops);
 }
 
-
-void cleanup_module(void) 
+static void __exit atm_exit(void) 
 {
 	unregister_qdisc(&atm_qdisc_ops);
 }
-#endif
+
+module_init(atm_init)
+module_exit(atm_exit)
+MODULE_LICENSE("GPL");

@@ -12,19 +12,34 @@
 
 #include <linux/config.h>
 
-#define PXA_IRQ_SKIP	7	/* The first 7 IRQs are not yet used */
+#ifdef CONFIG_PXA27x
+#define PXA_IRQ_SKIP	0
+#else
+#define PXA_IRQ_SKIP	7
+#endif
+
 #define PXA_IRQ(x)	((x) - PXA_IRQ_SKIP)
 
-#define IRQ_HWUART	PXA_IRQ(7)	/* HWUART Transmit/Receive/Error */
+#define IRQ_SSP3	PXA_IRQ(0)	/* SSP3 service request */
+#define IRQ_MSL		PXA_IRQ(1)	/* MSL Interface interrupt */
+#define IRQ_USBH2	PXA_IRQ(2)	/* USB Host interrupt 1 (OHCI) */
+#define IRQ_USBH1	PXA_IRQ(3)	/* USB Host interrupt 2 (non-OHCI) */
+#define IRQ_KEYPAD	PXA_IRQ(4)	/* Key pad controller */
+#define IRQ_MEMSTK	PXA_IRQ(5)	/* Memory Stick interrupt */
+#define IRQ_PWRI2C	PXA_IRQ(6)	/* Power I2C interrupt */
+#define IRQ_HWUART	PXA_IRQ(7)	/* HWUART Transmit/Receive/Error (PXA26x) */
+#define IRQ_OST_4_11	PXA_IRQ(7)	/* OS timer 4-11 matches (PXA27x) */
 #define	IRQ_GPIO0	PXA_IRQ(8)	/* GPIO0 Edge Detect */
 #define	IRQ_GPIO1	PXA_IRQ(9)	/* GPIO1 Edge Detect */
-#define	IRQ_GPIO_2_80	PXA_IRQ(10)	/* GPIO[2-80] Edge Detect */
+#define	IRQ_GPIO_2_x	PXA_IRQ(10)	/* GPIO[2-x] Edge Detect */
 #define	IRQ_USB		PXA_IRQ(11)	/* USB Service */
 #define	IRQ_PMU		PXA_IRQ(12)	/* Performance Monitoring Unit */
 #define	IRQ_I2S		PXA_IRQ(13)	/* I2S Interrupt */
 #define	IRQ_AC97	PXA_IRQ(14)	/* AC97 Interrupt */
-#define IRQ_ASSP	PXA_IRQ(15)	/* Audio SSP Service Request */
-#define IRQ_NSSP	PXA_IRQ(16)	/* Network SSP Service Request */
+#define IRQ_ASSP	PXA_IRQ(15)	/* Audio SSP Service Request (PXA25x) */
+#define IRQ_USIM	PXA_IRQ(15)     /* Smart Card interface interrupt (PXA27x) */
+#define IRQ_NSSP	PXA_IRQ(16)	/* Network SSP Service Request (PXA25x) */
+#define IRQ_SSP2	PXA_IRQ(16)	/* SSP2 interrupt (PXA27x) */
 #define	IRQ_LCD		PXA_IRQ(17)	/* LCD Controller Service Request */
 #define	IRQ_I2C		PXA_IRQ(18)	/* I2C Service Request */
 #define	IRQ_ICP		PXA_IRQ(19)	/* ICP Transmit/Receive/Error */
@@ -41,13 +56,28 @@
 #define	IRQ_RTC1Hz	PXA_IRQ(30)	/* RTC HZ Clock Tick */
 #define	IRQ_RTCAlrm	PXA_IRQ(31)	/* RTC Alarm */
 
-#define GPIO_2_80_TO_IRQ(x)	\
-			PXA_IRQ((x) - 2 + 32)
-#define IRQ_GPIO(x)	(((x) < 2) ? (IRQ_GPIO0 + (x)) : GPIO_2_80_TO_IRQ(x))
+#ifdef CONFIG_PXA27x
+#define IRQ_TPM		PXA_IRQ(32)	/* TPM interrupt */
+#define IRQ_CAMERA	PXA_IRQ(33)	/* Camera Interface */
 
-#define IRQ_TO_GPIO_2_80(i)	\
-			((i) - PXA_IRQ(32) + 2)
-#define IRQ_TO_GPIO(i)	((i) - (((i) > IRQ_GPIO1) ? IRQ_GPIO(2) - 2 : IRQ_GPIO(0)))
+#define PXA_INTERNAL_IRQS 34
+#else
+#define PXA_INTERNAL_IRQS 32
+#endif
+
+#define GPIO_2_x_TO_IRQ(x)	\
+			PXA_IRQ((x) - 2 + PXA_INTERNAL_IRQS)
+#define IRQ_GPIO(x)	(((x) < 2) ? (IRQ_GPIO0 + (x)) : GPIO_2_x_TO_IRQ(x))
+
+#define IRQ_TO_GPIO_2_x(i)	\
+			((i) - IRQ_GPIO(2) + 2)
+#define IRQ_TO_GPIO(i)	(((i) < IRQ_GPIO(2)) ? ((i) - IRQ_GPIO0) : IRQ_TO_GPIO_2_x(i))
+
+#if defined(CONFIG_PXA25x)
+#define PXA_LAST_GPIO	80
+#elif defined(CONFIG_PXA27x)
+#define PXA_LAST_GPIO	127
+#endif
 
 /*
  * The next 16 interrupts are for board specific purposes.  Since
@@ -55,7 +85,7 @@
  * these.  If you need more, increase IRQ_BOARD_END, but keep it
  * within sensible limits.
  */
-#define IRQ_BOARD_START		(IRQ_GPIO(80) + 1)
+#define IRQ_BOARD_START		(IRQ_GPIO(PXA_LAST_GPIO) + 1)
 #define IRQ_BOARD_END		(IRQ_BOARD_START + 16)
 
 #define IRQ_SA1111_START	(IRQ_BOARD_END)
@@ -118,7 +148,8 @@
  */
 #ifdef CONFIG_SA1111
 #define NR_IRQS			(IRQ_S1_BVD1_STSCHG + 1)
-#elif defined(CONFIG_ARCH_LUBBOCK)
+#elif defined(CONFIG_ARCH_LUBBOCK) || \
+      defined(CONFIG_MACH_MAINSTONE)
 #define NR_IRQS			(IRQ_BOARD_END)
 #else
 #define NR_IRQS			(IRQ_BOARD_START)
@@ -137,4 +168,20 @@
 #define LUBBOCK_BB_IRQ		LUBBOCK_IRQ(5)
 #define LUBBOCK_USB_DISC_IRQ	LUBBOCK_IRQ(6)  /* usb disconnect */
 #define LUBBOCK_LAST_IRQ	LUBBOCK_IRQ(6)
+
+#define MAINSTONE_IRQ(x)	(IRQ_BOARD_START + (x))
+#define MAINSTONE_MMC_IRQ	MAINSTONE_IRQ(0)
+#define MAINSTONE_USIM_IRQ	MAINSTONE_IRQ(1)
+#define MAINSTONE_USBC_IRQ	MAINSTONE_IRQ(2)
+#define MAINSTONE_ETHERNET_IRQ	MAINSTONE_IRQ(3)
+#define MAINSTONE_AC97_IRQ	MAINSTONE_IRQ(4)
+#define MAINSTONE_PEN_IRQ	MAINSTONE_IRQ(5)
+#define MAINSTONE_MSINS_IRQ	MAINSTONE_IRQ(6)
+#define MAINSTONE_EXBRD_IRQ	MAINSTONE_IRQ(7)
+#define MAINSTONE_S0_CD_IRQ	MAINSTONE_IRQ(9)
+#define MAINSTONE_S0_STSCHG_IRQ	MAINSTONE_IRQ(10)
+#define MAINSTONE_S0_IRQ	MAINSTONE_IRQ(11)
+#define MAINSTONE_S1_CD_IRQ	MAINSTONE_IRQ(13)
+#define MAINSTONE_S1_STSCHG_IRQ	MAINSTONE_IRQ(14)
+#define MAINSTONE_S1_IRQ	MAINSTONE_IRQ(15)
 

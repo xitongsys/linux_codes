@@ -67,13 +67,7 @@
 MODULE_DESCRIPTION("fmvj18x and compatible PCMCIA ethernet driver");
 MODULE_LICENSE("GPL");
 
-#define INT_MODULE_PARM(n, v) static int n = v; MODULE_PARM(n, "i")
-
-/* Bit map of interrupts to choose from */
-/* This means pick from 15, 14, 12, 11, 10, 9, 7, 5, 4, and 3 */
-INT_MODULE_PARM(irq_mask, 0xdeb8);
-static int irq_list[4] = { -1 };
-MODULE_PARM(irq_list, "1-4i");
+#define INT_MODULE_PARM(n, v) static int n = v; module_param(n, int, 0)
 
 /* SRAM configuration */
 /* 0:4KB*2 TX buffer   else:8KB*2 TX buffer */
@@ -248,7 +242,7 @@ static dev_link_t *fmvj18x_attach(void)
     dev_link_t *link;
     struct net_device *dev;
     client_reg_t client_reg;
-    int i, ret;
+    int ret;
     
     DEBUG(0, "fmvj18x_attach()\n");
 
@@ -256,7 +250,7 @@ static dev_link_t *fmvj18x_attach(void)
     dev = alloc_etherdev(sizeof(local_info_t));
     if (!dev)
 	return NULL;
-    lp = dev->priv;
+    lp = netdev_priv(dev);
     link = &lp->link;
     link->priv = dev;
 
@@ -267,12 +261,7 @@ static dev_link_t *fmvj18x_attach(void)
 
     /* Interrupt setup */
     link->irq.Attributes = IRQ_TYPE_EXCLUSIVE | IRQ_HANDLE_PRESENT;
-    link->irq.IRQInfo1 = IRQ_INFO2_VALID|IRQ_LEVEL_ID;
-    if (irq_list[0] == -1)
-	link->irq.IRQInfo2 = irq_mask;
-    else
-	for (i = 0; i < 4; i++)
-	    link->irq.IRQInfo2 |= 1 << irq_list[i];
+    link->irq.IRQInfo1 = IRQ_LEVEL_ID;
     link->irq.Handler = &fjn_interrupt;
     link->irq.Instance = dev;
     
@@ -299,7 +288,6 @@ static dev_link_t *fmvj18x_attach(void)
     link->next = dev_list;
     dev_list = link;
     client_reg.dev_info = &dev_info;
-    client_reg.Attributes = INFO_IO_CLIENT | INFO_CARD_SHARE;
     client_reg.EventMask =
 	CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL |
 	CS_EVENT_RESET_PHYSICAL | CS_EVENT_CARD_RESET |
@@ -307,7 +295,7 @@ static dev_link_t *fmvj18x_attach(void)
     client_reg.event_handler = &fmvj18x_event;
     client_reg.Version = 0x0210;
     client_reg.event_callback_args.client_data = link;
-    ret = CardServices(RegisterClient, &link->handle, &client_reg);
+    ret = pcmcia_register_client(&link->handle, &client_reg);
     if (ret != 0) {
 	cs_error(link->handle, RegisterClient, ret);
 	fmvj18x_detach(link);
@@ -332,35 +320,30 @@ static void fmvj18x_detach(dev_link_t *link)
     if (*linkp == NULL)
 	return;
 
-    if (link->state & DEV_CONFIG) {
+    if (link->dev)
+	unregister_netdev(dev);
+
+    if (link->state & DEV_CONFIG)
 	fmvj18x_release(link);
-	if (link->state & DEV_STALE_CONFIG)
-	    return;
-    }
 
     /* Break the link with Card Services */
     if (link->handle)
-	CardServices(DeregisterClient, link->handle);
+	pcmcia_deregister_client(link->handle);
     
     /* Unlink device structure, free pieces */
     *linkp = link->next;
-    if (link->dev) {
-	unregister_netdev(dev);
-	free_netdev(dev);
-    } else
-    	kfree(dev);
-    
+    free_netdev(dev);
 } /* fmvj18x_detach */
 
 /*====================================================================*/
 
-#define CS_CHECK(fn, args...) \
-while ((last_ret=CardServices(last_fn=(fn), args))!=0) goto cs_failed
+#define CS_CHECK(fn, ret) \
+do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
 
 static int mfc_try_io_port(dev_link_t *link)
 {
     int i, ret;
-    static ioaddr_t serial_base[5] = { 0x3f8, 0x2f8, 0x3e8, 0x2e8, 0x0 };
+    static kio_addr_t serial_base[5] = { 0x3f8, 0x2f8, 0x3e8, 0x2e8, 0x0 };
 
     for (i = 0; i < 5; i++) {
 	link->io.BasePort2 = serial_base[i];
@@ -369,7 +352,7 @@ static int mfc_try_io_port(dev_link_t *link)
 	    link->io.NumPorts2 = 0;
 	    printk(KERN_NOTICE "fmvj18x_cs: out of resource for serial\n");
 	}
-	ret = CardServices(RequestIO, link->handle, &link->io);
+	ret = pcmcia_request_io(link->handle, &link->io);
 	if (ret == CS_SUCCESS) return ret;
     }
     return ret;
@@ -378,14 +361,14 @@ static int mfc_try_io_port(dev_link_t *link)
 static int ungermann_try_io_port(dev_link_t *link)
 {
     int ret;
-    ioaddr_t ioaddr;
+    kio_addr_t ioaddr;
     /*
 	Ungermann-Bass Access/CARD accepts 0x300,0x320,0x340,0x360
 	0x380,0x3c0 only for ioport.
     */
     for (ioaddr = 0x300; ioaddr < 0x3e0; ioaddr += 0x20) {
 	link->io.BasePort1 = ioaddr;
-	ret = CardServices(RequestIO, link->handle, &link->io);
+	ret = pcmcia_request_io(link->handle, &link->io);
 	if (ret == CS_SUCCESS) {
 	    /* calculate ConfigIndex value */
 	    link->conf.ConfigIndex = 
@@ -400,12 +383,12 @@ static void fmvj18x_config(dev_link_t *link)
 {
     client_handle_t handle = link->handle;
     struct net_device *dev = link->priv;
-    local_info_t *lp = dev->priv;
+    local_info_t *lp = netdev_priv(dev);
     tuple_t tuple;
     cisparse_t parse;
     u_short buf[32];
     int i, last_fn, last_ret, ret;
-    ioaddr_t ioaddr;
+    kio_addr_t ioaddr;
     cardtype_t cardtype;
     char *card_name = "unknown";
     u_char *node_id;
@@ -417,12 +400,12 @@ static void fmvj18x_config(dev_link_t *link)
        registers.
     */
     tuple.DesiredTuple = CISTPL_CONFIG;
-    CS_CHECK(GetFirstTuple, handle, &tuple);
+    CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
     tuple.TupleData = (u_char *)buf;
     tuple.TupleDataMax = 64;
     tuple.TupleOffset = 0;
-    CS_CHECK(GetTupleData, handle, &tuple);
-    CS_CHECK(ParseTuple, handle, &tuple, &parse);
+    CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
+    CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
     
     /* Configure card */
     link->state |= DEV_CONFIG;
@@ -432,16 +415,16 @@ static void fmvj18x_config(dev_link_t *link)
 
     tuple.DesiredTuple = CISTPL_FUNCE;
     tuple.TupleOffset = 0;
-    if (CardServices(GetFirstTuple, handle, &tuple) == CS_SUCCESS) {
+    if (pcmcia_get_first_tuple(handle, &tuple) == CS_SUCCESS) {
 	/* Yes, I have CISTPL_FUNCE. Let's check CISTPL_MANFID */
 	tuple.DesiredTuple = CISTPL_CFTABLE_ENTRY;
-	CS_CHECK(GetFirstTuple, handle, &tuple);
-	CS_CHECK(GetTupleData, handle, &tuple);
-	CS_CHECK(ParseTuple, handle, &tuple, &parse);
+	CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
+	CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
+	CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
 	link->conf.ConfigIndex = parse.cftable_entry.index;
 	tuple.DesiredTuple = CISTPL_MANFID;
-	if (CardServices(GetFirstTuple, handle, &tuple) == CS_SUCCESS)
-	    CS_CHECK(GetTupleData, handle, &tuple);
+	if (pcmcia_get_first_tuple(handle, &tuple) == CS_SUCCESS)
+	    CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
 	else
 	    buf[0] = 0xffff;
 	switch (le16_to_cpu(buf[0])) {
@@ -449,7 +432,7 @@ static void fmvj18x_config(dev_link_t *link)
 	    cardtype = TDK;
 	    if (le16_to_cpu(buf[1]) == PRODID_TDK_CF010) {
 		cs_status_t status;
-		CardServices(GetStatus, handle, &status);
+		pcmcia_get_status(handle, &status);
 		if (status.CardState & CS_EVENT_3VCARD)
 		    link->conf.Vcc = 33; /* inserted in 3.3V slot */
 	    } else if (le16_to_cpu(buf[1]) == PRODID_TDK_GN3410) {
@@ -478,8 +461,8 @@ static void fmvj18x_config(dev_link_t *link)
     } else {
 	/* old type card */
 	tuple.DesiredTuple = CISTPL_MANFID;
-	if (CardServices(GetFirstTuple, handle, &tuple) == CS_SUCCESS)
-	    CS_CHECK(GetTupleData, handle, &tuple);
+	if (pcmcia_get_first_tuple(handle, &tuple) == CS_SUCCESS)
+	    CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
 	else
 	    buf[0] = 0xffff;
 	switch (le16_to_cpu(buf[0])) {
@@ -510,16 +493,12 @@ static void fmvj18x_config(dev_link_t *link)
 	ret = ungermann_try_io_port(link);
 	if (ret != CS_SUCCESS) goto cs_failed;
     } else { 
-	CS_CHECK(RequestIO, link->handle, &link->io);
+	CS_CHECK(RequestIO, pcmcia_request_io(link->handle, &link->io));
     }
-    CS_CHECK(RequestIRQ, link->handle, &link->irq);
-    CS_CHECK(RequestConfiguration, link->handle, &link->conf);
+    CS_CHECK(RequestIRQ, pcmcia_request_irq(link->handle, &link->irq));
+    CS_CHECK(RequestConfiguration, pcmcia_request_configuration(link->handle, &link->conf));
     dev->irq = link->irq.AssignedIRQ;
     dev->base_addr = link->io.BasePort1;
-    if (register_netdev(dev) != 0) {
-	printk(KERN_NOTICE "fmvj18x_cs: register_netdev() failed\n");
-	goto failed;
-    }
 
     if (link->io.BasePort2 != 0)
 	fmvj18x_setup_mfc(link);
@@ -546,17 +525,17 @@ static void fmvj18x_config(dev_link_t *link)
     case CONTEC:
 	tuple.DesiredTuple = CISTPL_FUNCE;
 	tuple.TupleOffset = 0;
-	CS_CHECK(GetFirstTuple, handle, &tuple);
+	CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
 	tuple.TupleOffset = 0;
-	CS_CHECK(GetTupleData, handle, &tuple);
+	CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
 	if (cardtype == MBH10304) {
 	    /* MBH10304's CIS_FUNCE is corrupted */
 	    node_id = &(tuple.TupleData[5]);
 	    card_name = "FMV-J182";
 	} else {
 	    while (tuple.TupleData[0] != CISTPL_FUNCE_LAN_NODE_ID ) {
-		CS_CHECK(GetNextTuple, handle, &tuple) ;
-		CS_CHECK(GetTupleData, handle, &tuple) ;
+		CS_CHECK(GetNextTuple, pcmcia_get_next_tuple(handle, &tuple));
+		CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
 	    }
 	    node_id = &(tuple.TupleData[2]);
 	    if( cardtype == TDK ) {
@@ -581,7 +560,6 @@ static void fmvj18x_config(dev_link_t *link)
 	/* Read MACID from Buggy CIS */
 	if (fmvj18x_get_hwinfo(link, tuple.TupleData) == -1) {
 	    printk(KERN_NOTICE "fmvj18x_cs: unable to read hardware net address.\n");
-	    unregister_netdev(dev);
 	    goto failed;
 	}
 	for (i = 0 ; i < 6; i++) {
@@ -598,10 +576,19 @@ static void fmvj18x_config(dev_link_t *link)
 	break;
     }
 
-    strcpy(lp->node.dev_name, dev->name);
-    link->dev = &lp->node;
-
     lp->cardtype = cardtype;
+    link->dev = &lp->node;
+    link->state &= ~DEV_CONFIG_PENDING;
+    SET_NETDEV_DEV(dev, &handle_to_dev(handle));
+
+    if (register_netdev(dev) != 0) {
+	printk(KERN_NOTICE "fmvj18x_cs: register_netdev() failed\n");
+	link->dev = NULL;
+	goto failed;
+    }
+
+    strcpy(lp->node.dev_name, dev->name);
+
     /* print current configuration */
     printk(KERN_INFO "%s: %s, sram %s, port %#3lx, irq %d, hw_addr ", 
 	   dev->name, card_name, sram_config == 0 ? "4K TX*2" : "8K TX*2", 
@@ -609,7 +596,6 @@ static void fmvj18x_config(dev_link_t *link)
     for (i = 0; i < 6; i++)
 	printk("%02X%s", dev->dev_addr[i], ((i<5) ? ":" : "\n"));
 
-    link->state &= ~DEV_CONFIG_PENDING;
     return;
     
 cs_failed:
@@ -626,15 +612,14 @@ static int fmvj18x_get_hwinfo(dev_link_t *link, u_char *node_id)
 {
     win_req_t req;
     memreq_t mem;
-    u_char *base;
+    u_char __iomem *base;
     int i, j;
 
     /* Allocate a small memory window */
     req.Attributes = WIN_DATA_WIDTH_8|WIN_MEMORY_TYPE_AM|WIN_ENABLE;
     req.Base = 0; req.Size = 0;
     req.AccessSpeed = 0;
-    link->win = (window_handle_t)link->handle;
-    i = CardServices(RequestWindow, &link->win, &req);
+    i = pcmcia_request_window(&link->handle, &req, &link->win);
     if (i != CS_SUCCESS) {
 	cs_error(link->handle, RequestWindow, i);
 	return -1;
@@ -643,7 +628,7 @@ static int fmvj18x_get_hwinfo(dev_link_t *link, u_char *node_id)
     base = ioremap(req.Base, req.Size);
     mem.Page = 0;
     mem.CardOffset = 0;
-    CardServices(MapMemPage, link->win, &mem);
+    pcmcia_map_mem_page(link->win, &mem);
 
     /*
      *  MBH10304 CISTPL_FUNCE_LAN_NODE_ID format
@@ -668,7 +653,7 @@ static int fmvj18x_get_hwinfo(dev_link_t *link, u_char *node_id)
     }
 
     iounmap(base);
-    j = CardServices(ReleaseWindow, link->win);
+    j = pcmcia_release_window(link->win);
     if (j != CS_SUCCESS)
 	cs_error(link->handle, ReleaseWindow, j);
     return (i != 0x200) ? 0 : -1;
@@ -680,17 +665,16 @@ static int fmvj18x_setup_mfc(dev_link_t *link)
 {
     win_req_t req;
     memreq_t mem;
-    u_char *base;
+    u_char __iomem *base;
     int i, j;
     struct net_device *dev = link->priv;
-    ioaddr_t ioaddr;
+    kio_addr_t ioaddr;
 
     /* Allocate a small memory window */
     req.Attributes = WIN_DATA_WIDTH_8|WIN_MEMORY_TYPE_AM|WIN_ENABLE;
     req.Base = 0; req.Size = 0;
     req.AccessSpeed = 0;
-    link->win = (window_handle_t)link->handle;
-    i = CardServices(RequestWindow, &link->win, &req);
+    i = pcmcia_request_window(&link->handle, &req, &link->win);
     if (i != CS_SUCCESS) {
 	cs_error(link->handle, RequestWindow, i);
 	return -1;
@@ -699,7 +683,7 @@ static int fmvj18x_setup_mfc(dev_link_t *link)
     base = ioremap(req.Base, req.Size);
     mem.Page = 0;
     mem.CardOffset = 0;
-    CardServices(MapMemPage, link->win, &mem);
+    pcmcia_map_mem_page(link->win, &mem);
 
     ioaddr = dev->base_addr;
     writeb(0x47, base+0x800);	/* Config Option Register of LAN */
@@ -712,7 +696,7 @@ static int fmvj18x_setup_mfc(dev_link_t *link)
     writeb(0x8, base+0x822);	/* Config and Status Register */
 
     iounmap(base);
-    j = CardServices(ReleaseWindow, link->win);
+    j = pcmcia_release_window(link->win);
     if (j != CS_SUCCESS)
 	cs_error(link->handle, ReleaseWindow, j);
     return 0;
@@ -725,27 +709,13 @@ static void fmvj18x_release(dev_link_t *link)
 
     DEBUG(0, "fmvj18x_release(0x%p)\n", link);
 
-    /*
-       If the device is currently in use, we won't release until it
-       is actually closed.
-    */
-    if (link->open) {
-	DEBUG(1, "fmvj18x_cs: release postponed, '%s' "
-	      "still open\n", link->dev->dev_name);
-	link->state |= DEV_STALE_CONFIG;
-	return;
-    }
-
     /* Don't bother checking to see if these succeed or not */
-    CardServices(ReleaseWindow, link->win);
-    CardServices(ReleaseConfiguration, link->handle);
-    CardServices(ReleaseIO, link->handle, &link->io);
-    CardServices(ReleaseIRQ, link->handle, &link->irq);
+    pcmcia_release_window(link->win);
+    pcmcia_release_configuration(link->handle);
+    pcmcia_release_io(link->handle, &link->io);
+    pcmcia_release_irq(link->handle, &link->irq);
     
     link->state &= ~DEV_CONFIG;
-
-    if (link->state & DEV_STALE_CONFIG)
-	    fmvj18x_detach(link);
 }
 
 /*====================================================================*/
@@ -761,10 +731,8 @@ static int fmvj18x_event(event_t event, int priority,
     switch (event) {
     case CS_EVENT_CARD_REMOVAL:
 	link->state &= ~DEV_PRESENT;
-	if (link->state & DEV_CONFIG) {
+	if (link->state & DEV_CONFIG)
 	    netif_device_detach(dev);
-	    fmvj18x_release(link);
-	}
 	break;
     case CS_EVENT_CARD_INSERTION:
 	link->state |= DEV_PRESENT | DEV_CONFIG_PENDING;
@@ -777,7 +745,7 @@ static int fmvj18x_event(event_t event, int priority,
 	if (link->state & DEV_CONFIG) {
 	    if (link->open)
 		netif_device_detach(dev);
-	    CardServices(ReleaseConfiguration, link->handle);
+	    pcmcia_release_configuration(link->handle);
 	}
 	break;
     case CS_EVENT_PM_RESUME:
@@ -785,7 +753,7 @@ static int fmvj18x_event(event_t event, int priority,
 	/* Fall through... */
     case CS_EVENT_CARD_RESET:
 	if (link->state & DEV_CONFIG) {
-	    CardServices(RequestConfiguration, link->handle, &link->conf);
+	    pcmcia_request_configuration(link->handle, &link->conf);
 	    if (link->open) {
 		fjn_reset(dev);
 		netif_device_attach(dev);
@@ -813,8 +781,7 @@ static int __init init_fmvj18x_cs(void)
 static void __exit exit_fmvj18x_cs(void)
 {
 	pcmcia_unregister_driver(&fmvj18x_cs_driver);
-	while (dev_list != NULL)
-		fmvj18x_detach(dev_list);
+	BUG_ON(dev_list != NULL);
 }
 
 module_init(init_fmvj18x_cs);
@@ -825,8 +792,8 @@ module_exit(exit_fmvj18x_cs);
 static irqreturn_t fjn_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
     struct net_device *dev = dev_id;
-    local_info_t *lp = dev->priv;
-    ioaddr_t ioaddr;
+    local_info_t *lp = netdev_priv(dev);
+    kio_addr_t ioaddr;
     unsigned short tx_stat, rx_stat;
 
     if (lp == NULL) {
@@ -884,8 +851,8 @@ static irqreturn_t fjn_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 static void fjn_tx_timeout(struct net_device *dev)
 {
-    struct local_info_t *lp = (struct local_info_t *)dev->priv;
-    ioaddr_t ioaddr = dev->base_addr;
+    struct local_info_t *lp = netdev_priv(dev);
+    kio_addr_t ioaddr = dev->base_addr;
 
     printk(KERN_NOTICE "%s: transmit timed out with status %04x, %s?\n",
 	   dev->name, htons(inw(ioaddr + TX_STATUS)),
@@ -914,8 +881,8 @@ static void fjn_tx_timeout(struct net_device *dev)
 
 static int fjn_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-    struct local_info_t *lp = (struct local_info_t *)dev->priv;
-    ioaddr_t ioaddr = dev->base_addr;
+    struct local_info_t *lp = netdev_priv(dev);
+    kio_addr_t ioaddr = dev->base_addr;
     short length = skb->len;
     
     if (length < ETH_ZLEN)
@@ -988,8 +955,8 @@ static int fjn_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 static void fjn_reset(struct net_device *dev)
 {
-    struct local_info_t *lp = (struct local_info_t *)dev->priv;
-    ioaddr_t ioaddr = dev->base_addr;
+    struct local_info_t *lp = netdev_priv(dev);
+    kio_addr_t ioaddr = dev->base_addr;
     int i;
 
     DEBUG(4, "fjn_reset(%s) called.\n",dev->name);
@@ -1074,8 +1041,8 @@ static void fjn_reset(struct net_device *dev)
 
 static void fjn_rx(struct net_device *dev)
 {
-    struct local_info_t *lp = (struct local_info_t *)dev->priv;
-    ioaddr_t ioaddr = dev->base_addr;
+    struct local_info_t *lp = netdev_priv(dev);
+    kio_addr_t ioaddr = dev->base_addr;
     int boguscount = 10;	/* 5 -> 10: by agy 19940922 */
 
     DEBUG(4, "%s: in rx_packet(), rx_status %02x.\n",
@@ -1203,7 +1170,7 @@ static int fjn_config(struct net_device *dev, struct ifmap *map){
 
 static int fjn_open(struct net_device *dev)
 {
-    struct local_info_t *lp = (struct local_info_t *)dev->priv;
+    struct local_info_t *lp = netdev_priv(dev);
     dev_link_t *link = &lp->link;
 
     DEBUG(4, "fjn_open('%s').\n", dev->name);
@@ -1228,9 +1195,9 @@ static int fjn_open(struct net_device *dev)
 
 static int fjn_close(struct net_device *dev)
 {
-    struct local_info_t *lp = (struct local_info_t *)dev->priv;
+    struct local_info_t *lp = netdev_priv(dev);
     dev_link_t *link = &lp->link;
-    ioaddr_t ioaddr = dev->base_addr;
+    kio_addr_t ioaddr = dev->base_addr;
 
     DEBUG(4, "fjn_close('%s').\n", dev->name);
 
@@ -1253,8 +1220,6 @@ static int fjn_close(struct net_device *dev)
 	outb(INTR_OFF, ioaddr + LAN_CTRL);
 
     link->open--;
-    if (link->state & DEV_STALE_CONFIG)
-	    fmvj18x_release(link);
 
     return 0;
 } /* fjn_close */
@@ -1263,7 +1228,7 @@ static int fjn_close(struct net_device *dev)
 
 static struct net_device_stats *fjn_get_stats(struct net_device *dev)
 {
-    local_info_t *lp = (local_info_t *)dev->priv;
+    local_info_t *lp = netdev_priv(dev);
     return &lp->stats;
 } /* fjn_get_stats */
 
@@ -1275,8 +1240,8 @@ static struct net_device_stats *fjn_get_stats(struct net_device *dev)
 
 static void set_rx_mode(struct net_device *dev)
 {
-    ioaddr_t ioaddr = dev->base_addr;
-    struct local_info_t *lp = (struct local_info_t *)dev->priv;
+    kio_addr_t ioaddr = dev->base_addr;
+    struct local_info_t *lp = netdev_priv(dev);
     u_char mc_filter[8];		 /* Multicast hash filter */
     u_long flags;
     int i;

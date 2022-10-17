@@ -32,12 +32,12 @@
 #include <linux/init.h>
 #include <linux/reboot.h>
 #include <linux/bootmem.h>
+#include <linux/bitops.h>
 
 #include <asm/ptrace.h>
 #include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
-#include <asm/bitops.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pci.h>
@@ -225,11 +225,13 @@ nautilus_init_pci(void)
 	if (request_resource(&iomem_resource, bus->resource[1]) < 0)
 		printk(KERN_ERR "Failed to request MEM on hose 0\n");
 
-	if (pci_mem < memtop && pci_mem > alpha_mv.min_mem_address) {
+	if (pci_mem < memtop)
+		memtop = pci_mem;
+	if (memtop > alpha_mv.min_mem_address) {
 		free_reserved_mem(__va(alpha_mv.min_mem_address),
-				  __va(pci_mem));
+				  __va(memtop));
 		printk("nautilus_init_pci: %ldk freed\n",
-			(pci_mem - alpha_mv.min_mem_address) >> 10);
+			(memtop - alpha_mv.min_mem_address) >> 10);
 	}
 
 	if ((IRONGATE0->dev_vendor >> 16) > 0x7006)	/* Albacore? */
@@ -248,7 +250,6 @@ struct alpha_machine_vector nautilus_mv __initmv = {
 	DO_EV6_MMU,
 	DO_DEFAULT_RTC,
 	DO_IRONGATE_IO,
-	DO_IRONGATE_BUS,
 	.machine_check		= nautilus_machine_check,
 	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
 	.min_io_address		= DEFAULT_IO_BASE,

@@ -64,12 +64,7 @@ MODULE_AUTHOR("David Hinds <dahinds@users.sourceforge.net>");
 MODULE_DESCRIPTION("PCMCIA parallel port card driver");
 MODULE_LICENSE("Dual MPL/GPL");
 
-#define INT_MODULE_PARM(n, v) static int n = v; MODULE_PARM(n, "i")
-
-/* Bit map of interrupts to choose from */
-INT_MODULE_PARM(irq_mask, 0xdeb8);
-static int irq_list[4] = { -1 };
-MODULE_PARM(irq_list, "1-4i");
+#define INT_MODULE_PARM(n, v) static int n = v; module_param(n, int, 0)
 
 INT_MODULE_PARM(epp_mode, 1);
 
@@ -116,7 +111,7 @@ static dev_link_t *parport_attach(void)
     parport_info_t *info;
     dev_link_t *link;
     client_reg_t client_reg;
-    int i, ret;
+    int ret;
     
     DEBUG(0, "parport_attach()\n");
 
@@ -129,12 +124,7 @@ static dev_link_t *parport_attach(void)
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_8;
     link->io.Attributes2 = IO_DATA_PATH_WIDTH_8;
     link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
-    link->irq.IRQInfo1 = IRQ_INFO2_VALID|IRQ_LEVEL_ID;
-    if (irq_list[0] == -1)
-	link->irq.IRQInfo2 = irq_mask;
-    else
-	for (i = 0; i < 4; i++)
-	    link->irq.IRQInfo2 |= 1 << irq_list[i];
+    link->irq.IRQInfo1 = IRQ_LEVEL_ID;
     link->conf.Attributes = CONF_ENABLE_IRQ;
     link->conf.Vcc = 50;
     link->conf.IntType = INT_MEMORY_AND_IO;
@@ -143,7 +133,6 @@ static dev_link_t *parport_attach(void)
     link->next = dev_list;
     dev_list = link;
     client_reg.dev_info = &dev_info;
-    client_reg.Attributes = INFO_IO_CLIENT | INFO_CARD_SHARE;
     client_reg.EventMask =
 	CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL |
 	CS_EVENT_RESET_PHYSICAL | CS_EVENT_CARD_RESET |
@@ -151,7 +140,7 @@ static dev_link_t *parport_attach(void)
     client_reg.event_handler = &parport_event;
     client_reg.Version = 0x0210;
     client_reg.event_callback_args.client_data = link;
-    ret = CardServices(RegisterClient, &link->handle, &client_reg);
+    ret = pcmcia_register_client(&link->handle, &client_reg);
     if (ret != CS_SUCCESS) {
 	cs_error(link->handle, RegisterClient, ret);
 	parport_detach(link);
@@ -187,7 +176,7 @@ static void parport_detach(dev_link_t *link)
 	parport_cs_release(link);
     
     if (link->handle) {
-	ret = CardServices(DeregisterClient, link->handle);
+	ret = pcmcia_deregister_client(link->handle);
 	if (ret != CS_SUCCESS)
 	    cs_error(link->handle, DeregisterClient, ret);
     }
@@ -206,11 +195,8 @@ static void parport_detach(dev_link_t *link)
 
 ======================================================================*/
 
-#define CS_CHECK(fn, args...) \
-while ((last_ret=CardServices(last_fn=(fn), args))!=0) goto cs_failed
-
-#define CFG_CHECK(fn, args...) \
-if (CardServices(fn, args) != 0) goto next_entry
+#define CS_CHECK(fn, ret) \
+do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
 
 void parport_config(dev_link_t *link)
 {
@@ -231,9 +217,9 @@ void parport_config(dev_link_t *link)
     tuple.TupleOffset = 0; tuple.TupleDataMax = 255;
     tuple.Attributes = 0;
     tuple.DesiredTuple = CISTPL_CONFIG;
-    CS_CHECK(GetFirstTuple, handle, &tuple);
-    CS_CHECK(GetTupleData, handle, &tuple);
-    CS_CHECK(ParseTuple, handle, &tuple, &parse);
+    CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
+    CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
+    CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
     link->conf.ConfigBase = parse.config.base;
     link->conf.Present = parse.config.rmask[0];
     
@@ -241,14 +227,15 @@ void parport_config(dev_link_t *link)
     link->state |= DEV_CONFIG;
 
     /* Not sure if this is right... look up the current Vcc */
-    CS_CHECK(GetConfigurationInfo, handle, &conf);
+    CS_CHECK(GetConfigurationInfo, pcmcia_get_configuration_info(handle, &conf));
     
     tuple.DesiredTuple = CISTPL_CFTABLE_ENTRY;
     tuple.Attributes = 0;
-    CS_CHECK(GetFirstTuple, handle, &tuple);
+    CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
     while (1) {
-	CFG_CHECK(GetTupleData, handle, &tuple);
-	CFG_CHECK(ParseTuple, handle, &tuple, &parse);
+	if (pcmcia_get_tuple_data(handle, &tuple) != 0 ||
+		pcmcia_parse_tuple(handle, &tuple, &parse) != 0)
+	    goto next_entry;
 
 	if ((cfg->io.nwin > 0) || (dflt.io.nwin > 0)) {
 	    cistpl_io_t *io = (cfg->io.nwin) ? &cfg->io : &dflt.io;
@@ -262,18 +249,19 @@ void parport_config(dev_link_t *link)
 		link->io.BasePort2 = io->win[1].base;
 		link->io.NumPorts2 = io->win[1].len;
 	    }
-	    CFG_CHECK(RequestIO, link->handle, &link->io);
+	    if (pcmcia_request_io(link->handle, &link->io) != 0)
+		goto next_entry;
 	    /* If we've got this far, we're done */
 	    break;
 	}
 	
     next_entry:
 	if (cfg->flags & CISTPL_CFTABLE_DEFAULT) dflt = *cfg;
-	CS_CHECK(GetNextTuple, handle, &tuple);
+	CS_CHECK(GetNextTuple, pcmcia_get_next_tuple(handle, &tuple));
     }
     
-    CS_CHECK(RequestIRQ, handle, &link->irq);
-    CS_CHECK(RequestConfiguration, handle, &link->conf);
+    CS_CHECK(RequestIRQ, pcmcia_request_irq(handle, &link->irq));
+    CS_CHECK(RequestConfiguration, pcmcia_request_configuration(handle, &link->conf));
 
     release_region(link->io.BasePort1, link->io.NumPorts1);
     if (link->io.NumPorts2)
@@ -335,9 +323,9 @@ void parport_cs_release(dev_link_t *link)
     info->ndev = 0;
     link->dev = NULL;
     
-    CardServices(ReleaseConfiguration, link->handle);
-    CardServices(ReleaseIO, link->handle, &link->io);
-    CardServices(ReleaseIRQ, link->handle, &link->irq);
+    pcmcia_release_configuration(link->handle);
+    pcmcia_release_io(link->handle, &link->io);
+    pcmcia_release_irq(link->handle, &link->irq);
     
     link->state &= ~DEV_CONFIG;
 
@@ -372,14 +360,14 @@ int parport_event(event_t event, int priority,
 	/* Fall through... */
     case CS_EVENT_RESET_PHYSICAL:
 	if (link->state & DEV_CONFIG)
-	    CardServices(ReleaseConfiguration, link->handle);
+	    pcmcia_release_configuration(link->handle);
 	break;
     case CS_EVENT_PM_RESUME:
 	link->state &= ~DEV_SUSPEND;
 	/* Fall through... */
     case CS_EVENT_CARD_RESET:
 	if (DEV_OK(link))
-	    CardServices(RequestConfiguration, link->handle, &link->conf);
+	    pcmcia_request_configuration(link->handle, &link->conf);
 	break;
     }
     return 0;
@@ -402,10 +390,7 @@ static int __init init_parport_cs(void)
 static void __exit exit_parport_cs(void)
 {
 	pcmcia_unregister_driver(&parport_cs_driver);
-
-	/* XXX: this really needs to move into generic code.. */
-	while (dev_list != NULL)
-		parport_detach(dev_list);
+	BUG_ON(dev_list != NULL);
 }
 
 module_init(init_parport_cs);

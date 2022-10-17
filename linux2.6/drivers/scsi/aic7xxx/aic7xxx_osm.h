@@ -53,7 +53,7 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGES.
  *
- * $Id: //depot/aic7xxx/linux/drivers/scsi/aic7xxx/aic7xxx_osm.h#147 $
+ * $Id: //depot/aic7xxx/linux/drivers/scsi/aic7xxx/aic7xxx_osm.h#151 $
  *
  */
 #ifndef _AIC7XXX_LINUX_H_
@@ -70,22 +70,14 @@
 #include <asm/byteorder.h>
 #include <asm/io.h>
 
-#ifndef KERNEL_VERSION
-#define KERNEL_VERSION(x,y,z) (((x)<<16)+((y)<<8)+(z))
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
 #include <linux/interrupt.h> /* For tasklet support. */
 #include <linux/config.h>
 #include <linux/slab.h>
-#else
-#include <linux/malloc.h>
-#endif
 
 /* Core SCSI definitions */
 #define AIC_LIB_PREFIX ahc
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 
 /* Name space conflict with BSD queue macros */
 #ifdef LIST_HEAD
@@ -156,11 +148,6 @@ extern Scsi_Host_Template aic7xxx_driver_template;
 
 /***************************** Bus Space/DMA **********************************/
 
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,2,17)
-typedef dma_addr_t bus_addr_t;
-#else
-typedef uint32_t bus_addr_t;
-#endif
 typedef uint32_t bus_size_t;
 
 typedef enum {
@@ -170,12 +157,12 @@ typedef enum {
 
 typedef union {
 	u_long		  ioport;
-	volatile uint8_t *maddr;
+	volatile uint8_t __iomem *maddr;
 } bus_space_handle_t;
 
 typedef struct bus_dma_segment
 {
-	bus_addr_t	ds_addr;
+	dma_addr_t	ds_addr;
 	bus_size_t	ds_len;
 } bus_dma_segment_t;
 
@@ -189,11 +176,11 @@ typedef struct ahc_linux_dma_tag* bus_dma_tag_t;
 
 struct ahc_linux_dmamap
 {
-	bus_addr_t	bus_addr;
+	dma_addr_t	bus_addr;
 };
 typedef struct ahc_linux_dmamap* bus_dmamap_t;
 
-typedef int bus_dma_filter_t(void*, bus_addr_t);
+typedef int bus_dma_filter_t(void*, dma_addr_t);
 typedef void bus_dmamap_callback_t(void *, bus_dma_segment_t *, int, int);
 
 #define BUS_DMA_WAITOK		0x0
@@ -210,7 +197,7 @@ typedef void bus_dmamap_callback_t(void *, bus_dma_segment_t *, int, int);
 
 int	ahc_dma_tag_create(struct ahc_softc *, bus_dma_tag_t /*parent*/,
 			   bus_size_t /*alignment*/, bus_size_t /*boundary*/,
-			   bus_addr_t /*lowaddr*/, bus_addr_t /*highaddr*/,
+			   dma_addr_t /*lowaddr*/, dma_addr_t /*highaddr*/,
 			   bus_dma_filter_t*/*filter*/, void */*filterarg*/,
 			   bus_size_t /*maxsize*/, int /*nsegments*/,
 			   bus_size_t /*maxsegsz*/, int /*flags*/,
@@ -292,11 +279,7 @@ ahc_scb_timer_reset(struct scb *scb, u_int usec)
 }
 
 /***************************** SMP support ************************************/
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,17)
 #include <linux/spinlock.h>
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,93)
-#include <linux/smp.h>
-#endif
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,5,0) || defined(SCSI_HAS_HOST_LOCK))
 #define AHC_SCSI_HAS_HOST_LOCK 1
@@ -304,7 +287,7 @@ ahc_scb_timer_reset(struct scb *scb, u_int usec)
 #define AHC_SCSI_HAS_HOST_LOCK 0
 #endif
 
-#define AIC7XXX_DRIVER_VERSION "6.2.35"
+#define AIC7XXX_DRIVER_VERSION "6.2.36"
 
 /**************************** Front End Queues ********************************/
 /*
@@ -515,11 +498,8 @@ typedef enum {
 
 struct scb_platform_data {
 	struct ahc_linux_device	*dev;
-	bus_addr_t		 buf_busaddr;
+	dma_addr_t		 buf_busaddr;
 	uint32_t		 xfer_len;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0)
-	uint32_t		 resid;		/* Transfer residual */
-#endif
 	uint32_t		 sense_resid;	/* Auto-Sense residual */
 	ahc_linux_scb_flags	 flags;
 };
@@ -549,9 +529,7 @@ struct ahc_platform_data {
 	struct ahc_completeq	 completeq;
 
 	spinlock_t		 spin_lock;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
 	struct tasklet_struct	 runq_tasklet;
-#endif
 	u_int			 qfrozen;
 	pid_t			 dv_pid;
 	struct timer_list	 completeq_timer;
@@ -567,7 +545,7 @@ struct ahc_platform_data {
 	uint32_t		 irq;		/* IRQ for this adapter */
 	uint32_t		 bios_address;
 	uint32_t		 mem_busaddr;	/* Mem Base Addr */
-	bus_addr_t		 hw_dma_mask;
+	uint64_t		 hw_dma_mask;
 	ahc_linux_softc_flags	 flags;
 };
 
@@ -595,10 +573,6 @@ ahc_delay(long usec)
 
 
 /***************************** Low Level I/O **********************************/
-#if defined(__powerpc__) || defined(__i386__) || defined(__ia64__)
-#define MMAPIO
-#endif
-
 static __inline uint8_t ahc_inb(struct ahc_softc * ahc, long port);
 static __inline void ahc_outb(struct ahc_softc * ahc, long port, uint8_t val);
 static __inline void ahc_outsb(struct ahc_softc * ahc, long port,
@@ -610,16 +584,12 @@ static __inline uint8_t
 ahc_inb(struct ahc_softc * ahc, long port)
 {
 	uint8_t x;
-#ifdef MMAPIO
 
 	if (ahc->tag == BUS_SPACE_MEMIO) {
 		x = readb(ahc->bsh.maddr + port);
 	} else {
 		x = inb(ahc->bsh.ioport + port);
 	}
-#else
-	x = inb(ahc->bsh.ioport + port);
-#endif
 	mb();
 	return (x);
 }
@@ -627,15 +597,11 @@ ahc_inb(struct ahc_softc * ahc, long port)
 static __inline void
 ahc_outb(struct ahc_softc * ahc, long port, uint8_t val)
 {
-#ifdef MMAPIO
 	if (ahc->tag == BUS_SPACE_MEMIO) {
 		writeb(val, ahc->bsh.maddr + port);
 	} else {
 		outb(val, ahc->bsh.ioport + port);
 	}
-#else
-	outb(val, ahc->bsh.ioport + port);
-#endif
 	mb();
 }
 
@@ -831,9 +797,7 @@ ahc_list_unlock(unsigned long *flags)
 #define PCIR_SUBVEND_0	0x2c
 #define PCIR_SUBDEV_0	0x2e
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
 extern struct pci_driver aic7xxx_pci_driver;
-#endif
 
 typedef enum
 {
@@ -843,15 +807,30 @@ typedef enum
 	AHC_POWER_STATE_D3
 } ahc_power_state;
 
-void ahc_power_state_change(struct ahc_softc *ahc,
-			    ahc_power_state new_state);
 /**************************** VL/EISA Routines ********************************/
-int			 aic7770_linux_probe(Scsi_Host_Template *);
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0) \
+  && (defined(__i386__) || defined(__alpha__)) \
+  && (!defined(CONFIG_EISA)))
+#define CONFIG_EISA
+#endif
+
+#ifdef CONFIG_EISA
+extern uint32_t aic7xxx_probe_eisa_vl;
+int			 ahc_linux_eisa_init(void);
+void			 ahc_linux_eisa_exit(void);
 int			 aic7770_map_registers(struct ahc_softc *ahc,
 					       u_int port);
 int			 aic7770_map_int(struct ahc_softc *ahc, u_int irq);
+#else
+static inline int	ahc_linux_eisa_init(void) {
+	return -ENODEV;
+}
+static inline void	ahc_linux_eisa_exit(void) {
+}
+#endif
 
 /******************************* PCI Routines *********************************/
+#ifdef CONFIG_PCI
 int			 ahc_linux_pci_init(void);
 void			 ahc_linux_pci_exit(void);
 int			 ahc_pci_map_registers(struct ahc_softc *ahc);
@@ -933,6 +912,13 @@ ahc_get_pci_bus(ahc_dev_softc_t pci)
 {
 	return (pci->bus->number);
 }
+#else
+static inline int ahc_linux_pci_init(void) {
+	return 0;
+}
+static inline void ahc_linux_pci_exit(void) {
+}
+#endif
 
 static __inline void ahc_flush_device_writes(struct ahc_softc *);
 static __inline void
@@ -942,27 +928,13 @@ ahc_flush_device_writes(struct ahc_softc *ahc)
 	ahc_inb(ahc, INTSTAT);
 }
 
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,3,0)
-#define pci_map_sg(pdev, sg_list, nseg, direction) (nseg)
-#define pci_unmap_sg(pdev, sg_list, nseg, direction)
-#define sg_dma_address(sg) (VIRT_TO_BUS((sg)->address))
-#define sg_dma_len(sg) ((sg)->length)
-#define pci_map_single(pdev, buffer, bufflen, direction) \
-	(VIRT_TO_BUS(buffer))
-#define pci_unmap_single(pdev, buffer, buflen, direction)
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,3)
-#define ahc_pci_set_dma_mask pci_set_dma_mask
-#else
-/*
- * Always "return" 0 for success.
- */
-#define ahc_pci_set_dma_mask(dev_softc, mask)  			\
-	(((dev_softc)->dma_mask = mask) && 0)
-#endif
 /**************************** Proc FS Support *********************************/
-int	ahc_linux_proc_info(struct Scsi_Host *, char *, char **, off_t, int, int);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0)
+int	ahc_linux_proc_info(char *, char **, off_t, int, int, int);
+#else
+int	ahc_linux_proc_info(struct Scsi_Host *, char *, char **,
+			    off_t, int, int);
+#endif
 
 /*************************** Domain Validation ********************************/
 #define AHC_DV_CMD(cmd) ((cmd)->scsi_done == ahc_linux_dv_complete)
@@ -1063,35 +1035,13 @@ u_long ahc_get_transfer_length(struct scb *scb)
 static __inline
 int ahc_get_transfer_dir(struct scb *scb)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,40)
 	return (scb->io_ctx->sc_data_direction);
-#else
-	if (scb->io_ctx->bufflen == 0)
-		return (CAM_DIR_NONE);
-
-	switch(scb->io_ctx->cmnd[0]) {
-	case 0x08:  /* READ(6)  */
-	case 0x28:  /* READ(10) */
-	case 0xA8:  /* READ(12) */
-		return (CAM_DIR_IN);
-        case 0x0A:  /* WRITE(6)  */
-        case 0x2A:  /* WRITE(10) */
-        case 0xAA:  /* WRITE(12) */
-		return (CAM_DIR_OUT);
-        default:
-		return (CAM_DIR_NONE);
-        }
-#endif
 }
 
 static __inline
 void ahc_set_residual(struct scb *scb, u_long resid)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,0)
 	scb->io_ctx->resid = resid;
-#else
-	scb->platform_data->resid = resid;
-#endif
 }
 
 static __inline
@@ -1103,11 +1053,7 @@ void ahc_set_sense_residual(struct scb *scb, u_long resid)
 static __inline
 u_long ahc_get_residual(struct scb *scb)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,0)
 	return (scb->io_ctx->resid);
-#else
-	return (scb->platform_data->resid);
-#endif
 }
 
 static __inline

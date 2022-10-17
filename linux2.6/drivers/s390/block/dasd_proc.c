@@ -9,7 +9,7 @@
  *
  * /proc interface for the dasd driver.
  *
- * $Revision: 1.23 $
+ * $Revision: 1.30 $
  */
 
 #include <linux/config.h>
@@ -30,7 +30,7 @@ static struct proc_dir_entry *dasd_devices_entry = NULL;
 static struct proc_dir_entry *dasd_statistics_entry = NULL;
 
 static inline char *
-dasd_get_user_string(const char *user_buf, size_t user_len)
+dasd_get_user_string(const char __user *user_buf, size_t user_len)
 {
 	char *buffer;
 
@@ -67,17 +67,17 @@ dasd_devices_show(struct seq_file *m, void *v)
 		seq_printf(m, "(none)");
 	/* Print kdev. */
 	if (device->gdp)
-		seq_printf(m, " at (%3d:%3d)",
+		seq_printf(m, " at (%3d:%6d)",
 			   device->gdp->major, device->gdp->first_minor);
 	else
-		seq_printf(m, "  at (???:???)");
+		seq_printf(m, "  at (???:??????)");
 	/* Print device name. */
 	if (device->gdp)
-		seq_printf(m, " is %-7s", device->gdp->disk_name);
+		seq_printf(m, " is %-8s", device->gdp->disk_name);
 	else
-		seq_printf(m, " is ???????");
+		seq_printf(m, " is ????????");
 	/* Print devices features. */
-	substr = device->ro_flag ? "(ro)" : " ";
+	substr = test_bit(DASD_FLAG_RO, &device->flags) ? "(ro)" : " ";
 	seq_printf(m, "%4s: ", substr);
 	/* Print device status information. */
 	switch ((device != NULL) ? device->state : -1) {
@@ -239,7 +239,7 @@ dasd_statistics_read(char *page, char **start, off_t off,
 }
 
 static int
-dasd_statistics_write(struct file *file, const char *user_buf,
+dasd_statistics_write(struct file *file, const char __user *user_buf,
 		      unsigned long user_len, void *data)
 {
 #ifdef CONFIG_DASD_PROFILE
@@ -248,7 +248,9 @@ dasd_statistics_write(struct file *file, const char *user_buf,
 	if (user_len > 65536)
 		user_len = 65536;
 	buffer = dasd_get_user_string(user_buf, user_len);
-	MESSAGE(KERN_INFO, "/proc/dasd/statictics: '%s'", buffer);
+	if (IS_ERR(buffer))
+		return PTR_ERR(buffer);
+	MESSAGE_LOG(KERN_INFO, "/proc/dasd/statictics: '%s'", buffer);
 
 	/* check for valid verbs */
 	for (str = buffer; isspace(*str); str++);
@@ -258,20 +260,20 @@ dasd_statistics_write(struct file *file, const char *user_buf,
 		if (strcmp(str, "on") == 0) {
 			/* switch on statistics profiling */
 			dasd_profile_level = DASD_PROFILE_ON;
-			MESSAGE(KERN_INFO, "%s", "Statictics switched on");
+			MESSAGE(KERN_INFO, "%s", "Statistics switched on");
 		} else if (strcmp(str, "off") == 0) {
 			/* switch off and reset statistics profiling */
 			memset(&dasd_global_profile,
 			       0, sizeof (struct dasd_profile_info_t));
 			dasd_profile_level = DASD_PROFILE_OFF;
-			MESSAGE(KERN_INFO, "%s", "Statictics switched off");
+			MESSAGE(KERN_INFO, "%s", "Statistics switched off");
 		} else
 			goto out_error;
 	} else if (strncmp(str, "reset", 5) == 0) {
 		/* reset the statistics */
 		memset(&dasd_global_profile, 0,
 		       sizeof (struct dasd_profile_info_t));
-		MESSAGE(KERN_INFO, "%s", "Statictics reset");
+		MESSAGE(KERN_INFO, "%s", "Statistics reset");
 	} else
 		goto out_error;
 	kfree(buffer);

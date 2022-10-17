@@ -8,10 +8,11 @@
 	On older 715 machines you'll find the technically identical chip 
 	called 'Vivace'. Both Harmony and Vicace are supported by this driver.
 
-	Copyright 2000 (c) Linuxcare Canada, Alex deVries <alex@linuxcare.com>
-	Copyright 2000-2002 (c) Helge Deller <deller@gmx.de>
+	Copyright 2000 (c) Linuxcare Canada, Alex deVries <alex@onefishtwo.ca>
+	Copyright 2000-2003 (c) Helge Deller <deller@gmx.de>
 	Copyright 2001 (c) Matthieu Delahaye <delahaym@esiee.fr>
 	Copyright 2001 (c) Jean-Christophe Vaugeois <vaugeoij@esiee.fr>
+	Copyright 2004 (c) Stuart Brady <sdbrady@ntlworld.com>
 
 				
 TODO:
@@ -124,9 +125,17 @@ TODO:
 #define GAIN_RO_MASK    ( 0x3f << GAIN_RO_SHIFT) 
 
 
-#define MAX_OUTPUT_LEVEL (GAIN_RO_MASK >> GAIN_RO_SHIFT)
-#define MAX_INPUT_LEVEL  (GAIN_RI_MASK >> GAIN_RI_SHIFT)
-#define MAX_VOLUME_LEVEL (GAIN_MA_MASK >> GAIN_MA_SHIFT)
+#define MAX_OUTPUT_LEVEL  (GAIN_RO_MASK >> GAIN_RO_SHIFT)
+#define MAX_INPUT_LEVEL   (GAIN_RI_MASK >> GAIN_RI_SHIFT)
+#define MAX_MONITOR_LEVEL (GAIN_MA_MASK >> GAIN_MA_SHIFT)
+
+#define MIXER_INTERNAL   SOUND_MIXER_LINE1
+#define MIXER_LINEOUT    SOUND_MIXER_LINE2
+#define MIXER_HEADPHONES SOUND_MIXER_LINE3
+
+#define MASK_INTERNAL   SOUND_MASK_LINE1
+#define MASK_LINEOUT    SOUND_MASK_LINE2
+#define MASK_HEADPHONES SOUND_MASK_LINE3
 
 /*
  * Channels Mask in mixer register
@@ -157,19 +166,21 @@ struct harmony_hpa {
 };
 
 struct harmony_dev {
-	int irq;
 	struct harmony_hpa *hpa;
+	struct parisc_device *dev;
 	u32 current_gain;
+	u32 dac_rate;		/* 8000 ... 48000 (Hz) */
 	u8 data_format;		/* HARMONY_DF_xx_BIT_xxx */
 	u8 sample_rate;		/* HARMONY_SR_xx_KHZ */
 	u8 stereo_select;	/* HARMONY_SS_MONO or HARMONY_SS_STEREO */
-	int format_initialized;
-	u32 dac_rate;		/* 8000 ... 48000 (Hz) */
-	int suspended_playing;
-	int suspended_recording;
+	int format_initialized  :1;
+	int suspended_playing   :1;
+	int suspended_recording :1;
 	
-	int blocked_playing;
-	int blocked_recording;
+	int blocked_playing     :1;
+	int blocked_recording   :1;
+	int audio_open		:1;
+	int mixer_open		:1;
 	
 	wait_queue_head_t wq_play, wq_record;
 	int first_filled_play;	/* first buffer containing data (next to play) */
@@ -178,11 +189,7 @@ struct harmony_dev {
 	int first_filled_record;
 	int nb_filled_record;
 		
-	int audio_open, mixer_open;
 	int dsp_unit, mixer_unit;
-
-	struct pci_dev *fake_pci_dev; /* The fake pci_dev needed for 
-					pci_* functions under ccio. */
 };
 
 
@@ -196,8 +203,8 @@ static struct harmony_dev harmony;
 struct harmony_buffer {
 	unsigned char *addr;
 	dma_addr_t dma_handle;
-	int dma_consistent;	/* Zero if pci_alloc_consistent() fails */
-	int len;
+	int dma_coherent;	/* Zero if dma_alloc_coherent() fails */
+	unsigned int len;
 };
 
 /*
@@ -208,23 +215,23 @@ static struct harmony_buffer played_buf, recorded_buf, silent, graveyard;
 
 
 #define CHECK_WBACK_INV_OFFSET(b,offset,len) \
-        do { if (!b.dma_consistent) \
+        do { if (!b.dma_coherent) \
 		dma_cache_wback_inv((unsigned long)b.addr+offset,len); \
 	} while (0) 
 
 	
 static int __init harmony_alloc_buffer(struct harmony_buffer *b, 
-		int buffer_count)
+		unsigned int buffer_count)
 {
 	b->len = buffer_count * HARMONY_BUF_SIZE;
-	b->addr = pci_alloc_consistent(harmony.fake_pci_dev, 
-			  b->len, &b->dma_handle);
+	b->addr = dma_alloc_coherent(&harmony.dev->dev, 
+			  b->len, &b->dma_handle, GFP_KERNEL|GFP_DMA);
 	if (b->addr && b->dma_handle) {
-		b->dma_consistent = 1;
-		DPRINTK(KERN_INFO PFX "consistent memory: 0x%lx, played_buf: 0x%lx\n",
+		b->dma_coherent = 1;
+		DPRINTK(KERN_INFO PFX "coherent memory: 0x%lx, played_buf: 0x%lx\n",
 				(unsigned long)b->dma_handle, (unsigned long)b->addr);
 	} else {
-		b->dma_consistent = 0;
+		b->dma_coherent = 0;
 		/* kmalloc()ed memory will HPMC on ccio machines ! */
 		b->addr = kmalloc(b->len, GFP_KERNEL);
 		if (!b->addr) {
@@ -241,8 +248,8 @@ static void __exit harmony_free_buffer(struct harmony_buffer *b)
 	if (!b->addr)
 		return;
 
-	if (b->dma_consistent)
-		pci_free_consistent(harmony.fake_pci_dev,
+	if (b->dma_coherent)
+		dma_free_coherent(&harmony.dev->dev,
 				b->len, b->addr, b->dma_handle);
 	else
 		kfree(b->addr);
@@ -372,7 +379,7 @@ static int harmony_audio_open(struct inode *inode, struct file *file)
 	if (harmony.audio_open) 
 		return -EBUSY;
 	
-	harmony.audio_open++;
+	harmony.audio_open = 1;
 	harmony.suspended_playing = harmony.suspended_recording = 1;
 	harmony.blocked_playing   = harmony.blocked_recording   = 0;
 	harmony.first_filled_play = harmony.first_filled_record = 0;
@@ -402,7 +409,7 @@ static int harmony_audio_release(struct inode *inode, struct file *file)
 	if (!harmony.audio_open) 
 		return -EBUSY;
 	
-	harmony.audio_open--;
+	harmony.audio_open = 0;
 
 	return 0;
 }
@@ -545,6 +552,7 @@ static ssize_t harmony_audio_write(struct file *file,
 	int count = 0;
 	int frame_size;
 	int buf_to_fill;
+	int fresh_buffer;
 
 	if (!harmony.format_initialized) {
 		if (harmony_format_auto_detect(buffer, total_count))
@@ -566,12 +574,16 @@ static ssize_t harmony_audio_write(struct file *file,
 		
 		
 		buf_to_fill = (harmony.first_filled_play+harmony.nb_filled_play); 
-		if (harmony.play_offset)
+		if (harmony.play_offset) {
 			buf_to_fill--;
+			buf_to_fill += MAX_BUFS;
+		}
 		buf_to_fill %= MAX_BUFS;
-
+		
+		fresh_buffer = (harmony.play_offset == 0);
+		
 		/* Figure out the size of the frame */
-		if ((total_count-count) > HARMONY_BUF_SIZE - harmony.play_offset) {
+		if ((total_count-count) >= HARMONY_BUF_SIZE - harmony.play_offset) {
 			frame_size = HARMONY_BUF_SIZE - harmony.play_offset;
 		} else {
 			frame_size = total_count - count;
@@ -589,7 +601,7 @@ static ssize_t harmony_audio_write(struct file *file,
 		CHECK_WBACK_INV_OFFSET(played_buf, (HARMONY_BUF_SIZE*buf_to_fill + harmony.play_offset), 
 				frame_size);
 	
-		if (!harmony.play_offset)
+		if (fresh_buffer)
 			harmony.nb_filled_play++;
 		
 		count += frame_size;
@@ -652,18 +664,17 @@ static int harmony_audio_ioctl(struct inode *inode,
 			switch (ival) {
 			case AFMT_MU_LAW:	new_format = HARMONY_DF_8BIT_ULAW; break;
 			case AFMT_A_LAW:	new_format = HARMONY_DF_8BIT_ALAW; break;
-			case AFMT_S16_LE:	/* fall through, but not really supported */
-			case AFMT_S16_BE:	new_format = HARMONY_DF_16BIT_LINEAR;
-						ival = AFMT_S16_BE;
-						break; 
+			case AFMT_S16_BE:	new_format = HARMONY_DF_16BIT_LINEAR; break;
 			default: {
 				DPRINTK(KERN_WARNING PFX 
 					"unsupported sound format 0x%04x requested.\n",
 					ival);
-				return -EINVAL;
+				ival = AFMT_S16_BE;
+				return put_user(ival, (int *) arg);
 			}
 			}
 			harmony_set_format(new_format);
+			return 0;
 		} else {
 			switch (harmony.data_format) {
 			case HARMONY_DF_8BIT_ULAW:	ival = AFMT_MU_LAW; break;
@@ -671,8 +682,8 @@ static int harmony_audio_ioctl(struct inode *inode,
 			case HARMONY_DF_16BIT_LINEAR:	ival = AFMT_U16_BE; break;
 			default: ival = 0;
 			}
+			return put_user(ival, (int *) arg);
 		}
-		return put_user(ival, (int *) arg);
 
 	case SOUND_PCM_READ_RATE:
 		ival = harmony.dac_rate;
@@ -691,7 +702,17 @@ static int harmony_audio_ioctl(struct inode *inode,
 		if (ival != 0 && ival != 1)
 			return -EINVAL;
 		harmony_set_stereo(ival);
-		return put_user(ival, (int *) arg);
+ 		return 0;
+ 
+ 	case SNDCTL_DSP_CHANNELS:
+ 		if (get_user(ival, (int *) arg))
+ 			return -EFAULT;
+ 		if (ival != 1 && ival != 2) {
+ 			ival = harmony.stereo_select == HARMONY_SS_MONO ? 1 : 2;
+ 			return put_user(ival, (int *) arg);
+ 		}
+ 		harmony_set_stereo(ival-1);
+ 		return 0;
 
 	case SNDCTL_DSP_GETBLKSIZE:
 		ival = HARMONY_BUF_SIZE;
@@ -835,15 +856,15 @@ static struct file_operations harmony_audio_fops = {
 static int harmony_audio_init(void)
 {
 	/* Request that IRQ */
-	if (request_irq(harmony.irq, harmony_interrupt, 0 ,"harmony", &harmony)) {
-		printk(KERN_ERR PFX "Error requesting irq %d.\n", harmony.irq);
+	if (request_irq(harmony.dev->irq, harmony_interrupt, 0 ,"harmony", &harmony)) {
+		printk(KERN_ERR PFX "Error requesting irq %d.\n", harmony.dev->irq);
 		return -EFAULT;
 	}
 
    	harmony.dsp_unit = register_sound_dsp(&harmony_audio_fops, -1);
 	if (harmony.dsp_unit < 0) {
 		printk(KERN_ERR PFX "Error registering dsp\n");
-		free_irq(harmony.irq, &harmony);
+		free_irq(harmony.dev->irq, &harmony);
 		return -EFAULT;
 	}
 	
@@ -889,7 +910,7 @@ static int harmony_mixer_get_level(int channel)
 	int right_level;
 
 	switch (channel) {
-		case SOUND_MIXER_OGAIN:
+		case SOUND_MIXER_VOLUME:
 			left_level  = (harmony.current_gain & GAIN_LO_MASK) >> GAIN_LO_SHIFT;
 			right_level = (harmony.current_gain & GAIN_RO_MASK) >> GAIN_RO_SHIFT;
 			left_level  = to_oss_level(MAX_OUTPUT_LEVEL - left_level, MAX_OUTPUT_LEVEL);
@@ -903,10 +924,10 @@ static int harmony_mixer_get_level(int channel)
 			right_level= to_oss_level(right_level, MAX_INPUT_LEVEL);
 			return (right_level << 8)+left_level;
 			
-		case SOUND_MIXER_VOLUME:
+		case SOUND_MIXER_MONITOR:
 			left_level = (harmony.current_gain & GAIN_MA_MASK) >> GAIN_MA_SHIFT;
-			left_level = to_oss_level(MAX_VOLUME_LEVEL-left_level, MAX_VOLUME_LEVEL);
-			return left_level;
+			left_level = to_oss_level(MAX_MONITOR_LEVEL-left_level, MAX_MONITOR_LEVEL);
+			return (left_level << 8)+left_level;
 	}
 	return -EINVAL;
 }
@@ -928,9 +949,11 @@ static int harmony_mixer_set_level(int channel, int value)
 
 	right_level = (value & 0x0000ff00) >> 8;
 	left_level = value & 0x000000ff;
+	if (right_level > 100) right_level = 100;
+	if (left_level > 100) left_level = 100;
   
 	switch (channel) {
-		case SOUND_MIXER_OGAIN:
+		case SOUND_MIXER_VOLUME:
 			right_level = to_harmony_level(100-right_level, MAX_OUTPUT_LEVEL);
 			left_level  = to_harmony_level(100-left_level, MAX_OUTPUT_LEVEL);
 			new_right_level = to_oss_level(MAX_OUTPUT_LEVEL - right_level, MAX_OUTPUT_LEVEL);
@@ -950,12 +973,12 @@ static int harmony_mixer_set_level(int channel, int value)
 			harmony_mixer_set_gain();
 			return (new_right_level << 8) + new_left_level;
 	
-		case SOUND_MIXER_VOLUME:
-			left_level = to_harmony_level(100-left_level, MAX_VOLUME_LEVEL);
-			new_left_level = to_oss_level(MAX_VOLUME_LEVEL-left_level, MAX_VOLUME_LEVEL);
-			harmony.current_gain = (harmony.current_gain & ~GAIN_MA_MASK)| (left_level << GAIN_MA_SHIFT);
+		case SOUND_MIXER_MONITOR:
+			left_level = to_harmony_level(100-left_level, MAX_MONITOR_LEVEL);
+			new_left_level = to_oss_level(MAX_MONITOR_LEVEL-left_level, MAX_MONITOR_LEVEL);
+			harmony.current_gain = (harmony.current_gain & ~GAIN_MA_MASK) | (left_level << GAIN_MA_SHIFT);
 			harmony_mixer_set_gain();
-			return new_left_level;
+			return (new_left_level << 8) + new_left_level;
 	}
 
 	return -EINVAL;
@@ -988,11 +1011,15 @@ static int harmony_mixer_set_recmask(int recmask)
 {
 	int new_input_line;
 	int new_input_mask;
-
-	if ((recmask & SOUND_MASK_LINE)) {
+	int current_input_line;
+	
+	current_input_line = (harmony.current_gain & GAIN_IS_MASK)
+				    >> GAIN_IS_SHIFT;
+	if ((current_input_line && ((recmask & SOUND_MASK_LINE) || !(recmask & SOUND_MASK_MIC))) ||
+		(!current_input_line && ((recmask & SOUND_MASK_LINE) && !(recmask & SOUND_MASK_MIC)))) {
 		new_input_line = 0;
 		new_input_mask = SOUND_MASK_LINE;
-	} else  {
+	} else {
 		new_input_line = 1;
 		new_input_mask = SOUND_MASK_MIC;
 	}
@@ -1011,9 +1038,9 @@ static int harmony_mixer_get_outmask(void)
 {
 	int outmask = 0;
 	
-	if (harmony.current_gain & GAIN_HE_MASK) outmask |=SOUND_MASK_PHONEOUT;
-	if (harmony.current_gain & GAIN_LE_MASK) outmask |=SOUND_MASK_LINE;
-	if (harmony.current_gain & GAIN_SE_MASK) outmask |=SOUND_MASK_SPEAKER;
+	if (harmony.current_gain & GAIN_SE_MASK) outmask |= MASK_INTERNAL;
+	if (harmony.current_gain & GAIN_LE_MASK) outmask |= MASK_LINEOUT;
+	if (harmony.current_gain & GAIN_HE_MASK) outmask |= MASK_HEADPHONES;
 	
 	return outmask;
 }
@@ -1021,24 +1048,24 @@ static int harmony_mixer_get_outmask(void)
 
 static int harmony_mixer_set_outmask(int outmask)
 {
-	if (outmask & SOUND_MASK_PHONEOUT) 
-		harmony.current_gain |= GAIN_HE_MASK; 
-	else 
-		harmony.current_gain &= ~GAIN_HE_MASK;
-	
-	if (outmask & SOUND_MASK_LINE) 
-		harmony.current_gain |= GAIN_LE_MASK;
-	else 
-		harmony.current_gain &= ~GAIN_LE_MASK;
-	
-	if (outmask & SOUND_MASK_SPEAKER) 
+	if (outmask & MASK_INTERNAL) 
 		harmony.current_gain |= GAIN_SE_MASK;
 	else 
 		harmony.current_gain &= ~GAIN_SE_MASK;
 	
+	if (outmask & MASK_LINEOUT) 
+		harmony.current_gain |= GAIN_LE_MASK;
+	else 
+		harmony.current_gain &= ~GAIN_LE_MASK;
+	
+	if (outmask & MASK_HEADPHONES) 
+		harmony.current_gain |= GAIN_HE_MASK; 
+	else 
+		harmony.current_gain &= ~GAIN_HE_MASK;
+	
 	harmony_mixer_set_gain();
 
-	return (outmask & (SOUND_MASK_PHONEOUT | SOUND_MASK_LINE | SOUND_MASK_SPEAKER));
+	return (outmask & (MASK_INTERNAL | MASK_LINEOUT | MASK_HEADPHONES));
 }
 
 /*
@@ -1076,19 +1103,19 @@ static int harmony_mixer_ioctl(struct inode * inode, struct file * file,
 		ret = SOUND_CAP_EXCL_INPUT;
 		break;
 	case MIXER_READ(SOUND_MIXER_STEREODEVS):
-		ret = SOUND_MASK_IGAIN | SOUND_MASK_OGAIN;
+		ret = SOUND_MASK_VOLUME | SOUND_MASK_IGAIN;
 		break;
 		
 	case MIXER_READ(SOUND_MIXER_RECMASK):
 		ret = SOUND_MASK_MIC | SOUND_MASK_LINE;
 		break;
 	case MIXER_READ(SOUND_MIXER_DEVMASK):
-		ret = SOUND_MASK_OGAIN | SOUND_MASK_IGAIN |
-			SOUND_MASK_VOLUME;
+		ret = SOUND_MASK_VOLUME | SOUND_MASK_IGAIN |
+			SOUND_MASK_MONITOR;
 		break;
 	case MIXER_READ(SOUND_MIXER_OUTMASK):
-		ret = SOUND_MASK_SPEAKER | SOUND_MASK_LINE |
-			SOUND_MASK_PHONEOUT;
+		ret = MASK_INTERNAL | MASK_LINEOUT |
+			MASK_HEADPHONES;
 		break;
 		
 	case MIXER_WRITE(SOUND_MIXER_RECSRC):
@@ -1105,15 +1132,15 @@ static int harmony_mixer_ioctl(struct inode * inode, struct file * file,
 		ret = harmony_mixer_get_outmask();
 		break;
 	
-	case MIXER_WRITE(SOUND_MIXER_OGAIN):
-	case MIXER_WRITE(SOUND_MIXER_IGAIN):
 	case MIXER_WRITE(SOUND_MIXER_VOLUME):
+	case MIXER_WRITE(SOUND_MIXER_IGAIN):
+	case MIXER_WRITE(SOUND_MIXER_MONITOR):
 		ret = harmony_mixer_set_level(cmd & 0xff, val);
 		break;
 
-	case MIXER_READ(SOUND_MIXER_OGAIN):
-	case MIXER_READ(SOUND_MIXER_IGAIN):
 	case MIXER_READ(SOUND_MIXER_VOLUME):
+	case MIXER_READ(SOUND_MIXER_IGAIN):
+	case MIXER_READ(SOUND_MIXER_MONITOR):
 		ret = harmony_mixer_get_level(cmd & 0xff);
 		break;
 
@@ -1131,7 +1158,7 @@ static int harmony_mixer_open(struct inode *inode, struct file *file)
 {
 	if (harmony.mixer_open) 
 		return -EBUSY;
-	harmony.mixer_open++;
+	harmony.mixer_open = 1;
 	return 0;
 }
 
@@ -1139,7 +1166,7 @@ static int harmony_mixer_release(struct inode *inode, struct file *file)
 {
 	if (!harmony.mixer_open) 
 		return -EBUSY;
-	harmony.mixer_open--;
+	harmony.mixer_open = 0;
 	return 0;
 }
 
@@ -1189,8 +1216,8 @@ static int __init harmony_mixer_init(void)
  * This is the callback that's called by the inventory hardware code 
  * if it finds a match to the registered driver. 
  */
-static int __init
-harmony_driver_callback(struct parisc_device *dev)
+static int __devinit
+harmony_driver_probe(struct parisc_device *dev)
 {
 	u8	id;
 	u8	rev;
@@ -1203,14 +1230,14 @@ harmony_driver_callback(struct parisc_device *dev)
 		return -EBUSY;
 	}
 
-	/* Set the HPA of harmony */
-	harmony.hpa = (struct harmony_hpa *)dev->hpa;
-
-	harmony.irq = dev->irq;
-	if (!harmony.irq) {
+	if (!dev->irq) {
 		printk(KERN_ERR PFX "no irq found\n");
 		return -ENODEV;
 	}
+
+	/* Set the HPA of harmony */
+	harmony.hpa = (struct harmony_hpa *)dev->hpa;
+	harmony.dev = dev;
 
 	/* Grab the ID and revision from the device */
 	id = gsc_readb(&harmony.hpa->id);
@@ -1223,7 +1250,7 @@ harmony_driver_callback(struct parisc_device *dev)
 
 	printk(KERN_INFO "Lasi Harmony Audio driver " HARMONY_VERSION ", "
 			"h/w id %i, rev. %i at 0x%lx, IRQ %i\n",
-			id, rev, dev->hpa, harmony.irq);
+			id, rev, dev->hpa, harmony.dev->irq);
 	
 	/* Make sure the control bit isn't set, although I don't think it 
 	   ever is. */
@@ -1233,9 +1260,6 @@ harmony_driver_callback(struct parisc_device *dev)
 		return -EBUSY;
 	}
 
-	/* a fake pci_dev is needed for pci_* functions under ccio */
-	harmony.fake_pci_dev = ccio_get_fake(dev);
-	
 	/* Initialize the memory buffers */
 	if (harmony_alloc_buffer(&played_buf, MAX_BUFS) || 
 	    harmony_alloc_buffer(&recorded_buf, MAX_BUFS) ||
@@ -1276,7 +1300,7 @@ MODULE_DEVICE_TABLE(parisc, harmony_tbl);
 static struct parisc_driver harmony_driver = {
 	.name		= "Lasi Harmony",
 	.id_table	= harmony_tbl,
-	.probe		= harmony_driver_callback,
+	.probe		= harmony_driver_probe,
 };
 
 static int __init init_harmony(void)
@@ -1286,7 +1310,7 @@ static int __init init_harmony(void)
 
 static void __exit cleanup_harmony(void)
 {
-	free_irq(harmony.irq, &harmony);
+	free_irq(harmony.dev->irq, &harmony);
 	unregister_sound_mixer(harmony.mixer_unit);
 	unregister_sound_dsp(harmony.dsp_unit);
 	harmony_free_buffer(&played_buf);
@@ -1297,7 +1321,7 @@ static void __exit cleanup_harmony(void)
 }
 
 
-MODULE_AUTHOR("Alex DeVries <alex@linuxcare.com>");
+MODULE_AUTHOR("Alex DeVries <alex@onefishtwo.ca>");
 MODULE_DESCRIPTION("Harmony sound driver");
 MODULE_LICENSE("GPL");
 

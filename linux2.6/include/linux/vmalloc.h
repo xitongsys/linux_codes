@@ -8,6 +8,7 @@
 #define VM_IOREMAP	0x00000001	/* ioremap() and friends */
 #define VM_ALLOC	0x00000002	/* vmalloc() */
 #define VM_MAP		0x00000004	/* vmap()ed pages */
+/* bits [20..32] reserved for arch specific ioremap internals */
 
 struct vm_struct {
 	void			*addr;
@@ -23,6 +24,7 @@ struct vm_struct {
  *	Highlevel APIs for driver use
  */
 extern void *vmalloc(unsigned long size);
+extern void *vmalloc_exec(unsigned long size);
 extern void *vmalloc_32(unsigned long size);
 extern void *__vmalloc(unsigned long size, int gfp_mask, pgprot_t prot);
 extern void vfree(void *addr);
@@ -35,6 +37,8 @@ extern void vunmap(void *addr);
  *	Lowlevel-APIs (not for driver use!)
  */
 extern struct vm_struct *get_vm_area(unsigned long size, unsigned long flags);
+extern struct vm_struct *__get_vm_area(unsigned long size, unsigned long flags,
+					unsigned long start, unsigned long end);
 extern struct vm_struct *remove_vm_area(void *addr);
 extern int map_vm_area(struct vm_struct *area, pgprot_t prot,
 			struct page ***pages);

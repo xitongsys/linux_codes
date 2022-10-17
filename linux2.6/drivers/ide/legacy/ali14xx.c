@@ -226,6 +226,8 @@ static int __init ali14xx_probe(void)
 	probe_hwif_init(hwif);
 	probe_hwif_init(mate);
 
+	create_proc_ide_interfaces();
+
 	return 0;
 }
 
@@ -243,25 +245,7 @@ int __init ali14xx_init(void)
 }
 
 #ifdef MODULE
-static void __exit ali14xx_release_hwif(ide_hwif_t *hwif)
-{
-	if (hwif->chipset != ide_ali14xx)
-		return;
-
-	hwif->chipset = ide_unknown;
-	hwif->tuneproc = NULL;
-	hwif->mate = NULL;
-	hwif->channel = 0;
-}
-
-static void __exit ali14xx_exit(void)
-{
-	ali14xx_release_hwif(&ide_hwifs[0]);
-	ali14xx_release_hwif(&ide_hwifs[1]);
-}
-
 module_init(ali14xx_init);
-module_exit(ali14xx_exit);
 #endif
 
 MODULE_AUTHOR("see local file");

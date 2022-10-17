@@ -39,9 +39,28 @@ struct parport_pc_private {
 	char *dma_buf;
 	dma_addr_t dma_handle;
 	struct pci_dev *dev;
+	struct list_head list;
+	struct parport *port;
 };
 
-extern __inline__ void parport_pc_write_data(struct parport *p, unsigned char d)
+struct parport_pc_via_data
+{
+	/* ISA PnP IRQ routing register 1 */
+	u8 via_pci_parport_irq_reg;
+	/* ISA PnP DMA request routing register */
+	u8 via_pci_parport_dma_reg;
+	/* Register and value to enable SuperIO configuration access */
+	u8 via_pci_superio_config_reg;
+	u8 via_pci_superio_config_data;
+	/* SuperIO function register number */
+	u8 viacfg_function;
+	/* parallel port control register number */
+	u8 viacfg_parport_control;
+	/* Parallel port base address register */
+	u8 viacfg_parport_base;
+};
+
+static __inline__ void parport_pc_write_data(struct parport *p, unsigned char d)
 {
 #ifdef DEBUG_PARPORT
 	printk (KERN_DEBUG "parport_pc_write_data(%p,0x%02x)\n", p, d);
@@ -49,7 +68,7 @@ extern __inline__ void parport_pc_write_data(struct parport *p, unsigned char d)
 	outb(d, DATA(p));
 }
 
-extern __inline__ unsigned char parport_pc_read_data(struct parport *p)
+static __inline__ unsigned char parport_pc_read_data(struct parport *p)
 {
 	unsigned char val = inb (DATA (p));
 #ifdef DEBUG_PARPORT
@@ -124,17 +143,17 @@ static __inline__ unsigned char __parport_pc_frob_control (struct parport *p,
 	return ctr;
 }
 
-extern __inline__ void parport_pc_data_reverse (struct parport *p)
+static __inline__ void parport_pc_data_reverse (struct parport *p)
 {
 	__parport_pc_frob_control (p, 0x20, 0x20);
 }
 
-extern __inline__ void parport_pc_data_forward (struct parport *p)
+static __inline__ void parport_pc_data_forward (struct parport *p)
 {
 	__parport_pc_frob_control (p, 0x20, 0x00);
 }
 
-extern __inline__ void parport_pc_write_control (struct parport *p,
+static __inline__ void parport_pc_write_control (struct parport *p,
 						 unsigned char d)
 {
 	const unsigned char wm = (PARPORT_CONTROL_STROBE |
@@ -152,7 +171,7 @@ extern __inline__ void parport_pc_write_control (struct parport *p,
 	__parport_pc_frob_control (p, wm, d & wm);
 }
 
-extern __inline__ unsigned char parport_pc_read_control(struct parport *p)
+static __inline__ unsigned char parport_pc_read_control(struct parport *p)
 {
 	const unsigned char rm = (PARPORT_CONTROL_STROBE |
 				  PARPORT_CONTROL_AUTOFD |
@@ -162,7 +181,7 @@ extern __inline__ unsigned char parport_pc_read_control(struct parport *p)
 	return priv->ctr & rm; /* Use soft copy */
 }
 
-extern __inline__ unsigned char parport_pc_frob_control (struct parport *p,
+static __inline__ unsigned char parport_pc_frob_control (struct parport *p,
 							 unsigned char mask,
 							 unsigned char val)
 {
@@ -189,18 +208,18 @@ extern __inline__ unsigned char parport_pc_frob_control (struct parport *p,
 	return __parport_pc_frob_control (p, mask, val);
 }
 
-extern __inline__ unsigned char parport_pc_read_status(struct parport *p)
+static __inline__ unsigned char parport_pc_read_status(struct parport *p)
 {
 	return inb(STATUS(p));
 }
 
 
-extern __inline__ void parport_pc_disable_irq(struct parport *p)
+static __inline__ void parport_pc_disable_irq(struct parport *p)
 {
 	__parport_pc_frob_control (p, 0x10, 0x00);
 }
 
-extern __inline__ void parport_pc_enable_irq(struct parport *p)
+static __inline__ void parport_pc_enable_irq(struct parport *p)
 {
 	__parport_pc_frob_control (p, 0x10, 0x10);
 }
@@ -208,12 +227,6 @@ extern __inline__ void parport_pc_enable_irq(struct parport *p)
 extern void parport_pc_release_resources(struct parport *p);
 
 extern int parport_pc_claim_resources(struct parport *p);
-
-extern void parport_pc_init_state(struct pardevice *, struct parport_state *s);
-
-extern void parport_pc_save_state(struct parport *p, struct parport_state *s);
-
-extern void parport_pc_restore_state(struct parport *p, struct parport_state *s);
 
 /* PCMCIA code will want to get us to look at a port.  Provide a mechanism. */
 extern struct parport *parport_pc_probe_port (unsigned long base,

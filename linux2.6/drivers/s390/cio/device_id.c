@@ -22,6 +22,7 @@
 #include "cio_debug.h"
 #include "css.h"
 #include "device.h"
+#include "ioasm.h"
 
 /*
  * diag210 is used under VM to get information about a virtual device
@@ -35,7 +36,7 @@ diag210(struct diag210 * addr)
 	 * use a static data area to be sure
 	 */
 	static struct diag210 diag210_tmp;
-	static spinlock_t diag210_lock = SPIN_LOCK_UNLOCKED;
+	static DEFINE_SPINLOCK(diag210_lock);
 	unsigned long flags;
 	int ccode;
 
@@ -194,16 +195,12 @@ __ccw_device_sense_id_start(struct ccw_device *cdev)
 	/* Try on every path. */
 	ret = -ENODEV;
 	while (cdev->private->imask != 0) {
-		if ((sch->lpm & cdev->private->imask) != 0 &&
-		    cdev->private->iretry-- > 0) {
-			/* 0x00E2C9C4 == ebcdic "SID" */
+		if ((sch->opm & cdev->private->imask) != 0 &&
+		    cdev->private->iretry > 0) {
+			cdev->private->iretry--;
 			ret = cio_start (sch, cdev->private->iccws,
-					 0x00E2C9C4, cdev->private->imask);
+					 cdev->private->imask);
 			/* ret is 0, -EBUSY, -EACCES or -ENODEV */
-			if (ret == -EBUSY) {
-				udelay(100);
-				continue;
-			}
 			if (ret != -EACCES)
 				return ret;
 		}
@@ -223,7 +220,7 @@ ccw_device_sense_id_start(struct ccw_device *cdev)
 	cdev->private->imask = 0x80;
 	cdev->private->iretry = 5;
 	ret = __ccw_device_sense_id_start(cdev);
-	if (ret)
+	if (ret && ret != -EBUSY)
 		ccw_device_sense_id_done(cdev, ret);
 }
 
@@ -249,22 +246,26 @@ ccw_device_check_sense_id(struct ccw_device *cdev)
 	/* Check the error cases. */
 	if (irb->scsw.fctl & (SCSW_FCTL_HALT_FUNC | SCSW_FCTL_CLEAR_FUNC))
 		return -ETIME;
-	if (irb->esw.esw0.erw.cons &&
-	    (irb->ecw[0] & (SNS0_CMD_REJECT | SNS0_INTERVENTION_REQ))) {
+	if (irb->esw.esw0.erw.cons && (irb->ecw[0] & SNS0_CMD_REJECT)) {
 		/*
 		 * if the device doesn't support the SenseID
 		 *  command further retries wouldn't help ...
+		 * NB: We don't check here for intervention required like we
+		 *     did before, because tape devices with no tape inserted
+		 *     may present this status *in conjunction with* the
+		 *     sense id information. So, for intervention required,
+		 *     we use the "whack it until it talks" strategy...
 		 */
-		CIO_MSG_EVENT(2, "SenseID : device %04X on Subchannel %04X "
-			      "reports cmd reject or intervention required\n",
-			      sch->schib.pmcw.dev, sch->irq);
+		CIO_MSG_EVENT(2, "SenseID : device %04x on Subchannel %04x "
+			      "reports cmd reject\n",
+			      cdev->private->devno, sch->irq);
 		return -EOPNOTSUPP;
 	}
 	if (irb->esw.esw0.erw.cons) {
-		CIO_MSG_EVENT(2, "SenseID : UC on dev %04X, "
+		CIO_MSG_EVENT(2, "SenseID : UC on dev %04x, "
 			      "lpum %02X, cnt %02d, sns :"
 			      " %02X%02X%02X%02X %02X%02X%02X%02X ...\n",
-			      sch->schib.pmcw.dev,
+			      cdev->private->devno,
 			      irb->esw.esw0.sublog.lpum,
 			      irb->esw.esw0.erw.scnt,
 			      irb->ecw[0], irb->ecw[1],
@@ -274,15 +275,18 @@ ccw_device_check_sense_id(struct ccw_device *cdev)
 		return -EAGAIN;
 	}
 	if (irb->scsw.cc == 3) {
-		CIO_MSG_EVENT(2, "SenseID : path %02X for device %04X on "
-			      "subchannel %04X is 'not operational'\n",
-			      sch->orb.lpm, sch->schib.pmcw.dev, sch->irq);
+		if ((sch->orb.lpm &
+		     sch->schib.pmcw.pim & sch->schib.pmcw.pam) != 0)
+			CIO_MSG_EVENT(2, "SenseID : path %02X for device %04x on"
+				      " subchannel %04x is 'not operational'\n",
+				      sch->orb.lpm, cdev->private->devno,
+				      sch->irq);
 		return -EACCES;
 	}
 	/* Hmm, whatever happened, try again. */
-	CIO_MSG_EVENT(2, "SenseID : start_IO() for device %04X on "
-		      "subchannel %04X returns status %02X%02X\n",
-		      sch->schib.pmcw.dev, sch->irq,
+	CIO_MSG_EVENT(2, "SenseID : start_IO() for device %04x on "
+		      "subchannel %04x returns status %02X%02X\n",
+		      cdev->private->devno, sch->irq,
 		      irb->scsw.dstat, irb->scsw.cstat);
 	return -EAGAIN;
 }
@@ -299,11 +303,16 @@ ccw_device_sense_id_irq(struct ccw_device *cdev, enum dev_event dev_event)
 
 	sch = to_subchannel(cdev->dev.parent);
 	irb = (struct irb *) __LC_IRB;
-	/* Ignore unsolicited interrupts. */
+	/* Retry sense id, if needed. */
 	if (irb->scsw.stctl ==
-	    		(SCSW_STCTL_STATUS_PEND | SCSW_STCTL_ALERT_STATUS))
+	    (SCSW_STCTL_STATUS_PEND | SCSW_STCTL_ALERT_STATUS)) {
+		if ((irb->scsw.cc == 1) || !irb->scsw.actl) {
+			ret = __ccw_device_sense_id_start(cdev);
+			if (ret && ret != -EBUSY)
+				ccw_device_sense_id_done(cdev, ret);
+		}
 		return;
-
+	}
 	if (ccw_device_accumulate_and_sense(cdev, irb) != 0)
 		return;
 	ret = ccw_device_check_sense_id(cdev);

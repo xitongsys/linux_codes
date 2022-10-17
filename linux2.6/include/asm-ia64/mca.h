@@ -2,13 +2,16 @@
  * File:	mca.h
  * Purpose:	Machine check handling specific defines
  *
- * Copyright (C) 1999 Silicon Graphics, Inc.
+ * Copyright (C) 1999, 2004 Silicon Graphics, Inc.
  * Copyright (C) Vijay Chander (vijay@engr.sgi.com)
  * Copyright (C) Srinivasa Thirumalachar (sprasad@engr.sgi.com)
+ * Copyright (C) Russ Anderson (rja@sgi.com)
  */
 
 #ifndef _ASM_IA64_MCA_H
 #define _ASM_IA64_MCA_H
+
+#define IA64_MCA_STACK_SIZE	8192
 
 #if !defined(__ASSEMBLY__)
 
@@ -18,23 +21,14 @@
 #include <asm/param.h>
 #include <asm/sal.h>
 #include <asm/processor.h>
-
-/* These are the return codes from all the IA64_MCA specific interfaces */
-typedef	int ia64_mca_return_code_t;
-
-enum {
-	IA64_MCA_SUCCESS	=	0,
-	IA64_MCA_FAILURE	=	1
-};
+#include <asm/mca_asm.h>
 
 #define IA64_MCA_RENDEZ_TIMEOUT		(20 * 1000)	/* value in milliseconds - 20 seconds */
 
-#define IA64_CMC_INT_DISABLE		0
-#define IA64_CMC_INT_ENABLE		1
-
-
-typedef u32 int_vector_t;
-typedef u64 millisec_t;
+typedef struct ia64_fptr {
+	unsigned long fp;
+	unsigned long gp;
+} ia64_fptr_t;
 
 typedef union cmcv_reg_u {
 	u64	cmcv_regval;
@@ -52,10 +46,6 @@ typedef union cmcv_reg_u {
 #define cmcv_mask		cmcv_reg_s.cmcr_mask
 #define cmcv_vector		cmcv_reg_s.cmcr_vector
 
-
-#define IA64_MCA_UCMC_HANDLER_SIZE	0x10
-#define IA64_INIT_HANDLER_SIZE		0x10
-
 enum {
 	IA64_MCA_RENDEZ_CHECKIN_NOTDONE	=	0x0,
 	IA64_MCA_RENDEZ_CHECKIN_DONE	=	0x1
@@ -72,16 +62,6 @@ typedef struct ia64_mc_info_s {
 	u8		imi_rendez_checkin[NR_CPUS];
 
 } ia64_mc_info_t;
-
-/* Possible rendez states passed from SAL to OS during MCA
- * handoff
- */
-enum {
-	IA64_MCA_RENDEZ_NOT_RQD		=	0x0,
-	IA64_MCA_RENDEZ_DONE_WITHOUT_INIT	=	0x1,
-	IA64_MCA_RENDEZ_DONE_WITH_INIT		=	0x2,
-	IA64_MCA_RENDEZ_FAILURE			=	-1
-};
 
 typedef struct ia64_mca_sal_to_os_state_s {
 	u64		imsto_os_gp;		/* GP of the os registered with the SAL */
@@ -124,42 +104,29 @@ typedef struct ia64_mca_os_to_sal_state_s {
 						 */
 } ia64_mca_os_to_sal_state_t;
 
-typedef int (*prfunc_t)(const char * fmt, ...);
+/* Per-CPU MCA state that is too big for normal per-CPU variables.  */
+
+struct ia64_mca_cpu {
+	u64 stack[IA64_MCA_STACK_SIZE/8];	/* MCA memory-stack */
+	u64 proc_state_dump[512];
+	u64 stackframe[32];
+	u64 rbstore[IA64_MCA_STACK_SIZE/8];	/* MCA reg.-backing store */
+	u64 init_stack[KERNEL_STACK_SIZE/8];
+} __attribute__ ((aligned(16)));
+
+/* Array of physical addresses of each CPU's MCA area.  */
+extern unsigned long __per_cpu_mca[NR_CPUS];
 
 extern void ia64_mca_init(void);
+extern void ia64_mca_cpu_init(void *);
 extern void ia64_os_mca_dispatch(void);
 extern void ia64_os_mca_dispatch_end(void);
 extern void ia64_mca_ucmc_handler(void);
 extern void ia64_monarch_init_handler(void);
 extern void ia64_slave_init_handler(void);
-extern irqreturn_t ia64_mca_rendez_int_handler(int,void *,struct pt_regs *);
-extern irqreturn_t ia64_mca_wakeup_int_handler(int,void *,struct pt_regs *);
-extern irqreturn_t ia64_mca_cmc_int_handler(int,void *,struct pt_regs *);
-extern irqreturn_t ia64_mca_cmc_int_caller(int,void *,struct pt_regs *);
-extern irqreturn_t ia64_mca_cpe_int_handler(int,void *,struct pt_regs *);
-extern irqreturn_t ia64_mca_cpe_int_caller(int,void *,struct pt_regs *);
-extern int  ia64_log_print(int,prfunc_t);
 extern void ia64_mca_cmc_vector_setup(void);
-extern int  ia64_mca_check_errors(void);
-extern u64  ia64_log_get(int, prfunc_t);
+extern int  ia64_reg_MCA_extension(void*);
+extern void ia64_unreg_MCA_extension(void);
 
-#define PLATFORM_CALL(fn, args)	printk("Platform call TBD\n")
-
-#define platform_mem_dev_err_print ia64_log_prt_oem_data
-#define platform_pci_bus_err_print ia64_log_prt_oem_data
-#define platform_pci_comp_err_print ia64_log_prt_oem_data
-#define platform_plat_specific_err_print ia64_log_prt_oem_data
-#define platform_host_ctlr_err_print ia64_log_prt_oem_data
-#define platform_plat_bus_err_print ia64_log_prt_oem_data
-
-#undef	MCA_TEST
-
-#undef IA64_MCA_DEBUG_INFO
-
-#if defined(IA64_MCA_DEBUG_INFO)
-# define IA64_MCA_DEBUG(fmt...)	printk(fmt)
-#else
-# define IA64_MCA_DEBUG(fmt...)
-#endif
 #endif /* !__ASSEMBLY__ */
 #endif /* _ASM_IA64_MCA_H */

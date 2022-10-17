@@ -1,3 +1,35 @@
+/*    System Call Table
+ *
+ *    Copyright (C) 1999-2004 Matthew Wilcox <willy at parisc-linux.org>
+ *    Copyright (C) 2000-2001 John Marvin <jsm at parisc-linux.org>
+ *    Copyright (C) 2000 Alan Modra <amodra at parisc-linux.org>
+ *    Copyright (C) 2000-2003 Paul Bame <bame at parisc-linux.org>
+ *    Copyright (C) 2000 Philipp Rumpf <prumpf with tux.org>
+ *    Copyright (C) 2000 Michael Ang <mang with subcarrier.org>
+ *    Copyright (C) 2000 David Huggins-Daines <dhd with pobox.org>
+ *    Copyright (C) 2000 Grant Grundler <grundler at parisc-linux.org>
+ *    Copyright (C) 2001 Richard Hirst <rhirst with parisc-linux.org>
+ *    Copyright (C) 2001-2002 Ryan Bradetich <rbrad at parisc-linux.org>
+ *    Copyright (C) 2001 Helge Deller <deller at parisc-linux.org>
+ *    Copyright (C) 2000-2001 Thomas Bogendoerfer <tsbogend at parisc-linux.org>
+ *    Copyright (C) 2002 Randolph Chung <tausq with parisc-linux.org>
+ *
+ *
+ *    This program is free software; you can redistribute it and/or modify
+ *    it under the terms of the GNU General Public License as published by
+ *    the Free Software Foundation; either version 2 of the License, or
+ *    (at your option) any later version.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU General Public License for more details.
+ *
+ *    You should have received a copy of the GNU General Public License
+ *    along with this program; if not, write to the Free Software
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ */
+
 #undef ENTRY_SAME
 #undef ENTRY_DIFF
 #undef ENTRY_UHOH
@@ -28,7 +60,7 @@
 #define ENTRY_COMP(_name_) .word sys_##_name_
 #endif
 
-	ENTRY_SAME(ni_syscall)	/* 0  -  old "setup()" system call*/
+	ENTRY_SAME(restart_syscall)	/* 0 */
 	ENTRY_SAME(exit)
 	ENTRY_SAME(fork_wrapper)
 	ENTRY_SAME(read)
@@ -42,7 +74,7 @@
 	ENTRY_DIFF(execve_wrapper)
 	ENTRY_SAME(chdir)
 	/* See comments in kernel/time.c!!! Maybe we don't need this? */
-	ENTRY_DIFF(time)
+	ENTRY_COMP(time)
 	ENTRY_SAME(mknod)
 	ENTRY_SAME(chmod)		/* 15 */
 	ENTRY_SAME(lchown)
@@ -52,14 +84,14 @@
 	ENTRY_DIFF(lseek)
 	ENTRY_SAME(getpid)		/* 20 */
 	/* the 'void * data' parameter may need re-packing in wide */
-	ENTRY_DIFF(mount)
+	ENTRY_COMP(mount)
 	/* concerned about struct sockaddr in wide/narrow */
 	/* ---> I think sockaddr is OK unless the compiler packs the struct */
 	/*      differently to align the char array */
 	ENTRY_SAME(bind)
 	ENTRY_SAME(setuid)
 	ENTRY_SAME(getuid)
-	ENTRY_SAME(stime)		/* 25 */
+	ENTRY_COMP(stime)		/* 25 */
 	ENTRY_SAME(ptrace)
 	ENTRY_SAME(alarm)
 	/* see stat comment */
@@ -200,12 +232,12 @@
 	ENTRY_DIFF(getdents)
 	/* it is POSSIBLE that select will be OK because even though fd_set
 	 * contains longs, the macros and sizes are clever. */
-	ENTRY_DIFF(select)
+	ENTRY_COMP(select)
 	ENTRY_SAME(flock)
 	ENTRY_SAME(msync)
 	/* struct iovec contains pointers */
-	ENTRY_DIFF(readv)		/* 145 */
-	ENTRY_DIFF(writev)
+	ENTRY_COMP(readv)		/* 145 */
+	ENTRY_COMP(writev)
 	ENTRY_SAME(getsid)
 	ENTRY_SAME(fdatasync)
 	/* struct __sysctl_args is a mess */
@@ -234,7 +266,7 @@
 	ENTRY_SAME(ni_syscall)		/* query_module */
 	ENTRY_SAME(poll)
 	/* structs contain pointers and an in_addr... */
-	ENTRY_DIFF(nfsservctl)
+	ENTRY_COMP(nfsservctl)
 	ENTRY_SAME(setresgid)		/* 170 */
 	ENTRY_SAME(getresgid)
 	ENTRY_SAME(prctl)
@@ -243,7 +275,7 @@
 	ENTRY_DIFF(rt_sigaction)
 	ENTRY_DIFF(rt_sigprocmask)	/* 175 */
 	ENTRY_DIFF(rt_sigpending)
-	ENTRY_UHOH(rt_sigtimedwait)
+	ENTRY_COMP(rt_sigtimedwait)
 	/* even though the struct siginfo_t is different, it appears like
 	 * all the paths use values which should be same wide and narrow.
 	 * Also the struct is padded to 128 bytes which means we don't have
@@ -260,15 +292,15 @@
 	ENTRY_COMP(recvmsg)
 	ENTRY_SAME(semop)		/* 185 */
 	ENTRY_SAME(semget)
-	ENTRY_DIFF(semctl_broken)
+	ENTRY_DIFF(semctl)
 	ENTRY_DIFF(msgsnd)
 	ENTRY_DIFF(msgrcv)
 	ENTRY_SAME(msgget)		/* 190 */
-	ENTRY_SAME(msgctl_broken)
+	ENTRY_SAME(msgctl)
 	ENTRY_SAME(shmat_wrapper)
 	ENTRY_SAME(shmdt)
 	ENTRY_SAME(shmget)
-	ENTRY_SAME(shmctl_broken)	/* 195 */
+	ENTRY_SAME(shmctl)		/* 195 */
 	ENTRY_SAME(ni_syscall)		/* streams1 */
 	ENTRY_SAME(ni_syscall)		/* streams2 */
 	ENTRY_SAME(lstat64)
@@ -276,19 +308,18 @@
 	ENTRY_OURS(ftruncate64)		/* 200 */
 	ENTRY_SAME(getdents64)
 	ENTRY_COMP(fcntl64)
-	ENTRY_SAME(ni_syscall)
-	ENTRY_SAME(ni_syscall)
-	ENTRY_SAME(ni_syscall)		/* 205 */
-	ENTRY_SAME(gettid)             
-	ENTRY_OURS(readahead)          
-	ENTRY_SAME(ni_syscall)		/* tkill */
-
+	ENTRY_SAME(ni_syscall)	/* attrctl -- dead */
+	ENTRY_SAME(ni_syscall)	/* acl_get -- dead */
+	ENTRY_SAME(ni_syscall)		/* 205 (acl_set -- dead) */
+	ENTRY_SAME(gettid)
+	ENTRY_OURS(readahead)
+	ENTRY_SAME(tkill)
 	ENTRY_SAME(sendfile64)
 	ENTRY_COMP(futex)		/* 210 */
 	ENTRY_COMP(sched_setaffinity)
 	ENTRY_COMP(sched_getaffinity)
-	ENTRY_SAME(ni_syscall)
-	ENTRY_SAME(ni_syscall)
+	ENTRY_SAME(ni_syscall)	/* set_thread_area */
+	ENTRY_SAME(ni_syscall)	/* get_thread_area */
 	ENTRY_SAME(io_setup)		/* 215 */
 	ENTRY_SAME(io_destroy)
 	ENTRY_SAME(io_getevents)
@@ -302,3 +333,40 @@
 	ENTRY_SAME(epoll_ctl)		/* 225 */
 	ENTRY_SAME(epoll_wait)
  	ENTRY_SAME(remap_file_pages)
+	ENTRY_SAME(semtimedop)
+	ENTRY_SAME(mq_open)
+	ENTRY_SAME(mq_unlink)		/* 230 */
+	ENTRY_SAME(mq_timedsend)
+	ENTRY_SAME(mq_timedreceive)
+	ENTRY_SAME(mq_notify)
+	ENTRY_SAME(mq_getsetattr)
+	ENTRY_COMP(waitid)		/* 235 */
+	ENTRY_OURS(fadvise64_64)
+	ENTRY_SAME(set_tid_address)
+	ENTRY_SAME(setxattr)
+	ENTRY_SAME(lsetxattr)
+	ENTRY_SAME(fsetxattr)		/* 240 */
+	ENTRY_SAME(getxattr)
+	ENTRY_SAME(lgetxattr)
+	ENTRY_SAME(fgetxattr)
+	ENTRY_SAME(listxattr)
+	ENTRY_SAME(llistxattr)		/* 245 */
+	ENTRY_SAME(flistxattr)
+	ENTRY_SAME(removexattr)
+	ENTRY_SAME(lremovexattr)
+	ENTRY_SAME(fremovexattr)
+	ENTRY_COMP(timer_create)	/* 250 */
+	ENTRY_COMP(timer_settime)
+	ENTRY_COMP(timer_gettime)
+	ENTRY_SAME(timer_getoverrun)
+	ENTRY_SAME(timer_delete)
+	ENTRY_COMP(clock_settime)	/* 255 */
+	ENTRY_COMP(clock_gettime)
+	ENTRY_COMP(clock_getres)
+	ENTRY_COMP(clock_nanosleep)
+	ENTRY_SAME(tgkill)
+	ENTRY_COMP(mbind)		/* 260 */
+	ENTRY_COMP(get_mempolicy)
+	ENTRY_COMP(set_mempolicy)
+	/* Nothing yet */
+

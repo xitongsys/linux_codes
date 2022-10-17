@@ -43,16 +43,6 @@ MODULE_LICENSE("GPL");
 
 /*====================================================================*/
 
-/* Parameters that can be set with 'insmod' */
-
-/* This means pick from 15, 12, 11, 10, 9, 7, 5, 4, and 3 */
-static int default_irq_list[10] = { 15, 12, 11, 10, 9, 7, 5, 4, 3, -1 };
-static int irq_list[10] = { -1 };
-
-MODULE_PARM(irq_list, "1-10i");
-
-/*====================================================================*/
-
 /*
    The event() function is this driver's Card Services event handler.
    It will be called by Card Services when an appropriate card status
@@ -134,7 +124,7 @@ static dev_link_t *avmcs_attach(void)
     client_reg_t client_reg;
     dev_link_t *link;
     local_info_t *local;
-    int ret, i;
+    int ret;
     
     /* Initialize the dev_link_t structure */
     link = kmalloc(sizeof(struct dev_link_t), GFP_KERNEL);
@@ -151,14 +141,7 @@ static dev_link_t *avmcs_attach(void)
     link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
     link->irq.Attributes = IRQ_TYPE_DYNAMIC_SHARING|IRQ_FIRST_SHARED;
 
-    link->irq.IRQInfo1 = IRQ_INFO2_VALID|IRQ_LEVEL_ID;
-    if (irq_list[0] != -1) {
-	    for (i = 0; i < 10 && irq_list[i] > 0; i++)
-	       link->irq.IRQInfo2 |= 1 << irq_list[i];
-    } else {
-	    for (i = 0; i < 10 && default_irq_list[i] > 0; i++)
-	       link->irq.IRQInfo2 |= 1 << default_irq_list[i];
-    }
+    link->irq.IRQInfo1 = IRQ_LEVEL_ID;
     
     /* General socket configuration */
     link->conf.Attributes = CONF_ENABLE_IRQ;
@@ -178,7 +161,6 @@ static dev_link_t *avmcs_attach(void)
     link->next = dev_list;
     dev_list = link;
     client_reg.dev_info = &dev_info;
-    client_reg.Attributes = INFO_IO_CLIENT | INFO_CARD_SHARE;
     client_reg.EventMask =
 	CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL |
 	CS_EVENT_RESET_PHYSICAL | CS_EVENT_CARD_RESET |
@@ -186,7 +168,7 @@ static dev_link_t *avmcs_attach(void)
     client_reg.event_handler = &avmcs_event;
     client_reg.Version = 0x0210;
     client_reg.event_callback_args.client_data = link;
-    ret = CardServices(RegisterClient, &link->handle, &client_reg);
+    ret = pcmcia_register_client(&link->handle, &client_reg);
     if (ret != 0) {
 	cs_error(link->handle, RegisterClient, ret);
 	avmcs_detach(link);
@@ -232,7 +214,7 @@ static void avmcs_detach(dev_link_t *link)
 
     /* Break the link with Card Services */
     if (link->handle)
-	CardServices(DeregisterClient, link->handle);
+	pcmcia_deregister_client(link->handle);
     
     /* Unlink device structure, free pieces */
     *linkp = link->next;
@@ -251,19 +233,29 @@ static void avmcs_detach(dev_link_t *link)
     
 ======================================================================*/
 
-static int get_tuple(int fn, client_handle_t handle, tuple_t *tuple,
+static int get_tuple(client_handle_t handle, tuple_t *tuple,
 		     cisparse_t *parse)
 {
-    int i;
-    i = CardServices(fn, handle, tuple);
+    int i = pcmcia_get_tuple_data(handle, tuple);
     if (i != CS_SUCCESS) return i;
-    i = CardServices(GetTupleData, handle, tuple);
-    if (i != CS_SUCCESS) return i;
-    return CardServices(ParseTuple, handle, tuple, parse);
+    return pcmcia_parse_tuple(handle, tuple, parse);
 }
 
-#define first_tuple(a, b, c) get_tuple(GetFirstTuple, a, b, c)
-#define next_tuple(a, b, c) get_tuple(GetNextTuple, a, b, c)
+static int first_tuple(client_handle_t handle, tuple_t *tuple,
+		     cisparse_t *parse)
+{
+    int i = pcmcia_get_first_tuple(handle, tuple);
+    if (i != CS_SUCCESS) return i;
+    return get_tuple(handle, tuple, parse);
+}
+
+static int next_tuple(client_handle_t handle, tuple_t *tuple,
+		     cisparse_t *parse)
+{
+    int i = pcmcia_get_next_tuple(handle, tuple);
+    if (i != CS_SUCCESS) return i;
+    return get_tuple(handle, tuple, parse);
+}
 
 static void avmcs_config(dev_link_t *link)
 {
@@ -287,14 +279,14 @@ static void avmcs_config(dev_link_t *link)
     */
     do {
 	tuple.DesiredTuple = CISTPL_CONFIG;
-	i = CardServices(GetFirstTuple, handle, &tuple);
+	i = pcmcia_get_first_tuple(handle, &tuple);
 	if (i != CS_SUCCESS) break;
 	tuple.TupleData = buf;
 	tuple.TupleDataMax = 64;
 	tuple.TupleOffset = 0;
-	i = CardServices(GetTupleData, handle, &tuple);
+	i = pcmcia_get_tuple_data(handle, &tuple);
 	if (i != CS_SUCCESS) break;
-	i = CardServices(ParseTuple, handle, &tuple, &parse);
+	i = pcmcia_parse_tuple(handle, &tuple, &parse);
 	if (i != CS_SUCCESS) break;
 	link->conf.ConfigBase = parse.config.base;
     } while (0);
@@ -337,7 +329,7 @@ static void avmcs_config(dev_link_t *link)
                 printk(KERN_INFO "avm_cs: testing i/o %#x-%#x\n",
 			link->io.BasePort1,
 		        link->io.BasePort1+link->io.NumPorts1-1);
-		i = CardServices(RequestIO, link->handle, &link->io);
+		i = pcmcia_request_io(link->handle, &link->io);
 		if (i == CS_SUCCESS) goto found_port;
 	    }
 	    i = next_tuple(handle, &tuple, &parse);
@@ -352,21 +344,21 @@ found_port:
 	/*
 	 * allocate an interrupt line
 	 */
-	i = CardServices(RequestIRQ, link->handle, &link->irq);
+	i = pcmcia_request_irq(link->handle, &link->irq);
 	if (i != CS_SUCCESS) {
 	    cs_error(link->handle, RequestIRQ, i);
-	    CardServices(ReleaseIO, link->handle, &link->io);
+	    pcmcia_release_io(link->handle, &link->io);
 	    break;
 	}
 	
 	/*
          * configure the PCMCIA socket
 	  */
-	i = CardServices(RequestConfiguration, link->handle, &link->conf);
+	i = pcmcia_request_configuration(link->handle, &link->conf);
 	if (i != CS_SUCCESS) {
 	    cs_error(link->handle, RequestConfiguration, i);
-	    CardServices(ReleaseIO, link->handle, &link->io);
-	    CardServices(ReleaseIRQ, link->handle, &link->irq);
+	    pcmcia_release_io(link->handle, &link->io);
+	    pcmcia_release_irq(link->handle, &link->irq);
 	    break;
 	}
 
@@ -437,9 +429,9 @@ static void avmcs_release(dev_link_t *link)
     link->dev = NULL;
     
     /* Don't bother checking to see if these succeed or not */
-    CardServices(ReleaseConfiguration, link->handle);
-    CardServices(ReleaseIO, link->handle, &link->io);
-    CardServices(ReleaseIRQ, link->handle, &link->irq);
+    pcmcia_release_configuration(link->handle);
+    pcmcia_release_io(link->handle, &link->io);
+    pcmcia_release_irq(link->handle, &link->irq);
     link->state &= ~DEV_CONFIG;
     
     if (link->state & DEV_STALE_LINK)
@@ -481,26 +473,26 @@ static int avmcs_event(event_t event, int priority,
 	/* Fall through... */
     case CS_EVENT_RESET_PHYSICAL:
 	if (link->state & DEV_CONFIG)
-	    CardServices(ReleaseConfiguration, link->handle);
+	    pcmcia_release_configuration(link->handle);
 	break;
     case CS_EVENT_PM_RESUME:
 	link->state &= ~DEV_SUSPEND;
 	/* Fall through... */
     case CS_EVENT_CARD_RESET:
 	if (link->state & DEV_CONFIG)
-	    CardServices(RequestConfiguration, link->handle, &link->conf);
+	    pcmcia_request_configuration(link->handle, &link->conf);
 	break;
     }
     return 0;
 } /* avmcs_event */
 
 static struct pcmcia_driver avmcs_driver = {
-	.owner		= THIS_MODULE,
-	.drv		= {
-		.name	= "avmcs_cs",
+	.owner	= THIS_MODULE,
+	.drv	= {
+		.name	= "avm_cs",
 	},
-	.attach		= avmcs_attach,
-	.detach		= avmcs_detach,
+	.attach	= avmcs_attach,
+	.detach	= avmcs_detach,
 };
 
 static int __init avmcs_init(void)
@@ -511,13 +503,7 @@ static int __init avmcs_init(void)
 static void __exit avmcs_exit(void)
 {
 	pcmcia_unregister_driver(&avmcs_driver);
-
-	/* XXX: this really needs to move into generic code.. */
-	while (dev_list != NULL) {
-		if (dev_list->state & DEV_CONFIG)
-			avmcs_release(dev_list);
-		avmcs_detach(dev_list);
-	}
+	BUG_ON(dev_list != NULL);
 }
 
 module_init(avmcs_init);

@@ -74,13 +74,19 @@ extern void read_rtc_time(void);
 extern void pmac_find_display(void);
 extern void giveup_fpu(struct task_struct *);
 extern void enable_kernel_fp(void);
+extern void enable_kernel_altivec(void);
 extern void giveup_altivec(struct task_struct *);
 extern void load_up_altivec(struct task_struct *);
+extern void giveup_spe(struct task_struct *);
+extern void load_up_spe(struct task_struct *);
+extern int fix_alignment(struct pt_regs *);
 extern void cvt_fd(float *from, double *to, unsigned long *fpscr);
 extern void cvt_df(double *from, float *to, unsigned long *fpscr);
 extern int call_rtas(const char *, int, int, unsigned long *, ...);
-extern int abs(int);
 extern void cacheable_memzero(void *p, unsigned int nb);
+extern int do_page_fault(struct pt_regs *, unsigned long, unsigned long);
+extern void bad_page_fault(struct pt_regs *, unsigned long, int);
+extern void die(const char *, struct pt_regs *, long);
 
 struct device_node;
 extern void note_scsi_host(struct device_node *, void *);
@@ -94,8 +100,6 @@ extern struct task_struct *_switch(struct thread_struct *prev,
 				   struct thread_struct *next);
 
 extern unsigned int rtas_data;
-
-extern void dump_regs(struct pt_regs *);
 
 static __inline__ unsigned long
 xchg_u32(volatile void *p, unsigned long val)

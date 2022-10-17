@@ -136,7 +136,7 @@
 #include <asm/atomic.h>
 #include <linux/blkdev.h>
 #include "../../scsi/scsi.h"
-#include "../../scsi/hosts.h"
+#include <scsi/scsi_host.h>
 
 #include "microtek.h"
 
@@ -214,8 +214,8 @@ static struct usb_driver mts_usb_driver = {
 #ifdef MTS_DO_DEBUG
 
 static inline void mts_debug_dump(struct mts_desc* desc) {
-	MTS_DEBUG("desc at 0x%x: halted = %02x%02x, toggle = %02x%02x\n",
-		  (int)desc,(int)desc->usb_dev->halted[1],(int)desc->usb_dev->halted[0],
+	MTS_DEBUG("desc at 0x%x: toggle = %02x%02x\n",
+		  (int)desc,
 		  (int)desc->usb_dev->toggle[1],(int)desc->usb_dev->toggle[0]
 		);
 	MTS_DEBUG("ep_out=%x ep_response=%x ep_image=%x\n",
@@ -324,7 +324,7 @@ static inline void mts_urb_abort(struct mts_desc* desc) {
 	MTS_DEBUG_GOT_HERE();
 	mts_debug_dump(desc);
 
-	usb_unlink_urb( desc->urb );
+	usb_kill_urb( desc->urb );
 }
 
 static int mts_scsi_abort (Scsi_Cmnd *srb)
@@ -341,12 +341,18 @@ static int mts_scsi_abort (Scsi_Cmnd *srb)
 static int mts_scsi_host_reset (Scsi_Cmnd *srb)
 {
 	struct mts_desc* desc = (struct mts_desc*)(srb->device->host->hostdata[0]);
+	int result, rc;
 
 	MTS_DEBUG_GOT_HERE();
 	mts_debug_dump(desc);
 
-	usb_reset_device(desc->usb_dev); /*FIXME: untested on new reset code */
-	return 0;  /* RANT why here 0 and not SUCCESS */
+	rc = usb_lock_device_for_reset(desc->usb_dev, desc->usb_intf);
+	if (rc < 0)
+		return FAILED;
+	result = usb_reset_device(desc->usb_dev);;
+	if (rc)
+		usb_unlock_device(desc->usb_dev);
+	return result ? FAILED : SUCCESS;
 }
 
 static
@@ -534,7 +540,7 @@ mts_build_transfer_context( Scsi_Cmnd *srb, struct mts_desc* desc )
 
 	if (!srb->use_sg) {
 		if ( !srb->bufflen ){
-			desc->context.data = 0;
+			desc->context.data = NULL;
 			desc->context.data_length = 0;
 			return;
 		} else {
@@ -693,7 +699,6 @@ static int mts_usb_probe(struct usb_interface *intf,
 			 const struct usb_device_id *id)
 {
 	int i;
-	int result;
 	int ep_out = -1;
 	int ep_in_set[3]; /* this will break if we have more than three endpoints
 			   which is why we check */
@@ -703,15 +708,15 @@ static int mts_usb_probe(struct usb_interface *intf,
 	struct vendor_product const* p;
 	struct usb_device *dev = interface_to_usbdev (intf);
 
-	/* the altsettting 0 on the interface we're probing */
+	/* the current altsetting on the interface we're probing */
 	struct usb_host_interface *altsetting;
 
 	MTS_DEBUG_GOT_HERE();
 	MTS_DEBUG( "usb-device descriptor at %x\n", (int)dev );
 
 	MTS_DEBUG( "product id = 0x%x, vendor id = 0x%x\n",
-		   (int)dev->descriptor.idProduct,
-		   (int)dev->descriptor.idVendor );
+		   le16_to_cpu(dev->descriptor.idProduct),
+		   le16_to_cpu(dev->descriptor.idVendor) );
 
 	MTS_DEBUG_GOT_HERE();
 
@@ -724,8 +729,8 @@ static int mts_usb_probe(struct usb_interface *intf,
 		MTS_MESSAGE( "model %s is not known to be fully supported, reports welcome!\n",
 			     p->name );
 
-	/* the altsettting 0 on the interface we're probing */
-	altsetting = &(intf->altsetting[0]);
+	/* the current altsetting on the interface we're probing */
+	altsetting = intf->cur_altsetting;
 
 
 	/* Check if the config is sane */
@@ -766,20 +771,6 @@ static int mts_usb_probe(struct usb_interface *intf,
 		MTS_WARNING( "couldn't find an output bulk endpoint. Bailing out.\n" );
 		return -ENODEV;
 	}
-
-	result = usb_set_interface(dev, altsetting->desc.bInterfaceNumber, 0);
-
-	MTS_DEBUG("usb_set_interface returned %d.\n",result);
-	switch( result )
-	{
-	case 0: /* no error */
-		break;
-
-	default:
-		MTS_DEBUG( "unknown error %d from usb_set_interface\n",
-			(int)result );
- 		return -ENODEV;
-	}
 	
 	
 	new_desc = kmalloc(sizeof(struct mts_desc), GFP_KERNEL);
@@ -792,6 +783,7 @@ static int mts_usb_probe(struct usb_interface *intf,
 		goto out_kfree;
 
 	new_desc->usb_dev = dev;
+	new_desc->usb_intf = intf;
 	init_MUTEX(&new_desc->lock);
 
 	/* endpoints */
@@ -837,10 +829,10 @@ static void mts_usb_disconnect (struct usb_interface *intf)
 
 	usb_set_intfdata(intf, NULL);
 
+	usb_kill_urb(desc->urb);
 	scsi_remove_host(desc->host);
-	usb_unlink_urb(desc->urb);
-	scsi_host_put(desc->host);
 
+	scsi_host_put(desc->host);
 	usb_free_urb(desc->urb);
 	kfree(desc);
 }

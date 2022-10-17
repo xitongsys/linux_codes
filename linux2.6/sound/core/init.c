@@ -26,6 +26,8 @@
 #include <linux/slab.h>
 #include <linux/time.h>
 #include <linux/ctype.h>
+#include <linux/pci.h>
+#include <linux/pm.h>
 #include <sound/core.h>
 #include <sound/control.h>
 #include <sound/info.h>
@@ -35,7 +37,6 @@ struct snd_shutdown_f_ops {
 	struct snd_shutdown_f_ops *next;
 };
 
-int snd_cards_count = 0;
 unsigned int snd_cards_lock = 0;	/* locked for registering/using */
 snd_card_t *snd_cards[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS-1)] = NULL};
 rwlock_t snd_card_rwlock = RW_LOCK_UNLOCKED;
@@ -71,7 +72,7 @@ snd_card_t *snd_card_new(int idx, const char *xid,
 
 	if (extra_size < 0)
 		extra_size = 0;
-	card = (snd_card_t *) snd_kcalloc(sizeof(snd_card_t) + extra_size, GFP_KERNEL);
+	card = kcalloc(1, sizeof(*card) + extra_size, GFP_KERNEL);
 	if (card == NULL)
 		return NULL;
 	if (xid) {
@@ -79,6 +80,7 @@ snd_card_t *snd_card_new(int idx, const char *xid,
 			goto __error;
 		strlcpy(card->id, xid, sizeof(card->id));
 	}
+	err = 0;
 	write_lock(&snd_card_rwlock);
 	if (idx < 0) {
 		int idx2;
@@ -94,15 +96,14 @@ snd_card_t *snd_card_new(int idx, const char *xid,
 			idx = snd_ecards_limit++;
 	} else if (idx < snd_ecards_limit) {
 		if (snd_cards_lock & (1 << idx))
-			idx = -1;	/* invalid */
+			err = -ENODEV;	/* invalid */
 	} else if (idx < SNDRV_CARDS)
 		snd_ecards_limit = idx + 1; /* increase the limit */
 	else
-		idx = -1;
-	if (idx < 0) {
+		err = -ENODEV;
+	if (idx < 0 || err < 0) {
 		write_unlock(&snd_card_rwlock);
-		if (idx >= snd_ecards_limit)
-			snd_printk(KERN_ERR "card %i is out of range (0-%i)\n", idx, snd_ecards_limit-1);
+		snd_printk(KERN_ERR "cannot find the slot for index %d (range 0-%i)\n", idx, snd_ecards_limit - 1);
 		goto __error;
 	}
 	snd_cards_lock |= 1 << idx;		/* lock it */
@@ -123,7 +124,7 @@ snd_card_t *snd_card_new(int idx, const char *xid,
 #endif
 	/* the control interface cannot be accessed from the user space until */
 	/* snd_cards_bitmask and snd_cards are set with snd_card_register */
-	if ((err = snd_ctl_register(card)) < 0) {
+	if ((err = snd_ctl_create(card)) < 0) {
 		snd_printd("unable to register control minors\n");
 		goto __error;
 	}
@@ -136,7 +137,7 @@ snd_card_t *snd_card_new(int idx, const char *xid,
 	return card;
 
       __error_ctl:
-	snd_ctl_unregister(card);
+	snd_device_free_all(card, SNDRV_DEV_CMD_PRE);
       __error:
 	kfree(card);
       	return NULL;
@@ -215,8 +216,6 @@ int snd_card_disconnect(snd_card_t * card)
 	/* phase 3: notify all connected devices about disconnection */
 	/* at this point, they cannot respond to any calls except release() */
 
-	snd_ctl_disconnect(card);
-
 #if defined(CONFIG_SND_MIXER_OSS) || defined(CONFIG_SND_MIXER_OSS_MODULE)
 	if (snd_mixer_oss_notify_callback)
 		snd_mixer_oss_notify_callback(card, SND_MIXER_OSS_NOTIFY_DISCONNECT);
@@ -249,11 +248,16 @@ int snd_card_free(snd_card_t * card)
 		return -EINVAL;
 	write_lock(&snd_card_rwlock);
 	snd_cards[card->number] = NULL;
-	snd_cards_count--;
 	write_unlock(&snd_card_rwlock);
 
 #ifdef CONFIG_PM
 	wake_up(&card->power_sleep);
+#ifdef CONFIG_ISA
+	if (card->pm_dev) {
+		pm_unregister(card->pm_dev);
+		card->pm_dev = NULL;
+	}
+#endif
 #endif
 
 	/* wait, until all devices are ready for the free operation */
@@ -271,17 +275,14 @@ int snd_card_free(snd_card_t * card)
 		snd_printk(KERN_ERR "unable to free all devices (normal)\n");
 		/* Fatal, but this situation should never occur */
 	}
-	if (snd_ctl_unregister(card) < 0) {
-		snd_printk(KERN_ERR "unable to unregister control minors\n");
-		/* Not fatal error */
-	}
 	if (snd_device_free_all(card, SNDRV_DEV_CMD_POST) < 0) {
 		snd_printk(KERN_ERR "unable to free all devices (post)\n");
 		/* Fatal, but this situation should never occur */
 	}
 	if (card->private_free)
 		card->private_free(card);
-	snd_info_free_entry(card->proc_id);
+	if (card->proc_id)
+		snd_info_unregister(card->proc_id);
 	if (snd_info_card_free(card) < 0) {
 		snd_printk(KERN_WARNING "unable to free card info\n");
 		/* Not fatal error */
@@ -432,7 +433,6 @@ int snd_card_register(snd_card_t * card)
 	if (card->id[0] == '\0')
 		choose_default_id(card);
 	snd_cards[card->number] = card;
-	snd_cards_count++;
 	write_unlock(&snd_card_rwlock);
 	if ((err = snd_info_card_register(card)) < 0) {
 		snd_printd("unable to create card info\n");
@@ -442,7 +442,6 @@ int snd_card_register(snd_card_t * card)
 		snd_printd("unable to create card entry\n");
 		goto __skip_info;
 	}
-	entry->content = SNDRV_INFO_CONTENT_TEXT;
 	entry->c.text.read_size = PAGE_SIZE;
 	entry->c.text.read = snd_card_id_read;
 	if (snd_info_register(entry) < 0) {
@@ -527,7 +526,6 @@ int __init snd_card_info_init(void)
 
 	entry = snd_info_create_module_entry(THIS_MODULE, "cards", NULL);
 	snd_runtime_check(entry != NULL, return -ENOMEM);
-	entry->content = SNDRV_INFO_CONTENT_TEXT;
 	entry->c.text.read_size = PAGE_SIZE;
 	entry->c.text.read = snd_card_info_read;
 	if (snd_info_register(entry) < 0) {
@@ -539,7 +537,6 @@ int __init snd_card_info_init(void)
 #ifdef MODULE
 	entry = snd_info_create_module_entry(THIS_MODULE, "modules", NULL);
 	if (entry) {
-		entry->content = SNDRV_INFO_CONTENT_TEXT;
 		entry->c.text.read_size = PAGE_SIZE;
 		entry->c.text.read = snd_card_module_info_read;
 		if (snd_info_register(entry) < 0)
@@ -659,12 +656,11 @@ int snd_card_file_remove(snd_card_t *card, struct file *file)
 	spin_unlock(&card->files_lock);
 	if (card->files == NULL)
 		wake_up(&card->shutdown_sleep);
-	if (mfile) {
-		kfree(mfile);
-	} else {
+	if (!mfile) {
 		snd_printk(KERN_ERR "ALSA card file remove problem (%p)\n", file);
 		return -ENOENT;
 	}
+	kfree(mfile);
 	return 0;
 }
 
@@ -682,6 +678,7 @@ int snd_card_file_remove(snd_card_t *card, struct file *file)
 int snd_power_wait(snd_card_t *card, unsigned int power_state, struct file *file)
 {
 	wait_queue_t wait;
+	int result = 0;
 
 	/* fastpath */
 	if (snd_power_get_state(card) == power_state)
@@ -689,18 +686,127 @@ int snd_power_wait(snd_card_t *card, unsigned int power_state, struct file *file
 	init_waitqueue_entry(&wait, current);
 	add_wait_queue(&card->power_sleep, &wait);
 	while (1) {
-		if (card->shutdown)
-			return -ENODEV;
-		if (snd_power_get_state(card) == power_state) {
-			remove_wait_queue(&card->power_sleep, &wait);
-			return 0;
+		if (card->shutdown) {
+			result = -ENODEV;
+			break;
 		}
-		if (file && (file->f_flags & O_NONBLOCK))
-			return -EAGAIN;
+		if (snd_power_get_state(card) == power_state)
+			break;
+#if 0 /* block all devices */
+		if (file && (file->f_flags & O_NONBLOCK)) {
+			result = -EAGAIN;
+			break;
+		}
+#endif
 		set_current_state(TASK_UNINTERRUPTIBLE);
 		snd_power_unlock(card);
 		schedule_timeout(30 * HZ);
 		snd_power_lock(card);
 	}
+	remove_wait_queue(&card->power_sleep, &wait);
+	return result;
 }
+
+/**
+ * snd_card_set_pm_callback - set the PCI power-management callbacks
+ * @card: soundcard structure
+ * @suspend: suspend callback function
+ * @resume: resume callback function
+ * @private_data: private data to pass to the callback functions
+ *
+ * Sets the power-management callback functions of the card.
+ * These callbacks are called from ALSA's common PCI suspend/resume
+ * handler and from the control API.
+ */
+int snd_card_set_pm_callback(snd_card_t *card,
+			     int (*suspend)(snd_card_t *, unsigned int),
+			     int (*resume)(snd_card_t *, unsigned int),
+			     void *private_data)
+{
+	card->pm_suspend = suspend;
+	card->pm_resume = resume;
+	card->pm_private_data = private_data;
+	return 0;
+}
+
+static int snd_generic_pm_callback(struct pm_dev *dev, pm_request_t rqst, void *data)
+{
+	snd_card_t *card = dev->data;
+
+	switch (rqst) {
+	case PM_SUSPEND:
+		if (card->power_state == SNDRV_CTL_POWER_D3hot)
+			break;
+		/* FIXME: the correct state value? */
+		card->pm_suspend(card, 0);
+		snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
+		break;
+	case PM_RESUME:
+		if (card->power_state == SNDRV_CTL_POWER_D0)
+			break;
+		/* FIXME: the correct state value? */
+		card->pm_resume(card, 0);
+		snd_power_change_state(card, SNDRV_CTL_POWER_D0);
+		break;
+	}
+	return 0;
+}
+
+/**
+ * snd_card_set_dev_pm_callback - set the generic power-management callbacks
+ * @card: soundcard structure
+ * @type: PM device type (PM_XXX)
+ * @suspend: suspend callback function
+ * @resume: resume callback function
+ * @private_data: private data to pass to the callback functions
+ *
+ * Registers the power-management and sets the lowlevel callbacks for
+ * the given card with the given PM type.  These callbacks are called
+ * from the ALSA's common PM handler and from the control API.
+ */
+int snd_card_set_dev_pm_callback(snd_card_t *card, int type,
+				 int (*suspend)(snd_card_t *, unsigned int),
+				 int (*resume)(snd_card_t *, unsigned int),
+				 void *private_data)
+{
+	card->pm_dev = pm_register(type, 0, snd_generic_pm_callback);
+	if (! card->pm_dev)
+		return -ENOMEM;
+	card->pm_dev->data = card;
+	snd_card_set_pm_callback(card, suspend, resume, private_data);
+	return 0;
+}
+
+#ifdef CONFIG_PCI
+int snd_card_pci_suspend(struct pci_dev *dev, u32 state)
+{
+	snd_card_t *card = pci_get_drvdata(dev);
+	int err;
+	if (! card || ! card->pm_suspend)
+		return 0;
+	if (card->power_state == SNDRV_CTL_POWER_D3hot)
+		return 0;
+	/* FIXME: correct state value? */
+	err = card->pm_suspend(card, 0);
+	pci_save_state(dev);
+	snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
+	return err;
+}
+
+int snd_card_pci_resume(struct pci_dev *dev)
+{
+	snd_card_t *card = pci_get_drvdata(dev);
+	if (! card || ! card->pm_resume)
+		return 0;
+	if (card->power_state == SNDRV_CTL_POWER_D0)
+		return 0;
+	/* restore the PCI config space */
+	pci_restore_state(dev);
+	/* FIXME: correct state value? */
+	card->pm_resume(card, 0);
+	snd_power_change_state(card, SNDRV_CTL_POWER_D0);
+	return 0;
+}
+#endif
+
 #endif /* CONFIG_PM */

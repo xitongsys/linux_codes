@@ -10,11 +10,30 @@
 #include "lkc.h"
 
 struct menu rootmenu;
-struct menu *current_menu, *current_entry;
 static struct menu **last_entry_ptr;
 
 struct file *file_list;
 struct file *current_file;
+
+static void menu_warn(struct menu *menu, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	fprintf(stderr, "%s:%d:warning: ", menu->file->name, menu->lineno);
+	vfprintf(stderr, fmt, ap);
+	fprintf(stderr, "\n");
+	va_end(ap);
+}
+
+static void prop_warn(struct property *prop, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	fprintf(stderr, "%s:%d:warning: ", prop->file->name, prop->lineno);
+	vfprintf(stderr, fmt, ap);
+	fprintf(stderr, "\n");
+	va_end(ap);
+}
 
 void menu_init(void)
 {
@@ -94,9 +113,9 @@ void menu_set_type(int type)
 		sym->type = type;
 		return;
 	}
-	fprintf(stderr, "%s:%d:warning: type of '%s' redefined from '%s' to '%s'\n",
-		current_entry->file->name, current_entry->lineno,
-		sym->name ? sym->name : "<choice>", sym_type_name(sym->type), sym_type_name(type));
+	menu_warn(current_entry, "type of '%s' redefined from '%s' to '%s'\n",
+	    sym->name ? sym->name : "<choice>",
+	    sym_type_name(sym->type), sym_type_name(type));
 }
 
 struct property *menu_add_prop(enum prop_type type, char *prompt, struct expr *expr, struct expr *dep)
@@ -110,8 +129,7 @@ struct property *menu_add_prop(enum prop_type type, char *prompt, struct expr *e
 
 	if (prompt) {
 		if (current_entry->prompt)
-			fprintf(stderr, "%s:%d: prompt redefined\n",
-				current_entry->file->name, current_entry->lineno);
+			menu_warn(current_entry, "prompt redefined\n");
 		current_entry->prompt = prop;
 	}
 
@@ -131,6 +149,50 @@ void menu_add_expr(enum prop_type type, struct expr *expr, struct expr *dep)
 void menu_add_symbol(enum prop_type type, struct symbol *sym, struct expr *dep)
 {
 	menu_add_prop(type, NULL, expr_alloc_symbol(sym), dep);
+}
+
+void sym_check_prop(struct symbol *sym)
+{
+	struct property *prop;
+	struct symbol *sym2;
+	for (prop = sym->prop; prop; prop = prop->next) {
+		switch (prop->type) {
+		case P_DEFAULT:
+			if ((sym->type == S_STRING || sym->type == S_INT || sym->type == S_HEX) &&
+			    prop->expr->type != E_SYMBOL)
+				prop_warn(prop,
+				    "default for config symbol '%'"
+				    " must be a single symbol", sym->name);
+			break;
+		case P_SELECT:
+			sym2 = prop_get_symbol(prop);
+			if (sym->type != S_BOOLEAN && sym->type != S_TRISTATE)
+				prop_warn(prop,
+				    "config symbol '%s' uses select, but is "
+				    "not boolean or tristate", sym->name);
+			else if (sym2->type == S_UNKNOWN)
+				prop_warn(prop,
+				    "'select' used by config symbol '%s' "
+				    "refer to undefined symbol '%s'",
+				    sym->name, sym2->name);
+			else if (sym2->type != S_BOOLEAN && sym2->type != S_TRISTATE)
+				prop_warn(prop,
+				    "'%s' has wrong type. 'select' only "
+				    "accept arguments of boolean and "
+				    "tristate type", sym2->name);
+			break;
+		case P_RANGE:
+			if (sym->type != S_INT && sym->type != S_HEX)
+				prop_warn(prop, "range is only allowed "
+				                "for int or hex symbols");
+			if (!sym_string_valid(sym, prop->expr->left.sym->name) ||
+			    !sym_string_valid(sym, prop->expr->right.sym->name))
+				prop_warn(prop, "range is invalid");
+			break;
+		default:
+			;
+		}
+	}
 }
 
 void menu_finalize(struct menu *parent)
@@ -222,17 +284,16 @@ void menu_finalize(struct menu *parent)
 		if (sym && sym_is_choice(sym) && menu->sym) {
 			menu->sym->flags |= SYMBOL_CHOICEVAL;
 			if (!menu->prompt)
-				fprintf(stderr, "%s:%d:warning: choice value must have a prompt\n",
-					menu->file->name, menu->lineno);
+				menu_warn(menu, "choice value must have a prompt");
 			for (prop = menu->sym->prop; prop; prop = prop->next) {
 				if (prop->type == P_PROMPT && prop->menu != menu) {
-					fprintf(stderr, "%s:%d:warning: choice values currently only support a single prompt\n",
-						prop->file->name, prop->lineno);
-					
+					prop_warn(prop, "choice values "
+					    "currently only support a "
+					    "single prompt");
 				}
 				if (prop->type == P_DEFAULT)
-					fprintf(stderr, "%s:%d:warning: defaults for choice values not supported\n",
-						prop->file->name, prop->lineno);
+					prop_warn(prop, "defaults for choice "
+					    "values not supported");
 			}
 			current_entry = menu;
 			menu_set_type(sym->type);
@@ -256,43 +317,15 @@ void menu_finalize(struct menu *parent)
 	}
 
 	if (sym && !(sym->flags & SYMBOL_WARNED)) {
-		struct symbol *sym2;
 		if (sym->type == S_UNKNOWN)
-			fprintf(stderr, "%s:%d:warning: config symbol defined without type\n",
-				parent->file->name, parent->lineno);
+			menu_warn(parent, "config symbol defined "
+			    "without type\n");
 
 		if (sym_is_choice(sym) && !parent->prompt)
-			fprintf(stderr, "%s:%d:warning: choice must have a prompt\n",
-				parent->file->name, parent->lineno);
+			menu_warn(parent, "choice must have a prompt\n");
 
-		for (prop = sym->prop; prop; prop = prop->next) {
-			switch (prop->type) {
-			case P_DEFAULT:
-				if ((sym->type == S_STRING || sym->type == S_INT || sym->type == S_HEX) &&
-				    prop->expr->type != E_SYMBOL)
-					fprintf(stderr, "%s:%d:warning: default must be a single symbol\n",
-						prop->file->name, prop->lineno);
-				break;
-			case P_SELECT:
-				sym2 = prop_get_symbol(prop);
-				if ((sym->type != S_BOOLEAN && sym->type != S_TRISTATE) ||
-				    (sym2->type != S_BOOLEAN && sym2->type != S_TRISTATE))
-					fprintf(stderr, "%s:%d:warning: enable is only allowed with boolean and tristate symbols\n",
-						prop->file->name, prop->lineno);
-				break;
-			case P_RANGE:
-				if (sym->type != S_INT && sym->type != S_HEX)
-					fprintf(stderr, "%s:%d:warning: range is only allowed for int or hex symbols\n",
-						prop->file->name, prop->lineno);
-				if (!sym_string_valid(sym, prop->expr->left.sym->name) ||
-				    !sym_string_valid(sym, prop->expr->right.sym->name))
-					fprintf(stderr, "%s:%d:warning: range is invalid\n",
-						prop->file->name, prop->lineno);
-				break;
-			default:
-				;
-			}
-		}
+		/* Check properties connected to this symbol */
+		sym_check_prop(sym);
 		sym->flags |= SYMBOL_WARNED;
 	}
 
@@ -353,45 +386,5 @@ struct menu *menu_get_parent_menu(struct menu *menu)
 			break;
 	}
 	return menu;
-}
-
-struct file *file_lookup(const char *name)
-{
-	struct file *file;
-
-	for (file = file_list; file; file = file->next) {
-		if (!strcmp(name, file->name))
-			return file;
-	}
-
-	file = malloc(sizeof(*file));
-	memset(file, 0, sizeof(*file));
-	file->name = strdup(name);
-	file->next = file_list;
-	file_list = file;
-	return file;
-}
-
-int file_write_dep(const char *name)
-{
-	struct file *file;
-	FILE *out;
-
-	if (!name)
-		name = ".config.cmd";
-	out = fopen("..config.tmp", "w");
-	if (!out)
-		return 1;
-	fprintf(out, "deps_config := \\\n");
-	for (file = file_list; file; file = file->next) {
-		if (file->next)
-			fprintf(out, "\t%s \\\n", file->name);
-		else
-			fprintf(out, "\t%s\n", file->name);
-	}
-	fprintf(out, "\n.config include/linux/autoconf.h: $(deps_config)\n\n$(deps_config):\n");
-	fclose(out);
-	rename("..config.tmp", name);
-	return 0;
 }
 

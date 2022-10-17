@@ -47,9 +47,9 @@
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/io.h>
-#include <asm/pgalloc.h>
 #include <asm/tlb.h>
 #include <asm/div64.h>
+#include "internal.h"
 
 #define LOAD_INT(x) ((x) >> FSHIFT)
 #define LOAD_FRAC(x) LOAD_INT(((x) & (FIXED_1-1)) * 100)
@@ -62,14 +62,10 @@
 extern int get_hardware_list(char *);
 extern int get_stram_list(char *);
 extern int get_chrdev_list(char *);
-extern int get_blkdev_list(char *);
 extern int get_filesystem_list(char *);
 extern int get_exec_domain_list(char *);
 extern int get_dma_list(char *);
 extern int get_locks_status (char *, char **, off_t, int);
-#ifdef CONFIG_SGI_DS1286
-extern int get_ds1286_status(char *);
-#endif
 
 static int proc_calc_metrics(char *page, char **start, off_t off,
 				 int count, int *eof, int len)
@@ -99,51 +95,16 @@ static int loadavg_read_proc(char *page, char **start, off_t off,
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
-struct vmalloc_info {
-	unsigned long used;
-	unsigned long largest_chunk;
-};
-
-static struct vmalloc_info get_vmalloc_info(void)
-{
-	unsigned long prev_end = VMALLOC_START;
-	struct vm_struct* vma;
-	struct vmalloc_info vmi;
-	vmi.used = 0;
-
-	read_lock(&vmlist_lock);
-
-	if(!vmlist)
-		vmi.largest_chunk = (VMALLOC_END-VMALLOC_START);
-	else
-		vmi.largest_chunk = 0;
-
-	for (vma = vmlist; vma; vma = vma->next) {
-		unsigned long free_area_size =
-			(unsigned long)vma->addr - prev_end;
-		vmi.used += vma->size;
-		if (vmi.largest_chunk < free_area_size )
-
-			vmi.largest_chunk = free_area_size;
-		prev_end = vma->size + (unsigned long)vma->addr;
-	}
-	if(VMALLOC_END-prev_end > vmi.largest_chunk)
-		vmi.largest_chunk = VMALLOC_END-prev_end;
-
-	read_unlock(&vmlist_lock);
-	return vmi;
-}
-
 static int uptime_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	struct timespec uptime;
 	struct timespec idle;
 	int len;
-	u64 idle_jiffies = init_task.utime + init_task.stime;
+	cputime_t idletime = cputime_add(init_task.utime, init_task.stime);
 
 	do_posix_clock_monotonic_gettime(&uptime);
-	jiffies_to_timespec(idle_jiffies, &idle);
+	cputime_to_timespec(idletime, &idle);
 	len = sprintf(page,"%lu.%02lu %lu.%02lu\n",
 			(unsigned long) uptime.tv_sec,
 			(uptime.tv_nsec / (NSEC_PER_SEC / 100)),
@@ -157,12 +118,13 @@ static int meminfo_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	struct sysinfo i;
-	int len, committed;
+	int len;
 	struct page_state ps;
 	unsigned long inactive;
 	unsigned long active;
 	unsigned long free;
-	unsigned long vmtot;
+	unsigned long committed;
+	unsigned long allowed;
 	struct vmalloc_info vmi;
 
 	get_page_state(&ps);
@@ -175,11 +137,10 @@ static int meminfo_read_proc(char *page, char **start, off_t off,
 	si_meminfo(&i);
 	si_swapinfo(&i);
 	committed = atomic_read(&vm_committed_space);
+	allowed = ((totalram_pages - hugetlb_total_pages())
+		* sysctl_overcommit_ratio / 100) + total_swap_pages;
 
-	vmtot = (VMALLOC_END-VMALLOC_START)>>10;
-	vmi = get_vmalloc_info();
-	vmi.used >>= 10;
-	vmi.largest_chunk >>= 10;
+	get_vmalloc_info(&vmi);
 
 	/*
 	 * Tagged format, for easy grepping and expansion.
@@ -202,7 +163,8 @@ static int meminfo_read_proc(char *page, char **start, off_t off,
 		"Writeback:    %8lu kB\n"
 		"Mapped:       %8lu kB\n"
 		"Slab:         %8lu kB\n"
-		"Committed_AS: %8u kB\n"
+		"CommitLimit:  %8lu kB\n"
+		"Committed_AS: %8lu kB\n"
 		"PageTables:   %8lu kB\n"
 		"VmallocTotal: %8lu kB\n"
 		"VmallocUsed:  %8lu kB\n"
@@ -224,11 +186,12 @@ static int meminfo_read_proc(char *page, char **start, off_t off,
 		K(ps.nr_writeback),
 		K(ps.nr_mapped),
 		K(ps.nr_slab),
+		K(allowed),
 		K(committed),
 		K(ps.nr_page_table_pages),
-		vmtot,
-		vmi.used,
-		vmi.largest_chunk
+		VMALLOC_TOTAL >> 10,
+		vmi.used >> 10,
+		vmi.largest_chunk >> 10
 		);
 
 		len += hugetlb_report_meminfo(page + len);
@@ -254,7 +217,6 @@ static struct file_operations fragmentation_file_operations = {
 static int version_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
-	extern char *linux_banner;
 	int len;
 
 	strcpy(page, linux_banner);
@@ -356,64 +318,66 @@ static struct file_operations proc_slabinfo_operations = {
 	.release	= seq_release,
 };
 
-int show_stat(struct seq_file *p, void *v)
+static int show_stat(struct seq_file *p, void *v)
 {
 	int i;
-	extern unsigned long total_forks;
-	u64 jif;
-	unsigned int sum = 0, user = 0, nice = 0, system = 0, idle = 0, iowait = 0, irq = 0, softirq = 0;
-	struct timeval now; 
-	unsigned long seq;
+	unsigned long jif;
+	cputime64_t user, nice, system, idle, iowait, irq, softirq, steal;
+	u64 sum = 0;
 
-	/* Atomically read jiffies and time of day */ 
-	do {
-		seq = read_seqbegin(&xtime_lock);
+	user = nice = system = idle = iowait =
+		irq = softirq = steal = cputime64_zero;
+	jif = - wall_to_monotonic.tv_sec;
+	if (wall_to_monotonic.tv_nsec)
+		--jif;
 
-		jif = get_jiffies_64();
-		do_gettimeofday(&now);
-	} while (read_seqretry(&xtime_lock, seq));
-
-	/* calc # of seconds since boot time */
-	jif -= INITIAL_JIFFIES;
-	jif = ((u64)now.tv_sec * HZ) + (now.tv_usec/(1000000/HZ)) - jif;
-	do_div(jif, HZ);
-
-	for (i = 0; i < NR_CPUS; i++) {
+	for_each_cpu(i) {
 		int j;
 
-		if (!cpu_online(i)) continue;
-		user += kstat_cpu(i).cpustat.user;
-		nice += kstat_cpu(i).cpustat.nice;
-		system += kstat_cpu(i).cpustat.system;
-		idle += kstat_cpu(i).cpustat.idle;
-		iowait += kstat_cpu(i).cpustat.iowait;
-		irq += kstat_cpu(i).cpustat.irq;
-		softirq += kstat_cpu(i).cpustat.softirq;
+		user = cputime64_add(user, kstat_cpu(i).cpustat.user);
+		nice = cputime64_add(nice, kstat_cpu(i).cpustat.nice);
+		system = cputime64_add(system, kstat_cpu(i).cpustat.system);
+		idle = cputime64_add(idle, kstat_cpu(i).cpustat.idle);
+		iowait = cputime64_add(iowait, kstat_cpu(i).cpustat.iowait);
+		irq = cputime64_add(irq, kstat_cpu(i).cpustat.irq);
+		softirq = cputime64_add(softirq, kstat_cpu(i).cpustat.softirq);
+		steal = cputime64_add(steal, kstat_cpu(i).cpustat.steal);
 		for (j = 0 ; j < NR_IRQS ; j++)
 			sum += kstat_cpu(i).irqs[j];
 	}
 
-	seq_printf(p, "cpu  %u %u %u %u %u %u %u\n",
-		jiffies_to_clock_t(user),
-		jiffies_to_clock_t(nice),
-		jiffies_to_clock_t(system),
-		jiffies_to_clock_t(idle),
-		jiffies_to_clock_t(iowait),
-		jiffies_to_clock_t(irq),
-		jiffies_to_clock_t(softirq));
-	for (i = 0; i < NR_CPUS; i++){
-		if (!cpu_online(i)) continue;
-		seq_printf(p, "cpu%d %u %u %u %u %u %u %u\n",
+	seq_printf(p, "cpu  %llu %llu %llu %llu %llu %llu %llu %llu\n",
+		(unsigned long long)cputime64_to_clock_t(user),
+		(unsigned long long)cputime64_to_clock_t(nice),
+		(unsigned long long)cputime64_to_clock_t(system),
+		(unsigned long long)cputime64_to_clock_t(idle),
+		(unsigned long long)cputime64_to_clock_t(iowait),
+		(unsigned long long)cputime64_to_clock_t(irq),
+		(unsigned long long)cputime64_to_clock_t(softirq),
+		(unsigned long long)cputime64_to_clock_t(steal));
+	for_each_online_cpu(i) {
+
+		/* Copy values here to work around gcc-2.95.3, gcc-2.96 */
+		user = kstat_cpu(i).cpustat.user;
+		nice = kstat_cpu(i).cpustat.nice;
+		system = kstat_cpu(i).cpustat.system;
+		idle = kstat_cpu(i).cpustat.idle;
+		iowait = kstat_cpu(i).cpustat.iowait;
+		irq = kstat_cpu(i).cpustat.irq;
+		softirq = kstat_cpu(i).cpustat.softirq;
+		steal = kstat_cpu(i).cpustat.steal;
+		seq_printf(p, "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu\n",
 			i,
-			jiffies_to_clock_t(kstat_cpu(i).cpustat.user),
-			jiffies_to_clock_t(kstat_cpu(i).cpustat.nice),
-			jiffies_to_clock_t(kstat_cpu(i).cpustat.system),
-			jiffies_to_clock_t(kstat_cpu(i).cpustat.idle),
-			jiffies_to_clock_t(kstat_cpu(i).cpustat.iowait),
-			jiffies_to_clock_t(kstat_cpu(i).cpustat.irq),
-			jiffies_to_clock_t(kstat_cpu(i).cpustat.softirq));
+			(unsigned long long)cputime64_to_clock_t(user),
+			(unsigned long long)cputime64_to_clock_t(nice),
+			(unsigned long long)cputime64_to_clock_t(system),
+			(unsigned long long)cputime64_to_clock_t(idle),
+			(unsigned long long)cputime64_to_clock_t(iowait),
+			(unsigned long long)cputime64_to_clock_t(irq),
+			(unsigned long long)cputime64_to_clock_t(softirq),
+			(unsigned long long)cputime64_to_clock_t(steal));
 	}
-	seq_printf(p, "intr %u", sum);
+	seq_printf(p, "intr %llu", (unsigned long long)sum);
 
 #if !defined(CONFIG_PPC64) && !defined(CONFIG_ALPHA)
 	for (i = 0; i < NR_IRQS; i++)
@@ -421,7 +385,7 @@ int show_stat(struct seq_file *p, void *v)
 #endif
 
 	seq_printf(p,
-		"\nctxt %lu\n"
+		"\nctxt %llu\n"
 		"btime %lu\n"
 		"processes %lu\n"
 		"procs_running %lu\n"
@@ -437,7 +401,7 @@ int show_stat(struct seq_file *p, void *v)
 
 static int stat_open(struct inode *inode, struct file *file)
 {
-	unsigned size = 4096 * (1 + num_online_cpus() / 32);
+	unsigned size = 4096 * (1 + num_possible_cpus() / 32);
 	char *buf;
 	struct seq_file *m;
 	int res;
@@ -473,30 +437,46 @@ static int devices_read_proc(char *page, char **start, off_t off,
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
-extern int show_interrupts(struct seq_file *p, void *v);
-static int interrupts_open(struct inode *inode, struct file *file)
+/*
+ * /proc/interrupts
+ */
+static void *int_seq_start(struct seq_file *f, loff_t *pos)
 {
-	unsigned size = 4096 * (1 + num_online_cpus() / 8);
-	char *buf = kmalloc(size, GFP_KERNEL);
-	struct seq_file *m;
-	int res;
-
-	if (!buf)
-		return -ENOMEM;
-	res = single_open(file, show_interrupts, NULL);
-	if (!res) {
-		m = file->private_data;
-		m->buf = buf;
-		m->size = size;
-	} else
-		kfree(buf);
-	return res;
+	return (*pos <= NR_IRQS) ? pos : NULL;
 }
+
+static void *int_seq_next(struct seq_file *f, void *v, loff_t *pos)
+{
+	(*pos)++;
+	if (*pos > NR_IRQS)
+		return NULL;
+	return pos;
+}
+
+static void int_seq_stop(struct seq_file *f, void *v)
+{
+	/* Nothing to do */
+}
+
+
+extern int show_interrupts(struct seq_file *f, void *v); /* In arch code */
+static struct seq_operations int_seq_ops = {
+	.start = int_seq_start,
+	.next  = int_seq_next,
+	.stop  = int_seq_stop,
+	.show  = show_interrupts
+};
+
+static int interrupts_open(struct inode *inode, struct file *filp)
+{
+	return seq_open(filp, &int_seq_ops);
+}
+
 static struct file_operations proc_interrupts_operations = {
 	.open		= interrupts_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
-	.release	= single_release,
+	.release	= seq_release,
 };
 
 static int filesystems_read_proc(char *page, char **start, off_t off,
@@ -509,21 +489,11 @@ static int filesystems_read_proc(char *page, char **start, off_t off,
 static int cmdline_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
-	extern char saved_command_line[];
 	int len;
 
 	len = sprintf(page, "%s\n", saved_command_line);
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
-
-#ifdef CONFIG_SGI_DS1286
-static int ds1286_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
-{
-	int len = get_ds1286_status(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
-}
-#endif
 
 static int locks_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
@@ -542,70 +512,6 @@ static int execdomains_read_proc(char *page, char **start, off_t off,
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
-/*
- * This function accesses profiling information. The returned data is
- * binary: the sampling step and the actual contents of the profile
- * buffer. Use of the program readprofile is recommended in order to
- * get meaningful info out of these data.
- */
-static ssize_t
-read_profile(struct file *file, char __user *buf, size_t count, loff_t *ppos)
-{
-	unsigned long p = *ppos;
-	ssize_t read;
-	char * pnt;
-	unsigned int sample_step = 1 << prof_shift;
-
-	if (p >= (prof_len+1)*sizeof(unsigned int))
-		return 0;
-	if (count > (prof_len+1)*sizeof(unsigned int) - p)
-		count = (prof_len+1)*sizeof(unsigned int) - p;
-	read = 0;
-
-	while (p < sizeof(unsigned int) && count > 0) {
-		put_user(*((char *)(&sample_step)+p),buf);
-		buf++; p++; count--; read++;
-	}
-	pnt = (char *)prof_buffer + p - sizeof(unsigned int);
-	if (copy_to_user(buf,(void *)pnt,count))
-		return -EFAULT;
-	read += count;
-	*ppos += read;
-	return read;
-}
-
-/*
- * Writing to /proc/profile resets the counters
- *
- * Writing a 'profiling multiplier' value into it also re-sets the profiling
- * interrupt frequency, on architectures that support this.
- */
-static ssize_t write_profile(struct file *file, const char __user *buf,
-			     size_t count, loff_t *ppos)
-{
-#ifdef CONFIG_SMP
-	extern int setup_profiling_timer (unsigned int multiplier);
-
-	if (count == sizeof(int)) {
-		unsigned int multiplier;
-
-		if (copy_from_user(&multiplier, buf, sizeof(int)))
-			return -EFAULT;
-
-		if (setup_profiling_timer(multiplier))
-			return -EINVAL;
-	}
-#endif
-
-	memset(prof_buffer, 0, prof_len * sizeof(*prof_buffer));
-	return count;
-}
-
-static struct file_operations proc_profile_operations = {
-	.read		= read_profile,
-	.write		= write_profile,
-};
-
 #ifdef CONFIG_MAGIC_SYSRQ
 /*
  * writing 'C' to /proc/sysrq-trigger is like sysrq-C
@@ -618,7 +524,7 @@ static ssize_t write_sysrq_trigger(struct file *file, const char __user *buf,
 
 		if (get_user(c, buf))
 			return -EFAULT;
-		handle_sysrq(c, NULL, NULL);
+		__handle_sysrq(c, NULL, NULL);
 	}
 	return count;
 }
@@ -630,7 +536,7 @@ static struct file_operations proc_sysrq_trigger_operations = {
 
 struct proc_dir_entry *proc_root_kcore;
 
-static void create_seq_entry(char *name, mode_t mode, struct file_operations *f)
+void create_seq_entry(char *name, mode_t mode, struct file_operations *f)
 {
 	struct proc_dir_entry *entry;
 	entry = create_proc_entry(name, mode, NULL);
@@ -658,9 +564,6 @@ void __init proc_misc_init(void)
 		{"devices",	devices_read_proc},
 		{"filesystems",	filesystems_read_proc},
 		{"cmdline",	cmdline_read_proc},
-#ifdef CONFIG_SGI_DS1286
-		{"rtc",		ds1286_read_proc},
-#endif
 		{"locks",	locks_read_proc},
 		{"execdomains",	execdomains_read_proc},
 		{NULL,}
@@ -685,6 +588,9 @@ void __init proc_misc_init(void)
 #ifdef CONFIG_MODULES
 	create_seq_entry("modules", 0, &proc_modules_operations);
 #endif
+#ifdef CONFIG_SCHEDSTATS
+	create_seq_entry("schedstat", 0, &proc_schedstat_operations);
+#endif
 #ifdef CONFIG_PROC_KCORE
 	proc_root_kcore = create_proc_entry("kcore", S_IRUSR, NULL);
 	if (proc_root_kcore) {
@@ -693,13 +599,6 @@ void __init proc_misc_init(void)
 				(size_t)high_memory - PAGE_OFFSET + PAGE_SIZE;
 	}
 #endif
-	if (prof_on) {
-		entry = create_proc_entry("profile", S_IWUSR | S_IRUGO, NULL);
-		if (entry) {
-			entry->proc_fops = &proc_profile_operations;
-			entry->size = (1+prof_len) * sizeof(unsigned int);
-		}
-	}
 #ifdef CONFIG_MAGIC_SYSRQ
 	entry = create_proc_entry("sysrq-trigger", S_IWUSR, NULL);
 	if (entry)

@@ -854,6 +854,41 @@ xfs_xlate_dinode_core(
 	INT_XLATE(buf_core->di_gen, mem_core->di_gen, dir, arch);
 }
 
+uint
+xfs_dic2xflags(
+	xfs_dinode_core_t	*dic,
+	xfs_arch_t		arch)
+{
+	__uint16_t		di_flags;
+	uint			flags;
+
+	di_flags = INT_GET(dic->di_flags, arch);
+	flags = XFS_CFORK_Q_ARCH(dic, arch) ? XFS_XFLAG_HASATTR : 0;
+	if (di_flags & XFS_DIFLAG_ANY) {
+		if (di_flags & XFS_DIFLAG_REALTIME)
+			flags |= XFS_XFLAG_REALTIME;
+		if (di_flags & XFS_DIFLAG_PREALLOC)
+			flags |= XFS_XFLAG_PREALLOC;
+		if (di_flags & XFS_DIFLAG_IMMUTABLE)
+			flags |= XFS_XFLAG_IMMUTABLE;
+		if (di_flags & XFS_DIFLAG_APPEND)
+			flags |= XFS_XFLAG_APPEND;
+		if (di_flags & XFS_DIFLAG_SYNC)
+			flags |= XFS_XFLAG_SYNC;
+		if (di_flags & XFS_DIFLAG_NOATIME)
+			flags |= XFS_XFLAG_NOATIME;
+		if (di_flags & XFS_DIFLAG_NODUMP)
+			flags |= XFS_XFLAG_NODUMP;
+		if (di_flags & XFS_DIFLAG_RTINHERIT)
+			flags |= XFS_XFLAG_RTINHERIT;
+		if (di_flags & XFS_DIFLAG_PROJINHERIT)
+			flags |= XFS_XFLAG_PROJINHERIT;
+		if (di_flags & XFS_DIFLAG_NOSYMLINKS)
+			flags |= XFS_XFLAG_NOSYMLINKS;
+	}
+	return flags;
+}
+
 /*
  * Given a mount structure and an inode number, return a pointer
  * to a newly allocated in-core inode coresponding to the given
@@ -907,9 +942,6 @@ xfs_iread(
 #endif
 #ifdef XFS_RW_TRACE
 	ip->i_rwtrace = ktrace_alloc(XFS_RW_KTRACE_SIZE, KM_SLEEP);
-#endif
-#ifdef XFS_STRAT_TRACE
-	ip->i_strat_trace = ktrace_alloc(XFS_STRAT_KTRACE_SIZE, KM_SLEEP);
 #endif
 #ifdef XFS_ILOCK_TRACE
 	ip->i_lock_trace = ktrace_alloc(XFS_ILOCK_KTRACE_SIZE, KM_SLEEP);
@@ -1115,8 +1147,7 @@ xfs_ialloc(
 	 * Call the space management code to pick
 	 * the on-disk inode to be allocated.
 	 */
-	ASSERT(pip != NULL);
-	error = xfs_dialloc(tp, pip ? pip->i_ino : 0, mode, okalloc,
+	error = xfs_dialloc(tp, pip->i_ino, mode, okalloc,
 			    ialloc_context, call_again, &ino);
 	if (error != 0) {
 		return error;
@@ -1132,7 +1163,8 @@ xfs_ialloc(
 	 * This is because we're setting fields here we need
 	 * to prevent others from looking at until we're done.
 	 */
-	error = xfs_trans_iget(tp->t_mountp, tp, ino, XFS_ILOCK_EXCL, &ip);
+	error = xfs_trans_iget(tp->t_mountp, tp, ino,
+			IGET_CREATE, XFS_ILOCK_EXCL, &ip);
 	if (error != 0) {
 		return error;
 	}
@@ -1144,8 +1176,8 @@ xfs_ialloc(
 	ip->i_d.di_onlink = 0;
 	ip->i_d.di_nlink = nlink;
 	ASSERT(ip->i_d.di_nlink == nlink);
-	ip->i_d.di_uid = current->fsuid;
-	ip->i_d.di_gid = current->fsgid;
+	ip->i_d.di_uid = current_fsuid(cr);
+	ip->i_d.di_gid = current_fsgid(cr);
 	ip->i_d.di_projid = prid;
 	memset(&(ip->i_d.di_pad[0]), 0, sizeof(ip->i_d.di_pad));
 
@@ -1212,8 +1244,15 @@ xfs_ialloc(
 		break;
 	case S_IFREG:
 	case S_IFDIR:
-		if (pip->i_d.di_flags &
-		    (XFS_DIFLAG_NOATIME|XFS_DIFLAG_NODUMP|XFS_DIFLAG_SYNC)) {
+		if (unlikely(pip->i_d.di_flags & XFS_DIFLAG_ANY)) {
+			if (pip->i_d.di_flags & XFS_DIFLAG_RTINHERIT) {
+				if ((mode & S_IFMT) == S_IFDIR) {
+					ip->i_d.di_flags |= XFS_DIFLAG_RTINHERIT;
+				} else {
+					ip->i_d.di_flags |= XFS_DIFLAG_REALTIME;
+					ip->i_iocore.io_flags |= XFS_IOCORE_RT;
+				}
+			}
 			if ((pip->i_d.di_flags & XFS_DIFLAG_NOATIME) &&
 			    xfs_inherit_noatime)
 				ip->i_d.di_flags |= XFS_DIFLAG_NOATIME;
@@ -1223,7 +1262,11 @@ xfs_ialloc(
 			if ((pip->i_d.di_flags & XFS_DIFLAG_SYNC) &&
 			    xfs_inherit_sync)
 				ip->i_d.di_flags |= XFS_DIFLAG_SYNC;
+			if ((pip->i_d.di_flags & XFS_DIFLAG_NOSYMLINKS) &&
+			    xfs_inherit_nosymlinks)
+				ip->i_d.di_flags |= XFS_DIFLAG_NOSYMLINKS;
 		}
+		/* FALLTHROUGH */
 	case S_IFLNK:
 		ip->i_d.di_format = XFS_DINODE_FMT_EXTENTS;
 		ip->i_df.if_flags = XFS_IFEXTENTS;
@@ -1362,16 +1405,16 @@ xfs_itrunc_trace(
 	ktrace_enter(ip->i_rwtrace,
 		     (void*)((long)tag),
 		     (void*)ip,
-		     (void*)((ip->i_d.di_size >> 32) & 0xffffffff),
-		     (void*)(ip->i_d.di_size & 0xffffffff),
+		     (void*)(unsigned long)((ip->i_d.di_size >> 32) & 0xffffffff),
+		     (void*)(unsigned long)(ip->i_d.di_size & 0xffffffff),
 		     (void*)((long)flag),
-		     (void*)((new_size >> 32) & 0xffffffff),
-		     (void*)(new_size & 0xffffffff),
-		     (void*)((toss_start >> 32) & 0xffffffff),
-		     (void*)(toss_start & 0xffffffff),
-		     (void*)((toss_finish >> 32) & 0xffffffff),
-		     (void*)(toss_finish & 0xffffffff),
-		     (void*)((long)private.p_cpuid),
+		     (void*)(unsigned long)((new_size >> 32) & 0xffffffff),
+		     (void*)(unsigned long)(new_size & 0xffffffff),
+		     (void*)(unsigned long)((toss_start >> 32) & 0xffffffff),
+		     (void*)(unsigned long)(toss_start & 0xffffffff),
+		     (void*)(unsigned long)((toss_finish >> 32) & 0xffffffff),
+		     (void*)(unsigned long)(toss_finish & 0xffffffff),
+		     (void*)(unsigned long)current_cpu(),
 		     (void*)0,
 		     (void*)0,
 		     (void*)0,
@@ -2755,17 +2798,8 @@ xfs_idestroy(
 	}
 	if (ip->i_afp)
 		xfs_idestroy_fork(ip, XFS_ATTR_FORK);
-#ifdef NOTYET
-	if (ip->i_range_lock.r_sleep != NULL) {
-		freesema(ip->i_range_lock.r_sleep);
-		kmem_free(ip->i_range_lock.r_sleep, sizeof(sema_t));
-	}
-#endif /* NOTYET */
 	mrfree(&ip->i_lock);
 	mrfree(&ip->i_iolock);
-#ifdef NOTYET
-	mutex_destroy(&ip->i_range_lock.r_spinlock);
-#endif /* NOTYET */
 	freesema(&ip->i_flock);
 #ifdef XFS_BMAP_TRACE
 	ktrace_free(ip->i_xtrace);
@@ -2775,9 +2809,6 @@ xfs_idestroy(
 #endif
 #ifdef XFS_RW_TRACE
 	ktrace_free(ip->i_rwtrace);
-#endif
-#ifdef XFS_STRAT_TRACE
-	ktrace_free(ip->i_strat_trace);
 #endif
 #ifdef XFS_ILOCK_TRACE
 	ktrace_free(ip->i_lock_trace);
@@ -3567,6 +3598,7 @@ corrupt_out:
 	return XFS_ERROR(EFSCORRUPTED);
 }
 
+
 /*
  * Flush all inactive inodes in mp.  Return true if no user references
  * were found, false otherwise.
@@ -3622,7 +3654,6 @@ xfs_iflush_all(
 					continue;
 				}
 				if (!(flag & XFS_FLUSH_ALL)) {
-					ASSERT(0);
 					busy = 1;
 					done = 1;
 					break;
@@ -3683,12 +3714,6 @@ xfs_iaccess(
 	mode_t		orgmode = mode;
 	struct inode	*inode = LINVFS_GET_IP(XFS_ITOV(ip));
 
-	/*
-	 * Verify that the MAC policy allows the requested access.
-	 */
-	if ((error = _MAC_XFS_IACCESS(ip, mode, cr)))
-		return XFS_ERROR(error);
-
 	if (mode & S_IWUSR) {
 		umode_t		imode = inode->i_mode;
 
@@ -3707,7 +3732,7 @@ xfs_iaccess(
 	if ((error = _ACL_XFS_IACCESS(ip, mode, cr)) != -1)
 		return error ? XFS_ERROR(error) : 0;
 
-	if (current->fsuid != ip->i_d.di_uid) {
+	if (current_fsuid(cr) != ip->i_d.di_uid) {
 		mode >>= 3;
 		if (!in_group_p((gid_t)ip->i_d.di_gid))
 			mode >>= 3;
@@ -3722,13 +3747,13 @@ xfs_iaccess(
 	 * Read/write DACs are always overridable.
 	 * Executable DACs are overridable if at least one exec bit is set.
 	 */
-	if ((orgmode & (S_IRUSR|S_IWUSR)) || (inode->i_mode & S_IXUGO))
+	if (!(orgmode & S_IXUSR) ||
+	    (inode->i_mode & S_IXUGO) || S_ISDIR(inode->i_mode))
 		if (capable_cred(cr, CAP_DAC_OVERRIDE))
 			return 0;
 
 	if ((orgmode == S_IRUSR) ||
-	    (((ip->i_d.di_mode & S_IFMT) == S_IFDIR) &&
-	     (!(orgmode & ~(S_IWUSR|S_IXUSR))))) {
+	    (S_ISDIR(inode->i_mode) && (!(orgmode & S_IWUSR)))) {
 		if (capable_cred(cr, CAP_DAC_READ_SEARCH))
 			return 0;
 #ifdef	NOISE
@@ -3737,32 +3762,6 @@ xfs_iaccess(
 		return XFS_ERROR(EACCES);
 	}
 	return XFS_ERROR(EACCES);
-}
-
-/*
- * Return whether or not it is OK to swap to the given file in the
- * given range.  Return 0 for OK and otherwise return the error.
- *
- * It is only OK to swap to a file if it has no holes, and all
- * extents have been initialized.
- *
- * We use the vnode behavior chain prevent and allow primitives
- * to ensure that the vnode chain stays coherent while we do this.
- * This allows us to walk the chain down to the bottom where XFS
- * lives without worrying about it changing out from under us.
- */
-int
-xfs_swappable(
-	bhv_desc_t	*bdp)
-{
-	xfs_inode_t	*ip;
-
-	ip = XFS_BHVTOI(bdp);
-	/*
-	 * Verify that the file does not have any
-	 * holes or unwritten exents.
-	 */
-	return xfs_bmap_check_swappable(ip);
 }
 
 /*
@@ -3814,7 +3813,7 @@ xfs_ichgtime(xfs_inode_t *ip,
 	 * We're not supposed to change timestamps in readonly-mounted
 	 * filesystems.  Throw it away if anyone asks us.
 	 */
-	if (vp->v_vfsp->vfs_flag & VFS_RDONLY)
+	if (unlikely(vp->v_vfsp->vfs_flag & VFS_RDONLY))
 		return;
 
 	/*
@@ -3828,17 +3827,17 @@ xfs_ichgtime(xfs_inode_t *ip,
 
 	nanotime(&tv);
 	if (flags & XFS_ICHGTIME_MOD) {
-		inode->i_mtime = tv;
+		VN_MTIMESET(vp, &tv);
 		ip->i_d.di_mtime.t_sec = (__int32_t)tv.tv_sec;
 		ip->i_d.di_mtime.t_nsec = (__int32_t)tv.tv_nsec;
 	}
 	if (flags & XFS_ICHGTIME_ACC) {
-		inode->i_atime  = tv;
+		VN_ATIMESET(vp, &tv);
 		ip->i_d.di_atime.t_sec = (__int32_t)tv.tv_sec;
 		ip->i_d.di_atime.t_nsec = (__int32_t)tv.tv_nsec;
 	}
 	if (flags & XFS_ICHGTIME_CHG) {
-		inode->i_ctime  = tv;
+		VN_CTIMESET(vp, &tv);
 		ip->i_d.di_ctime.t_sec = (__int32_t)tv.tv_sec;
 		ip->i_d.di_ctime.t_nsec = (__int32_t)tv.tv_nsec;
 	}
@@ -3859,17 +3858,18 @@ xfs_ichgtime(xfs_inode_t *ip,
 }
 
 #ifdef XFS_ILOCK_TRACE
+ktrace_t	*xfs_ilock_trace_buf;
+
 void
 xfs_ilock_trace(xfs_inode_t *ip, int lock, unsigned int lockflags, inst_t *ra)
 {
 	ktrace_enter(ip->i_lock_trace,
 		     (void *)ip,
-		      (void *)(__psint_t)lock,		/* 1 = LOCK, 3=UNLOCK, etc */
-		     (void *)(__psint_t)lockflags,	/* XFS_ILOCK_EXCL etc */
-		     (void *)ra,			/* caller of ilock */
-		     (void *)(__psint_t)cpuid(),
-		     (void *)(__psint_t)current_pid(),
-		     0,0,0,0,0,0,0,0,0,0);
-
+		     (void *)(unsigned long)lock, /* 1 = LOCK, 3=UNLOCK, etc */
+		     (void *)(unsigned long)lockflags, /* XFS_ILOCK_EXCL etc */
+		     (void *)ra,		/* caller of ilock */
+		     (void *)(unsigned long)current_cpu(),
+		     (void *)(unsigned long)current_pid(),
+		     NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
 }
-#endif /* ILOCK_TRACE */
+#endif

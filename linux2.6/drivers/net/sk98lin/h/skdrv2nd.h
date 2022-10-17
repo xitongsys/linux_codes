@@ -2,15 +2,16 @@
  *
  * Name:	skdrv2nd.h
  * Project:	GEnesis, PCI Gigabit Ethernet Adapter
- * Version:	$Revision: 1.3 $
- * Date:	$Date: 2003/08/12 16:51:18 $
+ * Version:	$Revision: 1.10 $
+ * Date:	$Date: 2003/12/11 16:04:45 $
  * Purpose:	Second header file for driver and all other modules
  *
  ******************************************************************************/
 
 /******************************************************************************
  *
- *	(C)Copyright 1998-2003 SysKonnect GmbH.
+ *	(C)Copyright 1998-2002 SysKonnect GmbH.
+ *	(C)Copyright 2002-2003 Marvell.
  *
  *	This program is free software; you can redistribute it and/or modify
  *	it under the terms of the GNU General Public License as published by
@@ -18,101 +19,6 @@
  *	(at your option) any later version.
  *
  *	The information in this file is provided "AS IS" without warranty.
- *
- ******************************************************************************/
-
-/******************************************************************************
- *
- * History:
- *
- *	$Log: skdrv2nd.h,v $
- *	Revision 1.3  2003/08/12 16:51:18  mlindner
- *	Fix: UDP and TCP Proto checks
- *	Fix: UDP header offset
- *	
- *	Revision 1.2  2003/08/07 10:50:54  mlindner
- *	Add: Speed and HW-Csum support for Yukon Lite chipset
- *	
- *	Revision 1.1  2003/07/21 07:25:29  rroesler
- *	Fix: Re-Enter after CVS crash
- *	
- *	Revision 1.19  2003/07/07 09:53:10  rroesler
- *	Fix: Removed proprietary RxTx defines and used the ones from skgehw.h instead
- *	
- *	Revision 1.18  2003/06/12 07:54:14  mlindner
- *	Fix: Changed Descriptor Alignment to 64 Byte
- *	
- *	Revision 1.17  2003/05/26 12:56:39  mlindner
- *	Add: Support for Kernel 2.5/2.6
- *	Add: New SkOsGetTimeCurrent function
- *	Add: SK_PNMI_HUNDREDS_SEC definition
- *	Fix: SK_TICKS_PER_SEC on Intel Itanium2
- *	
- *	Revision 1.16  2003/03/21 14:56:18  rroesler
- *	Added code regarding interrupt moderation
- *	
- *	Revision 1.15  2003/02/25 14:16:40  mlindner
- *	Fix: Copyright statement
- *	
- *	Revision 1.14  2003/02/25 13:26:26  mlindner
- *	Add: Support for various vendors
- *	
- *	Revision 1.13  2002/10/02 12:46:02  mlindner
- *	Add: Support for Yukon
- *	
- *	Revision 1.12.2.2  2001/09/05 12:14:50  mlindner
- *	add: New hardware revision int
- *	
- *	Revision 1.12.2.1  2001/03/12 16:50:59  mlindner
- *	chg: kernel 2.4 adaption
- *	
- *	Revision 1.12  2001/03/01 12:52:15  mlindner
- *	Fixed ring size
- *
- *	Revision 1.11  2001/02/19 13:28:02  mlindner
- *	Changed PNMI parameter values
- *
- *	Revision 1.10  2001/01/22 14:16:04  mlindner
- *	added ProcFs functionality
- *	Dual Net functionality integrated
- *	Rlmt networks added
- *
- *	Revision 1.1  2000/10/05 19:46:50  phargrov
- *	Add directory src/vipk_devs_nonlbl/vipk_sk98lin/
- *	This is the SysKonnect SK-98xx Gigabit Ethernet driver,
- *	contributed by SysKonnect.
- *
- *	Revision 1.9  2000/02/21 10:39:55  cgoos
- *	Added flag for jumbo support usage.
- *
- *	Revision 1.8  1999/11/22 13:50:44  cgoos
- *	Changed license header to GPL.
- *	Fixed two comments.
- *
- *	Revision 1.7  1999/09/28 12:38:21  cgoos
- *	Added CheckQueue to SK_AC.
- *	
- *	Revision 1.6  1999/07/27 08:04:05  cgoos
- *	Added checksumming variables to SK_AC.
- *	
- *	Revision 1.5  1999/03/29 12:33:26  cgoos
- *	Rreversed to fine lock granularity.
- *	
- *	Revision 1.4  1999/03/15 12:14:02  cgoos
- *	Added DriverLock to SK_AC.
- *	Removed other locks.
- *	
- *	Revision 1.3  1999/03/01 08:52:27  cgoos
- *	Changed pAC->PciDev declaration.
- *	
- *	Revision 1.2  1999/02/18 10:57:14  cgoos
- *	Removed SkDrvTimeStamp prototype.
- *	Fixed SkGeOsGetTime prototype.
- *	
- *	Revision 1.1  1999/02/16 07:41:01  cgoos
- *	First version.
- *	
- *	
  *
  ******************************************************************************/
 
@@ -147,53 +53,6 @@
 #include "h/skrlmt.h"
 #include "h/skgedrv.h"
 
-#define SK_PCI_ISCOMPLIANT(result, pdev) {     \
-    result = SK_FALSE; /* default */     \
-    /* 3Com (0x10b7) */     \
-    if (pdev->vendor == 0x10b7) {     \
-        /* Gigabit Ethernet Adapter (0x1700) */     \
-        if ((pdev->device == 0x1700)) { \
-            result = SK_TRUE;     \
-        }     \
-    /* SysKonnect (0x1148) */     \
-    } else if (pdev->vendor == 0x1148) {     \
-        /* SK-98xx Gigabit Ethernet Server Adapter (0x4300) */     \
-        /* SK-98xx V2.0 Gigabit Ethernet Adapter (0x4320) */     \
-        if ((pdev->device == 0x4300) || \
-            (pdev->device == 0x4320)) { \
-            result = SK_TRUE;     \
-        }     \
-    /* D-Link (0x1186) */     \
-    } else if (pdev->vendor == 0x1186) {     \
-        /* Gigabit Ethernet Adapter (0x4c00) */     \
-        if ((pdev->device == 0x4c00)) { \
-            result = SK_TRUE;     \
-        }     \
-    /* Marvell (0x11ab) */     \
-    } else if (pdev->vendor == 0x11ab) {     \
-        /* Gigabit Ethernet Adapter (0x4320) */     \
-        if ((pdev->device == 0x4320)) { \
-            result = SK_TRUE;     \
-        }     \
-    /* CNet (0x1371) */     \
-    } else if (pdev->vendor == 0x1371) {     \
-        /* GigaCard Network Adapter (0x434e) */     \
-        if ((pdev->device == 0x434e)) { \
-            result = SK_TRUE;     \
-        }     \
-    /* Linksys (0x1737) */     \
-    } else if (pdev->vendor == 0x1737) {     \
-        /* Gigabit Network Adapter (0x1032) */     \
-        /* Gigabit Network Adapter (0x1064) */     \
-        if ((pdev->device == 0x1032) || \
-            (pdev->device == 0x1064)) { \
-            result = SK_TRUE;     \
-        }     \
-    } else {     \
-        result = SK_FALSE;     \
-    }     \
-}
-
 
 extern SK_MBUF		*SkDrvAllocRlmtMbuf(SK_AC*, SK_IOC, unsigned);
 extern void		SkDrvFreeRlmtMbuf(SK_AC*, SK_IOC, SK_MBUF*);
@@ -205,6 +64,11 @@ extern int		SkPciWriteCfgDWord(SK_AC*, int, SK_U32);
 extern int		SkPciWriteCfgWord(SK_AC*, int, SK_U16);
 extern int		SkPciWriteCfgByte(SK_AC*, int, SK_U8);
 extern int		SkDrvEvent(SK_AC*, SK_IOC IoC, SK_U32, SK_EVPARA);
+
+#ifdef SK_DIAG_SUPPORT
+extern int		SkDrvEnterDiagMode(SK_AC *pAc);
+extern int		SkDrvLeaveDiagMode(SK_AC *pAc);
+#endif
 
 struct s_DrvRlmtMbuf {
 	SK_MBUF		*pNext;		/* Pointer to next RLMT Mbuf. */
@@ -247,11 +111,12 @@ struct s_DrvRlmtMbuf {
 #define		SK_IOCTL_SETMIB		(SK_IOCTL_BASE + 1)
 #define		SK_IOCTL_PRESETMIB	(SK_IOCTL_BASE + 2)
 #define		SK_IOCTL_GEN		(SK_IOCTL_BASE + 3)
+#define		SK_IOCTL_DIAG		(SK_IOCTL_BASE + 4)
 
 typedef struct s_IOCTL	SK_GE_IOCTL;
 
 struct s_IOCTL {
-	char*		pData;
+	char __user *	pData;
 	unsigned int	Len;
 };
 
@@ -401,7 +266,6 @@ struct s_TxD {
 typedef struct s_DevNet DEV_NET;
 
 struct s_DevNet {
-	struct			proc_dir_entry *proc;
 	int             PortNr;
 	int             NetNr;
 	int             Mtu;
@@ -420,7 +284,7 @@ struct s_TxPort {
 	TXD		*pTxdRingPrev;	/* descriptor sent previously */
 	int		TxdRingFree;	/* # of free entrys */
 	spinlock_t	TxDesRingLock;	/* serialize descriptor accesses */
-	caddr_t		HwAddr;		/* bmu registers address */
+	SK_IOC		HwAddr;		/* bmu registers address */
 	int		PortIndex;	/* index number of port (0 or 1) */
 };
 
@@ -436,7 +300,7 @@ struct s_RxPort {
 	int		RxdRingFree;	/* # of free entrys */
 	spinlock_t	RxDesRingLock;	/* serialize descriptor accesses */
 	int		RxFillLimit;	/* limit for buffers in ring */
-	caddr_t		HwAddr;		/* bmu registers address */
+	SK_IOC		HwAddr;		/* bmu registers address */
 	int		PortIndex;	/* index number of port (0 or 1) */
 };
 
@@ -462,6 +326,9 @@ struct s_RxPort {
 #define C_INTS_PER_SEC_DEFAULT      2000 
 #define C_INT_MOD_ENABLE_PERCENTAGE   50 /* if higher 50% enable */
 #define C_INT_MOD_DISABLE_PERCENTAGE  50 /* if lower 50% disable */
+#define C_INT_MOD_IPS_LOWER_RANGE     30
+#define C_INT_MOD_IPS_UPPER_RANGE     40000
+
 
 typedef struct s_DynIrqModInfo  DIM_INFO;
 struct s_DynIrqModInfo {
@@ -493,6 +360,11 @@ typedef struct s_PerStrm	PER_STRM;
 
 #define SK_ALLOC_IRQ	0x00000001
 
+#ifdef SK_DIAG_SUPPORT
+#define	DIAG_ACTIVE		1
+#define	DIAG_NOTACTIVE		0
+#endif
+
 /****************************************************************************
  * Per board structure / Adapter Context structure:
  *	Allocated within attach(9e) and freed within detach(9e).
@@ -510,6 +382,8 @@ struct s_AC  {
 	SK_CSUM		Csum;		/* for checksum module */
 	SK_RLMT		Rlmt;		/* for rlmt module */
 	spinlock_t	SlowPathLock;	/* Normal IRQ lock */
+	struct timer_list BlinkTimer;	/* for LED blinking */
+	int		LedsOn;
 	SK_PNMI_STRUCT_DATA PnmiStruct;	/* structure to get all Pnmi-Data */
 	int			RlmtMode;	/* link check mode to set */
 	int			RlmtNets;	/* Number of nets */
@@ -522,7 +396,7 @@ struct s_AC  {
 	SK_U32		PciDevId;	/* pci device id */
 	struct SK_NET_DEVICE	*dev[2];	/* pointer to device struct */
 	char		Name[30];	/* driver name */
-	struct SK_NET_DEVICE	*Next;		/* link all devices (for clearing) */
+
 	int		RxBufSize;	/* length of receive buffers */
         struct net_device_stats stats;	/* linux 'netstat -i' statistics */
 	int		Index;		/* internal board index number */
@@ -563,9 +437,18 @@ struct s_AC  {
 	int		PortUp;
 	int		PortDown;
 	int		ChipsetType;	/*  Chipset family type 
-							 *  0 == Genesis family support
-							 *  1 == Yukon family support
-							 */
+					 *  0 == Genesis family support
+					 *  1 == Yukon family support
+					 */
+#ifdef SK_DIAG_SUPPORT
+	SK_U32		DiagModeActive;		/* is diag active?	*/
+	SK_BOOL		DiagFlowCtrl;		/* for control purposes	*/
+	SK_PNMI_STRUCT_DATA PnmiBackup;		/* backup structure for all Pnmi-Data */
+	SK_BOOL         WasIfUp[SK_MAX_MACS];   /* for OpenClose while 
+						 * DIAG is busy with NIC 
+						 */
+#endif
+
 };
 
 

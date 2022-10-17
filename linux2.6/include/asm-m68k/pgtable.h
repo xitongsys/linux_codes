@@ -1,6 +1,8 @@
 #ifndef _M68K_PGTABLE_H
 #define _M68K_PGTABLE_H
 
+#include <asm-generic/4level-fixup.h>
+
 #include <linux/config.h>
 #include <asm/setup.h>
 
@@ -114,7 +116,7 @@ extern void *empty_zero_page;
  * It makes no sense to consider whether we cross a memory boundary if
  * we support just one physical chunk of memory.
  */
-extern inline int mm_end_of_chunk (unsigned long addr, int len)
+static inline int mm_end_of_chunk(unsigned long addr, int len)
 {
 	return 0;
 }
@@ -129,8 +131,8 @@ extern void kernel_set_cachemode(void *addr, unsigned long size, int cmode);
  * tables contain all the necessary information.  The Sun3 does, but
  * they are updated on demand.
  */
-extern inline void update_mmu_cache(struct vm_area_struct * vma,
-	unsigned long address, pte_t pte)
+static inline void update_mmu_cache(struct vm_area_struct *vma,
+				    unsigned long address, pte_t pte)
 {
 }
 
@@ -138,7 +140,8 @@ extern inline void update_mmu_cache(struct vm_area_struct * vma,
 
 #define kern_addr_valid(addr)	(1)
 
-#define io_remap_page_range remap_page_range
+#define io_remap_page_range(vma, vaddr, paddr, size, prot)		\
+		remap_pfn_range(vma, vaddr, (paddr) >> PAGE_SHIFT, size, prot)
 
 /* MMU-specific headers */
 
@@ -167,8 +170,6 @@ extern inline void update_mmu_cache(struct vm_area_struct * vma,
 	    : (MMU_IS_040 || MMU_IS_060)					\
 	    ? (__pgprot((pgprot_val(prot) & _CACHEMASK040) | _PAGE_NOCACHE_S))	\
 	    : (prot)))
-
-typedef pte_t *pte_addr_t;
 
 #endif /* !__ASSEMBLY__ */
 

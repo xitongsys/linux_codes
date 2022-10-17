@@ -41,7 +41,7 @@ td3	.req	lr
 		tst	buf, #1			@ odd address?
 		ldrneb	td0, [buf], #1
 		subne	len, len, #1
-		adcnes	sum, sum, td0, lsl #byte(1)
+		adcnes	sum, sum, td0, put_byte_1
 
 .less4:		tst	len, #6
 		beq	.less8_byte
@@ -68,19 +68,18 @@ td3	.req	lr
 
 .less8_byte:	tst	len, #1			@ odd number of bytes
 		ldrneb	td0, [buf], #1		@ include last byte
-		adcnes	sum, sum, td0, lsl #byte(0)	@ update checksum
+		adcnes	sum, sum, td0, put_byte_0	@ update checksum
 
 .done:		adc	r0, sum, #0		@ collect up the last carry
 		ldr	td0, [sp], #4
 		tst	td0, #1			@ check buffer alignment
-		movne	td0, r0, lsl #8		@ rotate checksum by 8 bits
-		orrne	r0, td0, r0, lsr #24
+		movne	r0, r0, ror #8		@ rotate checksum by 8 bits
 		ldr	pc, [sp], #4		@ return
 
 .not_aligned:	tst	buf, #1			@ odd address
 		ldrneb	td0, [buf], #1		@ make even
 		subne	len, len, #1
-		adcnes	sum, sum, td0, lsl #byte(1)	@ update checksum
+		adcnes	sum, sum, td0, put_byte_1	@ update checksum
 
 		tst	buf, #2			@ 32-bit aligned?
 #if __LINUX_ARM_ARCH__ >= 4

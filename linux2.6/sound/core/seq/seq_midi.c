@@ -1,6 +1,6 @@
 /*
  *   Generic MIDI synth driver for ALSA sequencer
- *   Copyright (c) 1998 by Frank van de Pol <fvdpol@home.nl>
+ *   Copyright (c) 1998 by Frank van de Pol <fvdpol@coil.demon.nl>
  *                         Jaroslav Kysela <perex@suse.cz>
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -31,6 +31,7 @@ Possible options for midisynth module:
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/string.h>
+#include <linux/moduleparam.h>
 #include <asm/semaphore.h>
 #include <sound/core.h>
 #include <sound/rawmidi.h>
@@ -39,16 +40,14 @@ Possible options for midisynth module:
 #include <sound/seq_midi_event.h>
 #include <sound/initval.h>
 
-MODULE_AUTHOR("Frank van de Pol <fvdpol@home.nl>, Jaroslav Kysela <perex@suse.cz>");
+MODULE_AUTHOR("Frank van de Pol <fvdpol@coil.demon.nl>, Jaroslav Kysela <perex@suse.cz>");
 MODULE_DESCRIPTION("Advanced Linux Sound Architecture sequencer MIDI synth.");
 MODULE_LICENSE("GPL");
-MODULE_CLASSES("{sound}");
-MODULE_SUPPORTED_DEVICE("sound");
-int output_buffer_size = PAGE_SIZE;
-MODULE_PARM(output_buffer_size, "i");
+static int output_buffer_size = PAGE_SIZE;
+module_param(output_buffer_size, int, 0644);
 MODULE_PARM_DESC(output_buffer_size, "Output buffer size in bytes.");
-int input_buffer_size = PAGE_SIZE;
-MODULE_PARM(input_buffer_size, "i");
+static int input_buffer_size = PAGE_SIZE;
+module_param(input_buffer_size, int, 0644);
 MODULE_PARM_DESC(input_buffer_size, "Input buffer size in bytes.");
 
 /* data for this midi synth driver */
@@ -257,17 +256,12 @@ static int midisynth_unuse(void *private_data, snd_seq_port_subscribe_t *info)
 /* delete given midi synth port */
 static void snd_seq_midisynth_delete(seq_midisynth_t *msynth)
 {
-	snd_seq_port_info_t port;
-	
 	if (msynth == NULL)
 		return;
 
 	if (msynth->seq_client > 0) {
 		/* delete port */
-		memset(&port, 0, sizeof(port));
-		port.addr.client = msynth->seq_client;
-		port.addr.port = msynth->seq_port;
-		snd_seq_kernel_client_ctl(port.addr.client, SNDRV_SEQ_IOCTL_DELETE_PORT, &port);
+		snd_seq_event_port_detach(msynth->seq_client, msynth->seq_port);
 	}
 
 	if (msynth->parser)
@@ -285,12 +279,12 @@ static int set_client_name(seq_midisynth_client_t *client, snd_card_t *card,
 	cinfo.client = client->seq_client;
 	cinfo.type = KERNEL_CLIENT;
 	name = rmidi->name[0] ? (const char *)rmidi->name : "External MIDI";
-	snprintf(cinfo.name, sizeof(cinfo.name), "Rawmidi %d - %s", card->number, name);
+	strlcpy(cinfo.name, name, sizeof(cinfo.name));
 	return snd_seq_kernel_client_ctl(client->seq_client, SNDRV_SEQ_IOCTL_SET_CLIENT_INFO, &cinfo);
 }
 
 /* register new midi synth port */
-int
+static int
 snd_seq_midisynth_register_port(snd_seq_device_t *dev)
 {
 	seq_midisynth_client_t *client;
@@ -327,7 +321,7 @@ snd_seq_midisynth_register_port(snd_seq_device_t *dev)
 	client = synths[card->number];
 	if (client == NULL) {
 		newclient = 1;
-		client = snd_kcalloc(sizeof(seq_midisynth_client_t), GFP_KERNEL);
+		client = kcalloc(1, sizeof(*client), GFP_KERNEL);
 		if (client == NULL) {
 			up(&register_mutex);
 			return -ENOMEM;
@@ -345,7 +339,7 @@ snd_seq_midisynth_register_port(snd_seq_device_t *dev)
 	} else if (device == 0)
 		set_client_name(client, card, &info); /* use the first device's name */
 
-	msynth = snd_kcalloc(sizeof(seq_midisynth_t) * ports, GFP_KERNEL);
+	msynth = kcalloc(ports, sizeof(seq_midisynth_t), GFP_KERNEL);
 	if (msynth == NULL)
 		goto __nomem;
 
@@ -429,7 +423,7 @@ snd_seq_midisynth_register_port(snd_seq_device_t *dev)
 }
 
 /* release midi synth port */
-int
+static int
 snd_seq_midisynth_unregister_port(snd_seq_device_t *dev)
 {
 	seq_midisynth_client_t *client;
@@ -443,7 +437,6 @@ snd_seq_midisynth_unregister_port(snd_seq_device_t *dev)
 		up(&register_mutex);
 		return -ENODEV;
 	}
-	snd_seq_event_port_detach(client->seq_client, client->ports[device]->seq_port);
 	ports = client->ports_per_device[device];
 	client->ports_per_device[device] = 0;
 	msynth = client->ports[device];
@@ -471,7 +464,9 @@ static int __init alsa_seq_midi_init(void)
 		snd_seq_midisynth_unregister_port,
 	};
 	memset(&synths, 0, sizeof(synths));
+	snd_seq_autoload_lock();
 	snd_seq_device_register_driver(SNDRV_SEQ_DEV_ID_MIDISYNTH, &ops, 0);
+	snd_seq_autoload_unlock();
 	return 0;
 }
 

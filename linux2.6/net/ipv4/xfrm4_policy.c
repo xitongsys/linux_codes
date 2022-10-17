@@ -12,8 +12,8 @@
 #include <net/xfrm.h>
 #include <net/ip.h>
 
-extern struct dst_ops xfrm4_dst_ops;
-extern struct xfrm_policy_afinfo xfrm4_policy_afinfo;
+static struct dst_ops xfrm4_dst_ops;
+static struct xfrm_policy_afinfo xfrm4_policy_afinfo;
 
 static struct xfrm_type_map xfrm4_type_map = { .lock = RW_LOCK_UNLOCKED };
 
@@ -43,14 +43,10 @@ static int __xfrm4_bundle_ok(struct xfrm_dst *xdst, struct flowi *fl)
 }
 
 static struct dst_entry *
-__xfrm4_find_bundle(struct flowi *fl, struct rtable *rt, struct xfrm_policy *policy)
+__xfrm4_find_bundle(struct flowi *fl, struct xfrm_policy *policy)
 {
 	struct dst_entry *dst;
 
-	if (!fl->fl4_src)
-		fl->fl4_src = rt->rt_src;
-	if (!fl->fl4_dst)
-		fl->fl4_dst = rt->rt_dst;
 	read_lock_bh(&policy->lock);
 	for (dst = policy->bundles; dst; dst = dst->next) {
 		struct xfrm_dst *xdst = (struct xfrm_dst*)dst;
@@ -94,7 +90,6 @@ __xfrm4_bundle_create(struct xfrm_policy *policy, struct xfrm_state **xfrm, int 
 			goto error;
 		}
 
-		dst1->xfrm = xfrm[i];
 		if (!dst)
 			dst = dst1;
 		else {
@@ -124,10 +119,12 @@ __xfrm4_bundle_create(struct xfrm_policy *policy, struct xfrm_state **xfrm, int 
 		dst_hold(&rt->u.dst);
 	}
 	dst_prev->child = &rt->u.dst;
+	i = 0;
 	for (dst_prev = dst; dst_prev != &rt->u.dst; dst_prev = dst_prev->child) {
 		struct xfrm_dst *x = (struct xfrm_dst*)dst_prev;
 		x->u.rt.fl = *fl;
 
+		dst_prev->xfrm = xfrm[i++];
 		dst_prev->dev = rt->u.dst.dev;
 		if (rt->u.dst.dev)
 			dev_hold(rt->u.dst.dev);
@@ -142,7 +139,7 @@ __xfrm4_bundle_create(struct xfrm_policy *policy, struct xfrm_state **xfrm, int 
 		/* Copy neighbout for reachability confirmation */
 		dst_prev->neighbour	= neigh_clone(rt->u.dst.neighbour);
 		dst_prev->input		= rt->u.dst.input;
-		dst_prev->output	= dst_prev->xfrm->type->output;
+		dst_prev->output	= xfrm4_output;
 		if (rt->peer)
 			atomic_inc(&rt->peer->refcnt);
 		x->u.rt.peer = rt->peer;
@@ -183,6 +180,15 @@ _decode_session4(struct sk_buff *skb, struct flowi *fl)
 
 				fl->fl_ip_sport = ports[0];
 				fl->fl_ip_dport = ports[1];
+			}
+			break;
+
+		case IPPROTO_ICMP:
+			if (pskb_may_pull(skb, xprth + 2 - skb->data)) {
+				u8 *icmp = xprth;
+
+				fl->fl_icmp_type = icmp[0];
+				fl->fl_icmp_code = icmp[1];
 			}
 			break;
 
@@ -237,7 +243,7 @@ static void xfrm4_update_pmtu(struct dst_entry *dst, u32 mtu)
 	path->ops->update_pmtu(path, mtu);
 }
 
-struct dst_ops xfrm4_dst_ops = {
+static struct dst_ops xfrm4_dst_ops = {
 	.family =		AF_INET,
 	.protocol =		__constant_htons(ETH_P_IP),
 	.gc =			xfrm4_garbage_collect,
@@ -246,7 +252,7 @@ struct dst_ops xfrm4_dst_ops = {
 	.entry_size =		sizeof(struct xfrm_dst),
 };
 
-struct xfrm_policy_afinfo xfrm4_policy_afinfo = {
+static struct xfrm_policy_afinfo xfrm4_policy_afinfo = {
 	.family = 		AF_INET,
 	.lock = 		RW_LOCK_UNLOCKED,
 	.type_map = 		&xfrm4_type_map,
@@ -257,12 +263,12 @@ struct xfrm_policy_afinfo xfrm4_policy_afinfo = {
 	.decode_session =	_decode_session4,
 };
 
-void __init xfrm4_policy_init(void)
+static void __init xfrm4_policy_init(void)
 {
 	xfrm_policy_register_afinfo(&xfrm4_policy_afinfo);
 }
 
-void __exit xfrm4_policy_fini(void)
+static void __exit xfrm4_policy_fini(void)
 {
 	xfrm_policy_unregister_afinfo(&xfrm4_policy_afinfo);
 }
@@ -271,12 +277,5 @@ void __init xfrm4_init(void)
 {
 	xfrm4_state_init();
 	xfrm4_policy_init();
-}
-
-void __exit xfrm4_fini(void)
-{
-	//xfrm4_input_fini();
-	xfrm4_policy_fini();
-	xfrm4_state_fini();
 }
 

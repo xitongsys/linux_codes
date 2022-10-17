@@ -30,8 +30,9 @@ struct usbmix_ctl_map {
 	int vendor;
 	int product;
 	const struct usbmix_name_map *map;
+	int ignore_ctl_error;
 };
-	
+
 /*
  * USB control mappers for SB Exitigy
  */
@@ -86,6 +87,15 @@ static struct usbmix_name_map extigy_map[] = {
 	{ 26, "IEC958 Optical Playback" }, /* OT */
 	{ 27, NULL }, /* DISABLED: EU (for what?) */
 	/* 28: FU speaker (mute) */
+	{ 29, NULL }, /* Digital Input Playback Source? */
+	{ 0 } /* terminator */
+};
+
+/* LineX FM Transmitter entry - needed to bypass controls bug */
+static struct usbmix_name_map linex_map[] = {
+	/* 1: IT pcm */
+	/* 2: OT Speaker */ 
+	{ 3, "Master" }, /* FU: master volume - left / right / mute */
 	{ 0 } /* terminator */
 };
 
@@ -117,8 +127,9 @@ static struct usbmix_name_map justlink_map[] = {
  */
 
 static struct usbmix_ctl_map usbmix_ctl_maps[] = {
-	{ 0x41e, 0x3000, extigy_map },
-	{ 0xc45, 0x1158, justlink_map },
+	{ 0x41e, 0x3000, extigy_map, 1 },
+	{ 0x8bb, 0x2702, linex_map, 1 },
+	{ 0xc45, 0x1158, justlink_map, 0 },
 	{ 0 } /* terminator */
 };
 

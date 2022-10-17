@@ -19,62 +19,12 @@
 #define __SAVE(reg,offset) "movq %%" #reg ",(14-" #offset ")*8(%%rsp)\n\t"
 #define __RESTORE(reg,offset) "movq (14-" #offset ")*8(%%rsp),%%" #reg "\n\t"
 
-#ifdef CONFIG_X86_REMOTE_DEBUG
-
-/* full frame for the debug stub */
-/* Should be replaced with a dwarf2 cie/fde description, then gdb could
-   figure it out all by itself. */
-struct save_context_frame { 
-	unsigned long rbp; 
-	unsigned long rbx;
-	unsigned long r11;
-	unsigned long r10;
-	unsigned long r9;
-	unsigned long r8;
-	unsigned long rcx;
-	unsigned long rdx;	
-	unsigned long r15;
-	unsigned long r14;
-	unsigned long r13;
-	unsigned long r12;
-	unsigned long rdi;
-	unsigned long rsi;
-	unsigned long flags;
-}; 
-
-#define SAVE_CONTEXT \
-	"pushfq\n\t"							\
-	"subq $14*8,%%rsp\n\t" 						\
-	__SAVE(rbx, 12) __SAVE(rdi,  1)					\
-	__SAVE(rdx,  6) __SAVE(rcx,  7)					\
-	__SAVE(r8,   8) __SAVE(r9,   9)					\
-	__SAVE(r12,  2) __SAVE(r13,  3)					\
-	__SAVE(r14,  4) __SAVE(r15,  5)					\
-	__SAVE(r10, 10) __SAVE(r11, 11)					\
-	__SAVE(rsi, 0)  __SAVE(rbp, 13) 				\
-
-
-#define RESTORE_CONTEXT \
-	__RESTORE(rbx, 12) __RESTORE(rdi,  1) 					\
-	__RESTORE(rdx,  6) __RESTORE(rcx,  7)					\
-	__RESTORE(r12,  2) __RESTORE(r13,  3)					\
-	__RESTORE(r14,  4) __RESTORE(r15,  5)					\
-	__RESTORE(r10, 10) __RESTORE(r11, 11)					\
-	__RESTORE(r8,   8) __RESTORE(r9,   9)					\
-	__RESTORE(rbp, 13) __RESTORE(rsi, 0) 		   		        \
-	"addq $14*8,%%rsp\n\t" 							\
-	"popfq\n\t"
-
-#define __EXTRA_CLOBBER 
-
-#else
 /* frame pointer must be last for get_wchan */
 #define SAVE_CONTEXT    "pushfq ; pushq %%rbp ; movq %%rsi,%%rbp\n\t"
 #define RESTORE_CONTEXT "movq %%rbp,%%rsi ; popq %%rbp ; popfq\n\t" 
 
 #define __EXTRA_CLOBBER  \
 	,"rcx","rbx","rdx","r8","r9","r10","r11","r12","r13","r14","r15"
-#endif
 
 #define switch_to(prev,next,last) \
 	asm volatile(SAVE_CONTEXT						    \
@@ -85,7 +35,7 @@ struct save_context_frame {
 		     "thread_return:\n\t"					    \
 		     "movq %%gs:%P[pda_pcurrent],%%rsi\n\t"			  \
 		     "movq %P[thread_info](%%rsi),%%r8\n\t"			  \
-		     "btr  %[tif_fork],%P[ti_flags](%%r8)\n\t"			  \
+		     LOCK "btr  %[tif_fork],%P[ti_flags](%%r8)\n\t"		  \
 		     "movq %%rax,%%rdi\n\t" 					  \
 		     "jc   ret_from_fork\n\t"					  \
 		     RESTORE_CONTEXT						    \
@@ -136,6 +86,56 @@ struct alt_instr {
 	__u8  pad[5];
 }; 
 #endif
+
+/*
+ * Alternative instructions for different CPU types or capabilities.
+ * 
+ * This allows to use optimized instructions even on generic binary
+ * kernels.
+ * 
+ * length of oldinstr must be longer or equal the length of newinstr
+ * It can be padded with nops as needed.
+ * 
+ * For non barrier like inlines please define new variants
+ * without volatile and memory clobber.
+ */
+#define alternative(oldinstr, newinstr, feature) 	\
+	asm volatile ("661:\n\t" oldinstr "\n662:\n" 		     \
+		      ".section .altinstructions,\"a\"\n"     	     \
+		      "  .align 8\n"				       \
+		      "  .quad 661b\n"            /* label */          \
+		      "  .quad 663f\n"		  /* new instruction */ \
+		      "  .byte %c0\n"             /* feature bit */    \
+		      "  .byte 662b-661b\n"       /* sourcelen */      \
+		      "  .byte 664f-663f\n"       /* replacementlen */ \
+		      ".previous\n"					\
+		      ".section .altinstr_replacement,\"ax\"\n"		\
+		      "663:\n\t" newinstr "\n664:\n"   /* replacement */ \
+		      ".previous" :: "i" (feature) : "memory")  
+
+/*
+ * Alternative inline assembly with input.
+ * 
+ * Pecularities:
+ * No memory clobber here. 
+ * Argument numbers start with 1.
+ * Best is to use constraints that are fixed size (like (%1) ... "r")
+ * If you use variable sized constraints like "m" or "g" in the 
+ * replacement maake sure to pad to the worst case length.
+ */
+#define alternative_input(oldinstr, newinstr, feature, input...)	\
+	asm volatile ("661:\n\t" oldinstr "\n662:\n"			\
+		      ".section .altinstructions,\"a\"\n"		\
+		      "  .align 8\n"					\
+		      "  .quad 661b\n"            /* label */		\
+		      "  .quad 663f\n"		  /* new instruction */	\
+		      "  .byte %c0\n"             /* feature bit */	\
+		      "  .byte 662b-661b\n"       /* sourcelen */	\
+		      "  .byte 664f-663f\n"       /* replacementlen */	\
+		      ".previous\n"					\
+		      ".section .altinstr_replacement,\"ax\"\n"		\
+		      "663:\n\t" newinstr "\n664:\n"   /* replacement */ \
+		      ".previous" :: "i" (feature), ##input)
 
 /*
  * Clear and set 'TS' bit respectively
@@ -297,11 +297,11 @@ static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
 #define mb() 	asm volatile("mfence":::"memory")
 #define rmb()	asm volatile("lfence":::"memory")
 
-/* could use SFENCE here, but it would be only needed for unordered SSE
-   store instructions and we always do an explicit sfence with them currently.
-   the ordering of normal stores is serialized enough. Just make it a compile
-   barrier. */
+#ifdef CONFIG_UNORDERED_IO
+#define wmb()	asm volatile("sfence" ::: "memory")
+#else
 #define wmb()	asm volatile("" ::: "memory")
+#endif
 #define read_barrier_depends()	do {} while(0)
 #define set_mb(var, value) do { xchg(&var, value); } while (0)
 #define set_wmb(var, value) do { var = value; wmb(); } while (0)
@@ -315,6 +315,7 @@ static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
 #define local_irq_enable()	__asm__ __volatile__("sti": : :"memory")
 /* used in the idle loop; sti takes one instruction cycle to complete */
 #define safe_halt()		__asm__ __volatile__("sti; hlt": : :"memory")
+
 #define irqs_disabled()			\
 ({					\
 	unsigned long flags;		\
@@ -324,6 +325,8 @@ static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
 
 /* For spinlocks etc */
 #define local_irq_save(x) 	do { warn_if_not_ulong(x); __asm__ __volatile__("# local_irq_save \n\t pushfq ; popq %0 ; cli":"=g" (x): /* no input */ :"memory"); } while (0)
+
+void cpu_idle_wait(void);
 
 /*
  * disable hlt during certain critical i/o operations

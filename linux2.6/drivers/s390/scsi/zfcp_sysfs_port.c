@@ -5,10 +5,13 @@
  *
  * sysfs port related routines
  *
- * Copyright (C) 2003 IBM Entwicklung GmbH, IBM Corporation
+ * (C) Copyright IBM Corp. 2003, 2004
+ *
  * Authors:
  *      Martin Peschke <mpeschke@de.ibm.com>
  *	Heiko Carstens <heiko.carstens@de.ibm.com>
+ *      Andreas Herrmann <aherrman@de.ibm.com>
+ *      Volker Sameske <sameske@de.ibm.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,16 +28,11 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#define ZFCP_SYSFS_PORT_C_REVISION "$Revision: 1.26 $"
+#define ZFCP_SYSFS_PORT_C_REVISION "$Revision: 1.47 $"
 
-#include <linux/init.h>
-#include <linux/module.h>
-#include <asm/ccwdev.h>
 #include "zfcp_ext.h"
-#include "zfcp_def.h"
 
 #define ZFCP_LOG_AREA                   ZFCP_LOG_AREA_CONFIG
-#define ZFCP_LOG_AREA_PREFIX            ZFCP_LOG_AREA_PREFIX_CONFIG
 
 /**
  * zfcp_sysfs_port_release - gets called when a struct device port is released
@@ -43,11 +41,7 @@
 void
 zfcp_sysfs_port_release(struct device *dev)
 {
-	struct zfcp_port *port;
-
-	port = dev_get_drvdata(dev);
-	zfcp_port_dequeue(port);
-	return;
+	kfree(dev);
 }
 
 /**
@@ -74,6 +68,10 @@ ZFCP_DEFINE_PORT_ATTR(status, "0x%08x\n", atomic_read(&port->status));
 ZFCP_DEFINE_PORT_ATTR(wwnn, "0x%016llx\n", port->wwnn);
 ZFCP_DEFINE_PORT_ATTR(d_id, "0x%06x\n", port->d_id);
 ZFCP_DEFINE_PORT_ATTR(scsi_id, "0x%x\n", port->scsi_id);
+ZFCP_DEFINE_PORT_ATTR(in_recovery, "%d\n", atomic_test_mask
+		      (ZFCP_STATUS_COMMON_ERP_INUSE, &port->status));
+ZFCP_DEFINE_PORT_ATTR(access_denied, "%d\n", atomic_test_mask
+		      (ZFCP_STATUS_COMMON_ACCESS_DENIED, &port->status));
 
 /**
  * zfcp_sysfs_unit_add_store - add a unit to sysfs tree
@@ -110,15 +108,12 @@ zfcp_sysfs_unit_add_store(struct device *dev, const char *buf, size_t count)
 
 	retval = 0;
 
-	zfcp_port_get(port);
-
-	/* try to open unit only if adapter is online */
-	if (port->adapter->ccw_device->online == 1)
-		zfcp_erp_unit_reopen(unit, ZFCP_STATUS_COMMON_ERP_FAILED);
+	zfcp_erp_unit_reopen(unit, 0);
+	zfcp_erp_wait(unit->port->adapter);
 	zfcp_unit_put(unit);
  out:
 	up(&zfcp_data.config_sema);
-	return retval ? retval : count;
+	return retval ? retval : (ssize_t) count;
 }
 
 static DEVICE_ATTR(unit_add, S_IWUSR, NULL, zfcp_sysfs_unit_add_store);
@@ -136,7 +131,7 @@ zfcp_sysfs_unit_remove_store(struct device *dev, const char *buf, size_t count)
 	struct zfcp_unit *unit;
 	fcp_lun_t fcp_lun;
 	char *endp;
-	int retval = -EINVAL;
+	int retval = 0;
 
 	down(&zfcp_data.config_sema);
 
@@ -147,8 +142,10 @@ zfcp_sysfs_unit_remove_store(struct device *dev, const char *buf, size_t count)
 	}
 
 	fcp_lun = simple_strtoull(buf, &endp, 0);
-	if ((endp + 1) < (buf + count))
+	if ((endp + 1) < (buf + count)) {
+		retval = -EINVAL;
 		goto out;
+	}
 
 	write_lock_irq(&zfcp_data.config_lock);
 	unit = zfcp_get_unit_by_lun(port, fcp_lun);
@@ -170,10 +167,10 @@ zfcp_sysfs_unit_remove_store(struct device *dev, const char *buf, size_t count)
 	zfcp_erp_unit_shutdown(unit, 0);
 	zfcp_erp_wait(unit->port->adapter);
 	zfcp_unit_put(unit);
-	device_unregister(&unit->sysfs_device);
+	zfcp_unit_dequeue(unit);
  out:
 	up(&zfcp_data.config_sema);
-	return retval ? retval : count;
+	return retval ? retval : (ssize_t) count;
 }
 
 static DEVICE_ATTR(unit_remove, S_IWUSR, NULL, zfcp_sysfs_unit_remove_store);
@@ -210,16 +207,12 @@ zfcp_sysfs_port_failed_store(struct device *dev, const char *buf, size_t count)
 		goto out;
 	}
 
-	/* restart error recovery only if adapter is online */
-	if (port->adapter->ccw_device->online != 1) {
-		retval = -ENXIO;
-		goto out;
-	}
 	zfcp_erp_modify_port_status(port, ZFCP_STATUS_COMMON_RUNNING, ZFCP_SET);
 	zfcp_erp_port_reopen(port, ZFCP_STATUS_COMMON_ERP_FAILED);
+	zfcp_erp_wait(port->adapter);
  out:
 	up(&zfcp_data.config_sema);
-	return retval ? retval : count;
+	return retval ? retval : (ssize_t) count;
 }
 
 /**
@@ -246,34 +239,16 @@ static DEVICE_ATTR(failed, S_IWUSR | S_IRUGO, zfcp_sysfs_port_failed_show,
 		   zfcp_sysfs_port_failed_store);
 
 /**
- * zfcp_sysfs_port_in_recovery_show - recovery state of port
- * @dev: pointer to belonging device
- * @buf: pointer to input buffer
- * 
- * Show function of "in_recovery" attribute of port. Will be
- * "0" if no error recovery is pending for port, otherwise "1".
+ * zfcp_port_common_attrs
+ * sysfs attributes that are common for all kind of fc ports.
  */
-static ssize_t
-zfcp_sysfs_port_in_recovery_show(struct device *dev, char *buf)
-{
-	struct zfcp_port *port;
-
-	port = dev_get_drvdata(dev);
-	if (atomic_test_mask(ZFCP_STATUS_COMMON_ERP_INUSE, &port->status))
-		return sprintf(buf, "1\n");
-	else
-		return sprintf(buf, "0\n");
-}
-
-static DEVICE_ATTR(in_recovery, S_IRUGO, zfcp_sysfs_port_in_recovery_show,
-		   NULL);
-
 static struct attribute *zfcp_port_common_attrs[] = {
 	&dev_attr_failed.attr,
 	&dev_attr_in_recovery.attr,
 	&dev_attr_status.attr,
 	&dev_attr_wwnn.attr,
 	&dev_attr_d_id.attr,
+	&dev_attr_access_denied.attr,
 	NULL
 };
 
@@ -281,6 +256,10 @@ static struct attribute_group zfcp_port_common_attr_group = {
 	.attrs = zfcp_port_common_attrs,
 };
 
+/**
+ * zfcp_port_no_ns_attrs
+ * sysfs attributes not to be used for nameserver ports.
+ */
 static struct attribute *zfcp_port_no_ns_attrs[] = {
 	&dev_attr_unit_add.attr,
 	&dev_attr_unit_remove.attr,
@@ -293,7 +272,7 @@ static struct attribute_group zfcp_port_no_ns_attr_group = {
 };
 
 /**
- * zfcp_sysfs_create_port_files - create sysfs port files
+ * zfcp_sysfs_port_create_files - create sysfs port files
  * @dev: pointer to belonging device
  *
  * Create all attributes of the sysfs representation of a port.
@@ -305,7 +284,7 @@ zfcp_sysfs_port_create_files(struct device *dev, u32 flags)
 
 	retval = sysfs_create_group(&dev->kobj, &zfcp_port_common_attr_group);
 
-	if ((flags & ZFCP_STATUS_PORT_NAMESERVER) || retval)
+	if ((flags & ZFCP_STATUS_PORT_WKA) || retval)
 		return retval;
 
 	retval = sysfs_create_group(&dev->kobj, &zfcp_port_no_ns_attr_group);
@@ -315,5 +294,18 @@ zfcp_sysfs_port_create_files(struct device *dev, u32 flags)
 	return retval;
 }
 
+/**
+ * zfcp_sysfs_port_remove_files - remove sysfs port files
+ * @dev: pointer to belonging device
+ *
+ * Remove all attributes of the sysfs representation of a port.
+ */
+void
+zfcp_sysfs_port_remove_files(struct device *dev, u32 flags)
+{
+	sysfs_remove_group(&dev->kobj, &zfcp_port_common_attr_group);
+	if (!(flags & ZFCP_STATUS_PORT_WKA))
+		sysfs_remove_group(&dev->kobj, &zfcp_port_no_ns_attr_group);
+}
+
 #undef ZFCP_LOG_AREA
-#undef ZFCP_LOG_AREA_PREFIX

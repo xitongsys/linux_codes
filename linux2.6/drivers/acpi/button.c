@@ -107,7 +107,7 @@ static struct file_operations acpi_button_state_fops = {
                               FS Interface (/proc)
    -------------------------------------------------------------------------- */
 
-static struct proc_dir_entry	*acpi_button_dir = NULL;
+static struct proc_dir_entry	*acpi_button_dir;
 
 static int acpi_button_info_seq_show(struct seq_file *seq, void *offset)
 {
@@ -116,12 +116,12 @@ static int acpi_button_info_seq_show(struct seq_file *seq, void *offset)
 	ACPI_FUNCTION_TRACE("acpi_button_info_seq_show");
 
 	if (!button || !button->device)
-		return 0;
+		return_VALUE(0);
 
 	seq_printf(seq, "type:                    %s\n", 
 		acpi_device_name(button->device));
 
-	return 0;
+	return_VALUE(0);
 }
 
 static int acpi_button_info_open_fs(struct inode *inode, struct file *file)
@@ -138,7 +138,7 @@ static int acpi_button_state_seq_show(struct seq_file *seq, void *offset)
 	ACPI_FUNCTION_TRACE("acpi_button_state_seq_show");
 
 	if (!button || !button->device)
-		return 0;
+		return_VALUE(0);
 
 	status = acpi_evaluate_integer(button->handle,"_LID",NULL,&state);
 	if (ACPI_FAILURE(status)) {
@@ -148,7 +148,7 @@ static int acpi_button_state_seq_show(struct seq_file *seq, void *offset)
 		seq_printf(seq, "state:      %s\n", (state ? "open" : "closed")); 
 	}
 
-	return 0;
+	return_VALUE(0);
 }
 
 static int acpi_button_state_open_fs(struct inode *inode, struct file *file)
@@ -187,9 +187,14 @@ acpi_button_add_fs (
 		break;
 	}
 
+	if (!entry)
+		return_VALUE(-ENODEV);
+	entry->owner = THIS_MODULE;
+
 	acpi_device_dir(device) = proc_mkdir(acpi_device_bid(device), entry);
 	if (!acpi_device_dir(device))
 		return_VALUE(-ENODEV);
+	acpi_device_dir(device)->owner = THIS_MODULE;
 
 	/* 'info' [R] */
 	entry = create_proc_entry(ACPI_BUTTON_FILE_INFO,
@@ -201,6 +206,7 @@ acpi_button_add_fs (
 	else {
 		entry->proc_fops = &acpi_button_info_fops;
 		entry->data = acpi_driver_data(device);
+		entry->owner = THIS_MODULE;
 	}
 
 	/* show lid state [R] */
@@ -214,6 +220,7 @@ acpi_button_add_fs (
 		else {
 			entry->proc_fops = &acpi_button_state_fops;
 			entry->data = acpi_driver_data(device);
+			entry->owner = THIS_MODULE;
 		}
 	}
 
@@ -225,10 +232,38 @@ static int
 acpi_button_remove_fs (
 	struct acpi_device	*device)
 {
+	struct acpi_button	*button = NULL;
+
 	ACPI_FUNCTION_TRACE("acpi_button_remove_fs");
 
+	button = acpi_driver_data(device);
 	if (acpi_device_dir(device)) {
-		remove_proc_entry(acpi_device_bid(device), acpi_button_dir);
+		if (button->type == ACPI_BUTTON_TYPE_LID)
+			remove_proc_entry(ACPI_BUTTON_FILE_STATE,
+					     acpi_device_dir(device));
+		remove_proc_entry(ACPI_BUTTON_FILE_INFO,
+				     acpi_device_dir(device));
+
+		remove_proc_entry(acpi_device_bid(device),
+				     acpi_device_dir(device)->parent);
+
+
+		switch (button->type) {
+			case ACPI_BUTTON_TYPE_POWER:
+			case ACPI_BUTTON_TYPE_POWERF:
+				remove_proc_entry(ACPI_BUTTON_SUBCLASS_POWER, 
+					acpi_button_dir);
+				break;
+			case ACPI_BUTTON_TYPE_SLEEP:
+			case ACPI_BUTTON_TYPE_SLEEPF:
+				remove_proc_entry(ACPI_BUTTON_SUBCLASS_SLEEP, 
+					acpi_button_dir);
+				break;
+			case ACPI_BUTTON_TYPE_LID:
+				remove_proc_entry(ACPI_BUTTON_SUBCLASS_LID, 
+					acpi_button_dir);
+				break;
+		}
 		acpi_device_dir(device) = NULL;
 	}
 
@@ -316,35 +351,35 @@ acpi_button_add (
 	 */
 	if (!strcmp(acpi_device_hid(device), ACPI_BUTTON_HID_POWER)) {
 		button->type = ACPI_BUTTON_TYPE_POWER;
-		sprintf(acpi_device_name(device), "%s",
+		strcpy(acpi_device_name(device),
 			ACPI_BUTTON_DEVICE_NAME_POWER);
 		sprintf(acpi_device_class(device), "%s/%s", 
 			ACPI_BUTTON_CLASS, ACPI_BUTTON_SUBCLASS_POWER);
 	}
 	else if (!strcmp(acpi_device_hid(device), ACPI_BUTTON_HID_POWERF)) {
 		button->type = ACPI_BUTTON_TYPE_POWERF;
-		sprintf(acpi_device_name(device), "%s",
+		strcpy(acpi_device_name(device),
 			ACPI_BUTTON_DEVICE_NAME_POWERF);
 		sprintf(acpi_device_class(device), "%s/%s", 
 			ACPI_BUTTON_CLASS, ACPI_BUTTON_SUBCLASS_POWER);
 	}
 	else if (!strcmp(acpi_device_hid(device), ACPI_BUTTON_HID_SLEEP)) {
 		button->type = ACPI_BUTTON_TYPE_SLEEP;
-		sprintf(acpi_device_name(device), "%s",
+		strcpy(acpi_device_name(device),
 			ACPI_BUTTON_DEVICE_NAME_SLEEP);
 		sprintf(acpi_device_class(device), "%s/%s", 
 			ACPI_BUTTON_CLASS, ACPI_BUTTON_SUBCLASS_SLEEP);
 	}
 	else if (!strcmp(acpi_device_hid(device), ACPI_BUTTON_HID_SLEEPF)) {
 		button->type = ACPI_BUTTON_TYPE_SLEEPF;
-		sprintf(acpi_device_name(device), "%s",
+		strcpy(acpi_device_name(device),
 			ACPI_BUTTON_DEVICE_NAME_SLEEPF);
 		sprintf(acpi_device_class(device), "%s/%s", 
 			ACPI_BUTTON_CLASS, ACPI_BUTTON_SUBCLASS_SLEEP);
 	}
 	else if (!strcmp(acpi_device_hid(device), ACPI_BUTTON_HID_LID)) {
 		button->type = ACPI_BUTTON_TYPE_LID;
-		sprintf(acpi_device_name(device), "%s",
+		strcpy(acpi_device_name(device),
 			ACPI_BUTTON_DEVICE_NAME_LID);
 		sprintf(acpi_device_class(device), "%s/%s", 
 			ACPI_BUTTON_CLASS, ACPI_BUTTON_SUBCLASS_LID);
@@ -421,6 +456,15 @@ acpi_button_add (
 		goto end;
 	}
 
+	if (device->wakeup.flags.valid) {
+		/* Button's GPE is run-wake GPE */
+		acpi_set_gpe_type(device->wakeup.gpe_device, 
+			device->wakeup.gpe_number, ACPI_GPE_TYPE_WAKE_RUN);
+		acpi_enable_gpe(device->wakeup.gpe_device, 
+			device->wakeup.gpe_number, ACPI_NOT_ISR);
+		device->wakeup.state.enabled = 1;
+	}
+
 	printk(KERN_INFO PREFIX "%s [%s]\n", 
 		acpi_device_name(device), acpi_device_bid(device));
 
@@ -485,6 +529,7 @@ acpi_button_init (void)
 	acpi_button_dir = proc_mkdir(ACPI_BUTTON_CLASS, acpi_root_dir);
 	if (!acpi_button_dir)
 		return_VALUE(-ENODEV);
+	acpi_button_dir->owner = THIS_MODULE;
 
 	result = acpi_bus_register_driver(&acpi_button_driver);
 	if (result < 0) {

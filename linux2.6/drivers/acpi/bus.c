@@ -22,6 +22,7 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#include <linux/module.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/list.h>
@@ -39,11 +40,16 @@
 #define _COMPONENT		ACPI_BUS_COMPONENT
 ACPI_MODULE_NAME		("acpi_bus")
 
-extern void acpi_pic_set_level_irq(unsigned int irq);
+#ifdef	CONFIG_X86
+extern void __init acpi_pic_sci_set_trigger(unsigned int irq, u16 trigger);
+#endif
 
 FADT_DESCRIPTOR			acpi_fadt;
+EXPORT_SYMBOL(acpi_fadt);
+
 struct acpi_device		*acpi_root;
 struct proc_dir_entry		*acpi_root_dir;
+EXPORT_SYMBOL(acpi_root_dir);
 
 #define STRUCT_TO_INT(s)	(*((int*)&s))
 
@@ -51,10 +57,6 @@ struct proc_dir_entry		*acpi_root_dir;
                                 Device Management
    -------------------------------------------------------------------------- */
 
-extern void acpi_bus_data_handler (
-	acpi_handle		handle,
-	u32			function,
-	void			*context);
 int
 acpi_bus_get_device (
 	acpi_handle		handle,
@@ -71,13 +73,14 @@ acpi_bus_get_device (
 
 	status = acpi_get_data(handle, acpi_bus_data_handler, (void**) device);
 	if (ACPI_FAILURE(status) || !*device) {
-		ACPI_DEBUG_PRINT((ACPI_DB_WARN, "Error getting context for object [%p]\n",
+		ACPI_DEBUG_PRINT((ACPI_DB_WARN, "No context for object [%p]\n",
 			handle));
 		return_VALUE(-ENODEV);
 	}
 
 	return_VALUE(0);
 }
+EXPORT_SYMBOL(acpi_bus_get_device);
 
 int
 acpi_bus_get_status (
@@ -110,11 +113,20 @@ acpi_bus_get_status (
 	else
 		STRUCT_TO_INT(device->status) = 0x0F;
 
+	if (device->status.functional && !device->status.present) {
+		printk(KERN_WARNING PREFIX "Device [%s] status [%08x]: "
+			"functional but not present; setting present\n",
+			device->pnp.bus_id,
+			(u32) STRUCT_TO_INT(device->status));
+		device->status.present = 1;
+	}
+
 	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Device [%s] status [%08x]\n", 
 		device->pnp.bus_id, (u32) STRUCT_TO_INT(device->status)));
 
 	return_VALUE(0);
 }
+EXPORT_SYMBOL(acpi_bus_get_status);
 
 
 /* --------------------------------------------------------------------------
@@ -172,6 +184,7 @@ acpi_bus_get_power (
 
 	return_VALUE(0);
 }
+EXPORT_SYMBOL(acpi_bus_get_power);
 
 
 int
@@ -260,6 +273,7 @@ end:
 
 	return_VALUE(result);
 }
+EXPORT_SYMBOL(acpi_bus_set_power);
 
 
 
@@ -267,7 +281,7 @@ end:
                                 Event Management
    -------------------------------------------------------------------------- */
 
-static spinlock_t		acpi_bus_event_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(acpi_bus_event_lock);
 
 LIST_HEAD(acpi_bus_event_list);
 DECLARE_WAIT_QUEUE_HEAD(acpi_bus_event_queue);
@@ -296,8 +310,8 @@ acpi_bus_generate_event (
 	if (!event)
 		return_VALUE(-ENOMEM);
 
-	sprintf(event->device_class, "%s", device->pnp.device_class);
-	sprintf(event->bus_id, "%s", device->pnp.bus_id);
+	strcpy(event->device_class, device->pnp.device_class);
+	strcpy(event->bus_id, device->pnp.bus_id);
 	event->type = type;
 	event->data = data;
 
@@ -309,6 +323,7 @@ acpi_bus_generate_event (
 
 	return_VALUE(0);
 }
+EXPORT_SYMBOL(acpi_bus_generate_event);
 
 int
 acpi_bus_receive_event (
@@ -322,7 +337,7 @@ acpi_bus_receive_event (
 	ACPI_FUNCTION_TRACE("acpi_bus_receive_event");
 
 	if (!event)
-		return -EINVAL;
+		return_VALUE(-EINVAL);
 
 	if (list_empty(&acpi_bus_event_list)) {
 
@@ -354,6 +369,7 @@ acpi_bus_receive_event (
 
 	return_VALUE(0);
 }
+EXPORT_SYMBOL(acpi_bus_receive_event);
 
 
 /* --------------------------------------------------------------------------
@@ -580,14 +596,20 @@ acpi_bus_init_irq (void)
 }
 
 
-static int __init
-acpi_bus_init (void)
+void __init
+acpi_early_init (void)
 {
-	int			result = 0;
 	acpi_status		status = AE_OK;
 	struct acpi_buffer	buffer = {sizeof(acpi_fadt), &acpi_fadt};
 
-	ACPI_FUNCTION_TRACE("acpi_bus_init");
+	ACPI_FUNCTION_TRACE("acpi_early_init");
+
+	if (acpi_disabled)
+		return_VOID;
+
+	/* enable workarounds, unless strict ACPI spec. compliance */
+	if (!acpi_strict)
+		acpi_gbl_enable_interpreter_slack = TRUE;
 
 	status = acpi_initialize_subsystem();
 	if (ACPI_FAILURE(status)) {
@@ -607,23 +629,63 @@ acpi_bus_init (void)
 	status = acpi_get_table(ACPI_TABLE_FADT, 1, &buffer);
 	if (ACPI_FAILURE(status)) {
 		printk(KERN_ERR PREFIX "Unable to get the FADT\n");
-		goto error1;
+		goto error0;
 	}
 
 #ifdef CONFIG_X86
-	/* Ensure the SCI is set to level-triggered, active-low */
-	if (acpi_ioapic)
-		mp_config_ioapic_for_sci(acpi_fadt.sci_int);
-	else
-		acpi_pic_set_level_irq(acpi_fadt.sci_int);
+	if (!acpi_ioapic) {
+		extern acpi_interrupt_flags acpi_sci_flags;
+
+		/* compatible (0) means level (3) */
+		if (acpi_sci_flags.trigger == 0)
+			acpi_sci_flags.trigger = 3;
+
+		/* Set PIC-mode SCI trigger type */
+		acpi_pic_sci_set_trigger(acpi_fadt.sci_int, acpi_sci_flags.trigger);
+	} else {
+		extern int acpi_sci_override_gsi;
+		/*
+		 * now that acpi_fadt is initialized,
+		 * update it with result from INT_SRC_OVR parsing
+		 */
+		acpi_fadt.sci_int = acpi_sci_override_gsi;
+	}
 #endif
 
-	status = acpi_enable_subsystem(ACPI_FULL_INITIALIZATION);
+	status = acpi_enable_subsystem(~(ACPI_NO_HARDWARE_INIT | ACPI_NO_ACPI_ENABLE));
+	if (ACPI_FAILURE(status)) {
+		printk(KERN_ERR PREFIX "Unable to enable ACPI\n");
+		goto error0;
+	}
+
+	return_VOID;
+
+error0:
+	disable_acpi();
+	return_VOID;
+}
+
+static int __init
+acpi_bus_init (void)
+{
+	int			result = 0;
+	acpi_status		status = AE_OK;
+	extern acpi_status	acpi_os_initialize1(void);
+
+	ACPI_FUNCTION_TRACE("acpi_bus_init");
+
+	status = acpi_os_initialize1();
+
+	status = acpi_enable_subsystem(ACPI_NO_HARDWARE_INIT | ACPI_NO_ACPI_ENABLE);
 	if (ACPI_FAILURE(status)) {
 		printk(KERN_ERR PREFIX "Unable to start the ACPI Interpreter\n");
 		goto error1;
 	}
 
+	if (ACPI_FAILURE(status)) {
+		printk(KERN_ERR PREFIX "Unable to initialize ACPI OS objects\n");
+		goto error1;
+	}
 #ifdef CONFIG_ACPI_EC
 	/*
 	 * ACPI 2.0 requires the EC driver to be loaded and work before
@@ -671,7 +733,6 @@ acpi_bus_init (void)
 	/* Mimic structured exception handling */
 error1:
 	acpi_terminate();
-error0:
 	return_VALUE(-ENODEV);
 }
 
@@ -686,12 +747,9 @@ static int __init acpi_init (void)
 	printk(KERN_INFO PREFIX "Subsystem revision %08x\n",
 		ACPI_CA_VERSION);
 
-	/* Initial core debug level excludes drivers, so include them now */
-	acpi_set_debug(ACPI_DEBUG_LOW);
-
 	if (acpi_disabled) {
 		printk(KERN_INFO PREFIX "Interpreter disabled.\n");
-		return -ENODEV;
+		return_VALUE(-ENODEV);
 	}
 
 	firmware_register(&acpi_subsys);
@@ -704,29 +762,14 @@ static int __init acpi_init (void)
 			pm_active = 1;
 		else {
 			printk(KERN_INFO PREFIX "APM is already active, exiting\n");
-			acpi_disabled = 1;
+			disable_acpi();
 			result = -ENODEV;
 		}
 #endif
 	} else
-		acpi_disabled = 1;
+		disable_acpi();
 
 	return_VALUE(result);
 }
 
-
-static int __init acpi_setup(char *str)
-{
-	while (str && *str) {
-		if (strncmp(str, "off", 3) == 0)
-			acpi_disabled = 1;
-		str = strchr(str, ',');
-		if (str)
-			str += strspn(str, ", \t");
-	}
-	return 1;
-}
-
 subsys_initcall(acpi_init);
-
-__setup("acpi=", acpi_setup);

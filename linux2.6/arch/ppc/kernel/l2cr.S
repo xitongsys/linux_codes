@@ -45,6 +45,7 @@
 #include <asm/cputable.h>
 #include <asm/ppc_asm.h>
 #include <asm/cache.h>
+#include <asm/page.h>
 
 /* Usage:
 
@@ -129,11 +130,6 @@ END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
 	sync
 	mtspr	HID0,r4			/* Disable DPM */
 	sync
-
-	/* Flush & disable L1 */
-	mr	r5,r3
-	bl	__flush_disable_L1
-	mr	r3,r5
 
 	/* Get the current enable bit of the L2CR into r4 */
 	mfspr	r4,L2CR
@@ -236,7 +232,6 @@ END_FTR_SECTION_IFSET(CPU_FTR_SPEC7450)
 	sync
 
 4:
-	bl	__inval_enable_L1
 
 	/* Restore HID0[DPM] to whatever it was before */
 	sync
@@ -290,7 +285,7 @@ END_FTR_SECTION_IFCLR(CPU_FTR_L3CR)
 	/* Tweak some bits */
 	rlwinm	r5,r3,0,0,0		/* r5 contains the new enable bit */
 	rlwinm	r3,r3,0,22,20		/* Turn off the invalidate bit */
-	rlwinm	r3,r3,0,1,31		/* Turn off the enable bit */
+	rlwinm	r3,r3,0,2,31		/* Turn off the enable & PE bits */
 	rlwinm	r3,r3,0,5,3		/* Turn off the clken bit */
 	/* Check to see if we need to flush */
 	rlwinm.	r4,r4,0,0,0
@@ -385,7 +380,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_L3CR)
 /* flush_disable_L1()	- Flush and disable L1 cache
  *
  * clobbers r0, r3, ctr, cr0
- *
+ * Must be called with interrupts disabled and MMU enabled.
  */
 _GLOBAL(__flush_disable_L1)
 	/* Stop pending alitvec streams and memory accesses */
@@ -394,13 +389,12 @@ BEGIN_FTR_SECTION
 END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
  	sync
 
-	/* Load counter to 0x1000 cache lines (128k) and
+	/* Load counter to 0x4000 cache lines (512k) and
 	 * load cache with datas
 	 */
-	lis	r3,0x0002
-//	li	r3,0x1000	/* 128kB / 32B */
+	li	r3,0x4000	/* 512kB / 32B */
 	mtctr	r3
-	li	r3, 0
+	lis	r3,KERNELBASE@h
 1:
 	lwz	r0,0(r3)
 	addi	r3,r3,0x0020	/* Go to start of next cache line */
@@ -409,10 +403,9 @@ END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
 	sync
 
 	/* Now flush those cache lines */
-	lis	r3,0x0002
-//	li	r3,0x1000	/* 128kB / 32B */
+	li	r3,0x4000	/* 512kB / 32B */
 	mtctr	r3
-	li	r3, 0
+	lis	r3,KERNELBASE@h
 1:
 	dcbf	0,r3
 	addi	r3,r3,0x0020	/* Go to start of next cache line */

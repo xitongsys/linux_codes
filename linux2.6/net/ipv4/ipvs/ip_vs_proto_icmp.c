@@ -9,13 +9,8 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
-#include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/errno.h>
-#include <linux/compiler.h>
-#include <linux/vmalloc.h>
 #include <linux/icmp.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4.h>
@@ -27,7 +22,7 @@ static int icmp_timeouts[1] =		{ 1*60*HZ };
 
 static char * icmp_state_name_table[1] = { "ICMP" };
 
-struct ip_vs_conn *
+static struct ip_vs_conn *
 icmp_conn_in_get(const struct sk_buff *skb,
 		 struct ip_vs_protocol *pp,
 		 const struct iphdr *iph,
@@ -54,7 +49,7 @@ icmp_conn_in_get(const struct sk_buff *skb,
 #endif
 }
 
-struct ip_vs_conn *
+static struct ip_vs_conn *
 icmp_conn_out_get(const struct sk_buff *skb,
 		  struct ip_vs_protocol *pp,
 		  const struct iphdr *iph,
@@ -109,24 +104,29 @@ icmp_debug_packet(struct ip_vs_protocol *pp,
 		  const char *msg)
 {
 	char buf[256];
-	struct iphdr iph;
-	struct icmphdr icmph;
+	struct iphdr _iph, *ih;
 
-	if (skb_copy_bits(skb, offset, &iph, sizeof(iph)) < 0)
+	ih = skb_header_pointer(skb, offset, sizeof(_iph), &_iph);
+	if (ih == NULL)
 		sprintf(buf, "%s TRUNCATED", pp->name);
-	else if (iph.frag_off & __constant_htons(IP_OFFSET))
+	else if (ih->frag_off & __constant_htons(IP_OFFSET))
 		sprintf(buf, "%s %u.%u.%u.%u->%u.%u.%u.%u frag",
-			pp->name, NIPQUAD(iph.saddr),
-			NIPQUAD(iph.daddr));
-	else if (skb_copy_bits(skb, offset + iph.ihl*4, &icmph, sizeof(icmph)) < 0)
-		sprintf(buf, "%s TRUNCATED to %u bytes\n",
-			pp->name, skb->len - offset);
-	else
-		sprintf(buf, "%s %u.%u.%u.%u->%u.%u.%u.%u T:%d C:%d",
-			pp->name, NIPQUAD(iph.saddr),
-			NIPQUAD(iph.daddr),
-			icmph.type, icmph.code);
+			pp->name, NIPQUAD(ih->saddr),
+			NIPQUAD(ih->daddr));
+	else {
+		struct icmphdr _icmph, *ic;
 
+		ic = skb_header_pointer(skb, offset + ih->ihl*4,
+					sizeof(_icmph), &_icmph);
+		if (ic == NULL)
+			sprintf(buf, "%s TRUNCATED to %u bytes\n",
+				pp->name, skb->len - offset);
+		else
+			sprintf(buf, "%s %u.%u.%u.%u->%u.%u.%u.%u T:%d C:%d",
+				pp->name, NIPQUAD(ih->saddr),
+				NIPQUAD(ih->daddr),
+				ic->type, ic->code);
+	}
 	printk(KERN_DEBUG "IPVS: %s: %s\n", msg, buf);
 }
 

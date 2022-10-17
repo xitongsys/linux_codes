@@ -31,19 +31,19 @@
 /*
  * max time before a read is submitted.
  */
-#define default_read_expire (HZ / 20)
+#define default_read_expire (HZ / 8)
 
 /*
  * ditto for writes, these limits are not hard, even
  * if the disk is capable of satisfying them.
  */
-#define default_write_expire (HZ / 5)
+#define default_write_expire (HZ / 4)
 
 /*
  * read_batch_expire describes how long we will allow a stream of reads to
  * persist before looking to see whether it is time to switch over to writes.
  */
-#define default_read_batch_expire (HZ / 5)
+#define default_read_batch_expire (HZ / 2)
 
 /*
  * write_batch_expire describes how long we want a stream of writes to run for.
@@ -51,7 +51,7 @@
  * See, the problem is: we can send a lot of writes to disk cache / TCQ in
  * a short amount of time...
  */
-#define default_write_batch_expire (HZ / 20)
+#define default_write_batch_expire (HZ / 8)
 
 /*
  * max time we may wait to anticipate a read (default around 6ms)
@@ -70,6 +70,7 @@
 /* Bits in as_io_context.state */
 enum as_io_states {
 	AS_TASK_RUNNING=0,	/* Process has not exitted */
+	AS_TASK_IOSTARTED,	/* Process has started some IO */
 	AS_TASK_IORUNNING,	/* Process has completed some IO */
 };
 
@@ -99,7 +100,14 @@ struct as_data {
 	sector_t last_sector[2];	/* last REQ_SYNC & REQ_ASYNC sectors */
 	struct list_head *dispatch;	/* driver dispatch queue */
 	struct list_head *hash;		/* request hash */
-	unsigned long new_success; /* anticipation success on new proc */
+
+	unsigned long exit_prob;	/* probability a task will exit while
+					   being waited on */
+	unsigned long new_ttime_total; 	/* mean thinktime on new proc */
+	unsigned long new_ttime_mean;
+	u64 new_seek_total;		/* mean seek on new proc */
+	sector_t new_seek_mean;
+
 	unsigned long current_batch_expires;
 	unsigned long last_check_fifo[2];
 	int changed_batch;		/* 1: waiting for old batch to end */
@@ -137,6 +145,10 @@ enum arq_state {
 				   scheduler */
 	AS_RQ_DISPATCHED,	/* On the dispatch list. It belongs to the
 				   driver now */
+	AS_RQ_PRESCHED,		/* Debug poisoning for requests being used */
+	AS_RQ_REMOVED,
+	AS_RQ_MERGED,
+	AS_RQ_POSTSCHED,	/* when they shouldn't be */
 };
 
 struct as_rq {
@@ -183,6 +195,7 @@ static void free_as_io_context(struct as_io_context *aic)
 /* Called when the task exits */
 static void exit_as_io_context(struct as_io_context *aic)
 {
+	WARN_ON(!test_bit(AS_TASK_RUNNING, &aic->state));
 	clear_bit(AS_TASK_RUNNING, &aic->state);
 }
 
@@ -413,6 +426,8 @@ as_find_arq_rb(struct as_data *ad, sector_t sector, int data_dir)
 				 * for a request.
 				 */
 
+#define BACK_PENALTY	2
+
 /*
  * as_choose_req selects the preferred one of two requests of the same data_dir
  * ignoring time - eg. timeouts, which is the job of as_dispatch_request
@@ -446,7 +461,7 @@ as_choose_req(struct as_data *ad, struct as_rq *arq1, struct as_rq *arq2)
 	if (s1 >= last)
 		d1 = s1 - last;
 	else if (s1+maxback >= last)
-		d1 = (last - s1)*2;
+		d1 = (last - s1)*BACK_PENALTY;
 	else {
 		r1_wrap = 1;
 		d1 = 0; /* shut up, gcc */
@@ -455,7 +470,7 @@ as_choose_req(struct as_data *ad, struct as_rq *arq1, struct as_rq *arq2)
 	if (s2 >= last)
 		d2 = s2 - last;
 	else if (s2+maxback >= last)
-		d2 = (last - s2)*2;
+		d2 = (last - s2)*BACK_PENALTY;
 	else {
 		r2_wrap = 1;
 		d2 = 0;
@@ -585,18 +600,11 @@ static void as_antic_stop(struct as_data *ad)
 	int status = ad->antic_status;
 
 	if (status == ANTIC_WAIT_REQ || status == ANTIC_WAIT_NEXT) {
-		struct as_io_context *aic;
-
 		if (status == ANTIC_WAIT_NEXT)
 			del_timer(&ad->antic_timer);
 		ad->antic_status = ANTIC_FINISHED;
 		/* see as_work_handler */
 		kblockd_schedule_work(&ad->antic_work);
-
-		aic = ad->io_context->aic;
-		if (aic->seek_samples == 0)
-			/* new process */
-			ad->new_success = (ad->new_success * 3) / 4 + 256;
 	}
 }
 
@@ -606,20 +614,21 @@ static void as_antic_stop(struct as_data *ad)
 static void as_antic_timeout(unsigned long data)
 {
 	struct request_queue *q = (struct request_queue *)data;
-	struct as_data *ad = q->elevator.elevator_data;
+	struct as_data *ad = q->elevator->elevator_data;
 	unsigned long flags;
 
 	spin_lock_irqsave(q->queue_lock, flags);
 	if (ad->antic_status == ANTIC_WAIT_REQ
 			|| ad->antic_status == ANTIC_WAIT_NEXT) {
-		struct as_io_context *aic;
+		struct as_io_context *aic = ad->io_context->aic;
+
 		ad->antic_status = ANTIC_FINISHED;
 		kblockd_schedule_work(&ad->antic_work);
 
-		aic = ad->io_context->aic;
-		if (aic->seek_samples == 0)
-			/* new process */
-			ad->new_success = (ad->new_success * 3) / 4;
+		if (aic->ttime_samples == 0) {
+			/* process anticipated on has exitted or timed out*/
+			ad->exit_prob = (7*ad->exit_prob + 256)/8;
+		}
 	}
 	spin_unlock_irqrestore(q->queue_lock, flags);
 }
@@ -633,7 +642,7 @@ static int as_close_req(struct as_data *ad, struct as_rq *arq)
 	unsigned long delay;	/* milliseconds */
 	sector_t last = ad->last_sector[ad->batch_data_dir];
 	sector_t next = arq->request->sector;
-	sector_t delta;	/* acceptable close offset (in sectors) */
+	sector_t delta; /* acceptable close offset (in sectors) */
 
 	if (ad->antic_status == ANTIC_OFF || !ad->ioc_finished)
 		delay = 0;
@@ -667,9 +676,13 @@ static int as_can_break_anticipation(struct as_data *ad, struct as_rq *arq)
 {
 	struct io_context *ioc;
 	struct as_io_context *aic;
+	sector_t s;
 
-	if (arq && arq->is_sync == REQ_SYNC && as_close_req(ad, arq)) {
-		/* close request */
+	ioc = ad->io_context;
+	BUG_ON(!ioc);
+
+	if (arq && ioc == arq->io_context) {
+		/* request from same process */
 		return 1;
 	}
 
@@ -681,20 +694,14 @@ static int as_can_break_anticipation(struct as_data *ad, struct as_rq *arq)
 		return 1;
 	}
 
-	ioc = ad->io_context;
-	BUG_ON(!ioc);
-
-	if (arq && ioc == arq->io_context) {
-		/* request from same process */
-		return 1;
-	}
-
 	aic = ioc->aic;
 	if (!aic)
 		return 0;
 
 	if (!test_bit(AS_TASK_RUNNING, &aic->state)) {
 		/* process anticipated on has exitted */
+		if (aic->ttime_samples == 0)
+			ad->exit_prob = (7*ad->exit_prob + 256)/8;
 		return 1;
 	}
 
@@ -708,28 +715,52 @@ static int as_can_break_anticipation(struct as_data *ad, struct as_rq *arq)
 		return 1;
 	}
 
-	if (ad->new_success < 256 &&
-			(aic->seek_samples == 0 || aic->ttime_samples == 0)) {
+	if (arq && arq->is_sync == REQ_SYNC && as_close_req(ad, arq)) {
 		/*
-		 * Process has just started IO and we have a bad history of
-		 * success anticipating on new processes!
+		 * Found a close request that is not one of ours.
+		 *
+		 * This makes close requests from another process reset
+		 * our thinktime delay. Is generally useful when there are
+		 * two or more cooperating processes working in the same
+		 * area.
 		 */
+		spin_lock(&aic->lock);
+		aic->last_end_request = jiffies;
+		spin_unlock(&aic->lock);
 		return 1;
 	}
 
-	if (aic->ttime_mean > ad->antic_expire) {
+
+	if (aic->ttime_samples == 0) {
+		if (ad->new_ttime_mean > ad->antic_expire)
+			return 1;
+		if (ad->exit_prob > 128)
+			return 1;
+	} else if (aic->ttime_mean > ad->antic_expire) {
 		/* the process thinks too much between requests */
 		return 1;
 	}
 
-	if (arq && aic->seek_samples) {
-		sector_t s;
-		if (ad->last_sector[REQ_SYNC] < arq->request->sector)
-			s = arq->request->sector - ad->last_sector[REQ_SYNC];
-		else
-			s = ad->last_sector[REQ_SYNC] - arq->request->sector;
+	if (!arq)
+		return 0;
 
-		if (aic->seek_mean > (s>>1)) {
+	if (ad->last_sector[REQ_SYNC] < arq->request->sector)
+		s = arq->request->sector - ad->last_sector[REQ_SYNC];
+	else
+		s = ad->last_sector[REQ_SYNC] - arq->request->sector;
+
+	if (aic->seek_samples == 0) {
+		/*
+		 * Process has just started IO. Use past statistics to
+		 * guage success possibility
+		 */
+		if (ad->new_seek_mean > s) {
+			/* this request is better than what we're expecting */
+			return 1;
+		}
+
+	} else {
+		if (aic->seek_mean > s) {
 			/* this request is better than what we're expecting */
 			return 1;
 		}
@@ -774,12 +805,51 @@ static int as_can_anticipate(struct as_data *ad, struct as_rq *arq)
 	return 1;
 }
 
+static void as_update_thinktime(struct as_data *ad, struct as_io_context *aic, unsigned long ttime)
+{
+	/* fixed point: 1.0 == 1<<8 */
+	if (aic->ttime_samples == 0) {
+		ad->new_ttime_total = (7*ad->new_ttime_total + 256*ttime) / 8;
+		ad->new_ttime_mean = ad->new_ttime_total / 256;
+
+		ad->exit_prob = (7*ad->exit_prob)/8;
+	}
+	aic->ttime_samples = (7*aic->ttime_samples + 256) / 8;
+	aic->ttime_total = (7*aic->ttime_total + 256*ttime) / 8;
+	aic->ttime_mean = (aic->ttime_total + 128) / aic->ttime_samples;
+}
+
+static void as_update_seekdist(struct as_data *ad, struct as_io_context *aic, sector_t sdist)
+{
+	u64 total;
+
+	if (aic->seek_samples == 0) {
+		ad->new_seek_total = (7*ad->new_seek_total + 256*(u64)sdist)/8;
+		ad->new_seek_mean = ad->new_seek_total / 256;
+	}
+
+	/*
+	 * Don't allow the seek distance to get too large from the
+	 * odd fragment, pagein, etc
+	 */
+	if (aic->seek_samples <= 60) /* second&third seek */
+		sdist = min(sdist, (aic->seek_mean * 4) + 2*1024*1024);
+	else
+		sdist = min(sdist, (aic->seek_mean * 4)	+ 2*1024*64);
+
+	aic->seek_samples = (7*aic->seek_samples + 256) / 8;
+	aic->seek_total = (7*aic->seek_total + (u64)256*sdist) / 8;
+	total = aic->seek_total + (aic->seek_samples/2);
+	do_div(total, aic->seek_samples);
+	aic->seek_mean = (sector_t)total;
+}
+
 /*
  * as_update_iohist keeps a decaying histogram of IO thinktimes, and
  * updates @aic->ttime_mean based on that. It is called when a new
  * request is queued.
  */
-static void as_update_iohist(struct as_io_context *aic, struct request *rq)
+static void as_update_iohist(struct as_data *ad, struct as_io_context *aic, struct request *rq)
 {
 	struct as_rq *arq = RQ_DATA(rq);
 	int data_dir = arq->is_sync;
@@ -790,60 +860,29 @@ static void as_update_iohist(struct as_io_context *aic, struct request *rq)
 		return;
 
 	if (data_dir == REQ_SYNC) {
+		unsigned long in_flight = atomic_read(&aic->nr_queued)
+					+ atomic_read(&aic->nr_dispatched);
 		spin_lock(&aic->lock);
-
-		if (test_bit(AS_TASK_IORUNNING, &aic->state)
-				&& !atomic_read(&aic->nr_queued)
-				&& !atomic_read(&aic->nr_dispatched)) {
+		if (test_bit(AS_TASK_IORUNNING, &aic->state) ||
+			test_bit(AS_TASK_IOSTARTED, &aic->state)) {
 			/* Calculate read -> read thinktime */
-			thinktime = jiffies - aic->last_end_request;
-			thinktime = min(thinktime, MAX_THINKTIME-1);
-			/* fixed point: 1.0 == 1<<8 */
-			aic->ttime_samples += 256;
-			aic->ttime_total += 256*thinktime;
-			if (aic->ttime_samples)
-				/* fixed point factor is cancelled here */
-				aic->ttime_mean = (aic->ttime_total + 128)
-							/ aic->ttime_samples;
-			aic->ttime_samples = (aic->ttime_samples>>1)
-						+ (aic->ttime_samples>>2);
-			aic->ttime_total = (aic->ttime_total>>1)
-						+ (aic->ttime_total>>2);
+			if (test_bit(AS_TASK_IORUNNING, &aic->state)
+							&& in_flight == 0) {
+				thinktime = jiffies - aic->last_end_request;
+				thinktime = min(thinktime, MAX_THINKTIME-1);
+			} else
+				thinktime = 0;
+			as_update_thinktime(ad, aic, thinktime);
+
+			/* Calculate read -> read seek distance */
+			if (aic->last_request_pos < rq->sector)
+				seek_dist = rq->sector - aic->last_request_pos;
+			else
+				seek_dist = aic->last_request_pos - rq->sector;
+			as_update_seekdist(ad, aic, seek_dist);
 		}
-
-		/* Calculate read -> read seek distance */
-		if (!aic->seek_samples)
-			seek_dist = 0;
-		else if (aic->last_request_pos < rq->sector)
-			seek_dist = rq->sector - aic->last_request_pos;
-		else
-			seek_dist = aic->last_request_pos - rq->sector;
-
 		aic->last_request_pos = rq->sector + rq->nr_sectors;
-
-		/*
-		 * Don't allow the seek distance to get too large from the
-		 * odd fragment, pagein, etc
-		 */
-		if (aic->seek_samples < 400) /* second&third seek */
-			seek_dist = min(seek_dist, (aic->seek_mean * 4)
-							+ 2*1024*1024);
-		else
-			seek_dist = min(seek_dist, (aic->seek_mean * 4)
-							+ 2*1024*64);
-
-		aic->seek_samples += 256;
-		aic->seek_total += (u64)256*seek_dist;
-		if (aic->seek_samples) {
-			u64 total = aic->seek_total + (aic->seek_samples>>1);
-			do_div(total, aic->seek_samples);
-			aic->seek_mean = (sector_t)total;
-		}
-		aic->seek_samples = (aic->seek_samples>>1)
-					+ (aic->seek_samples>>2);
-		aic->seek_total = (aic->seek_total>>1)
-					+ (aic->seek_total>>2);
-
+		set_bit(AS_TASK_IOSTARTED, &aic->state);
 		spin_unlock(&aic->lock);
 	}
 }
@@ -875,7 +914,7 @@ static void as_update_arq(struct as_data *ad, struct as_rq *arq)
 /*
  * Gathers timings and resizes the write batch automatically
  */
-void update_write_batch(struct as_data *ad)
+static void update_write_batch(struct as_data *ad)
 {
 	unsigned long batch = ad->batch_expire[REQ_ASYNC];
 	long write_time;
@@ -906,17 +945,27 @@ void update_write_batch(struct as_data *ad)
  */
 static void as_completed_request(request_queue_t *q, struct request *rq)
 {
-	struct as_data *ad = q->elevator.elevator_data;
+	struct as_data *ad = q->elevator->elevator_data;
 	struct as_rq *arq = RQ_DATA(rq);
-	struct as_io_context *aic;
 
 	WARN_ON(!list_empty(&rq->queuelist));
 
-	if (unlikely(arq->state != AS_RQ_DISPATCHED))
-		return;
+	if (arq->state == AS_RQ_PRESCHED) {
+		WARN_ON(arq->io_context);
+		goto out;
+	}
+
+	if (arq->state == AS_RQ_MERGED)
+		goto out_ioc;
+
+	if (arq->state != AS_RQ_REMOVED) {
+		printk("arq->state %d\n", arq->state);
+		WARN_ON(1);
+		goto out;
+	}
 
 	if (!blk_fs_request(rq))
-		return;
+		goto out;
 
 	if (ad->changed_batch && ad->nr_dispatched == 1) {
 		kblockd_schedule_work(&ad->antic_work);
@@ -940,10 +989,7 @@ static void as_completed_request(request_queue_t *q, struct request *rq)
 		ad->new_batch = 0;
 	}
 
-	if (!arq->io_context)
-		return;
-
-	if (ad->io_context == arq->io_context) {
+	if (ad->io_context == arq->io_context && ad->io_context) {
 		ad->antic_start = jiffies;
 		ad->ioc_finished = 1;
 		if (ad->antic_status == ANTIC_WAIT_REQ) {
@@ -955,18 +1001,23 @@ static void as_completed_request(request_queue_t *q, struct request *rq)
 		}
 	}
 
-	aic = arq->io_context->aic;
-	if (!aic)
-		return;
+out_ioc:
+	if (!arq->io_context)
+		goto out;
 
-	spin_lock(&aic->lock);
 	if (arq->is_sync == REQ_SYNC) {
-		set_bit(AS_TASK_IORUNNING, &aic->state);
-		aic->last_end_request = jiffies;
+		struct as_io_context *aic = arq->io_context->aic;
+		if (aic) {
+			spin_lock(&aic->lock);
+			set_bit(AS_TASK_IORUNNING, &aic->state);
+			aic->last_end_request = jiffies;
+			spin_unlock(&aic->lock);
+		}
 	}
-	spin_unlock(&aic->lock);
 
 	put_io_context(arq->io_context);
+out:
+	arq->state = AS_RQ_POSTSCHED;
 }
 
 /*
@@ -979,7 +1030,7 @@ static void as_remove_queued_request(request_queue_t *q, struct request *rq)
 {
 	struct as_rq *arq = RQ_DATA(rq);
 	const int data_dir = arq->is_sync;
-	struct as_data *ad = q->elevator.elevator_data;
+	struct as_data *ad = q->elevator->elevator_data;
 
 	WARN_ON(arq->state != AS_RQ_QUEUED);
 
@@ -1035,14 +1086,14 @@ static void as_remove_request(request_queue_t *q, struct request *rq)
 	struct as_rq *arq = RQ_DATA(rq);
 
 	if (unlikely(arq->state == AS_RQ_NEW))
-		return;
-
-	if (!arq) {
-		WARN_ON(1);
-		return;
-	}
+		goto out;
 
 	if (ON_RB(&arq->rb_node)) {
+		if (arq->state != AS_RQ_QUEUED) {
+			printk("arq->state %d\n", arq->state);
+			WARN_ON(1);
+			goto out;
+		}
 		/*
 		 * We'll lose the aliased request(s) here. I don't think this
 		 * will ever happen, but if it does, hopefully someone will
@@ -1050,8 +1101,16 @@ static void as_remove_request(request_queue_t *q, struct request *rq)
 		 */
 		WARN_ON(!list_empty(&rq->queuelist));
 		as_remove_queued_request(q, rq);
-	} else
+	} else {
+		if (arq->state != AS_RQ_DISPATCHED) {
+			printk("arq->state %d\n", arq->state);
+			WARN_ON(1);
+			goto out;
+		}
 		as_remove_dispatched_request(q, rq);
+	}
+out:
+	arq->state = AS_RQ_REMOVED;
 }
 
 /*
@@ -1157,13 +1216,12 @@ static void as_move_to_dispatch(struct as_data *ad, struct as_rq *arq)
 	}
 
 	as_remove_queued_request(ad->q, rq);
+	WARN_ON(arq->state != AS_RQ_QUEUED);
+
 	list_add(&rq->queuelist, insert);
+	arq->state = AS_RQ_DISPATCHED;
 	if (arq->io_context && arq->io_context->aic)
 		atomic_inc(&arq->io_context->aic->nr_dispatched);
-
-	WARN_ON(arq->state != AS_RQ_QUEUED);
-	arq->state = AS_RQ_DISPATCHED;
-
 	ad->nr_dispatched++;
 }
 
@@ -1229,9 +1287,9 @@ static int as_dispatch_request(struct as_data *ad)
 			 */
 			goto dispatch_writes;
 
- 		if (ad->batch_data_dir == REQ_ASYNC) {
+		if (ad->batch_data_dir == REQ_ASYNC) {
 			WARN_ON(ad->new_batch);
- 			ad->changed_batch = 1;
+			ad->changed_batch = 1;
 		}
 		ad->batch_data_dir = REQ_SYNC;
 		arq = list_entry_fifo(ad->fifo_list[ad->batch_data_dir].next);
@@ -1247,8 +1305,8 @@ static int as_dispatch_request(struct as_data *ad)
 dispatch_writes:
 		BUG_ON(RB_EMPTY(&ad->sort_list[REQ_ASYNC]));
 
- 		if (ad->batch_data_dir == REQ_SYNC) {
- 			ad->changed_batch = 1;
+		if (ad->batch_data_dir == REQ_SYNC) {
+			ad->changed_batch = 1;
 
 			/*
 			 * new_batch might be 1 when the queue runs out of
@@ -1291,8 +1349,6 @@ fifo_expired:
 			ad->new_batch = 1;
 
 		ad->changed_batch = 0;
-
-		arq->request->flags |= REQ_SOFTBARRIER;
 	}
 
 	/*
@@ -1305,7 +1361,7 @@ fifo_expired:
 
 static struct request *as_next_request(request_queue_t *q)
 {
-	struct as_data *ad = q->elevator.elevator_data;
+	struct as_data *ad = q->elevator->elevator_data;
 	struct request *rq = NULL;
 
 	/*
@@ -1369,8 +1425,8 @@ static void as_add_request(struct as_data *ad, struct as_rq *arq)
 	arq->io_context = as_get_io_context();
 
 	if (arq->io_context) {
+		as_update_iohist(ad, arq->io_context->aic, arq->request);
 		atomic_inc(&arq->io_context->aic->nr_queued);
-		as_update_iohist(arq->io_context->aic, arq->request);
 	}
 
 	alias = as_add_arq_rb(ad, arq);
@@ -1391,6 +1447,7 @@ static void as_add_request(struct as_data *ad, struct as_rq *arq)
 
 	} else {
 		as_add_aliased_request(ad, arq, alias);
+
 		/*
 		 * have we been anticipating this request?
 		 * or does it come from the same process as the one we are
@@ -1412,10 +1469,15 @@ static void as_add_request(struct as_data *ad, struct as_rq *arq)
  */
 static void as_requeue_request(request_queue_t *q, struct request *rq)
 {
-	struct as_data *ad = q->elevator.elevator_data;
+	struct as_data *ad = q->elevator->elevator_data;
 	struct as_rq *arq = RQ_DATA(rq);
 
 	if (arq) {
+		if (arq->state != AS_RQ_REMOVED) {
+			printk("arq->state %d\n", arq->state);
+			WARN_ON(1);
+		}
+
 		arq->state = AS_RQ_DISPATCHED;
 		if (arq->io_context && arq->io_context->aic)
 			atomic_inc(&arq->io_context->aic->nr_dispatched);
@@ -1427,20 +1489,43 @@ static void as_requeue_request(request_queue_t *q, struct request *rq)
 
 	/* Stop anticipating - let this request get through */
 	as_antic_stop(ad);
+}
 
-	return;
+/*
+ * Account a request that is inserted directly onto the dispatch queue.
+ * arq->io_context->aic->nr_dispatched should not need to be incremented
+ * because only new requests should come through here: requeues go through
+ * our explicit requeue handler.
+ */
+static void as_account_queued_request(struct as_data *ad, struct request *rq)
+{
+	if (blk_fs_request(rq)) {
+		struct as_rq *arq = RQ_DATA(rq);
+		arq->state = AS_RQ_DISPATCHED;
+		ad->nr_dispatched++;
+	}
 }
 
 static void
 as_insert_request(request_queue_t *q, struct request *rq, int where)
 {
-	struct as_data *ad = q->elevator.elevator_data;
+	struct as_data *ad = q->elevator->elevator_data;
 	struct as_rq *arq = RQ_DATA(rq);
+
+	if (arq) {
+		if (arq->state != AS_RQ_PRESCHED) {
+			printk("arq->state: %d\n", arq->state);
+			WARN_ON(1);
+		}
+		arq->state = AS_RQ_NEW;
+	}
 
 	/* barriers must flush the reorder queue */
 	if (unlikely(rq->flags & (REQ_SOFTBARRIER | REQ_HARDBARRIER)
-			&& where == ELEVATOR_INSERT_SORT))
+			&& where == ELEVATOR_INSERT_SORT)) {
+		WARN_ON(1);
 		where = ELEVATOR_INSERT_BACK;
+	}
 
 	switch (where) {
 		case ELEVATOR_INSERT_BACK:
@@ -1451,10 +1536,12 @@ as_insert_request(request_queue_t *q, struct request *rq, int where)
 				as_move_to_dispatch(ad, ad->next_arq[REQ_ASYNC]);
 
 			list_add_tail(&rq->queuelist, ad->dispatch);
+			as_account_queued_request(ad, rq);
 			as_antic_stop(ad);
 			break;
 		case ELEVATOR_INSERT_FRONT:
 			list_add(&rq->queuelist, ad->dispatch);
+			as_account_queued_request(ad, rq);
 			as_antic_stop(ad);
 			break;
 		case ELEVATOR_INSERT_SORT:
@@ -1475,7 +1562,7 @@ as_insert_request(request_queue_t *q, struct request *rq, int where)
  */
 static int as_queue_empty(request_queue_t *q)
 {
-	struct as_data *ad = q->elevator.elevator_data;
+	struct as_data *ad = q->elevator->elevator_data;
 
 	if (!list_empty(&ad->fifo_list[REQ_ASYNC])
 		|| !list_empty(&ad->fifo_list[REQ_SYNC])
@@ -1514,7 +1601,7 @@ as_latter_request(request_queue_t *q, struct request *rq)
 static int
 as_merge(request_queue_t *q, struct request **req, struct bio *bio)
 {
-	struct as_data *ad = q->elevator.elevator_data;
+	struct as_data *ad = q->elevator->elevator_data;
 	sector_t rb_key = bio->bi_sector + bio_sectors(bio);
 	struct request *__rq;
 	int ret;
@@ -1569,7 +1656,7 @@ out_insert:
 
 static void as_merged_request(request_queue_t *q, struct request *req)
 {
-	struct as_data *ad = q->elevator.elevator_data;
+	struct as_data *ad = q->elevator->elevator_data;
 	struct as_rq *arq = RQ_DATA(req);
 
 	/*
@@ -1614,7 +1701,7 @@ static void
 as_merged_requests(request_queue_t *q, struct request *req,
 			 struct request *next)
 {
-	struct as_data *ad = q->elevator.elevator_data;
+	struct as_data *ad = q->elevator->elevator_data;
 	struct as_rq *arq = RQ_DATA(req);
 	struct as_rq *anext = RQ_DATA(next);
 
@@ -1675,7 +1762,8 @@ as_merged_requests(request_queue_t *q, struct request *req,
 	 * kill knowledge of next, this one is a goner
 	 */
 	as_remove_queued_request(q, next);
-	put_io_context(anext->io_context);
+
+	anext->state = AS_RQ_MERGED;
 }
 
 /*
@@ -1700,12 +1788,17 @@ static void as_work_handler(void *data)
 
 static void as_put_request(request_queue_t *q, struct request *rq)
 {
-	struct as_data *ad = q->elevator.elevator_data;
+	struct as_data *ad = q->elevator->elevator_data;
 	struct as_rq *arq = RQ_DATA(rq);
 
 	if (!arq) {
 		WARN_ON(1);
 		return;
+	}
+
+	if (arq->state != AS_RQ_POSTSCHED && arq->state != AS_RQ_PRESCHED) {
+		printk("arq->state %d\n", arq->state);
+		WARN_ON(1);
 	}
 
 	mempool_free(arq, ad->arq_pool);
@@ -1714,14 +1807,14 @@ static void as_put_request(request_queue_t *q, struct request *rq)
 
 static int as_set_request(request_queue_t *q, struct request *rq, int gfp_mask)
 {
-	struct as_data *ad = q->elevator.elevator_data;
+	struct as_data *ad = q->elevator->elevator_data;
 	struct as_rq *arq = mempool_alloc(ad->arq_pool, gfp_mask);
 
 	if (arq) {
 		memset(arq, 0, sizeof(*arq));
 		RB_CLEAR(&arq->rb_node);
 		arq->request = rq;
-		arq->state = AS_RQ_NEW;
+		arq->state = AS_RQ_PRESCHED;
 		arq->io_context = NULL;
 		INIT_LIST_HEAD(&arq->hash);
 		arq->on_hash = 0;
@@ -1735,21 +1828,21 @@ static int as_set_request(request_queue_t *q, struct request *rq, int gfp_mask)
 
 static int as_may_queue(request_queue_t *q, int rw)
 {
-	int ret = 0;
-	struct as_data *ad = q->elevator.elevator_data;
+	int ret = ELV_MQUEUE_MAY;
+	struct as_data *ad = q->elevator->elevator_data;
 	struct io_context *ioc;
 	if (ad->antic_status == ANTIC_WAIT_REQ ||
 			ad->antic_status == ANTIC_WAIT_NEXT) {
 		ioc = as_get_io_context();
 		if (ad->io_context == ioc)
-			ret = 1;
+			ret = ELV_MQUEUE_MUST;
 		put_io_context(ioc);
 	}
 
 	return ret;
 }
 
-static void as_exit(request_queue_t *q, elevator_t *e)
+static void as_exit_queue(elevator_t *e)
 {
 	struct as_data *ad = e->elevator_data;
 
@@ -1769,7 +1862,7 @@ static void as_exit(request_queue_t *q, elevator_t *e)
  * initialize elevator private data (as_data), and alloc a arq for
  * each request on the free lists
  */
-static int as_init(request_queue_t *q, elevator_t *e)
+static int as_init_queue(request_queue_t *q, elevator_t *e)
 {
 	struct as_data *ad;
 	int i;
@@ -1823,8 +1916,6 @@ static int as_init(request_queue_t *q, elevator_t *e)
 	if (ad->write_batch_count < 2)
 		ad->write_batch_count = 2;
 
-	ad->new_success = 512;
-
 	return 0;
 }
 
@@ -1860,10 +1951,21 @@ as_var_store(unsigned long *var, const char *page, size_t count)
 	return count;
 }
 
-#define SHOW_FUNCTION(__FUNC, __VAR)					\
+static ssize_t as_est_show(struct as_data *ad, char *page)
+{
+	int pos = 0;
+
+	pos += sprintf(page+pos, "%lu %% exit probability\n", 100*ad->exit_prob/256);
+	pos += sprintf(page+pos, "%lu ms new thinktime\n", ad->new_ttime_mean);
+	pos += sprintf(page+pos, "%llu sectors new seek distance\n", (unsigned long long)ad->new_seek_mean);
+
+	return pos;
+}
+
+#define SHOW_FUNCTION(__FUNC, __VAR)				\
 static ssize_t __FUNC(struct as_data *ad, char *page)		\
-{									\
-	return as_var_show(__VAR, (page));			\
+{								\
+	return as_var_show(jiffies_to_msecs((__VAR)), (page));	\
 }
 SHOW_FUNCTION(as_readexpire_show, ad->fifo_expire[REQ_SYNC]);
 SHOW_FUNCTION(as_writeexpire_show, ad->fifo_expire[REQ_ASYNC]);
@@ -1880,6 +1982,7 @@ static ssize_t __FUNC(struct as_data *ad, const char *page, size_t count)	\
 		*(__PTR) = (MIN);					\
 	else if (*(__PTR) > (MAX))					\
 		*(__PTR) = (MAX);					\
+	*(__PTR) = msecs_to_jiffies(*(__PTR));				\
 	return ret;							\
 }
 STORE_FUNCTION(as_readexpire_store, &ad->fifo_expire[REQ_SYNC], 0, INT_MAX);
@@ -1891,6 +1994,10 @@ STORE_FUNCTION(as_write_batchexpire_store,
 			&ad->batch_expire[REQ_ASYNC], 0, INT_MAX);
 #undef STORE_FUNCTION
 
+static struct as_fs_entry as_est_entry = {
+	.attr = {.name = "est_time", .mode = S_IRUGO },
+	.show = as_est_show,
+};
 static struct as_fs_entry as_readexpire_entry = {
 	.attr = {.name = "read_expire", .mode = S_IRUGO | S_IWUSR },
 	.show = as_readexpire_show,
@@ -1918,6 +2025,7 @@ static struct as_fs_entry as_write_batchexpire_entry = {
 };
 
 static struct attribute *default_attrs[] = {
+	&as_est_entry.attr,
 	&as_readexpire_entry.attr,
 	&as_writeexpire_entry.attr,
 	&as_anticexpire_entry.attr,
@@ -1958,44 +2066,69 @@ static struct sysfs_ops as_sysfs_ops = {
 	.store	= as_attr_store,
 };
 
-struct kobj_type as_ktype = {
+static struct kobj_type as_ktype = {
 	.sysfs_ops	= &as_sysfs_ops,
 	.default_attrs	= default_attrs,
 };
 
-static int __init as_slab_setup(void)
-{
-	arq_pool = kmem_cache_create("as_arq", sizeof(struct as_rq),
-				     0, 0, NULL, NULL);
+static struct elevator_type iosched_as = {
+	.ops = {
+		.elevator_merge_fn = 		as_merge,
+		.elevator_merged_fn =		as_merged_request,
+		.elevator_merge_req_fn =	as_merged_requests,
+		.elevator_next_req_fn =		as_next_request,
+		.elevator_add_req_fn =		as_insert_request,
+		.elevator_remove_req_fn =	as_remove_request,
+		.elevator_requeue_req_fn = 	as_requeue_request,
+		.elevator_queue_empty_fn =	as_queue_empty,
+		.elevator_completed_req_fn =	as_completed_request,
+		.elevator_former_req_fn =	as_former_request,
+		.elevator_latter_req_fn =	as_latter_request,
+		.elevator_set_req_fn =		as_set_request,
+		.elevator_put_req_fn =		as_put_request,
+		.elevator_may_queue_fn =	as_may_queue,
+		.elevator_init_fn =		as_init_queue,
+		.elevator_exit_fn =		as_exit_queue,
+	},
 
-	if (!arq_pool)
-		panic("as: can't init slab pool\n");
-
-	return 0;
-}
-
-subsys_initcall(as_slab_setup);
-
-elevator_t iosched_as = {
-	.elevator_merge_fn = 		as_merge,
-	.elevator_merged_fn =		as_merged_request,
-	.elevator_merge_req_fn =	as_merged_requests,
-	.elevator_next_req_fn =		as_next_request,
-	.elevator_add_req_fn =		as_insert_request,
-	.elevator_remove_req_fn =	as_remove_request,
-	.elevator_requeue_req_fn = 	as_requeue_request,
-	.elevator_queue_empty_fn =	as_queue_empty,
-	.elevator_completed_req_fn =	as_completed_request,
-	.elevator_former_req_fn =	as_former_request,
-	.elevator_latter_req_fn =	as_latter_request,
-	.elevator_set_req_fn =		as_set_request,
-	.elevator_put_req_fn =		as_put_request,
-	.elevator_may_queue_fn =	as_may_queue,
-	.elevator_init_fn =		as_init,
-	.elevator_exit_fn =		as_exit,
-
-	.elevator_ktype =		&as_ktype,
-	.elevator_name =		"anticipatory",
+	.elevator_ktype = &as_ktype,
+	.elevator_name = "anticipatory",
+	.elevator_owner = THIS_MODULE,
 };
 
-EXPORT_SYMBOL(iosched_as);
+static int __init as_init(void)
+{
+	int ret;
+
+	arq_pool = kmem_cache_create("as_arq", sizeof(struct as_rq),
+				     0, 0, NULL, NULL);
+	if (!arq_pool)
+		return -ENOMEM;
+
+	ret = elv_register(&iosched_as);
+	if (!ret) {
+		/*
+		 * don't allow AS to get unregistered, since we would have
+		 * to browse all tasks in the system and release their
+		 * as_io_context first
+		 */
+		__module_get(THIS_MODULE);
+		return 0;
+	}
+
+	kmem_cache_destroy(arq_pool);
+	return ret;
+}
+
+static void __exit as_exit(void)
+{
+	kmem_cache_destroy(arq_pool);
+	elv_unregister(&iosched_as);
+}
+
+module_init(as_init);
+module_exit(as_exit);
+
+MODULE_AUTHOR("Nick Piggin");
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("anticipatory IO scheduler");

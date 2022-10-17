@@ -21,13 +21,34 @@
 #define PAGE_MASK	(~(PAGE_SIZE-1))
 #define PTE_MASK	PAGE_MASK
 
+#if defined(CONFIG_HUGETLB_PAGE_SIZE_64K)
+#define HPAGE_SHIFT	16
+#elif defined(CONFIG_HUGETLB_PAGE_SIZE_1MB)
+#define HPAGE_SHIFT	20
+#endif
+
+#ifdef CONFIG_HUGETLB_PAGE
+#define HPAGE_SIZE		(1UL << HPAGE_SHIFT)
+#define HPAGE_MASK		(~(HPAGE_SIZE-1))
+#define HUGETLB_PAGE_ORDER	(HPAGE_SHIFT-PAGE_SHIFT)
+#endif
+
 #ifdef __KERNEL__
 #ifndef __ASSEMBLY__
 
-extern void clear_page(void *to);
-extern void copy_page(void *to, void *from);
+extern void (*clear_page)(void *to);
+extern void (*copy_page)(void *to, void *from);
 
-#if defined(CONFIG_CPU_SH3)
+extern void clear_page_slow(void *to);
+extern void copy_page_slow(void *to, void *from);
+
+#if defined(CONFIG_SH7705_CACHE_32KB) && defined(CONFIG_MMU)
+struct page;
+extern void clear_user_page(void *to, unsigned long address, struct page *pg);
+extern void copy_user_page(void *to, void *from, unsigned long address, struct page *pg);
+extern void __clear_user_page(void *to, void *orig_to);
+extern void __copy_user_page(void *to, void *from, void *orig_to);
+#elif defined(CONFIG_CPU_SH2) || defined(CONFIG_CPU_SH3) || !defined(CONFIG_MMU)
 #define clear_user_page(page, vaddr, pg)	clear_page(page)
 #define copy_user_page(to, from, vaddr, pg)	copy_page(to, from)
 #elif defined(CONFIG_CPU_SH4)
@@ -64,7 +85,7 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 /*
  * IF YOU CHANGE THIS, PLEASE ALSO CHANGE
  *
- *	arch/sh/vmlinux.lds.S
+ *	arch/sh/kernel/vmlinux.lds.S
  *
  * which has the same constant encoded..
  */

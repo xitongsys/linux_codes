@@ -1,12 +1,12 @@
 /*
  * Joystick device driver for the input driver suite.
  *
- * Copyright (c) 1999-2002 Vojtech Pavlik 
- * Copyright (c) 1999 Colin Van Dyke 
+ * Copyright (c) 1999-2002 Vojtech Pavlik
+ * Copyright (c) 1999 Colin Van Dyke
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or 
+ * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  */
 
@@ -34,7 +34,7 @@ MODULE_SUPPORTED_DEVICE("input/js");
 MODULE_LICENSE("GPL");
 
 #define JOYDEV_MINOR_BASE	0
-#define JOYDEV_MINORS		16	
+#define JOYDEV_MINORS		16
 #define JOYDEV_BUFFER_SIZE	64
 
 #define MSECS(t)	(1000 * ((t) / HZ) + 1000 * ((t) % HZ) / HZ)
@@ -115,7 +115,7 @@ static void joydev_event(struct input_handle *handle, unsigned int type, unsigne
 
 		default:
 			return;
-	}  
+	}
 
 	event.time = MSECS(jiffies);
 
@@ -143,7 +143,6 @@ static int joydev_fasync(int fd, struct file *file, int on)
 
 static void joydev_free(struct joydev *joydev)
 {
-	devfs_remove("js%d", joydev->minor);
 	joydev_table[joydev->minor] = NULL;
 	kfree(joydev);
 }
@@ -190,12 +189,12 @@ static int joydev_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static ssize_t joydev_write(struct file * file, const char * buffer, size_t count, loff_t *ppos)
+static ssize_t joydev_write(struct file * file, const char __user * buffer, size_t count, loff_t *ppos)
 {
 	return -EINVAL;
 }
 
-static ssize_t joydev_read(struct file *file, char *buf, size_t count, loff_t *ppos)
+static ssize_t joydev_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
 	struct joydev_list *list = file->private_data;
 	struct joydev *joydev = list->joydev;
@@ -231,8 +230,10 @@ static ssize_t joydev_read(struct file *file, char *buf, size_t count, loff_t *p
 		&& list->head == list->tail && (file->f_flags & O_NONBLOCK))
 			return -EAGAIN;
 
-	retval = wait_event_interruptible(list->joydev->wait, list->joydev->exist
-		&& (list->startup < joydev->nabs + joydev->nkey || list->head != list->tail));
+	retval = wait_event_interruptible(list->joydev->wait,
+		 			  !list->joydev->exist ||
+					  list->startup < joydev->nabs + joydev->nkey ||
+					  list->head != list->tail);
 
 	if (retval)
 		return retval;
@@ -290,47 +291,54 @@ static int joydev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 	struct joydev_list *list = file->private_data;
 	struct joydev *joydev = list->joydev;
 	struct input_dev *dev = joydev->handle.dev;
-	int i;
+	void __user *argp = (void __user *)arg;
+	int i, j;
 
 	if (!joydev->exist) return -ENODEV;
 
 	switch (cmd) {
 
 		case JS_SET_CAL:
-			return copy_from_user(&joydev->glue.JS_CORR, (struct JS_DATA_TYPE *) arg,
+			return copy_from_user(&joydev->glue.JS_CORR, argp,
 				sizeof(struct JS_DATA_TYPE)) ? -EFAULT : 0;
 		case JS_GET_CAL:
-			return copy_to_user((struct JS_DATA_TYPE *) arg, &joydev->glue.JS_CORR,
+			return copy_to_user(argp, &joydev->glue.JS_CORR,
 				sizeof(struct JS_DATA_TYPE)) ? -EFAULT : 0;
 		case JS_SET_TIMEOUT:
-			return get_user(joydev->glue.JS_TIMEOUT, (int *) arg);
+			return get_user(joydev->glue.JS_TIMEOUT, (int __user *) arg);
 		case JS_GET_TIMEOUT:
-			return put_user(joydev->glue.JS_TIMEOUT, (int *) arg);
+			return put_user(joydev->glue.JS_TIMEOUT, (int __user *) arg);
 		case JS_SET_TIMELIMIT:
-			return get_user(joydev->glue.JS_TIMELIMIT, (long *) arg);
+			return get_user(joydev->glue.JS_TIMELIMIT, (long __user *) arg);
 		case JS_GET_TIMELIMIT:
-			return put_user(joydev->glue.JS_TIMELIMIT, (long *) arg);
+			return put_user(joydev->glue.JS_TIMELIMIT, (long __user *) arg);
 		case JS_SET_ALL:
-			return copy_from_user(&joydev->glue, (struct JS_DATA_SAVE_TYPE *) arg,
+			return copy_from_user(&joydev->glue, argp,
 						sizeof(struct JS_DATA_SAVE_TYPE)) ? -EFAULT : 0;
 		case JS_GET_ALL:
-			return copy_to_user((struct JS_DATA_SAVE_TYPE *) arg, &joydev->glue,
+			return copy_to_user(argp, &joydev->glue,
 						sizeof(struct JS_DATA_SAVE_TYPE)) ? -EFAULT : 0;
 
 		case JSIOCGVERSION:
-			return put_user(JS_VERSION, (__u32 *) arg);
+			return put_user(JS_VERSION, (__u32 __user *) arg);
 		case JSIOCGAXES:
-			return put_user(joydev->nabs, (__u8 *) arg);
+			return put_user(joydev->nabs, (__u8 __user *) arg);
 		case JSIOCGBUTTONS:
-			return put_user(joydev->nkey, (__u8 *) arg);
+			return put_user(joydev->nkey, (__u8 __user *) arg);
 		case JSIOCSCORR:
-			return copy_from_user(joydev->corr, (struct js_corr *) arg,
-						sizeof(struct js_corr) * joydev->nabs) ? -EFAULT : 0;
+			if (copy_from_user(joydev->corr, argp,
+				      sizeof(struct js_corr) * joydev->nabs))
+			    return -EFAULT;
+			for (i = 0; i < joydev->nabs; i++) {
+				j = joydev->abspam[i];
+			        joydev->abs[i] = joydev_correct(dev->abs[j], joydev->corr + i);
+			}
+			return 0;
 		case JSIOCGCORR:
-			return copy_to_user((struct js_corr *) arg, joydev->corr,
+			return copy_to_user(argp, joydev->corr,
 						sizeof(struct js_corr) * joydev->nabs) ? -EFAULT : 0;
 		case JSIOCSAXMAP:
-			if (copy_from_user(joydev->abspam, (__u8 *) arg, sizeof(__u8) * ABS_MAX))
+			if (copy_from_user(joydev->abspam, argp, sizeof(__u8) * ABS_MAX))
 				return -EFAULT;
 			for (i = 0; i < joydev->nabs; i++) {
 				if (joydev->abspam[i] > ABS_MAX) return -EINVAL;
@@ -338,10 +346,10 @@ static int joydev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 			}
 			return 0;
 		case JSIOCGAXMAP:
-			return copy_to_user((__u8 *) arg, joydev->abspam,
+			return copy_to_user(argp, joydev->abspam,
 						sizeof(__u8) * ABS_MAX) ? -EFAULT : 0;
 		case JSIOCSBTNMAP:
-			if (copy_from_user(joydev->keypam, (__u16 *) arg, sizeof(__u16) * (KEY_MAX - BTN_MISC)))
+			if (copy_from_user(joydev->keypam, argp, sizeof(__u16) * (KEY_MAX - BTN_MISC)))
 				return -EFAULT;
 			for (i = 0; i < joydev->nkey; i++) {
 				if (joydev->keypam[i] > KEY_MAX || joydev->keypam[i] < BTN_MISC) return -EINVAL;
@@ -349,7 +357,7 @@ static int joydev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 			}
 			return 0;
 		case JSIOCGBTNMAP:
-			return copy_to_user((__u16 *) arg, joydev->keypam,
+			return copy_to_user(argp, joydev->keypam,
 						sizeof(__u16) * (KEY_MAX - BTN_MISC)) ? -EFAULT : 0;
 		default:
 			if ((cmd & ~(_IOC_SIZEMASK << _IOC_SIZESHIFT)) == JSIOCGNAME(0)) {
@@ -357,7 +365,7 @@ static int joydev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 				if (!dev->name) return 0;
 				len = strlen(dev->name) + 1;
 				if (len > _IOC_SIZE(cmd)) len = _IOC_SIZE(cmd);
-				if (copy_to_user((char *) arg, dev->name, len)) return -EFAULT;
+				if (copy_to_user(argp, dev->name, len)) return -EFAULT;
 				return len;
 			}
 	}
@@ -379,10 +387,6 @@ static struct input_handle *joydev_connect(struct input_handler *handler, struct
 {
 	struct joydev *joydev;
 	int i, j, t, minor;
-
-	/* Avoid tablets */
-        if (test_bit(EV_KEY, dev->evbit) && test_bit(BTN_TOUCH, dev->keybit))
-		return NULL;
 
 	for (minor = 0; minor < JOYDEV_MINORS && joydev_table[minor]; minor++);
 	if (minor == JOYDEV_MINORS) {
@@ -430,6 +434,7 @@ static struct input_handle *joydev_connect(struct input_handler *handler, struct
 		j = joydev->abspam[i];
 		if (dev->absmax[j] == dev->absmin[j]) {
 			joydev->corr[i].type = JS_CORR_NONE;
+			joydev->abs[i] = dev->abs[j];
 			continue;
 		}
 		joydev->corr[i].type = JS_CORR_BROKEN;
@@ -445,9 +450,12 @@ static struct input_handle *joydev_connect(struct input_handler *handler, struct
 	}
 
 	joydev_table[minor] = joydev;
-	
+
 	devfs_mk_cdev(MKDEV(INPUT_MAJOR, JOYDEV_MINOR_BASE + minor),
-			S_IFCHR|S_IRUGO|S_IWUSR, "js%d", minor);
+			S_IFCHR|S_IRUGO|S_IWUSR, "input/js%d", minor);
+	class_simple_device_add(input_class,
+				MKDEV(INPUT_MAJOR, JOYDEV_MINOR_BASE + minor),
+				dev->dev, "js%d", minor);
 
 	return &joydev->handle;
 }
@@ -456,13 +464,24 @@ static void joydev_disconnect(struct input_handle *handle)
 {
 	struct joydev *joydev = handle->private;
 
+	class_simple_device_remove(MKDEV(INPUT_MAJOR, JOYDEV_MINOR_BASE + joydev->minor));
+	devfs_remove("input/js%d", joydev->minor);
 	joydev->exist = 0;
 
 	if (joydev->open)
-		input_close_device(handle);	
+		input_close_device(handle);
 	else
 		joydev_free(joydev);
 }
+
+static struct input_device_id joydev_blacklist[] = {
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT | INPUT_DEVICE_ID_MATCH_KEYBIT,
+		.evbit = { BIT(EV_KEY) },
+		.keybit = { [LONG(BTN_TOUCH)] = BIT(BTN_TOUCH) },
+	}, 	/* Avoid itouchpads, touchscreens and tablets */
+	{ }, 	/* Terminating entry */
+};
 
 static struct input_device_id joydev_ids[] = {
 	{
@@ -493,6 +512,7 @@ static struct input_handler joydev_handler = {
 	.minor =	JOYDEV_MINOR_BASE,
 	.name =		"joydev",
 	.id_table =	joydev_ids,
+	.blacklist = 	joydev_blacklist,
 };
 
 static int __init joydev_init(void)

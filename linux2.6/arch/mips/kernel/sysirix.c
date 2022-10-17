@@ -29,10 +29,10 @@
 #include <linux/namei.h>
 #include <linux/socket.h>
 #include <linux/security.h>
+#include <linux/syscalls.h>
 
 #include <asm/ptrace.h>
 #include <asm/page.h>
-#include <asm/pgalloc.h>
 #include <asm/uaccess.h>
 #include <asm/inventory.h>
 
@@ -128,16 +128,21 @@ asmlinkage int irix_prctl(struct pt_regs *regs)
 		if (value > RLIM_INFINITY)
 			value = RLIM_INFINITY;
 		if (capable(CAP_SYS_ADMIN)) {
-			current->rlim[RLIMIT_STACK].rlim_max =
-				current->rlim[RLIMIT_STACK].rlim_cur = value;
+			task_lock(current->group_leader);
+			current->signal->rlim[RLIMIT_STACK].rlim_max =
+				current->signal->rlim[RLIMIT_STACK].rlim_cur = value;
+			task_unlock(current->group_leader);
 			error = value;
 			break;
 		}
-		if (value > current->rlim[RLIMIT_STACK].rlim_max) {
+		task_lock(current->group_leader);
+		if (value > current->signal->rlim[RLIMIT_STACK].rlim_max) {
 			error = -EINVAL;
+			task_unlock(current->group_leader);
 			break;
 		}
-		current->rlim[RLIMIT_STACK].rlim_cur = value;
+		current->signal->rlim[RLIMIT_STACK].rlim_cur = value;
+		task_unlock(current->group_leader);
 		error = value;
 		break;
 	}
@@ -145,7 +150,7 @@ asmlinkage int irix_prctl(struct pt_regs *regs)
 	case PR_GETSTACKSIZE:
 		printk("irix_prctl[%s:%d]: Wants PR_GETSTACKSIZE\n",
 		       current->comm, current->pid);
-		error = current->rlim[RLIMIT_STACK].rlim_cur;
+		error = current->signal->rlim[RLIMIT_STACK].rlim_cur;
 		break;
 
 	case PR_MAXPPROCS:
@@ -235,14 +240,7 @@ asmlinkage int irix_prctl(struct pt_regs *regs)
 #undef DEBUG_PROCGRPS
 
 extern unsigned long irix_mapelf(int fd, struct elf_phdr *user_phdrp, int cnt);
-extern asmlinkage int sys_setpgid(pid_t pid, pid_t pgid);
-extern void sys_sync(void);
-extern asmlinkage int sys_getsid(pid_t pid);
-extern asmlinkage long sys_write (unsigned int fd, const char *buf, unsigned long count);
-extern asmlinkage long sys_lseek (unsigned int fd, off_t offset, unsigned int origin);
-extern asmlinkage int sys_getgroups(int gidsetsize, gid_t *grouplist);
-extern asmlinkage int sys_setgroups(int gidsetsize, gid_t *grouplist);
-extern int getrusage(struct task_struct *p, int who, struct rusage *ru);
+extern int getrusage(struct task_struct *p, int who, struct rusage __user *ru);
 extern char *prom_getenv(char *name);
 extern long prom_setenv(char *name, char *value);
 
@@ -289,9 +287,9 @@ asmlinkage int irix_syssgi(struct pt_regs *regs)
 		int pid = (int) regs->regs[base + 5];
 		char *buf = (char *) regs->regs[base + 6];
 		struct task_struct *p;
-		char comm[16];
+		char tcomm[sizeof(current->comm)];
 
-		retval = verify_area(VERIFY_WRITE, buf, 16);
+		retval = verify_area(VERIFY_WRITE, buf, sizeof(tcomm));
 		if (retval)
 			break;
 		read_lock(&tasklist_lock);
@@ -301,11 +299,11 @@ asmlinkage int irix_syssgi(struct pt_regs *regs)
 			retval = -ESRCH;
 			break;
 		}
-		memcpy(comm, p->comm, 16);
+		get_task_comm(tcomm, p);
 		read_unlock(&tasklist_lock);
 
 		/* XXX Need to check sizes. */
-		copy_to_user(buf, p->comm, 16);
+		copy_to_user(buf, tcomm, sizeof(tcomm));
 		retval = 0;
 		break;
 	}
@@ -368,7 +366,7 @@ asmlinkage int irix_syssgi(struct pt_regs *regs)
 			retval = HZ;
 			goto out;
 		case 4:
-			retval = NGROUPS;
+			retval = NGROUPS_MAX;
 			goto out;
 		case 5:
 			retval = NR_OPEN;
@@ -565,7 +563,7 @@ asmlinkage int irix_brk(unsigned long brk)
 	/*
 	 * Check against rlimit and stack..
 	 */
-	rlim = current->rlim[RLIMIT_DATA].rlim_cur;
+	rlim = current->signal->rlim[RLIMIT_DATA].rlim_cur;
 	if (rlim >= RLIM_INFINITY)
 		rlim = ~0;
 	if (brk - mm->end_code > rlim) {
@@ -621,8 +619,14 @@ asmlinkage int irix_getgid(struct pt_regs *regs)
 
 asmlinkage int irix_stime(int value)
 {
-	if (!capable(CAP_SYS_TIME))
-		return -EPERM;
+	int err;
+	struct timespec tv;
+
+	tv.tv_sec = value;
+	tv.tv_nsec = 0;
+	err = security_settime(&tv, NULL);
+	if (err)
+		return err;
 
 	write_seqlock_irq(&xtime_lock);
 	xtime.tv_sec = value;
@@ -693,9 +697,6 @@ asmlinkage int irix_pause(void)
 
 	return -EINTR;
 }
-
-extern asmlinkage long sys_mount(char * dev_name, char * dir_name, char * type,
-				unsigned long new_flags, void * data);
 
 /* XXX need more than this... */
 asmlinkage int irix_mount(char *dev_name, char *dir_name, unsigned long flags,
@@ -792,9 +793,6 @@ out:
 	return error;
 }
 
-extern asmlinkage int sys_setpgid(pid_t pid, pid_t pgid);
-extern asmlinkage int sys_setsid(void);
-
 asmlinkage int irix_setpgrp(int flags)
 {
 	int error;
@@ -823,8 +821,8 @@ asmlinkage int irix_times(struct tms * tbuf)
 			return err;
 		err |= __put_user(current->utime, &tbuf->tms_utime);
 		err |= __put_user(current->stime, &tbuf->tms_stime);
-		err |= __put_user(current->cutime, &tbuf->tms_cutime);
-		err |= __put_user(current->cstime, &tbuf->tms_cstime);
+		err |= __put_user(current->signal->cutime, &tbuf->tms_cutime);
+		err |= __put_user(current->signal->cstime, &tbuf->tms_cstime);
 	}
 
 	return err;
@@ -883,8 +881,6 @@ asmlinkage unsigned long irix_sethostid(unsigned long val)
 	return -EINVAL;
 }
 
-extern asmlinkage int sys_socket(int family, int type, int protocol);
-
 asmlinkage int irix_socket(int family, int type, int protocol)
 {
 	switch(type) {
@@ -928,8 +924,8 @@ asmlinkage int irix_getdomainname(char *name, int len)
 		return error;
 
 	down_read(&uts_sem);
-	if(len > (__NEW_UTS_LEN - 1))
-		len = __NEW_UTS_LEN - 1;
+	if (len > __NEW_UTS_LEN)
+		len = __NEW_UTS_LEN;
 	error = 0;
 	if (copy_to_user(name, system_utsname.domainname, len))
 		error = -EFAULT;
@@ -968,7 +964,7 @@ asmlinkage int irix_shmsys(int opcode, unsigned long arg0, unsigned long arg1,
 {
 	switch (opcode) {
 	case 0:
-		return sys_shmat((int) arg0, (char *)arg1, (int) arg2,
+		return do_shmat((int) arg0, (char *)arg1, (int) arg2,
 				 (unsigned long *) arg3);
 	case 1:
 		return sys_shmctl((int)arg0, (int)arg1, (struct shmid_ds *)arg2);
@@ -1206,8 +1202,8 @@ static int irix_xstat32_xlate(struct kstat *stat, void *ubuf)
 	ub.st_ino     = stat->ino;
 	ub.st_mode    = stat->mode;
 	ub.st_nlink   = stat->nlink;
-	SET_STAT_UID(ub, stat->uid);
-	SET_STAT_GID(ub, stat->gid);
+	SET_UID(ub.st_uid, stat->uid);
+	SET_GID(ub.st_gid, stat->gid);
 	ub.st_rdev    = sysv_encode_dev(stat->rdev);
 #if BITS_PER_LONG == 32
 	if (stat->size > MAX_NON_LFS)
@@ -1263,9 +1259,9 @@ static int irix_xstat64_xlate(struct kstat *stat, void *ubuf)
 	ks.st_atime.tv_sec = (s32) stat->atime.tv_sec;
 	ks.st_atime.tv_nsec = stat->atime.tv_nsec;
 	ks.st_mtime.tv_sec = (s32) stat->mtime.tv_sec;
-	ks.st_mtime.tv_nsec = stat->mtime.tv_nsec;;
+	ks.st_mtime.tv_nsec = stat->mtime.tv_nsec;
 	ks.st_ctime.tv_sec = (s32) stat->ctime.tv_sec;
-	ks.st_ctime.tv_nsec = stat->ctime.tv_nsec;;
+	ks.st_ctime.tv_nsec = stat->ctime.tv_nsec;
 
 	ks.st_blksize = (s32) stat->blksize;
 	ks.st_blocks = (long long) stat->blocks;
@@ -1355,8 +1351,6 @@ asmlinkage int irix_fxstat(int version, int fd, struct stat *statbuf)
 	}
 	return error;
 }
-
-extern asmlinkage int sys_mknod(const char * filename, int mode, unsigned dev);
 
 asmlinkage int irix_xmknod(int ver, char *filename, int mode, unsigned dev)
 {
@@ -1501,9 +1495,6 @@ asmlinkage int irix_sigqueue(int pid, int sig, int code, int val)
 	return -EINVAL;
 }
 
-extern asmlinkage int sys_truncate(const char * path, unsigned long length);
-extern asmlinkage int sys_ftruncate(unsigned int fd, unsigned long length);
-
 asmlinkage int irix_truncate64(char *name, int pad, int size1, int size2)
 {
 	int retval;
@@ -1531,10 +1522,6 @@ asmlinkage int irix_ftruncate64(int fd, int pad, int size1, int size2)
 out:
 	return retval;
 }
-
-extern asmlinkage unsigned long
-sys_mmap(unsigned long addr, size_t len, int prot, int flags, int fd,
-         off_t offset);
 
 asmlinkage int irix_mmap64(struct pt_regs *regs)
 {
@@ -1661,9 +1648,9 @@ asmlinkage int irix_statvfs64(char *fname, struct irix_statvfs64 *buf)
 	struct kstatfs kbuf;
 	int error, i;
 
-	printk("[%s:%d] Wheee.. irix_statvfs(%s,%p)\n",
+	printk("[%s:%d] Wheee.. irix_statvfs64(%s,%p)\n",
 	       current->comm, current->pid, fname, buf);
-	error = verify_area(VERIFY_WRITE, buf, sizeof(struct irix_statvfs));
+	error = verify_area(VERIFY_WRITE, buf, sizeof(struct irix_statvfs64));
 	if(error)
 		goto out;
 	error = user_path_walk(fname, &nd);
@@ -1707,7 +1694,7 @@ asmlinkage int irix_fstatvfs64(int fd, struct irix_statvfs *buf)
 	struct file *file;
 	int error, i;
 
-	printk("[%s:%d] Wheee.. irix_fstatvfs(%d,%p)\n",
+	printk("[%s:%d] Wheee.. irix_fstatvfs64(%d,%p)\n",
 	       current->comm, current->pid, fd, buf);
 
 	error = verify_area(VERIFY_WRITE, buf, sizeof(struct irix_statvfs));
@@ -2106,9 +2093,6 @@ out:
 
 #undef DEBUG_FCNTL
 
-extern asmlinkage long sys_fcntl(unsigned int fd, unsigned int cmd,
-				 unsigned long arg);
-
 #define IRIX_F_ALLOCSP 10
 
 asmlinkage int irix_fcntl(int fd, int cmd, int arg)
@@ -2159,7 +2143,7 @@ asmlinkage int irix_ulimit(int cmd, int arg)
 		retval = -EINVAL;
 		goto out;
 #endif
-		retval = current->rlim[RLIMIT_NOFILE].rlim_cur;
+		retval = current->signal->rlim[RLIMIT_NOFILE].rlim_cur;
 		goto out;
 
 	case 5:

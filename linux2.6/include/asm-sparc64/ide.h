@@ -13,7 +13,6 @@
 #include <linux/config.h>
 #include <asm/pgalloc.h>
 #include <asm/io.h>
-#include <asm/hdreg.h>
 #include <asm/page.h>
 #include <asm/spitfire.h>
 
@@ -25,53 +24,8 @@
 # endif
 #endif
 
-static __inline__ int ide_default_irq(unsigned long base)
-{
-	return 0;
-}
-
-static __inline__ unsigned long ide_default_io_base(int index)
-{
-	return 0;
-}
-
-static __inline__ void ide_init_hwif_ports(hw_regs_t *hw, unsigned long data_port, unsigned long ctrl_port, int *irq)
-{
-	unsigned long reg = data_port;
-	int i;
-
-	for (i = IDE_DATA_OFFSET; i <= IDE_STATUS_OFFSET; i++) {
-		hw->io_ports[i] = reg;
-		reg += 1;
-	}
-	if (ctrl_port) {
-		hw->io_ports[IDE_CONTROL_OFFSET] = ctrl_port;
-	} else {
-		hw->io_ports[IDE_CONTROL_OFFSET] = hw->io_ports[IDE_DATA_OFFSET] + 0x206;
-	}
-	if (irq != NULL)
-		*irq = 0;
-	hw->io_ports[IDE_IRQ_OFFSET] = 0;
-}
-
-/*
- * This registers the standard ports for this architecture with the IDE
- * driver.
- */
-static __inline__ void ide_init_default_hwifs(void)
-{
-#ifndef CONFIG_BLK_DEV_IDEPCI
-	hw_regs_t hw;
-	int index;
-
-	for (index = 0; index < MAX_HWIFS; index++) {
-		memset(&hw, 0, sizeof hw);
-		ide_init_hwif_ports(&hw, ide_default_io_base(index), 0, NULL);
-		hw.irq = ide_default_irq(ide_default_io_base(index));
-		ide_register_hw(&hw, NULL);
-	}
-#endif /* CONFIG_BLK_DEV_IDEPCI */
-}
+#define IDE_ARCH_OBSOLETE_INIT
+#define ide_default_io_ctl(base)	((base) + 0x206) /* obsolete */
 
 #define __ide_insl(data_reg, buffer, wcount) \
 	__ide_insw(data_reg, buffer, (wcount)<<1)
@@ -84,7 +38,7 @@ static __inline__ void ide_init_default_hwifs(void)
 #define __ide_mm_outsw	__ide_outsw
 #define __ide_mm_outsl	__ide_outsl
 
-static __inline__ unsigned int inw_be(unsigned long addr)
+static inline unsigned int inw_be(void __iomem *addr)
 {
 	unsigned int ret;
 
@@ -95,9 +49,7 @@ static __inline__ unsigned int inw_be(unsigned long addr)
 	return ret;
 }
 
-static __inline__ void __ide_insw(unsigned long port,
-				  void *dst,
-				  u32 count)
+static inline void __ide_insw(void __iomem *port, void *dst, u32 count)
 {
 #if (L1DCACHE_SIZE > PAGE_SIZE)		/* is there D$ aliasing problem */
 	unsigned long end = (unsigned long)dst + (count << 1);
@@ -127,16 +79,14 @@ static __inline__ void __ide_insw(unsigned long port,
 #endif
 }
 
-static __inline__ void outw_be(unsigned short w, unsigned long addr)
+static inline void outw_be(unsigned short w, void __iomem *addr)
 {
 	__asm__ __volatile__("stha %0, [%1] %2"
 			     : /* no outputs */
 			     : "r" (w), "r" (addr), "i" (ASI_PHYS_BYPASS_EC_E));
 }
 
-static __inline__ void __ide_outsw(unsigned long port,
-				   void *src,
-				   u32 count)
+static inline void __ide_outsw(void __iomem *port, void *src, u32 count)
 {
 #if (L1DCACHE_SIZE > PAGE_SIZE)		/* is there D$ aliasing problem */
 	unsigned long end = (unsigned long)src + (count << 1);

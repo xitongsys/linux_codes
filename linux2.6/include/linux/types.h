@@ -8,8 +8,6 @@
 	(((bits)+BITS_PER_LONG-1)/BITS_PER_LONG)
 #define DECLARE_BITMAP(name,bits) \
 	unsigned long name[BITS_TO_LONGS(bits)]
-#define CLEAR_BITMAP(name,bits) \
-	memset(name, 0, BITS_TO_LONGS(bits)*sizeof(unsigned long))
 #endif
 
 #include <linux/posix_types.h>
@@ -31,6 +29,7 @@ typedef __kernel_key_t		key_t;
 typedef __kernel_suseconds_t	suseconds_t;
 typedef __kernel_timer_t	timer_t;
 typedef __kernel_clockid_t	clockid_t;
+typedef __kernel_mqd_t		mqd_t;
 
 #ifdef __KERNEL__
 typedef __kernel_uid32_t	uid_t;
@@ -147,6 +146,21 @@ typedef unsigned long sector_t;
  * Below are truly Linux-specific types that should never collide with
  * any application/library that wants linux/types.h.
  */
+
+#ifdef __CHECKER__
+#define __bitwise __attribute__((bitwise))
+#else
+#define __bitwise
+#endif
+
+typedef __u16 __bitwise __le16;
+typedef __u16 __bitwise __be16;
+typedef __u32 __bitwise __le32;
+typedef __u32 __bitwise __be32;
+#if defined(__GNUC__) && !defined(__STRICT_ANSI__)
+typedef __u64 __bitwise __le64;
+typedef __u64 __bitwise __be64;
+#endif
 
 struct ustat {
 	__kernel_daddr_t	f_tfree;

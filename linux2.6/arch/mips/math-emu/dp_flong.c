@@ -3,7 +3,7 @@
  */
 /*
  * MIPS floating point support
- * Copyright (C) 1994-2000 Algorithmics Ltd.  All rights reserved.
+ * Copyright (C) 1994-2000 Algorithmics Ltd.
  * http://www.algor.co.uk
  *
  * ########################################################################
@@ -32,6 +32,8 @@ ieee754dp ieee754dp_flong(s64 x)
 	COMPXDP;
 
 	CLEARCX;
+
+	xc = ( 0 ? xc : xc );
 
 	if (x == 0)
 		return ieee754dp_zero(0);

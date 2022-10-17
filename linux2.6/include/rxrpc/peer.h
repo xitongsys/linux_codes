@@ -67,13 +67,12 @@ struct rxrpc_peer
 
 
 extern int rxrpc_peer_lookup(struct rxrpc_transport *trans,
-			     u32 addr,
+			     __be32 addr,
 			     struct rxrpc_peer **_peer);
 
 static inline void rxrpc_get_peer(struct rxrpc_peer *peer)
 {
-	if (atomic_read(&peer->usage)<0)
-		BUG();
+	BUG_ON(atomic_read(&peer->usage)<0);
 	atomic_inc(&peer->usage);
 	//printk("rxrpc_get_peer(%p{u=%d})\n",peer,atomic_read(&peer->usage));
 }

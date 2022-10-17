@@ -11,7 +11,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -19,25 +18,25 @@
 #include <linux/sched.h>
 #include <linux/seq_file.h>
 #include <linux/interrupt.h>
+#include <linux/hardirq.h>
 
 #include <asm/rtc.h>
 #include <asm/ptrace.h>
 #include <asm/system.h>
 #include <asm/irq.h>
-#include <asm/hardirq.h>
 #include <asm/traps.h>
 
 #include <asm/q40_master.h>
 #include <asm/q40ints.h>
 
-/* 
- * Q40 IRQs are defined as follows: 
+/*
+ * Q40 IRQs are defined as follows:
  *            3,4,5,6,7,10,11,14,15 : ISA dev IRQs
  *            16-31: reserved
  *            32   : keyboard int
  *            33   : frame int (50/200 Hz periodic timer)
  *            34   : sample int (10/20 KHz periodic timer)
- *          
+ *
 */
 
 extern int ints_inited;
@@ -46,10 +45,8 @@ extern int ints_inited;
 irqreturn_t q40_irq2_handler (int, void *, struct pt_regs *fp);
 
 
-extern irqreturn_t (*q40_sys_default_handler[]) (int, void *, struct pt_regs *);
-
 static irqreturn_t q40_defhand (int irq, void *dev_id, struct pt_regs *fp);
-static irqreturn_t sys_default_handler(int lev, void *dev_id, struct pt_regs *regs);
+static irqreturn_t default_handler(int lev, void *dev_id, struct pt_regs *regs);
 
 
 #define DEVNAME_SIZE 24
@@ -96,7 +93,8 @@ void q40_init_IRQ (void)
 	}
 
 	/* setup handler for ISA ints */
-	sys_request_irq(IRQ2,q40_irq2_handler, 0, "q40 ISA and master chip", NULL);
+	cpu_request_irq(IRQ2, q40_irq2_handler, 0, "q40 ISA and master chip",
+			NULL);
 
 	/* now enable some ints.. */
 	master_outb(1,EXT_ENABLE_REG);  /* ISA IRQ 5-15 */
@@ -123,7 +121,7 @@ int q40_request_irq(unsigned int irq,
 	  case 12: case 13:
 	    printk("%s: ISA IRQ %d from %s not implemented by HW\n", __FUNCTION__, irq, devname);
 	    return -ENXIO;
-	  case 11: 	      
+	  case 11:
 	    printk("warning IRQ 10 and 11 not distinguishable\n");
 	    irq=10;
 	  default:
@@ -132,7 +130,7 @@ int q40_request_irq(unsigned int irq,
 
 	if (irq<Q40_IRQ_SAMPLE)
 	  {
-	    if (irq_tab[irq].dev_id != NULL) 
+	    if (irq_tab[irq].dev_id != NULL)
 		  {
 		    printk("%s: IRQ %d from %s is not replaceable\n",
 			   __FUNCTION__, irq, irq_tab[irq].devname);
@@ -153,8 +151,8 @@ int q40_request_irq(unsigned int irq,
 	  }
 	else {
 	  /* Q40_IRQ_SAMPLE :somewhat special actions required here ..*/
-	  sys_request_irq(4,handler,flags,devname,dev_id);
-	  sys_request_irq(6,handler,flags,devname,dev_id);
+	  cpu_request_irq(4, handler, flags, devname, dev_id);
+	  cpu_request_irq(6, handler, flags, devname, dev_id);
 	  return 0;
 	}
 }
@@ -177,13 +175,13 @@ void q40_free_irq(unsigned int irq, void *dev_id)
 	  default:
 	    ;
 	  }
-	
+
 	if (irq<Q40_IRQ_SAMPLE)
 	  {
 	    if (irq_tab[irq].dev_id != dev_id)
 	      printk("%s: Removing probably wrong IRQ %d from %s\n",
 		     __FUNCTION__, irq, irq_tab[irq].devname);
-	    
+
 	    irq_tab[irq].handler = q40_defhand;
 	    irq_tab[irq].flags   = 0;
 	    irq_tab[irq].dev_id  = NULL;
@@ -192,8 +190,8 @@ void q40_free_irq(unsigned int irq, void *dev_id)
 	  }
 	else
 	  { /* == Q40_IRQ_SAMPLE */
-	    sys_free_irq(4,dev_id);
-	    sys_free_irq(6,dev_id);
+	    cpu_free_irq(4, dev_id);
+	    cpu_free_irq(6, dev_id);
 	  }
 }
 
@@ -206,7 +204,7 @@ irqreturn_t q40_process_int (int level, struct pt_regs *fp)
   return IRQ_HANDLED;
 }
 
-/* 
+/*
  * this stuff doesn't really belong here..
 */
 
@@ -268,10 +266,10 @@ void q40_sched_init (irqreturn_t (*timer_routine)(int, void *, struct pt_regs *)
 }
 
 
-/* 
- * tables to translate bits into IRQ numbers 
+/*
+ * tables to translate bits into IRQ numbers
  * it is a good idea to order the entries by priority
- * 
+ *
 */
 
 struct IRQ_TABLE{ unsigned mask; int irq ;};
@@ -281,21 +279,17 @@ static struct IRQ_TABLE iirqs[]={
   {Q40_IRQ_KEYB_MASK,Q40_IRQ_KEYBOARD},
   {0,0}};
 #endif
-static struct IRQ_TABLE eirqs[]={
-  {Q40_IRQ3_MASK,3},                   /* ser 1 */
-  {Q40_IRQ4_MASK,4},                   /* ser 2 */
-  {Q40_IRQ14_MASK,14},                 /* IDE 1 */
-  {Q40_IRQ15_MASK,15},                 /* IDE 2 */
-  {Q40_IRQ6_MASK,6},                   /* floppy, handled elsewhere */
-  {Q40_IRQ7_MASK,7},                   /* par */
-
-  {Q40_IRQ5_MASK,5},
-  {Q40_IRQ10_MASK,10},
-
-
-
-
-  {0,0}};
+static struct IRQ_TABLE eirqs[] = {
+  { .mask = Q40_IRQ3_MASK,	.irq = 3 },	/* ser 1 */
+  { .mask = Q40_IRQ4_MASK,	.irq = 4 },	/* ser 2 */
+  { .mask = Q40_IRQ14_MASK,	.irq = 14 },	/* IDE 1 */
+  { .mask = Q40_IRQ15_MASK,	.irq = 15 },	/* IDE 2 */
+  { .mask = Q40_IRQ6_MASK,	.irq = 6 },	/* floppy, handled elsewhere */
+  { .mask = Q40_IRQ7_MASK,	.irq = 7 },	/* par */
+  { .mask = Q40_IRQ5_MASK,	.irq = 5 },
+  { .mask = Q40_IRQ10_MASK,	.irq = 10 },
+  {0,0}
+};
 
 /* complain only this many times about spurious ints : */
 static int ccleirq=60;    /* ISA dev IRQ's*/
@@ -324,7 +318,7 @@ irqreturn_t q40_irq2_handler (int vec, void *devname, struct pt_regs *fp)
   mir=master_inb(IIRQ_REG);
   if (mir&Q40_IRQ_FRAME_MASK) {
 	  irq_tab[Q40_IRQ_FRAME].count++;
-	  irq_tab[Q40_IRQ_FRAME].handler(Q40_IRQ_FRAME,irq_tab[Q40_IRQ_FRAME].dev_id,fp);   
+	  irq_tab[Q40_IRQ_FRAME].handler(Q40_IRQ_FRAME,irq_tab[Q40_IRQ_FRAME].dev_id,fp);
 	  master_outb(-1,FRAME_CLEAR_REG);
   }
   if ((mir&Q40_IRQ_SER_MASK) || (mir&Q40_IRQ_EXT_MASK)) {
@@ -361,15 +355,15 @@ irqreturn_t q40_irq2_handler (int vec, void *devname, struct pt_regs *fp)
 #endif
 				  goto iirq;
 			  }
-			  irq_tab[irq].count++; 
+			  irq_tab[irq].count++;
 			  irq_tab[irq].state |= IRQ_INPROGRESS;
 			  irq_tab[irq].handler(irq,irq_tab[irq].dev_id,fp);
 			  irq_tab[irq].state &= ~IRQ_INPROGRESS;
-			  
+
 			  /* naively enable everything, if that fails than    */
 			  /* this function will be reentered immediately thus */
 			  /* getting another chance to disable the IRQ        */
-			  
+
 			  if ( disabled ) {
 #ifdef IP_USE_DISABLE
 				  if (irq>4){
@@ -384,9 +378,9 @@ irqreturn_t q40_irq2_handler (int vec, void *devname, struct pt_regs *fp)
 			  return IRQ_HANDLED;
 		  }
 	  }
-	  if (mer && ccleirq>0 && !aliased_irq) 
+	  if (mer && ccleirq>0 && !aliased_irq)
 		  printk("ISA interrupt from unknown source? EIRQ_REG = %x\n",mer),ccleirq--;
-  } 
+  }
  iirq:
   mir=master_inb(IIRQ_REG);
   /* should test whether keyboard irq is really enabled, doing it in defhand */
@@ -404,10 +398,10 @@ int show_q40_interrupts (struct seq_file *p, void *v)
 	for (i = 0; i <= Q40_IRQ_MAX; i++) {
 		if (irq_tab[i].count)
 		      seq_printf(p, "%sIRQ %02d: %8d  %s%s\n",
-			      (i<=15) ? "ISA-" : "    " ,		
+			      (i<=15) ? "ISA-" : "    " ,
 			    i, irq_tab[i].count,
 			    irq_tab[i].devname[0] ? irq_tab[i].devname : "?",
-			    irq_tab[i].handler == q40_defhand ? 
+			    irq_tab[i].handler == q40_defhand ?
 					" (now unassigned)" : "");
 	}
 	return 0;
@@ -421,16 +415,22 @@ static irqreturn_t q40_defhand (int irq, void *dev_id, struct pt_regs *fp)
 	else master_outb(-1,KEYBOARD_UNLOCK_REG);
 	return IRQ_NONE;
 }
-static irqreturn_t sys_default_handler(int lev, void *dev_id, struct pt_regs *regs)
+static irqreturn_t default_handler(int lev, void *dev_id, struct pt_regs *regs)
 {
 	printk ("Uninitialised interrupt level %d\n", lev);
 	return IRQ_NONE;
 }
 
- irqreturn_t (*q40_sys_default_handler[SYS_IRQS]) (int, void *, struct pt_regs *) = {
-	 sys_default_handler,sys_default_handler,sys_default_handler,sys_default_handler,
-	 sys_default_handler,sys_default_handler,sys_default_handler,sys_default_handler
- };
+irqreturn_t (*q40_default_handler[SYS_IRQS])(int, void *, struct pt_regs *) = {
+	 [0] = default_handler,
+	 [1] = default_handler,
+	 [2] = default_handler,
+	 [3] = default_handler,
+	 [4] = default_handler,
+	 [5] = default_handler,
+	 [6] = default_handler,
+	 [7] = default_handler
+};
 
 
 void q40_enable_irq (unsigned int irq)
@@ -439,7 +439,7 @@ void q40_enable_irq (unsigned int irq)
   {
     mext_disabled--;
     if (mext_disabled>0)
-	  printk("q40_enable_irq : nested disable/enable\n"); 
+	  printk("q40_enable_irq : nested disable/enable\n");
     if (mext_disabled==0)
     master_outb(1,EXT_ENABLE_REG);
     }

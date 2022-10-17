@@ -15,7 +15,7 @@
  *		ftp://prep.ai.mit.edu/pub/gnu/GPL
  *	Each contributing author retains all rights to their own work.
  *
- *  (C) 1999-2001 Ben Fennema
+ *  (C) 1999-2004 Ben Fennema
  *  (C) 1999 Stelias Computing Inc
  *
  * HISTORY
@@ -33,10 +33,10 @@
 #include "udf_i.h"
 #include "udf_sb.h"
 
-static void extent_trunc(struct inode * inode, lb_addr bloc, int extoffset,
-	lb_addr eloc, int8_t etype, uint32_t elen, struct buffer_head *bh, uint32_t nelen)
+static void extent_trunc(struct inode * inode, kernel_lb_addr bloc, int extoffset,
+	kernel_lb_addr eloc, int8_t etype, uint32_t elen, struct buffer_head *bh, uint32_t nelen)
 {
-	lb_addr neloc = { 0, 0 };
+	kernel_lb_addr neloc = { 0, 0 };
 	int last_block = (elen + inode->i_sb->s_blocksize - 1) >> inode->i_sb->s_blocksize_bits;
 	int first_block = (nelen + inode->i_sb->s_blocksize - 1) >> inode->i_sb->s_blocksize_bits;
 
@@ -66,9 +66,70 @@ static void extent_trunc(struct inode * inode, lb_addr bloc, int extoffset,
 	}
 }
 
+void udf_discard_prealloc(struct inode * inode)
+{
+	kernel_lb_addr bloc, eloc;
+	uint32_t extoffset = 0, elen, nelen;
+	uint64_t lbcount = 0;
+	int8_t etype = -1, netype;
+	struct buffer_head *bh = NULL;
+	int adsize;
+
+	if (UDF_I_ALLOCTYPE(inode) == ICBTAG_FLAG_AD_IN_ICB ||
+		inode->i_size == UDF_I_LENEXTENTS(inode))
+	{
+		return;
+	}
+
+	if (UDF_I_ALLOCTYPE(inode) == ICBTAG_FLAG_AD_SHORT)
+		adsize = sizeof(short_ad);
+	else if (UDF_I_ALLOCTYPE(inode) == ICBTAG_FLAG_AD_LONG)
+		adsize = sizeof(long_ad);
+	else
+		adsize = 0;
+
+	bloc = UDF_I_LOCATION(inode);
+
+	while ((netype = udf_next_aext(inode, &bloc, &extoffset, &eloc, &elen, &bh, 1)) != -1)
+	{
+		etype = netype;
+		lbcount += elen;
+		if (lbcount > inode->i_size && lbcount - inode->i_size < inode->i_sb->s_blocksize)
+		{
+			nelen = elen - (lbcount - inode->i_size);
+			extent_trunc(inode, bloc, extoffset-adsize, eloc, etype, elen, bh, nelen);
+			lbcount = inode->i_size;
+		}
+	}
+	if (etype == (EXT_NOT_RECORDED_ALLOCATED >> 30))
+	{
+		extoffset -= adsize;
+		lbcount -= elen;
+		extent_trunc(inode, bloc, extoffset, eloc, etype, elen, bh, 0);
+		if (!bh)
+		{
+			UDF_I_LENALLOC(inode) = extoffset - udf_file_entry_alloc_offset(inode);
+			mark_inode_dirty(inode);
+		}
+		else
+		{
+			struct allocExtDesc *aed = (struct allocExtDesc *)(bh->b_data);
+			aed->lengthAllocDescs = cpu_to_le32(extoffset - sizeof(struct allocExtDesc));
+			if (!UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_STRICT) || UDF_SB_UDFREV(inode->i_sb) >= 0x0201)
+				udf_update_tag(bh->b_data, extoffset);
+			else
+				udf_update_tag(bh->b_data, sizeof(struct allocExtDesc));
+			mark_buffer_dirty_inode(bh, inode);
+		}
+	}
+	UDF_I_LENEXTENTS(inode) = lbcount;
+
+	udf_release_data(bh);
+}
+
 void udf_truncate_extents(struct inode * inode)
 {
-	lb_addr bloc, eloc, neloc = { 0, 0 };
+	kernel_lb_addr bloc, eloc, neloc = { 0, 0 };
 	uint32_t extoffset, elen, offset, nelen = 0, lelen = 0, lenalloc;
 	int8_t etype;
 	int first_block = inode->i_size >> inode->i_sb->s_blocksize_bits;
@@ -193,7 +254,7 @@ void udf_truncate_extents(struct inode * inode)
 			}
 			else if (etype == (EXT_NOT_RECORDED_ALLOCATED >> 30))
 			{
-				lb_addr neloc = { 0, 0 };
+				kernel_lb_addr neloc = { 0, 0 };
 				extoffset -= adsize;
 				nelen = EXT_NOT_RECORDED_NOT_ALLOCATED |
 					((elen + offset + inode->i_sb->s_blocksize - 1) &
@@ -211,7 +272,7 @@ void udf_truncate_extents(struct inode * inode)
 						~(inode->i_sb->s_blocksize - 1));
 					udf_write_aext(inode, bloc, &extoffset, eloc, elen, bh, 1);
 				}
-				memset(&eloc, 0x00, sizeof(lb_addr));
+				memset(&eloc, 0x00, sizeof(kernel_lb_addr));
 				elen = EXT_NOT_RECORDED_NOT_ALLOCATED | offset;
 				udf_add_aext(inode, &bloc, &extoffset, eloc, elen, &bh, 1);
 			}

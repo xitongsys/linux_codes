@@ -64,19 +64,9 @@ struct adfs_discmap {
 	unsigned int		dm_endbit;
 };
 
-/* dir stuff */
-
-
 /* Inode stuff */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,0)
-int adfs_get_block(struct inode *inode, sector_t block,
-		   struct buffer_head *bh, int create);
-#else
-int adfs_bmap(struct inode *inode, int block);
-#endif
 struct inode *adfs_iget(struct super_block *sb, struct object_info *obj);
-void adfs_read_inode(struct inode *inode);
-void adfs_write_inode(struct inode *inode,int unused);
+int adfs_write_inode(struct inode *inode,int unused);
 int adfs_notify_change(struct dentry *dentry, struct iattr *attr);
 
 /* map.c */
@@ -87,9 +77,6 @@ extern unsigned int adfs_map_free(struct super_block *sb);
 void __adfs_error(struct super_block *sb, const char *function,
 		  const char *fmt, ...);
 #define adfs_error(sb, fmt...) __adfs_error(sb, __FUNCTION__, fmt)
-
-/* namei.c */
-extern struct dentry *adfs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *);
 
 /* super.c */
 

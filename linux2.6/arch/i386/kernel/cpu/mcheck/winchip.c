@@ -1,5 +1,6 @@
 /*
  * IDT Winchip specific Machine Check Exception Reporting
+ * (C) Copyright 2002 Alan Cox <alan@redhat.com>
  */
 
 #include <linux/init.h>
@@ -15,9 +16,10 @@
 #include "mce.h"
 
 /* Machine check handler for WinChip C6 */
-static asmlinkage void winchip_machine_check(struct pt_regs * regs, long error_code)
+static fastcall void winchip_machine_check(struct pt_regs * regs, long error_code)
 {
 	printk(KERN_EMERG "CPU0: Machine Check Exception.\n");
+	add_taint(TAINT_MACHINE_CHECK);
 }
 
 /* Set up machine check reporting on the Winchip C6 series */

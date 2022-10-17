@@ -231,7 +231,7 @@ void snd_emu10k1_wait(emu10k1_t *emu, unsigned int wait)
 
 unsigned short snd_emu10k1_ac97_read(ac97_t *ac97, unsigned short reg)
 {
-	emu10k1_t *emu = snd_magic_cast(emu10k1_t, ac97->private_data, return -ENXIO);
+	emu10k1_t *emu = ac97->private_data;
 	unsigned long flags;
 	unsigned short val;
 
@@ -244,7 +244,7 @@ unsigned short snd_emu10k1_ac97_read(ac97_t *ac97, unsigned short reg)
 
 void snd_emu10k1_ac97_write(ac97_t *ac97, unsigned short reg, unsigned short data)
 {
-	emu10k1_t *emu = snd_magic_cast(emu10k1_t, ac97->private_data, return);
+	emu10k1_t *emu = ac97->private_data;
 	unsigned long flags;
 
 	spin_lock_irqsave(&emu->emu_lock, flags);
@@ -313,28 +313,3 @@ unsigned int snd_emu10k1_rate_to_pitch(unsigned int rate)
 	return 0;		/* Should never reach this point */
 }
 
-/*
- *  Returns an attenuation based upon a cumulative volume value
- *  Algorithm calculates 0x200 - 0x10 log2 (input)
- */
- 
-unsigned char snd_emu10k1_sum_vol_attn(unsigned int value)
-{
-	unsigned short count = 16, ans;
-
-	if (value == 0)
-		return 0xFF;
-
-	/* Find first SET bit. This is the integer part of the value */
-	while ((value & 0x10000) == 0) {
-		value <<= 1;
-		count--;
-	}
-
-	/* The REST of the data is the fractional part. */
-	ans = (unsigned short) (0x110 - ((count << 4) + ((value & 0x0FFFFL) >> 12)));
-	if (ans > 0xFF)
-		ans = 0xFF;
-
-	return (unsigned char) ans;
-}

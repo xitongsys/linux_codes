@@ -1,35 +1,16 @@
-/*======================================================================
-  
-    Cardbus device configuration
-    
-    cardbus.c 1.87 2002/10/24 06:11:41
-
-    The contents of this file are subject to the Mozilla Public
-    License Version 1.1 (the "License"); you may not use this file
-    except in compliance with the License. You may obtain a copy of
-    the License at http://www.mozilla.org/MPL/
-
-    Software distributed under the License is distributed on an "AS
-    IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
-    implied. See the License for the specific language governing
-    rights and limitations under the License.
-
-    The initial developer of the original code is David A. Hinds
-    <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
-    are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
-
-    Alternatively, the contents of this file may be used under the
-    terms of the GNU General Public License version 2 (the "GPL"), in which
-    case the provisions of the GPL are applicable instead of the
-    above.  If you wish to allow the use of your version of this file
-    only under the terms of the GPL and not to allow others to use
-    your version of this file under the MPL, indicate your decision
-    by deleting the provisions above and replace them with the notice
-    and other provisions required by the GPL.  If you do not delete
-    the provisions above, a recipient may use your version of this
-    file under either the MPL or the GPL.
-    
-======================================================================*/
+/*
+ * cardbus.c -- 16-bit PCMCIA core support
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * The initial developer of the original code is David A. Hinds
+ * <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
+ * are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
+ *
+ * (C) 1999		David A. Hinds
+ */
 
 /*
  * Cardbus handling has been re-written to be more of a PCI bridge thing,
@@ -58,10 +39,6 @@
 #include <pcmcia/cistpl.h>
 #include "cs_internal.h"
 
-#ifdef PCMCIA_DEBUG
-static int pc_debug = PCMCIA_DEBUG;
-#endif
-
 /*====================================================================*/
 
 #define FIND_FIRST_BIT(n)	((n) - ((n) & ((n)-1)))
@@ -89,7 +66,7 @@ static int pc_debug = PCMCIA_DEBUG;
     
 =====================================================================*/
 
-static u_int xlate_rom_addr(u_char * b, u_int addr)
+static u_int xlate_rom_addr(void __iomem *b, u_int addr)
 {
 	u_int img = 0, ofs = 0, sz;
 	u_short data;
@@ -119,10 +96,10 @@ static u_int xlate_rom_addr(u_char * b, u_int addr)
 static void cb_release_cis_mem(struct pcmcia_socket * s)
 {
 	if (s->cb_cis_virt) {
-		DEBUG(1, "cs: cb_release_cis_mem()\n");
+		cs_dbg(s, 1, "cb_release_cis_mem()\n");
 		iounmap(s->cb_cis_virt);
 		s->cb_cis_virt = NULL;
-		s->cb_cis_res = 0;
+		s->cb_cis_res = NULL;
 	}
 }
 
@@ -160,7 +137,7 @@ int read_cb_mem(struct pcmcia_socket * s, int space, u_int addr, u_int len, void
 	struct pci_dev *dev;
 	struct resource *res;
 
-	DEBUG(3, "cs: read_cb_mem(%d, %#x, %u)\n", space, addr, len);
+	cs_dbg(s, 3, "read_cb_mem(%d, %#x, %u)\n", space, addr, len);
 
 	dev = pci_find_slot(s->cb_dev->subordinate->number, 0);
 	if (!dev)

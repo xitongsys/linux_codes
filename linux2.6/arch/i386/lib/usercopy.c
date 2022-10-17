@@ -9,6 +9,7 @@
 #include <linux/mm.h>
 #include <linux/highmem.h>
 #include <linux/blkdev.h>
+#include <linux/module.h>
 #include <asm/uaccess.h>
 #include <asm/mmx.h>
 
@@ -30,6 +31,7 @@ static inline int __movsl_is_ok(unsigned long a1, unsigned long a2, unsigned lon
 #define __do_strncpy_from_user(dst,src,count,res)			   \
 do {									   \
 	int __d0, __d1, __d2;						   \
+	might_sleep();							   \
 	__asm__ __volatile__(						   \
 		"	testl %1,%1\n"					   \
 		"	jz 2f\n"					   \
@@ -118,6 +120,7 @@ strncpy_from_user(char *dst, const char __user *src, long count)
 #define __do_clear_user(addr,size)					\
 do {									\
 	int __d0;							\
+	might_sleep();							\
   	__asm__ __volatile__(						\
 		"0:	rep; stosl\n"					\
 		"	movl %2,%0\n"					\
@@ -218,7 +221,7 @@ long strnlen_user(const char __user *s, long n)
 
 #ifdef CONFIG_X86_INTEL_USERCOPY
 static unsigned long
-__copy_user_intel(void *to, const void *from,unsigned long size)
+__copy_user_intel(void __user *to, const void *from, unsigned long size)
 {
 	int d0, d1;
 	__asm__ __volatile__(
@@ -325,7 +328,7 @@ __copy_user_intel(void *to, const void *from,unsigned long size)
 }
 
 static unsigned long
-__copy_user_zeroing_intel(void *to, const void *from, unsigned long size)
+__copy_user_zeroing_intel(void *to, const void __user *from, unsigned long size)
 {
 	int d0, d1;
 	__asm__ __volatile__(
@@ -424,9 +427,9 @@ __copy_user_zeroing_intel(void *to, const void *from, unsigned long size)
  * them
  */
 unsigned long
-__copy_user_zeroing_intel(void *to, const void *from, unsigned long size);
+__copy_user_zeroing_intel(void *to, const void __user *from, unsigned long size);
 unsigned long
-__copy_user_intel(void *to, const void *from,unsigned long size);
+__copy_user_intel(void __user *to, const void *from, unsigned long size);
 #endif /* CONFIG_X86_INTEL_USERCOPY */
 
 /* Generic arbitrary sized copy.  */
@@ -511,6 +514,7 @@ do {									\
 
 unsigned long __copy_to_user_ll(void __user *to, const void *from, unsigned long n)
 {
+	BUG_ON((long) n < 0);
 #ifndef CONFIG_X86_WP_WORKS_OK
 	if (unlikely(boot_cpu_data.wp_works_ok == 0) &&
 			((unsigned long )to) < TASK_SIZE) {
@@ -541,8 +545,10 @@ survive:
 				goto survive;
 			}
 
-			if (retval != 1)
+			if (retval != 1) {
+				up_read(&current->mm->mmap_sem);
 		       		break;
+		       	}
 
 			maddr = kmap_atomic(pg, KM_USER0);
 			memcpy(maddr + offset, from, len);
@@ -559,17 +565,72 @@ survive:
 	}
 #endif
 	if (movsl_is_ok(to, from, n))
-		__copy_user((void *)to, from, n);
+		__copy_user(to, from, n);
 	else
-		n = __copy_user_intel((void *)to, from, n);
+		n = __copy_user_intel(to, from, n);
 	return n;
 }
 
-unsigned long __copy_from_user_ll(void *to, const void __user *from, unsigned long n)
+unsigned long
+__copy_from_user_ll(void *to, const void __user *from, unsigned long n)
 {
+	BUG_ON((long)n < 0);
 	if (movsl_is_ok(to, from, n))
-		__copy_user_zeroing(to, (const void *) from, n);
+		__copy_user_zeroing(to, from, n);
 	else
-		n = __copy_user_zeroing_intel(to, (const void *) from, n);
+		n = __copy_user_zeroing_intel(to, from, n);
 	return n;
 }
+
+/**
+ * copy_to_user: - Copy a block of data into user space.
+ * @to:   Destination address, in user space.
+ * @from: Source address, in kernel space.
+ * @n:    Number of bytes to copy.
+ *
+ * Context: User context only.  This function may sleep.
+ *
+ * Copy data from kernel space to user space.
+ *
+ * Returns number of bytes that could not be copied.
+ * On success, this will be zero.
+ */
+unsigned long
+copy_to_user(void __user *to, const void *from, unsigned long n)
+{
+	might_sleep();
+	BUG_ON((long) n < 0);
+	if (access_ok(VERIFY_WRITE, to, n))
+		n = __copy_to_user(to, from, n);
+	return n;
+}
+EXPORT_SYMBOL(copy_to_user);
+
+/**
+ * copy_from_user: - Copy a block of data from user space.
+ * @to:   Destination address, in kernel space.
+ * @from: Source address, in user space.
+ * @n:    Number of bytes to copy.
+ *
+ * Context: User context only.  This function may sleep.
+ *
+ * Copy data from user space to kernel space.
+ *
+ * Returns number of bytes that could not be copied.
+ * On success, this will be zero.
+ *
+ * If some data could not be copied, this function will pad the copied
+ * data to the requested size using zero bytes.
+ */
+unsigned long
+copy_from_user(void *to, const void __user *from, unsigned long n)
+{
+	might_sleep();
+	BUG_ON((long) n < 0);
+	if (access_ok(VERIFY_READ, from, n))
+		n = __copy_from_user(to, from, n);
+	else
+		memset(to, 0, n);
+	return n;
+}
+EXPORT_SYMBOL(copy_from_user);

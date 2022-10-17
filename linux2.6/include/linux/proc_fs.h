@@ -24,11 +24,6 @@ enum {
 	PROC_ROOT_INO = 1,
 };
 
-/* Finally, the dynamically allocatable proc entries are reserved: */
-
-#define PROC_DYNAMIC_FIRST 4096
-#define PROC_NDYNAMIC      16384
-
 #define PROC_SUPER_MAGIC 0x9fa0
 
 /*
@@ -53,7 +48,7 @@ typedef	int (write_proc_t)(struct file *file, const char __user *buffer,
 typedef int (get_info_t)(char *, char **, off_t, int);
 
 struct proc_dir_entry {
-	unsigned short low_ino;
+	unsigned int low_ino;
 	unsigned short namelen;
 	const char *name;
 	mode_t mode;
@@ -84,6 +79,7 @@ struct kcore_list {
 extern struct proc_dir_entry proc_root;
 extern struct proc_dir_entry *proc_root_fs;
 extern struct proc_dir_entry *proc_net;
+extern struct proc_dir_entry *proc_net_stat;
 extern struct proc_dir_entry *proc_bus;
 extern struct proc_dir_entry *proc_root_driver;
 extern struct proc_dir_entry *proc_root_kcore;
@@ -91,10 +87,15 @@ extern struct proc_dir_entry *proc_root_kcore;
 extern void proc_root_init(void);
 extern void proc_misc_init(void);
 
+struct mm_struct;
+
 struct dentry *proc_pid_lookup(struct inode *dir, struct dentry * dentry, struct nameidata *);
 struct dentry *proc_pid_unhash(struct task_struct *p);
 void proc_pid_flush(struct dentry *proc_dentry);
 int proc_pid_readdir(struct file * filp, void * dirent, filldir_t filldir);
+unsigned long task_vsize(struct mm_struct *);
+int task_statm(struct mm_struct *, int *, int *, int *, int *);
+char *task_mem(struct mm_struct *, char *);
 
 extern struct proc_dir_entry *create_proc_entry(const char *name, mode_t mode,
 						struct proc_dir_entry *parent);
@@ -102,7 +103,7 @@ extern void remove_proc_entry(const char *name, struct proc_dir_entry *parent);
 
 extern struct vfsmount *proc_mnt;
 extern int proc_fill_super(struct super_block *,void *,int);
-extern struct inode * proc_get_inode(struct super_block *, int, struct proc_dir_entry *);
+extern struct inode *proc_get_inode(struct super_block *, unsigned int, struct proc_dir_entry *);
 
 extern int proc_match(int, const char *,struct proc_dir_entry *);
 
@@ -131,16 +132,22 @@ extern void proc_tty_unregister_driver(struct tty_driver *driver);
 /*
  * proc_devtree.c
  */
+struct device_node;
 extern void proc_device_tree_init(void);
-
-/*
- * proc_rtas.c
- */
-extern void proc_rtas_init(void);
+#ifdef CONFIG_PROC_DEVICETREE
+extern void proc_device_tree_add_node(struct device_node *, struct proc_dir_entry *);
+#else /* !CONFIG_PROC_DEVICETREE */
+static inline void proc_device_tree_add_node(struct device_node *np, struct proc_dir_entry *pde)
+{
+	return;
+}
+#endif /* CONFIG_PROC_DEVICETREE */
 
 extern struct proc_dir_entry *proc_symlink(const char *,
 		struct proc_dir_entry *, const char *);
 extern struct proc_dir_entry *proc_mkdir(const char *,struct proc_dir_entry *);
+extern struct proc_dir_entry *proc_mkdir_mode(const char *name, mode_t mode,
+			struct proc_dir_entry *parent);
 
 static inline struct proc_dir_entry *create_proc_read_entry(const char *name,
 	mode_t mode, struct proc_dir_entry *base, 
@@ -186,6 +193,7 @@ static inline void proc_net_remove(const char *name)
 
 #define proc_root_driver NULL
 #define proc_net NULL
+#define proc_bus NULL
 
 #define proc_net_fops_create(name, mode, fops)  ({ (void)(mode), NULL; })
 #define proc_net_create(name, mode, info)	({ (void)(mode), NULL; })
@@ -200,14 +208,13 @@ static inline struct proc_dir_entry *create_proc_entry(const char *name,
 #define remove_proc_entry(name, parent) do {} while (0)
 
 static inline struct proc_dir_entry *proc_symlink(const char *name,
-		struct proc_dir_entry *parent,char *dest) {return NULL;}
+		struct proc_dir_entry *parent,const char *dest) {return NULL;}
 static inline struct proc_dir_entry *proc_mkdir(const char *name,
 	struct proc_dir_entry *parent) {return NULL;}
 
 static inline struct proc_dir_entry *create_proc_read_entry(const char *name,
 	mode_t mode, struct proc_dir_entry *base, 
-	int (*read_proc)(char *, char **, off_t, int, int *, void *),
-	void * data) { return NULL; }
+	read_proc_t *read_proc, void * data) { return NULL; }
 static inline struct proc_dir_entry *create_proc_info_entry(const char *name,
 	mode_t mode, struct proc_dir_entry *base, get_info_t *get_info)
 	{ return NULL; }
@@ -220,17 +227,12 @@ extern struct proc_dir_entry proc_root;
 
 #endif /* CONFIG_PROC_FS */
 
-#if !defined(CONFIG_PROC_FS)
+#if !defined(CONFIG_PROC_KCORE)
 static inline void kclist_add(struct kcore_list *new, void *addr, size_t size)
 {
 }
-static inline struct kcore_list * kclist_del(void *addr)
-{
-	return NULL;
-}
 #else
 extern void kclist_add(struct kcore_list *, void *, size_t);
-extern struct kcore_list *kclist_del(void *);
 #endif
 
 struct proc_inode {

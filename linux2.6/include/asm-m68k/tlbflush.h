@@ -1,6 +1,8 @@
 #ifndef _M68K_TLBFLUSH_H
 #define _M68K_TLBFLUSH_H
 
+#include <linux/config.h>
+
 #ifndef CONFIG_SUN3
 
 #include <asm/current.h>
@@ -65,20 +67,24 @@ static inline void flush_tlb_all(void)
 
 static inline void flush_tlb_mm(struct mm_struct *mm)
 {
-	if (mm == current->mm)
+	if (mm == current->active_mm)
 		__flush_tlb();
 }
 
 static inline void flush_tlb_page(struct vm_area_struct *vma, unsigned long addr)
 {
-	if (vma->vm_mm == current->mm)
+	if (vma->vm_mm == current->active_mm) {
+		mm_segment_t old_fs = get_fs();
+		set_fs(USER_DS);
 		__flush_tlb_one(addr);
+		set_fs(old_fs);
+	}
 }
 
 static inline void flush_tlb_range(struct vm_area_struct *vma,
 				   unsigned long start, unsigned long end)
 {
-	if (vma->vm_mm == current->mm)
+	if (vma->vm_mm == current->active_mm)
 		__flush_tlb();
 }
 
@@ -87,7 +93,7 @@ static inline void flush_tlb_kernel_range(unsigned long start, unsigned long end
 	flush_tlb_all();
 }
 
-extern inline void flush_tlb_pgtables(struct mm_struct *mm,
+static inline void flush_tlb_pgtables(struct mm_struct *mm,
 				      unsigned long start, unsigned long end)
 {
 }
@@ -143,7 +149,7 @@ static inline void flush_tlb_mm (struct mm_struct *mm)
 	     seg = sun3_get_segmap(i);
 	     if(seg == SUN3_INVALID_PMEG)
 		     continue;
-	     
+
 	     sun3_put_segmap(i, SUN3_INVALID_PMEG);
 	     pmeg_alloc[seg] = 0;
 	     pmeg_ctx[seg] = 0;
@@ -151,7 +157,7 @@ static inline void flush_tlb_mm (struct mm_struct *mm)
      }
 
      sun3_put_context(oldctx);
-     		     
+
 }
 
 /* Flush a single TLB page. In this case, we're limited to flushing a
@@ -170,7 +176,7 @@ static inline void flush_tlb_page (struct vm_area_struct *vma,
 		pmeg_alloc[i] = 0;
 		pmeg_ctx[i] = 0;
 		pmeg_vaddr[i] = 0;
-		sun3_put_segmap (addr,  SUN3_INVALID_PMEG);     
+		sun3_put_segmap (addr,  SUN3_INVALID_PMEG);
 	}
 	sun3_put_context(oldctx);
 
@@ -182,7 +188,7 @@ static inline void flush_tlb_range (struct vm_area_struct *vma,
 {
 	struct mm_struct *mm = vma->vm_mm;
 	unsigned char seg, oldctx;
-	
+
 	start &= ~SUN3_PMEG_MASK;
 
 	oldctx = sun3_get_context();
@@ -190,7 +196,7 @@ static inline void flush_tlb_range (struct vm_area_struct *vma,
 
 	while(start < end)
 	{
-		if((seg = sun3_get_segmap(start)) == SUN3_INVALID_PMEG) 
+		if((seg = sun3_get_segmap(start)) == SUN3_INVALID_PMEG)
 		     goto next;
 		if(pmeg_ctx[seg] == mm->context) {
 			pmeg_alloc[seg] = 0;
@@ -214,7 +220,7 @@ static inline void flush_tlb_kernel_page (unsigned long addr)
 	sun3_put_segmap (addr & ~(SUN3_PMEG_SIZE - 1), SUN3_INVALID_PMEG);
 }
 
-extern inline void flush_tlb_pgtables(struct mm_struct *mm,
+static inline void flush_tlb_pgtables(struct mm_struct *mm,
 				      unsigned long start, unsigned long end)
 {
 }

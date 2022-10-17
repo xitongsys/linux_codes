@@ -1,7 +1,7 @@
 /*
  *  linux/arch/arm/kernel/calls.S
  *
- *  Copyright (C) 1995-2003 Russell King
+ *  Copyright (C) 1995-2004 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -134,7 +134,7 @@ __syscall_start:
 		.long	sys_ipc
 		.long	sys_fsync
 		.long	sys_sigreturn_wrapper
-/* 120 */	.long	sys_clone_wapper
+/* 120 */	.long	sys_clone_wrapper
 		.long	sys_setdomainname
 		.long	sys_newuname
 		.long	sys_ni_syscall
@@ -254,7 +254,7 @@ __syscall_start:
 		.long	sys_fremovexattr
 		.long	sys_tkill
 		.long	sys_sendfile64
-/* 240 */	.long	sys_futex
+/* 240 */	.long	sys_futex_wrapper
 		.long	sys_sched_setaffinity
 		.long	sys_sched_getaffinity
 		.long	sys_io_setup
@@ -270,7 +270,31 @@ __syscall_start:
 	 	.long	sys_remap_file_pages
 		.long	sys_ni_syscall	/* sys_set_thread_area */
 /* 255 */	.long	sys_ni_syscall	/* sys_get_thread_area */
- 		.long	sys_ni_syscall	/* sys_set_tid_address */
+ 		.long	sys_set_tid_address
+		.long	sys_timer_create
+		.long	sys_timer_settime
+		.long	sys_timer_gettime
+/* 260 */	.long	sys_timer_getoverrun
+		.long	sys_timer_delete
+		.long	sys_clock_settime
+		.long	sys_clock_gettime
+		.long	sys_clock_getres
+/* 265 */	.long	sys_clock_nanosleep
+		.long	sys_statfs64
+		.long	sys_fstatfs64
+		.long	sys_tgkill
+		.long	sys_utimes
+/* 270 */	.long	sys_fadvise64_64
+		.long	sys_pciconfig_iobase
+		.long	sys_pciconfig_read
+		.long	sys_pciconfig_write
+		.long	sys_mq_open
+/* 275 */	.long	sys_mq_unlink
+		.long	sys_mq_timedsend
+		.long	sys_mq_timedreceive
+		.long	sys_mq_notify
+		.long	sys_mq_getsetattr
+/* 280 */	.long	sys_waitid
 __syscall_end:
 
 		.rept	NR_syscalls - (__syscall_end - __syscall_start) / 4

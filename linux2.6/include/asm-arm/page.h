@@ -84,7 +84,11 @@
 # endif
 #endif
 
-#ifndef _USER
+#ifdef CONFIG_CPU_COPY_V6
+# define MULTI_USER 1
+#endif
+
+#if !defined(_USER) && !defined(MULTI_USER)
 #error Unknown user operations model
 #endif
 
@@ -125,7 +129,7 @@ extern void __cpu_copy_user_page(void *to, const void *from,
 	} while (0)
 
 #define clear_page(page)	memzero((void *)(page), PAGE_SIZE)
-extern void copy_page(void *to, void *from);
+extern void copy_page(void *to, const void *from);
 
 #undef STRICT_MM_TYPECHECKS
 

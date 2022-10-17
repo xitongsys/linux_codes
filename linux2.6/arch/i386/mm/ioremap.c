@@ -12,7 +12,6 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <asm/io.h>
-#include <asm/pgalloc.h>
 #include <asm/fixmap.h>
 #include <asm/cacheflush.h>
 #include <asm/tlbflush.h>
@@ -81,9 +80,14 @@ static int remap_area_pages(unsigned long address, unsigned long phys_addr,
 		BUG();
 	spin_lock(&init_mm.page_table_lock);
 	do {
+		pud_t *pud;
 		pmd_t *pmd;
-		pmd = pmd_alloc(&init_mm, dir, address);
+		
 		error = -ENOMEM;
+		pud = pud_alloc(&init_mm, dir, address);
+		if (!pud)
+			break;
+		pmd = pmd_alloc(&init_mm, pud, address);
 		if (!pmd)
 			break;
 		if (remap_area_pmd(pmd, address, end - address,
@@ -111,9 +115,9 @@ static int remap_area_pages(unsigned long address, unsigned long phys_addr,
  * have to convert them into an offset in a page-aligned mapping, but the
  * caller shouldn't need to know that small detail.
  */
-void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flags)
+void __iomem * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flags)
 {
-	void * addr;
+	void __iomem * addr;
 	struct vm_struct * area;
 	unsigned long offset, last_addr;
 
@@ -126,12 +130,12 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 	 * Don't remap the low PCI/ISA area, it's always mapped..
 	 */
 	if (phys_addr >= 0xA0000 && last_addr < 0x100000)
-		return phys_to_virt(phys_addr);
+		return (void __iomem *) phys_to_virt(phys_addr);
 
 	/*
 	 * Don't allow anybody to remap normal RAM that we're using..
 	 */
-	if (phys_addr < virt_to_phys(high_memory)) {
+	if (phys_addr <= virt_to_phys(high_memory - 1)) {
 		char *t_addr, *t_end;
 		struct page *page;
 
@@ -153,16 +157,16 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 	/*
 	 * Ok, go for it..
 	 */
-	area = get_vm_area(size, VM_IOREMAP);
+	area = get_vm_area(size, VM_IOREMAP | (flags << 20));
 	if (!area)
 		return NULL;
 	area->phys_addr = phys_addr;
-	addr = area->addr;
+	addr = (void __iomem *) area->addr;
 	if (remap_area_pages((unsigned long) addr, phys_addr, size, flags)) {
-		vunmap(addr);
+		vunmap((void __force *) addr);
 		return NULL;
 	}
-	return (void *) (offset + (char *)addr);
+	return (void __iomem *) (offset + (char __iomem *)addr);
 }
 
 
@@ -188,17 +192,17 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
  * Must be freed with iounmap.
  */
 
-void *ioremap_nocache (unsigned long phys_addr, unsigned long size)
+void __iomem *ioremap_nocache (unsigned long phys_addr, unsigned long size)
 {
 	unsigned long last_addr;
-	void *p = __ioremap(phys_addr, size, _PAGE_PCD);
+	void __iomem *p = __ioremap(phys_addr, size, _PAGE_PCD);
 	if (!p) 
 		return p; 
 
 	/* Guaranteed to be > phys_addr, as per __ioremap() */
 	last_addr = phys_addr + size - 1;
 
-	if (last_addr < virt_to_phys(high_memory)) { 
+	if (last_addr < virt_to_phys(high_memory) - 1) {
 		struct page *ppage = virt_to_page(__va(phys_addr));		
 		unsigned long npages;
 
@@ -222,20 +226,21 @@ void *ioremap_nocache (unsigned long phys_addr, unsigned long size)
 	return p;					
 }
 
-void iounmap(void *addr)
+void iounmap(volatile void __iomem *addr)
 {
 	struct vm_struct *p;
-	if (addr <= high_memory) 
+	if ((void __force *) addr <= high_memory) 
 		return; 
-	p = remove_vm_area((void *) (PAGE_MASK & (unsigned long) addr));
+	p = remove_vm_area((void *) (PAGE_MASK & (unsigned long __force) addr));
 	if (!p) { 
 		printk("__iounmap: bad address %p\n", addr);
 		return;
-	} 
+	}
 
-	if (p->flags && p->phys_addr < virt_to_phys(high_memory)) { 
+	if ((p->flags >> 20) && p->phys_addr < virt_to_phys(high_memory) - 1) {
+		/* p->size includes the guard page, but cpa doesn't like that */
 		change_page_attr(virt_to_page(__va(p->phys_addr)),
-				 p->size >> PAGE_SHIFT,
+				 (p->size - PAGE_SIZE) >> PAGE_SHIFT,
 				 PAGE_KERNEL); 				 
 		global_flush_tlb();
 	} 

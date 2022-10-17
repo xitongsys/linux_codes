@@ -69,10 +69,12 @@ const struct smb_to_posix_error mapping_table_ERRDOS[] = {
 	{ERRinvparm, -EINVAL},
 	{ERRdiskfull, -ENOSPC},
 	{ERRinvname, -ENOENT},
+	{ERRinvlevel,-EOPNOTSUPP},
 	{ERRdirnotempty, -ENOTEMPTY},
 	{ERRnotlocked, -ENOLCK},
 	{ERRalreadyexists, -EEXIST},
 	{ERRmoredata, -EOVERFLOW},
+	{ERReasnotsupported,-EOPNOTSUPP},
 	{ErrQuota, -EDQUOT},
 	{ErrNotALink, -ENOLINK},
 	{ERRnetlogonNotStarted,-ENOPROTOOPT},
@@ -125,10 +127,10 @@ const struct smb_to_posix_error mapping_table_ERRHRD[] = {
 /* Convert string containing dotted ip address to binary form */
 /* returns 0 if invalid address */
 
-/* BB add address family, change rc to status flag and return *//* also see inet_pton */
-/* To identify v4 vs. v6 - 1) check for colon (v6 only) 2) then call inet_pton to parse for bad address  */
+/* BB add address family, change rc to status flag and return union or for ipv6 */
+/*  will need parent to call something like inet_pton to convert ipv6 address  BB */
 int
-inet_addr(char *cp)
+cifs_inet_pton(int address_family, char *cp,void *dst)
 {
 	struct in_addr address;
 	int value;
@@ -139,6 +141,9 @@ inet_addr(char *cp)
 	char *end = bytes;
 	static const int addr_class_max[4] =
 	    { 0xffffffff, 0xffffff, 0xffff, 0xff };
+
+	if(address_family != AF_INET)
+		return -EAFNOSUPPORT;
 
 	for (i = 0; i < 4; i++) {
 		bytes[i] = 0;
@@ -166,6 +171,9 @@ inet_addr(char *cp)
 				return 0;
 			*end++ = value;
 			temp = *++cp;
+		} else if (temp == ':') {
+			cFYI(1,("IPv6 addresses not supported for CIFS mounts yet"));
+			return -1;
 		} else
 			break;
 	}
@@ -181,9 +189,9 @@ inet_addr(char *cp)
 	if (value > addr_class_max[end - bytes])
 		return 0;
 
-	address.s_addr = *((int *) bytes) | htonl(value);
-	return address.s_addr;
-
+	address.s_addr = *((__be32 *) bytes) | htonl(value);
+	*((__be32 *)dst) = address.s_addr;
+	return 1; /* success */
 }
 
 /*****************************************************************************
@@ -281,7 +289,7 @@ static const struct {
 	ERRDOS, 87, NT_STATUS_BAD_WORKING_SET_LIMIT}, {
 	ERRDOS, 87, NT_STATUS_INCOMPATIBLE_FILE_MAP}, {
 	ERRDOS, 87, NT_STATUS_SECTION_PROTECTION}, {
-	ERRDOS, 282, NT_STATUS_EAS_NOT_SUPPORTED}, {
+	ERRDOS, ERReasnotsupported, NT_STATUS_EAS_NOT_SUPPORTED}, {
 	ERRDOS, 255, NT_STATUS_EA_TOO_LARGE}, {
 	ERRHRD, ERRgeneral, NT_STATUS_NONEXISTENT_EA_ENTRY}, {
 	ERRHRD, ERRgeneral, NT_STATUS_NO_EAS_ON_FILE}, {
@@ -746,7 +754,8 @@ static const struct {
 	ERRDOS, ERRnoaccess, 0xc000028e}, {
 	ERRDOS, ERRnoaccess, 0xc000028f}, {
 	ERRDOS, ERRnoaccess, 0xc0000290}, {
-ERRDOS, ERRbadfunc, 0xc000029c},};
+	ERRDOS, ERRbadfunc, 0xc000029c}, {
+	ERRDOS, ERRinvlevel, 0x007c0001}, };
 
 /*****************************************************************************
  Print an error message from the status code
@@ -804,16 +813,13 @@ map_smb_to_linux_error(struct smb_hdr *smb)
 
 	if (smb->Flags2 & SMBFLG2_ERR_STATUS) {
 		/* translate the newer STATUS codes to old style errors and then to POSIX errors */
-		smb->Status.CifsError = le32_to_cpu(smb->Status.CifsError);
+		__u32 err = le32_to_cpu(smb->Status.CifsError);
 		if(cifsFYI)
-			cifs_print_status(smb->Status.CifsError);
-		ntstatus_to_dos(smb->Status.CifsError, &smberrclass,
-				&smberrcode);
+			cifs_print_status(err);
+		ntstatus_to_dos(err, &smberrclass, &smberrcode);
 	} else {
 		smberrclass = smb->Status.DosError.ErrorClass;
-		smb->Status.DosError.Error =
-		    le16_to_cpu(smb->Status.DosError.Error);
-		smberrcode = smb->Status.DosError.Error;
+		smberrcode = le16_to_cpu(smb->Status.DosError.Error);
 	}
 
 	/* old style errors */

@@ -5,6 +5,7 @@
 
   Copyright (C) 2001 by Andreas Gruenbacher <a.gruenbacher@computer.org>
   Copyright (C) 2001 SGI - Silicon Graphics, Inc <linux-xfs@oss.sgi.com>
+  Copyright (c) 2004 Red Hat, Inc., James Morris <jmorris@redhat.com>
  */
 #include <linux/fs.h>
 #include <linux/slab.h>
@@ -13,41 +14,9 @@
 #include <linux/xattr.h>
 #include <linux/namei.h>
 #include <linux/security.h>
+#include <linux/syscalls.h>
+#include <linux/module.h>
 #include <asm/uaccess.h>
-
-/*
- * Extended attribute memory allocation wrappers, originally
- * based on the Intermezzo PRESTO_ALLOC/PRESTO_FREE macros.
- * Values larger than a page are uncommon - extended attributes
- * are supposed to be small chunks of metadata, and it is quite
- * unusual to have very many extended attributes, so lists tend
- * to be quite short as well.  The 64K upper limit is derived
- * from the extended attribute size limit used by XFS.
- * Intentionally allow zero @size for value/list size requests.
- */
-static void *
-xattr_alloc(size_t size, size_t limit)
-{
-	void *ptr;
-
-	if (size > limit)
-		return ERR_PTR(-E2BIG);
-
-	if (!size)	/* size request, no buffer is needed */
-		return NULL;
-
-	ptr = kmalloc((unsigned long) size, GFP_KERNEL);
-	if (!ptr)
-		return ERR_PTR(-ENOMEM);
-	return ptr;
-}
-
-static void
-xattr_free(void *ptr, size_t size)
-{
-	if (size)	/* for a size request, no buffer was needed */
-		kfree(ptr);
-}
 
 /*
  * Extended attribute SET operations
@@ -57,7 +26,7 @@ setxattr(struct dentry *d, char __user *name, void __user *value,
 	 size_t size, int flags)
 {
 	int error;
-	void *kvalue;
+	void *kvalue = NULL;
 	char kname[XATTR_NAME_MAX + 1];
 
 	if (flags & ~(XATTR_CREATE|XATTR_REPLACE))
@@ -69,13 +38,16 @@ setxattr(struct dentry *d, char __user *name, void __user *value,
 	if (error < 0)
 		return error;
 
-	kvalue = xattr_alloc(size, XATTR_SIZE_MAX);
-	if (IS_ERR(kvalue))
-		return PTR_ERR(kvalue);
-
-	if (size > 0 && copy_from_user(kvalue, value, size)) {
-		xattr_free(kvalue, size);
-		return -EFAULT;
+	if (size) {
+		if (size > XATTR_SIZE_MAX)
+			return -E2BIG;
+		kvalue = kmalloc(size, GFP_KERNEL);
+		if (!kvalue)
+			return -ENOMEM;
+		if (copy_from_user(kvalue, value, size)) {
+			kfree(kvalue);
+			return -EFAULT;
+		}
 	}
 
 	error = -EOPNOTSUPP;
@@ -90,7 +62,8 @@ setxattr(struct dentry *d, char __user *name, void __user *value,
 out:
 		up(&d->d_inode->i_sem);
 	}
-	xattr_free(kvalue, size);
+	if (kvalue)
+		kfree(kvalue);
 	return error;
 }
 
@@ -146,7 +119,7 @@ static ssize_t
 getxattr(struct dentry *d, char __user *name, void __user *value, size_t size)
 {
 	ssize_t error;
-	void *kvalue;
+	void *kvalue = NULL;
 	char kname[XATTR_NAME_MAX + 1];
 
 	error = strncpy_from_user(kname, name, sizeof(kname));
@@ -155,9 +128,13 @@ getxattr(struct dentry *d, char __user *name, void __user *value, size_t size)
 	if (error < 0)
 		return error;
 
-	kvalue = xattr_alloc(size, XATTR_SIZE_MAX);
-	if (IS_ERR(kvalue))
-		return PTR_ERR(kvalue);
+	if (size) {
+		if (size > XATTR_SIZE_MAX)
+			size = XATTR_SIZE_MAX;
+		kvalue = kmalloc(size, GFP_KERNEL);
+		if (!kvalue)
+			return -ENOMEM;
+	}
 
 	error = -EOPNOTSUPP;
 	if (d->d_inode->i_op && d->d_inode->i_op->getxattr) {
@@ -165,13 +142,18 @@ getxattr(struct dentry *d, char __user *name, void __user *value, size_t size)
 		if (error)
 			goto out;
 		error = d->d_inode->i_op->getxattr(d, kname, kvalue, size);
+		if (error > 0) {
+			if (size && copy_to_user(value, kvalue, error))
+				error = -EFAULT;
+		} else if (error == -ERANGE && size >= XATTR_SIZE_MAX) {
+			/* The file system tried to returned a value bigger
+			   than XATTR_SIZE_MAX bytes. Not possible. */
+			error = -E2BIG;
+		}
 	}
-
-	if (kvalue && error > 0)
-		if (copy_to_user(value, kvalue, error))
-			error = -EFAULT;
 out:
-	xattr_free(kvalue, size);
+	if (kvalue)
+		kfree(kvalue);
 	return error;
 }
 
@@ -226,11 +208,15 @@ static ssize_t
 listxattr(struct dentry *d, char __user *list, size_t size)
 {
 	ssize_t error;
-	char *klist;
+	char *klist = NULL;
 
-	klist = (char *)xattr_alloc(size, XATTR_LIST_MAX);
-	if (IS_ERR(klist))
-		return PTR_ERR(klist);
+	if (size) {
+		if (size > XATTR_LIST_MAX)
+			size = XATTR_LIST_MAX;
+		klist = kmalloc(size, GFP_KERNEL);
+		if (!klist)
+			return -ENOMEM;
+	}
 
 	error = -EOPNOTSUPP;
 	if (d->d_inode->i_op && d->d_inode->i_op->listxattr) {
@@ -238,13 +224,18 @@ listxattr(struct dentry *d, char __user *list, size_t size)
 		if (error)
 			goto out;
 		error = d->d_inode->i_op->listxattr(d, klist, size);
+		if (error > 0) {
+			if (size && copy_to_user(list, klist, error))
+				error = -EFAULT;
+		} else if (error == -ERANGE && size >= XATTR_LIST_MAX) {
+			/* The file system tried to returned a list bigger
+			   than XATTR_LIST_MAX bytes. Not possible. */
+			error = -E2BIG;
+		}
 	}
-
-	if (klist && error > 0)
-		if (copy_to_user(list, klist, error))
-			error = -EFAULT;
 out:
-	xattr_free(klist, size);
+	if (klist)
+		kfree(klist);
 	return error;
 }
 
@@ -359,3 +350,131 @@ sys_fremovexattr(int fd, char __user *name)
 	fput(f);
 	return error;
 }
+
+
+static const char *
+strcmp_prefix(const char *a, const char *a_prefix)
+{
+	while (*a_prefix && *a == *a_prefix) {
+		a++;
+		a_prefix++;
+	}
+	return *a_prefix ? NULL : a;
+}
+
+/*
+ * In order to implement different sets of xattr operations for each xattr
+ * prefix with the generic xattr API, a filesystem should create a
+ * null-terminated array of struct xattr_handler (one for each prefix) and
+ * hang a pointer to it off of the s_xattr field of the superblock.
+ *
+ * The generic_fooxattr() functions will use this list to dispatch xattr
+ * operations to the correct xattr_handler.
+ */
+#define for_each_xattr_handler(handlers, handler)		\
+		for ((handler) = *(handlers)++;			\
+			(handler) != NULL;			\
+			(handler) = *(handlers)++)
+
+/*
+ * Find the xattr_handler with the matching prefix.
+ */
+static struct xattr_handler *
+xattr_resolve_name(struct xattr_handler **handlers, const char **name)
+{
+	struct xattr_handler *handler;
+
+	if (!*name)
+		return NULL;
+
+	for_each_xattr_handler(handlers, handler) {
+		const char *n = strcmp_prefix(*name, handler->prefix);
+		if (n) {
+			*name = n;
+			break;
+		}
+	}
+	return handler;
+}
+
+/*
+ * Find the handler for the prefix and dispatch its get() operation.
+ */
+ssize_t
+generic_getxattr(struct dentry *dentry, const char *name, void *buffer, size_t size)
+{
+	struct xattr_handler *handler;
+	struct inode *inode = dentry->d_inode;
+
+	handler = xattr_resolve_name(inode->i_sb->s_xattr, &name);
+	if (!handler)
+		return -EOPNOTSUPP;
+	return handler->get(inode, name, buffer, size);
+}
+
+/*
+ * Combine the results of the list() operation from every xattr_handler in the
+ * list.
+ */
+ssize_t
+generic_listxattr(struct dentry *dentry, char *buffer, size_t buffer_size)
+{
+	struct inode *inode = dentry->d_inode;
+	struct xattr_handler *handler, **handlers = inode->i_sb->s_xattr;
+	unsigned int size = 0;
+
+	if (!buffer) {
+		for_each_xattr_handler(handlers, handler)
+			size += handler->list(inode, NULL, 0, NULL, 0);
+	} else {
+		char *buf = buffer;
+
+		for_each_xattr_handler(handlers, handler) {
+			size = handler->list(inode, buf, buffer_size, NULL, 0);
+			if (size > buffer_size)
+				return -ERANGE;
+			buf += size;
+			buffer_size -= size;
+		}
+		size = buf - buffer;
+	}
+	return size;
+}
+
+/*
+ * Find the handler for the prefix and dispatch its set() operation.
+ */
+int
+generic_setxattr(struct dentry *dentry, const char *name, const void *value, size_t size, int flags)
+{
+	struct xattr_handler *handler;
+	struct inode *inode = dentry->d_inode;
+
+	if (size == 0)
+		value = "";  /* empty EA, do not remove */
+	handler = xattr_resolve_name(inode->i_sb->s_xattr, &name);
+	if (!handler)
+		return -EOPNOTSUPP;
+	return handler->set(inode, name, value, size, flags);
+}
+
+/*
+ * Find the handler for the prefix and dispatch its set() operation to remove
+ * any associated extended attribute.
+ */
+int
+generic_removexattr(struct dentry *dentry, const char *name)
+{
+	struct xattr_handler *handler;
+	struct inode *inode = dentry->d_inode;
+
+	handler = xattr_resolve_name(inode->i_sb->s_xattr, &name);
+	if (!handler)
+		return -EOPNOTSUPP;
+	return handler->set(inode, name, NULL, 0, XATTR_REPLACE);
+}
+
+EXPORT_SYMBOL(generic_getxattr);
+EXPORT_SYMBOL(generic_listxattr);
+EXPORT_SYMBOL(generic_setxattr);
+EXPORT_SYMBOL(generic_removexattr);

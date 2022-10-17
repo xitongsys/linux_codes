@@ -32,7 +32,7 @@
 #define AT_SYSINFO 32
 #define AT_SYSINFO_EHDR		33
 
-int sysctl_vsyscall32;
+int sysctl_vsyscall32 = 1;
 
 #define ARCH_DLINFO do {  \
 	if (sysctl_vsyscall32) { \
@@ -46,7 +46,7 @@ struct elf_phdr;
 
 #define IA32_EMULATOR 1
 
-#define ELF_ET_DYN_BASE		(IA32_PAGE_OFFSET/3 + 0x1000000)
+#define ELF_ET_DYN_BASE		(TASK_UNMAPPED_32 + 0x1000000)
 
 #undef ELF_ARCH
 #define ELF_ARCH EM_386
@@ -182,6 +182,7 @@ struct elf_prpsinfo
 #define user user32
 
 #define __ASM_X86_64_ELF_H 1
+#define elf_read_implies_exec(ex, have_pt_gnu_stack)	(!(have_pt_gnu_stack))
 //#include <asm/ia32.h>
 #include <linux/elf.h>
 
@@ -197,6 +198,7 @@ static inline void elf_core_copy_regs(elf_gregset_t *elfregs, struct pt_regs *re
 static inline int elf_core_copy_task_regs(struct task_struct *t, elf_gregset_t* elfregs)
 {	
 	struct pt_regs *pp = (struct pt_regs *)(t->thread.rsp0);
+	--pp;
 	ELF_CORE_COPY_REGS((*elfregs), pp);
 	/* fix wrong segments */ 
 	(*elfregs)[7] = t->thread.ds; 
@@ -212,8 +214,10 @@ elf_core_copy_task_fpregs(struct task_struct *tsk, struct pt_regs *regs, elf_fpr
 	struct _fpstate_ia32 *fpstate = (void*)fpu; 
 	mm_segment_t oldfs = get_fs();
 
-	if (!tsk->used_math) 
+	if (!tsk_used_math(tsk))
 		return 0;
+	if (!regs)
+		regs = (struct pt_regs *)tsk->thread.rsp0;
 	--regs;
 	if (tsk == current)
 		unlazy_fpu(tsk);
@@ -231,7 +235,7 @@ static inline int
 elf_core_copy_task_xfpregs(struct task_struct *t, elf_fpxregset_t *xfpu)
 {
 	struct pt_regs *regs = ((struct pt_regs *)(t->thread.rsp0))-1; 
-	if (!t->used_math) 
+	if (!tsk_used_math(t))
 		return 0;
 	if (t == current)
 		unlazy_fpu(t); 
@@ -245,12 +249,23 @@ elf_core_copy_task_xfpregs(struct task_struct *t, elf_fpxregset_t *xfpu)
 #define elf_check_arch(x) \
 	((x)->e_machine == EM_386)
 
+extern int force_personality32;
+
 #define ELF_EXEC_PAGESIZE PAGE_SIZE
 #define ELF_HWCAP (boot_cpu_data.x86_capability[0])
 #define ELF_PLATFORM  ("i686")
 #define SET_PERSONALITY(ex, ibcs2)			\
 do {							\
-	set_personality((ibcs2)?PER_SVR4:current->personality);	\
+	unsigned long new_flags = 0;				\
+	if ((ex).e_ident[EI_CLASS] == ELFCLASS32)		\
+		new_flags = _TIF_IA32;				\
+	if ((current_thread_info()->flags & _TIF_IA32)		\
+	    != new_flags)					\
+		set_thread_flag(TIF_ABI_PENDING);		\
+	else							\
+		clear_thread_flag(TIF_ABI_PENDING);		\
+	/* XXX This overwrites the user set personality */	\
+	current->personality |= force_personality32;		\
 } while (0)
 
 /* Override some function names */
@@ -261,19 +276,10 @@ do {							\
 
 #define load_elf_binary load_elf32_binary
 
-#undef CONFIG_BINFMT_ELF
-#ifdef CONFIG_BINFMT_ELF32
-# define CONFIG_BINFMT_ELF		CONFIG_BINFMT_ELF32
-#endif
-
-#undef CONFIG_BINFMT_ELF_MODULE
-#ifdef CONFIG_BINFMT_ELF32_MODULE
-# define CONFIG_BINFMT_ELF_MODULE	CONFIG_BINFMT_ELF32_MODULE
-#endif
-
 #define ELF_PLAT_INIT(r, load_addr)	elf32_init(r)
-#define setup_arg_pages(bprm)		ia32_setup_arg_pages(bprm)
-int ia32_setup_arg_pages(struct linux_binprm *bprm);
+#define setup_arg_pages(bprm, stack_top, exec_stack) \
+	ia32_setup_arg_pages(bprm, stack_top, exec_stack)
+int ia32_setup_arg_pages(struct linux_binprm *bprm, unsigned long stack_top, int executable_stack);
 
 #undef start_thread
 #define start_thread(regs,new_rip,new_rsp) do { \
@@ -301,6 +307,9 @@ MODULE_AUTHOR("Eric Youngdale, Andi Kleen");
 
 #define elf_addr_t __u32
 
+#undef TASK_SIZE
+#define TASK_SIZE 0xffffffff
+
 static void elf32_init(struct pt_regs *);
 
 #include "../../../fs/binfmt_elf.c" 
@@ -323,15 +332,14 @@ static void elf32_init(struct pt_regs *regs)
 	me->thread.gsindex = 0;
     me->thread.ds = __USER_DS; 
 	me->thread.es = __USER_DS;
-	set_thread_flag(TIF_IA32); 
 }
 
-int setup_arg_pages(struct linux_binprm *bprm)
+int setup_arg_pages(struct linux_binprm *bprm, unsigned long stack_top, int executable_stack)
 {
 	unsigned long stack_base;
 	struct vm_area_struct *mpnt;
 	struct mm_struct *mm = current->mm;
-	int i;
+	int i, ret;
 
 	stack_base = IA32_STACK_TOP - MAX_ARG_PAGES * PAGE_SIZE;
 	mm->arg_start = bprm->p + stack_base;
@@ -350,28 +358,34 @@ int setup_arg_pages(struct linux_binprm *bprm)
 		return -ENOMEM;
 	}
 
+	memset(mpnt, 0, sizeof(*mpnt));
+
 	down_write(&mm->mmap_sem);
 	{
 		mpnt->vm_mm = mm;
 		mpnt->vm_start = PAGE_MASK & (unsigned long) bprm->p;
 		mpnt->vm_end = IA32_STACK_TOP;
-		mpnt->vm_flags = vm_stack_flags32; 
+		if (executable_stack == EXSTACK_ENABLE_X)
+			mpnt->vm_flags = VM_STACK_FLAGS |  VM_EXEC;
+		else if (executable_stack == EXSTACK_DISABLE_X)
+			mpnt->vm_flags = VM_STACK_FLAGS & ~VM_EXEC;
+		else
+			mpnt->vm_flags = VM_STACK_FLAGS;
  		mpnt->vm_page_prot = (mpnt->vm_flags & VM_EXEC) ? 
  			PAGE_COPY_EXEC : PAGE_COPY;
-		mpnt->vm_ops = NULL;
-		mpnt->vm_pgoff = 0;
-		mpnt->vm_file = NULL;
-		INIT_LIST_HEAD(&mpnt->shared);
-		mpnt->vm_private_data = (void *) 0;
-		insert_vm_struct(mm, mpnt);
-		mm->total_vm = (mpnt->vm_end - mpnt->vm_start) >> PAGE_SHIFT;
+		if ((ret = insert_vm_struct(mm, mpnt))) {
+			up_write(&mm->mmap_sem);
+			kmem_cache_free(vm_area_cachep, mpnt);
+			return ret;
+		}
+		mm->stack_vm = mm->total_vm = vma_pages(mpnt);
 	} 
 
 	for (i = 0 ; i < MAX_ARG_PAGES ; i++) {
 		struct page *page = bprm->page[i];
 		if (page) {
 			bprm->page[i] = NULL;
-			put_dirty_page(current,page,stack_base,PAGE_COPY_EXEC);
+			install_arg_page(mpnt, page, stack_base);
 		}
 		stack_base += PAGE_SIZE;
 	}
@@ -386,15 +400,35 @@ elf32_map (struct file *filep, unsigned long addr, struct elf_phdr *eppnt, int p
 	unsigned long map_addr;
 	struct task_struct *me = current; 
 
-	if (prot & PROT_READ) 
-		prot |= vm_force_exec32;
-
 	down_write(&me->mm->mmap_sem);
 	map_addr = do_mmap(filep, ELF_PAGESTART(addr),
 			   eppnt->p_filesz + ELF_PAGEOFFSET(eppnt->p_vaddr), prot, 
-			   type|MAP_32BIT,
+			   type,
 			   eppnt->p_offset - ELF_PAGEOFFSET(eppnt->p_vaddr));
 	up_write(&me->mm->mmap_sem);
 	return(map_addr);
 }
 
+#ifdef CONFIG_SYSCTL
+/* Register vsyscall32 into the ABI table */
+#include <linux/sysctl.h>
+
+static ctl_table abi_table2[] = {
+	{ 99, "vsyscall32", &sysctl_vsyscall32, sizeof(int), 0644, NULL,
+	  proc_dointvec },
+	{ 0, }
+}; 
+
+static ctl_table abi_root_table2[] = { 
+	{ .ctl_name = CTL_ABI, .procname = "abi", .mode = 0555, 
+	  .child = abi_table2 }, 
+	{ 0 }, 
+}; 
+
+static __init int ia32_binfmt_init(void)
+{ 
+	register_sysctl_table(abi_root_table2, 1);
+	return 0;
+}
+__initcall(ia32_binfmt_init);
+#endif

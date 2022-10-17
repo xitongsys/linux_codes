@@ -419,6 +419,7 @@ static void dn_nsp_disc_init(struct sock *sk, struct sk_buff *skb)
 		case DN_CI:
 		case DN_CD:
 			scp->state = DN_RJ;
+			sk->sk_err = ECONNREFUSED;
 			break;
 		case DN_RUN:
 			sk->sk_shutdown |= SHUTDOWN_MASK;
@@ -504,7 +505,7 @@ static void dn_nsp_linkservice(struct sock *sk, struct sk_buff *skb)
 	struct dn_scp *scp = DN_SK(sk);
 	unsigned short segnum;
 	unsigned char lsflags;
-	char fcval;
+	signed char fcval;
 	int wake_up = 0;
 	char *ptr = skb->data;
 	unsigned char fctype = scp->services_rem & NSP_FC_MASK;

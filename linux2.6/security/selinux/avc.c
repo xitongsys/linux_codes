@@ -4,6 +4,9 @@
  * Authors:  Stephen Smalley, <sds@epoch.ncsc.mil>
  *           James Morris <jmorris@redhat.com>
  *
+ * Update:   KaiGai, Kohei <kaigai@ak.jp.nec.com>
+ *     Replaced the avc_lock spinlock by RCU.
+ *
  * Copyright (C) 2003 Red Hat, Inc., James Morris <jmorris@redhat.com>
  *
  *	This program is free software; you can redistribute it and/or modify
@@ -18,41 +21,89 @@
 #include <linux/dcache.h>
 #include <linux/init.h>
 #include <linux/skbuff.h>
+#include <linux/percpu.h>
 #include <net/sock.h>
 #include <linux/un.h>
 #include <net/af_unix.h>
 #include <linux/ip.h>
-#include <linux/udp.h>
-#include <linux/tcp.h>
+#include <linux/audit.h>
+#include <linux/ipv6.h>
+#include <net/ipv6.h>
 #include "avc.h"
 #include "avc_ss.h"
-#include "class_to_string.h"
-#include "common_perm_to_string.h"
-#include "av_inherit.h"
-#include "av_perm_to_string.h"
-#include "objsec.h"
 
-#define AVC_CACHE_SLOTS		512
-#define AVC_CACHE_MAXNODES	410
+static const struct av_perm_to_string
+{
+  u16 tclass;
+  u32 value;
+  const char *name;
+} av_perm_to_string[] = {
+#define S_(c, v, s) { c, v, s },
+#include "av_perm_to_string.h"
+#undef S_
+};
+
+#ifdef CONFIG_AUDIT
+static const char *class_to_string[] = {
+#define S_(s) s,
+#include "class_to_string.h"
+#undef S_
+};
+#endif
+
+#define TB_(s) static const char * s [] = {
+#define TE_(s) };
+#define S_(s) s,
+#include "common_perm_to_string.h"
+#undef TB_
+#undef TE_
+#undef S_
+
+static const struct av_inherit
+{
+    u16 tclass;
+    const char **common_pts;
+    u32 common_base;
+} av_inherit[] = {
+#define S_(c, i, b) { c, common_##i##_perm_to_string, b },
+#include "av_inherit.h"
+#undef S_
+};
+
+#define AVC_CACHE_SLOTS			512
+#define AVC_DEF_CACHE_THRESHOLD		512
+#define AVC_CACHE_RECLAIM		16
+
+#ifdef CONFIG_SECURITY_SELINUX_AVC_STATS
+#define avc_cache_stats_incr(field) 				\
+do {								\
+	per_cpu(avc_cache_stats, get_cpu()).field++;		\
+	put_cpu();						\
+} while (0)
+#else
+#define avc_cache_stats_incr(field)	do {} while (0)
+#endif
 
 struct avc_entry {
 	u32			ssid;
 	u32			tsid;
 	u16			tclass;
 	struct av_decision	avd;
-	int			used;	/* used recently */
+	atomic_t		used;	/* used recently */
 };
 
 struct avc_node {
 	struct avc_entry	ae;
-	struct avc_node		*next;
+	struct list_head	list;
+	struct rcu_head         rhead;
 };
 
 struct avc_cache {
-	struct avc_node	*slots[AVC_CACHE_SLOTS];
-	u32		lru_hint;	/* LRU hint for reclaim scan */
-	u32		active_nodes;
-	u32		latest_notif;	/* latest revocation notification */
+	struct list_head	slots[AVC_CACHE_SLOTS];
+	spinlock_t		slots_lock[AVC_CACHE_SLOTS]; /* lock for writes */
+	atomic_t		lru_hint;	/* LRU hint for reclaim scan */
+	atomic_t		active_nodes;
+	u32			latest_notif;	/* latest revocation notification */
 };
 
 struct avc_callback_node {
@@ -67,15 +118,16 @@ struct avc_callback_node {
 	struct avc_callback_node *next;
 };
 
-static spinlock_t avc_lock = SPIN_LOCK_UNLOCKED;
-static spinlock_t avc_log_lock = SPIN_LOCK_UNLOCKED;
-static struct avc_node *avc_node_freelist = NULL;
+/* Exported via selinufs */
+unsigned int avc_cache_threshold = AVC_DEF_CACHE_THRESHOLD;
+
+#ifdef CONFIG_SECURITY_SELINUX_AVC_STATS
+DEFINE_PER_CPU(struct avc_cache_stats, avc_cache_stats) = { 0 };
+#endif
+
 static struct avc_cache avc_cache;
-static char *avc_audit_buffer = NULL;
-static unsigned avc_cache_stats[AVC_NSTATS];
-static struct avc_callback_node *avc_callbacks = NULL;
-static unsigned int avc_log_level = 4; /* default:  KERN_WARNING */
-static char avc_level_string[4] = "< >";
+static struct avc_callback_node *avc_callbacks;
+static kmem_cache_t *avc_node_cachep;
 
 static inline int avc_hash(u32 ssid, u32 tsid, u16 tclass)
 {
@@ -87,14 +139,14 @@ static inline int avc_hash(u32 ssid, u32 tsid, u16 tclass)
  * @tclass: target security class
  * @av: access vector
  */
-void avc_dump_av(u16 tclass, u32 av)
+void avc_dump_av(struct audit_buffer *ab, u16 tclass, u32 av)
 {
-	char **common_pts = 0;
+	const char **common_pts = NULL;
 	u32 common_base = 0;
 	int i, i2, perm;
 
 	if (av == 0) {
-		printk(" null");
+		audit_log_format(ab, " null");
 		return;
 	}
 
@@ -106,12 +158,14 @@ void avc_dump_av(u16 tclass, u32 av)
 		}
 	}
 
-	printk(" {");
+	audit_log_format(ab, " {");
 	i = 0;
 	perm = 1;
 	while (perm < common_base) {
-		if (perm & av)
-			printk(" %s", common_pts[i]);
+		if (perm & av) {
+			audit_log_format(ab, " %s", common_pts[i]);
+			av &= ~perm;
+		}
 		i++;
 		perm <<= 1;
 	}
@@ -123,14 +177,20 @@ void avc_dump_av(u16 tclass, u32 av)
 				    (av_perm_to_string[i2].value == perm))
 					break;
 			}
-			if (i2 < ARRAY_SIZE(av_perm_to_string))
-				printk(" %s", av_perm_to_string[i2].name);
+			if (i2 < ARRAY_SIZE(av_perm_to_string)) {
+				audit_log_format(ab, " %s",
+						 av_perm_to_string[i2].name);
+				av &= ~perm;
+			}
 		}
 		i++;
 		perm <<= 1;
 	}
 
-	printk(" }");
+	if (av)
+		audit_log_format(ab, " 0x%x", av);
+
+	audit_log_format(ab, " }");
 }
 
 /**
@@ -139,7 +199,7 @@ void avc_dump_av(u16 tclass, u32 av)
  * @tsid: target security identifier
  * @tclass: target security class
  */
-void avc_dump_query(u32 ssid, u32 tsid, u16 tclass)
+void avc_dump_query(struct audit_buffer *ab, u32 ssid, u32 tsid, u16 tclass)
 {
 	int rc;
 	char *scontext;
@@ -147,20 +207,20 @@ void avc_dump_query(u32 ssid, u32 tsid, u16 tclass)
 
  	rc = security_sid_to_context(ssid, &scontext, &scontext_len);
 	if (rc)
-		printk("ssid=%d", ssid);
+		audit_log_format(ab, "ssid=%d", ssid);
 	else {
-		printk("scontext=%s", scontext);
+		audit_log_format(ab, "scontext=%s", scontext);
 		kfree(scontext);
 	}
 
 	rc = security_sid_to_context(tsid, &scontext, &scontext_len);
 	if (rc)
-		printk(" tsid=%d", tsid);
+		audit_log_format(ab, " tsid=%d", tsid);
 	else {
-		printk(" tcontext=%s", scontext);
+		audit_log_format(ab, " tcontext=%s", scontext);
 		kfree(scontext);
 	}
-	printk(" tclass=%s", class_to_string[tclass]);
+	audit_log_format(ab, " tclass=%s", class_to_string[tclass]);
 }
 
 /**
@@ -168,170 +228,163 @@ void avc_dump_query(u32 ssid, u32 tsid, u16 tclass)
  *
  * Initialize the access vector cache.
  */
-void avc_init(void)
+void __init avc_init(void)
 {
-	struct avc_node	*new;
 	int i;
 
-	for (i = 0; i < AVC_NSTATS; i++)
-		avc_cache_stats[i] = 0;
-
-	for (i = 0; i < AVC_CACHE_SLOTS; i++)
-		avc_cache.slots[i] = 0;
-	avc_cache.lru_hint = 0;
-	avc_cache.active_nodes = 0;
-	avc_cache.latest_notif = 0;
-
-	for (i = 0; i < AVC_CACHE_MAXNODES; i++) {
-		new = kmalloc(sizeof(*new), GFP_ATOMIC);
-		if (!new) {
-			printk(KERN_WARNING "avc:  only able to allocate "
-			       "%d entries\n", i);
-			break;
-		}
-		memset(new, 0, sizeof(*new));
-		new->next = avc_node_freelist;
-		avc_node_freelist = new;
+	for (i = 0; i < AVC_CACHE_SLOTS; i++) {
+		INIT_LIST_HEAD(&avc_cache.slots[i]);
+		spin_lock_init(&avc_cache.slots_lock[i]);
 	}
+	atomic_set(&avc_cache.active_nodes, 0);
+	atomic_set(&avc_cache.lru_hint, 0);
 
-	avc_audit_buffer = (char *)__get_free_page(GFP_ATOMIC);
-	if (!avc_audit_buffer)
-		panic("AVC:  unable to allocate audit buffer\n");
+	avc_node_cachep = kmem_cache_create("avc_node", sizeof(struct avc_node),
+					     0, SLAB_PANIC, NULL, NULL);
 
-	avc_level_string[1] = '0' + avc_log_level;
+	audit_log(current->audit_context, "AVC INITIALIZED\n");
 }
 
-#if 0
-static void avc_hash_eval(char *tag)
+int avc_get_hash_stats(char *page)
 {
 	int i, chain_len, max_chain_len, slots_used;
 	struct avc_node *node;
-	unsigned long flags;
 
-	spin_lock_irqsave(&avc_lock,flags);
+	rcu_read_lock();
 
 	slots_used = 0;
 	max_chain_len = 0;
 	for (i = 0; i < AVC_CACHE_SLOTS; i++) {
-		node = avc_cache.slots[i];
-		if (node) {
+		if (!list_empty(&avc_cache.slots[i])) {
 			slots_used++;
 			chain_len = 0;
-			while (node) {
+			list_for_each_entry_rcu(node, &avc_cache.slots[i], list)
 				chain_len++;
-				node = node->next;
-			}
 			if (chain_len > max_chain_len)
 				max_chain_len = chain_len;
 		}
 	}
 
-	spin_unlock_irqrestore(&avc_lock,flags);
+	rcu_read_unlock();
 
-	printk(KERN_INFO "\n");
-	printk(KERN_INFO "%s avc:  %d entries and %d/%d buckets used, longest "
-	       "chain length %d\n", tag, avc_cache.active_nodes, slots_used,
-	       AVC_CACHE_SLOTS, max_chain_len);
+	return scnprintf(page, PAGE_SIZE, "entries: %d\nbuckets used: %d/%d\n"
+			 "longest chain: %d\n",
+			 atomic_read(&avc_cache.active_nodes),
+			 slots_used, AVC_CACHE_SLOTS, max_chain_len);
 }
-#else
-static inline void avc_hash_eval(char *tag)
-{ }
-#endif
 
-static inline struct avc_node *avc_reclaim_node(void)
+static void avc_node_free(struct rcu_head *rhead)
 {
-	struct avc_node *prev, *cur;
-	int hvalue, try;
+	struct avc_node *node = container_of(rhead, struct avc_node, rhead);
+	kmem_cache_free(avc_node_cachep, node);
+	avc_cache_stats_incr(frees);
+}
 
-	hvalue = avc_cache.lru_hint;
-	for (try = 0; try < 2; try++) {
-		do {
-			prev = NULL;
-			cur = avc_cache.slots[hvalue];
-			while (cur) {
-				if (!cur->ae.used)
-					goto found;
+static void avc_node_delete(struct avc_node *node)
+{
+	list_del_rcu(&node->list);
+	call_rcu(&node->rhead, avc_node_free);
+	atomic_dec(&avc_cache.active_nodes);
+}
 
-				cur->ae.used = 0;
+static void avc_node_kill(struct avc_node *node)
+{
+	kmem_cache_free(avc_node_cachep, node);
+	avc_cache_stats_incr(frees);
+	atomic_dec(&avc_cache.active_nodes);
+}
 
-				prev = cur;
-				cur = cur->next;
+static void avc_node_replace(struct avc_node *new, struct avc_node *old)
+{
+	list_replace_rcu(&old->list, &new->list);
+	call_rcu(&old->rhead, avc_node_free);
+	atomic_dec(&avc_cache.active_nodes);
+}
+
+static inline int avc_reclaim_node(void)
+{
+	struct avc_node *node;
+	int hvalue, try, ecx;
+	unsigned long flags;
+
+	for (try = 0, ecx = 0; try < AVC_CACHE_SLOTS; try++ ) {
+		hvalue = atomic_inc_return(&avc_cache.lru_hint) & (AVC_CACHE_SLOTS - 1);
+
+		if (!spin_trylock_irqsave(&avc_cache.slots_lock[hvalue], flags))
+			continue;
+
+		list_for_each_entry(node, &avc_cache.slots[hvalue], list) {
+			if (atomic_dec_and_test(&node->ae.used)) {
+				/* Recently Unused */
+				avc_node_delete(node);
+				avc_cache_stats_incr(reclaims);
+				ecx++;
+				if (ecx >= AVC_CACHE_RECLAIM) {
+					spin_unlock_irqrestore(&avc_cache.slots_lock[hvalue], flags);
+					goto out;
+				}
 			}
-			hvalue = (hvalue + 1) & (AVC_CACHE_SLOTS - 1);
-		} while (hvalue != avc_cache.lru_hint);
+		}
+		spin_unlock_irqrestore(&avc_cache.slots_lock[hvalue], flags);
 	}
-
-	panic("avc_reclaim_node");
-
-found:
-	avc_cache.lru_hint = hvalue;
-
-	if (prev == NULL)
-		avc_cache.slots[hvalue] = cur->next;
-	else
-		prev->next = cur->next;
-
-	return cur;
+out:
+	return ecx;
 }
 
-static inline struct avc_node *avc_claim_node(u32 ssid,
-                                              u32 tsid, u16 tclass)
+static struct avc_node *avc_alloc_node(void)
 {
-	struct avc_node *new;
-	int hvalue;
+	struct avc_node *node;
 
-	hvalue = avc_hash(ssid, tsid, tclass);
-	if (avc_node_freelist) {
-		new = avc_node_freelist;
-		avc_node_freelist = avc_node_freelist->next;
-		avc_cache.active_nodes++;
-	} else {
-		new = avc_reclaim_node();
-		if (!new)
-			goto out;
-	}
+	node = kmem_cache_alloc(avc_node_cachep, SLAB_ATOMIC);
+	if (!node)
+		goto out;
 
-	new->ae.used = 1;
-	new->ae.ssid = ssid;
-	new->ae.tsid = tsid;
-	new->ae.tclass = tclass;
-	new->next = avc_cache.slots[hvalue];
-	avc_cache.slots[hvalue] = new;
+	memset(node, 0, sizeof(*node));
+	INIT_RCU_HEAD(&node->rhead);
+	INIT_LIST_HEAD(&node->list);
+	atomic_set(&node->ae.used, 1);
+	avc_cache_stats_incr(allocations);
+
+	if (atomic_inc_return(&avc_cache.active_nodes) > avc_cache_threshold)
+		avc_reclaim_node();
 
 out:
-	return new;
+	return node;
 }
 
-static inline struct avc_node *avc_search_node(u32 ssid, u32 tsid,
-                                               u16 tclass, int *probes)
+static void avc_node_populate(struct avc_node *node, u32 ssid, u32 tsid, u16 tclass, struct avc_entry *ae)
 {
-	struct avc_node *cur;
+	node->ae.ssid = ssid;
+	node->ae.tsid = tsid;
+	node->ae.tclass = tclass;
+	memcpy(&node->ae.avd, &ae->avd, sizeof(node->ae.avd));
+}
+
+static inline struct avc_node *avc_search_node(u32 ssid, u32 tsid, u16 tclass)
+{
+	struct avc_node *node, *ret = NULL;
 	int hvalue;
-	int tprobes = 1;
 
 	hvalue = avc_hash(ssid, tsid, tclass);
-	cur = avc_cache.slots[hvalue];
-	while (cur != NULL &&
-	       (ssid != cur->ae.ssid ||
-		tclass != cur->ae.tclass ||
-		tsid != cur->ae.tsid)) {
-		tprobes++;
-		cur = cur->next;
+	list_for_each_entry_rcu(node, &avc_cache.slots[hvalue], list) {
+		if (ssid == node->ae.ssid &&
+		    tclass == node->ae.tclass &&
+		    tsid == node->ae.tsid) {
+			ret = node;
+			break;
+		}
 	}
 
-	if (cur == NULL) {
+	if (ret == NULL) {
 		/* cache miss */
 		goto out;
 	}
 
 	/* cache hit */
-	if (probes)
-		*probes = tprobes;
-
-	cur->ae.used = 1;
-
+	if (atomic_read(&ret->ae.used) != 1)
+		atomic_set(&ret->ae.used, 1);
 out:
-	return cur;
+	return ret;
 }
 
 /**
@@ -340,36 +393,52 @@ out:
  * @tsid: target security identifier
  * @tclass: target security class
  * @requested: requested permissions, interpreted based on @tclass
- * @aeref:  AVC entry reference
  *
  * Look up an AVC entry that is valid for the
  * @requested permissions between the SID pair
  * (@ssid, @tsid), interpreting the permissions
  * based on @tclass.  If a valid AVC entry exists,
- * then this function updates @aeref to refer to the
- * entry and returns %0. Otherwise, this function
- * returns -%ENOENT.
+ * then this function return the avc_node.
+ * Otherwise, this function returns NULL.
  */
-int avc_lookup(u32 ssid, u32 tsid, u16 tclass,
-               u32 requested, struct avc_entry_ref *aeref)
+static struct avc_node *avc_lookup(u32 ssid, u32 tsid, u16 tclass, u32 requested)
 {
 	struct avc_node *node;
-	int probes, rc = 0;
 
-	avc_cache_stats_incr(AVC_CAV_LOOKUPS);
-	node = avc_search_node(ssid, tsid, tclass,&probes);
+	avc_cache_stats_incr(lookups);
+	node = avc_search_node(ssid, tsid, tclass);
 
 	if (node && ((node->ae.avd.decided & requested) == requested)) {
-		avc_cache_stats_incr(AVC_CAV_HITS);
-		avc_cache_stats_add(AVC_CAV_PROBES,probes);
-		aeref->ae = &node->ae;
+		avc_cache_stats_incr(hits);
 		goto out;
 	}
 
-	avc_cache_stats_incr(AVC_CAV_MISSES);
-	rc = -ENOENT;
+	node = NULL;
+	avc_cache_stats_incr(misses);
 out:
-	return rc;
+	return node;
+}
+
+static int avc_latest_notif_update(int seqno, int is_insert)
+{
+	int ret = 0;
+	static DEFINE_SPINLOCK(notif_lock);
+	unsigned long flag;
+
+	spin_lock_irqsave(&notif_lock, flag);
+	if (is_insert) {
+		if (seqno < avc_cache.latest_notif) {
+			printk(KERN_WARNING "avc:  seqno %d < latest_notif %d\n",
+			       seqno, avc_cache.latest_notif);
+			ret = -EAGAIN;
+		}
+	} else {
+		if (seqno > avc_cache.latest_notif)
+			avc_cache.latest_notif = seqno;
+	}
+	spin_unlock_irqrestore(&notif_lock, flag);
+
+	return ret;
 }
 
 /**
@@ -378,7 +447,6 @@ out:
  * @tsid: target security identifier
  * @tclass: target security class
  * @ae: AVC entry
- * @aeref:  AVC entry reference
  *
  * Insert an AVC entry for the SID pair
  * (@ssid, @tsid) and class @tclass.
@@ -387,97 +455,58 @@ out:
  * response to a security_compute_av() call.  If the
  * sequence number @ae->avd.seqno is not less than the latest
  * revocation notification, then the function copies
- * the access vectors into a cache entry, updates
- * @aeref to refer to the entry, and returns %0.
- * Otherwise, this function returns -%EAGAIN.
+ * the access vectors into a cache entry, returns
+ * avc_node inserted. Otherwise, this function returns NULL.
  */
-int avc_insert(u32 ssid, u32 tsid, u16 tclass,
-               struct avc_entry *ae, struct avc_entry_ref *aeref)
+static struct avc_node *avc_insert(u32 ssid, u32 tsid, u16 tclass, struct avc_entry *ae)
 {
-	struct avc_node *node;
-	int rc = 0;
+	struct avc_node *pos, *node = NULL;
+	int hvalue;
+	unsigned long flag;
 
-	if (ae->avd.seqno < avc_cache.latest_notif) {
-		printk(KERN_WARNING "avc:  seqno %d < latest_notif %d\n",
-		       ae->avd.seqno, avc_cache.latest_notif);
-		rc = -EAGAIN;
+	if (avc_latest_notif_update(ae->avd.seqno, 1))
 		goto out;
-	}
 
-	node = avc_claim_node(ssid, tsid, tclass);
-	if (!node) {
-		rc = -ENOMEM;
-		goto out;
-	}
+	node = avc_alloc_node();
+	if (node) {
+		hvalue = avc_hash(ssid, tsid, tclass);
+		avc_node_populate(node, ssid, tsid, tclass, ae);
 
-	node->ae.avd.allowed = ae->avd.allowed;
-	node->ae.avd.decided = ae->avd.decided;
-	node->ae.avd.auditallow = ae->avd.auditallow;
-	node->ae.avd.auditdeny = ae->avd.auditdeny;
-	node->ae.avd.seqno = ae->avd.seqno;
-	aeref->ae = &node->ae;
+		spin_lock_irqsave(&avc_cache.slots_lock[hvalue], flag);
+		list_for_each_entry(pos, &avc_cache.slots[hvalue], list) {
+			if (pos->ae.ssid == ssid &&
+			    pos->ae.tsid == tsid &&
+			    pos->ae.tclass == tclass) {
+			    	avc_node_replace(node, pos);
+				goto found;
+			}
+		}
+		list_add_rcu(&node->list, &avc_cache.slots[hvalue]);
+found:
+		spin_unlock_irqrestore(&avc_cache.slots_lock[hvalue], flag);
+	}
 out:
-	return rc;
+	return node;
 }
 
-static inline void avc_print_ipv4_addr(u32 addr, u16 port, char *name1, char *name2)
+static inline void avc_print_ipv6_addr(struct audit_buffer *ab,
+				       struct in6_addr *addr, u16 port,
+				       char *name1, char *name2)
+{
+	if (!ipv6_addr_any(addr))
+		audit_log_format(ab, " %s=%04x:%04x:%04x:%04x:%04x:"
+				 "%04x:%04x:%04x", name1, NIP6(*addr));
+	if (port)
+		audit_log_format(ab, " %s=%d", name2, ntohs(port));
+}
+
+static inline void avc_print_ipv4_addr(struct audit_buffer *ab, u32 addr,
+				       u16 port, char *name1, char *name2)
 {
 	if (addr)
-		printk(" %s=%d.%d.%d.%d", name1, NIPQUAD(addr));
+		audit_log_format(ab, " %s=%d.%d.%d.%d", name1, NIPQUAD(addr));
 	if (port)
-		printk(" %s=%d", name2, ntohs(port));
-}
-
-/*
- * Copied from net/core/utils.c:net_ratelimit and modified for
- * use by the AVC audit facility.
- */
-#define AVC_MSG_COST	5*HZ
-#define AVC_MSG_BURST	10*5*HZ
-
-/*
- * This enforces a rate limit: not more than one kernel message
- * every 5secs to make a denial-of-service attack impossible.
- */
-static int avc_ratelimit(void)
-{
-	static spinlock_t ratelimit_lock = SPIN_LOCK_UNLOCKED;
-	static unsigned long toks = 10*5*HZ;
-	static unsigned long last_msg;
-	static int missed, rc = 0;
-	unsigned long flags;
-	unsigned long now = jiffies;
-
-	spin_lock_irqsave(&ratelimit_lock, flags);
-	toks += now - last_msg;
-	last_msg = now;
-	if (toks > AVC_MSG_BURST)
-		toks = AVC_MSG_BURST;
-	if (toks >= AVC_MSG_COST) {
-		int lost = missed;
-		missed = 0;
-		toks -= AVC_MSG_COST;
-		spin_unlock_irqrestore(&ratelimit_lock, flags);
-		if (lost)
-			printk(KERN_WARNING "AVC: %d messages suppressed.\n",
-			       lost);
-		rc = 1;
-		goto out;
-	}
-	missed++;
-	spin_unlock_irqrestore(&ratelimit_lock, flags);
-out:
-	return rc;
-}
-
-static inline int check_avc_ratelimit(void)
-{
-	if (selinux_enforcing)
-		return avc_ratelimit();
-	else {
-		/* If permissive, then never suppress messages. */
-		return 1;
-	}
+		audit_log_format(ab, " %s=%d", name2, ntohs(port));
 }
 
 /**
@@ -505,9 +534,8 @@ void avc_audit(u32 ssid, u32 tsid,
 {
 	struct task_struct *tsk = current;
 	struct inode *inode = NULL;
-	char *p;
 	u32 denied, audited;
-	unsigned long flags;
+	struct audit_buffer *ab;
 
 	denied = requested & ~avd->allowed;
 	if (denied) {
@@ -522,22 +550,18 @@ void avc_audit(u32 ssid, u32 tsid,
 			return;
 	}
 
-	if (!check_avc_ratelimit())
-		return;
-
-	/* prevent overlapping printks */
-	spin_lock_irqsave(&avc_log_lock,flags);
-
-	printk("%s\n", avc_level_string);
-	printk("%savc:  %s ", avc_level_string, denied ? "denied" : "granted");
-	avc_dump_av(tclass,audited);
-	printk(" for ");
+	ab = audit_log_start(current->audit_context);
+	if (!ab)
+		return;		/* audit_panic has been called */
+	audit_log_format(ab, "avc:  %s ", denied ? "denied" : "granted");
+	avc_dump_av(ab, tclass,audited);
+	audit_log_format(ab, " for ");
 	if (a && a->tsk)
 		tsk = a->tsk;
 	if (tsk && tsk->pid) {
 		struct mm_struct *mm;
 		struct vm_area_struct *vma;
-		printk(" pid=%d", tsk->pid);
+		audit_log_format(ab, " pid=%d", tsk->pid);
 		if (tsk == current)
 			mm = current->mm;
 		else
@@ -548,134 +572,138 @@ void avc_audit(u32 ssid, u32 tsid,
 				while (vma) {
 					if ((vma->vm_flags & VM_EXECUTABLE) &&
 					    vma->vm_file) {
-						p = d_path(vma->vm_file->f_dentry,
-							   vma->vm_file->f_vfsmnt,
-							   avc_audit_buffer,
-							   PAGE_SIZE);
-						printk(" exe=%s", p);
+						audit_log_d_path(ab, "exe=",
+							vma->vm_file->f_dentry,
+							vma->vm_file->f_vfsmnt);
 						break;
 					}
 					vma = vma->vm_next;
 				}
 				up_read(&mm->mmap_sem);
+			} else {
+				audit_log_format(ab, " comm=%s", tsk->comm);
 			}
 			if (tsk != current)
 				mmput(mm);
 		} else {
-			printk(" comm=%s", tsk->comm);
+			audit_log_format(ab, " comm=%s", tsk->comm);
 		}
 	}
 	if (a) {
 		switch (a->type) {
 		case AVC_AUDIT_DATA_IPC:
-			printk(" key=%d", a->u.ipc_id);
+			audit_log_format(ab, " key=%d", a->u.ipc_id);
 			break;
 		case AVC_AUDIT_DATA_CAP:
-			printk(" capability=%d", a->u.cap);
+			audit_log_format(ab, " capability=%d", a->u.cap);
 			break;
 		case AVC_AUDIT_DATA_FS:
 			if (a->u.fs.dentry) {
+				struct dentry *dentry = a->u.fs.dentry;
 				if (a->u.fs.mnt) {
-					p = d_path(a->u.fs.dentry,
-						   a->u.fs.mnt,
-						   avc_audit_buffer,
-						   PAGE_SIZE);
-					if (p)
-						printk(" path=%s", p);
+					audit_log_d_path(ab, "path=", dentry,
+							a->u.fs.mnt);
+				} else {
+					audit_log_format(ab, " name=%s",
+							 dentry->d_name.name);
 				}
-				inode = a->u.fs.dentry->d_inode;
+				inode = dentry->d_inode;
 			} else if (a->u.fs.inode) {
+				struct dentry *dentry;
 				inode = a->u.fs.inode;
+				dentry = d_find_alias(inode);
+				if (dentry) {
+					audit_log_format(ab, " name=%s",
+							 dentry->d_name.name);
+					dput(dentry);
+				}
 			}
 			if (inode)
-				printk(" dev=%s ino=%ld",
-				       inode->i_sb->s_id, inode->i_ino);
+				audit_log_format(ab, " dev=%s ino=%ld",
+						 inode->i_sb->s_id,
+						 inode->i_ino);
 			break;
 		case AVC_AUDIT_DATA_NET:
 			if (a->u.net.sk) {
 				struct sock *sk = a->u.net.sk;
 				struct unix_sock *u;
-				struct inet_opt *inet;
+				int len = 0;
+				char *p = NULL;
 
 				switch (sk->sk_family) {
-				case AF_INET:
-					inet = inet_sk(sk);
-					avc_print_ipv4_addr(inet->rcv_saddr,
-					                    inet->sport,
-					                    "laddr", "lport");
-					avc_print_ipv4_addr(inet->daddr,
-					                    inet->dport,
-					                    "faddr", "fport");
+				case AF_INET: {
+					struct inet_sock *inet = inet_sk(sk);
+
+					avc_print_ipv4_addr(ab, inet->rcv_saddr,
+							    inet->sport,
+							    "laddr", "lport");
+					avc_print_ipv4_addr(ab, inet->daddr,
+							    inet->dport,
+							    "faddr", "fport");
 					break;
+				}
+				case AF_INET6: {
+					struct inet_sock *inet = inet_sk(sk);
+					struct ipv6_pinfo *inet6 = inet6_sk(sk);
+
+					avc_print_ipv6_addr(ab, &inet6->rcv_saddr,
+							    inet->sport,
+							    "laddr", "lport");
+					avc_print_ipv6_addr(ab, &inet6->daddr,
+							    inet->dport,
+							    "faddr", "fport");
+					break;
+				}
 				case AF_UNIX:
 					u = unix_sk(sk);
 					if (u->dentry) {
-						p = d_path(u->dentry,
-							   u->mnt,
-							   avc_audit_buffer,
-							   PAGE_SIZE);
-						printk(" path=%s", p);
-					} else if (u->addr) {
-						p = avc_audit_buffer;
-						memcpy(p,
-						       u->addr->name->sun_path,
-						       u->addr->len-sizeof(short));
-						if (*p == 0) {
-							*p = '@';
-							p += u->addr->len-sizeof(short);
-							*p = 0;
-						}
-						printk(" path=%s",
-						       avc_audit_buffer);
+						audit_log_d_path(ab, "path=",
+							u->dentry, u->mnt);
+						break;
 					}
+					if (!u->addr)
+						break;
+					len = u->addr->len-sizeof(short);
+					p = &u->addr->name->sun_path[0];
+					if (*p)
+						audit_log_format(ab,
+							"path=%*.*s", len,
+							len, p);
+					else
+						audit_log_format(ab,
+							"path=@%*.*s", len-1,
+							len-1, p+1);
 					break;
 				}
 			}
-			if (a->u.net.daddr) {
-				printk(" daddr=%d.%d.%d.%d",
-				       NIPQUAD(a->u.net.daddr));
-				if (a->u.net.port)
-					printk(" dest=%d", a->u.net.port);
-			} else if (a->u.net.port)
-				printk(" port=%d", a->u.net.port);
-			if (a->u.net.skb) {
-				struct sk_buff *skb = a->u.net.skb;
-
-				if ((skb->protocol == htons(ETH_P_IP)) &&
-				     skb->nh.iph) {
-					u16 source = 0, dest = 0;
-					u8  protocol = skb->nh.iph->protocol;
-
-
-					if (protocol == IPPROTO_TCP &&
-					    skb->h.th) {
-						source = skb->h.th->source;
-						dest = skb->h.th->dest;
-					}
-					if (protocol == IPPROTO_UDP &&
-					    skb->h.uh) {
-						source = skb->h.uh->source;
-						dest = skb->h.uh->dest;
-					}
-
-					avc_print_ipv4_addr(skb->nh.iph->saddr,
-					                    source,
-					                    "saddr", "source");
-					avc_print_ipv4_addr(skb->nh.iph->daddr,
-					                    dest,
-					                    "daddr", "dest");
-				}
+			
+			switch (a->u.net.family) {
+			case AF_INET:
+				avc_print_ipv4_addr(ab, a->u.net.v4info.saddr,
+						    a->u.net.sport,
+						    "saddr", "src");
+				avc_print_ipv4_addr(ab, a->u.net.v4info.daddr,
+						    a->u.net.dport,
+						    "daddr", "dest");
+				break;
+			case AF_INET6:
+				avc_print_ipv6_addr(ab, &a->u.net.v6info.saddr,
+						    a->u.net.sport,
+						    "saddr", "src");
+				avc_print_ipv6_addr(ab, &a->u.net.v6info.daddr,
+						    a->u.net.dport,
+						    "daddr", "dest");
+				break;
 			}
 			if (a->u.net.netif)
-				printk(" netif=%s", a->u.net.netif);
+				audit_log_format(ab, " netif=%s",
+					a->u.net.netif);
 			break;
 		}
 	}
-	printk(" ");
-	avc_dump_query(ssid, tsid, tclass);
-	printk("\n");
-
-	spin_unlock_irqrestore(&avc_log_lock,flags);
+	audit_log_format(ab, " ");
+	avc_dump_query(ab, ssid, tsid, tclass);
+	audit_log_end(ab);
 }
 
 /**
@@ -724,8 +752,54 @@ static inline int avc_sidcmp(u32 x, u32 y)
 	return (x == y || x == SECSID_WILD || y == SECSID_WILD);
 }
 
-static inline void avc_update_node(u32 event, struct avc_node *node, u32 perms)
+/**
+ * avc_update_node Update an AVC entry
+ * @event : Updating event
+ * @perms : Permission mask bits
+ * @ssid,@tsid,@tclass : identifier of an AVC entry
+ *
+ * if a valid AVC entry doesn't exist,this function returns -ENOENT.
+ * if kmalloc() called internal returns NULL, this function returns -ENOMEM.
+ * otherwise, this function update the AVC entry. The original AVC-entry object
+ * will release later by RCU.
+ */
+static int avc_update_node(u32 event, u32 perms, u32 ssid, u32 tsid, u16 tclass)
 {
+	int hvalue, rc = 0;
+	unsigned long flag;
+	struct avc_node *pos, *node, *orig = NULL;
+
+	node = avc_alloc_node();
+	if (!node) {
+		rc = -ENOMEM;
+		goto out;
+	}
+
+	/* Lock the target slot */
+	hvalue = avc_hash(ssid, tsid, tclass);
+	spin_lock_irqsave(&avc_cache.slots_lock[hvalue], flag);
+
+	list_for_each_entry(pos, &avc_cache.slots[hvalue], list){
+		if ( ssid==pos->ae.ssid &&
+		     tsid==pos->ae.tsid &&
+		     tclass==pos->ae.tclass ){
+			orig = pos;
+			break;
+		}
+	}
+
+	if (!orig) {
+		rc = -ENOENT;
+		avc_node_kill(node);
+		goto out_unlock;
+	}
+
+	/*
+	 * Copy and replace original node.
+	 */
+
+	avc_node_populate(node, ssid, tsid, tclass, &orig->ae);
+
 	switch (event) {
 	case AVC_CALLBACK_GRANT:
 		node->ae.avd.allowed |= perms;
@@ -747,6 +821,11 @@ static inline void avc_update_node(u32 event, struct avc_node *node, u32 perms)
 		node->ae.avd.auditdeny &= ~perms;
 		break;
 	}
+	avc_node_replace(node, orig);
+out_unlock:
+	spin_unlock_irqrestore(&avc_cache.slots_lock[hvalue], flag);
+out:
+	return rc;
 }
 
 static int avc_update_cache(u32 event, u32 ssid, u32 tsid,
@@ -754,31 +833,27 @@ static int avc_update_cache(u32 event, u32 ssid, u32 tsid,
 {
 	struct avc_node *node;
 	int i;
-	unsigned long flags;
 
-	spin_lock_irqsave(&avc_lock,flags);
+	rcu_read_lock();
 
 	if (ssid == SECSID_WILD || tsid == SECSID_WILD) {
 		/* apply to all matching nodes */
 		for (i = 0; i < AVC_CACHE_SLOTS; i++) {
-			for (node = avc_cache.slots[i]; node;
-			     node = node->next) {
+			list_for_each_entry_rcu(node, &avc_cache.slots[i], list) {
 				if (avc_sidcmp(ssid, node->ae.ssid) &&
 				    avc_sidcmp(tsid, node->ae.tsid) &&
-				    tclass == node->ae.tclass) {
-					avc_update_node(event,node,perms);
+				    tclass == node->ae.tclass ) {
+					avc_update_node(event, perms, node->ae.ssid,
+							node->ae.tsid, node->ae.tclass);
 				}
 			}
 		}
 	} else {
 		/* apply to one node */
-		node = avc_search_node(ssid, tsid, tclass, 0);
-		if (node) {
-			avc_update_node(event,node,perms);
-		}
+		avc_update_node(event, perms, ssid, tsid, tclass);
 	}
 
-	spin_unlock_irqrestore(&avc_lock,flags);
+	rcu_read_unlock();
 
 	return 0;
 }
@@ -790,7 +865,6 @@ static int avc_control(u32 event, u32 ssid, u32 tsid,
 	struct avc_callback_node *c;
 	u32 tretained = 0, cretained = 0;
 	int rc = 0;
-	unsigned long flags;
 
 	/*
 	 * try_revoke only removes permissions from the cache
@@ -825,10 +899,7 @@ static int avc_control(u32 event, u32 ssid, u32 tsid,
 		*out_retained = tretained;
 	}
 
-	spin_lock_irqsave(&avc_lock,flags);
-	if (seqno > avc_cache.latest_notif)
-		avc_cache.latest_notif = seqno;
-	spin_unlock_irqrestore(&avc_lock,flags);
+	avc_latest_notif_update(seqno, 0);
 
 out:
 	return rc;
@@ -846,7 +917,7 @@ int avc_ss_grant(u32 ssid, u32 tsid, u16 tclass,
                  u32 perms, u32 seqno)
 {
 	return avc_control(AVC_CALLBACK_GRANT,
-			   ssid, tsid, tclass, perms, seqno, 0);
+			   ssid, tsid, tclass, perms, seqno, NULL);
 }
 
 /**
@@ -884,7 +955,7 @@ int avc_ss_revoke(u32 ssid, u32 tsid, u16 tclass,
                   u32 perms, u32 seqno)
 {
 	return avc_control(AVC_CALLBACK_REVOKE,
-			   ssid, tsid, tclass, perms, seqno, 0);
+			   ssid, tsid, tclass, perms, seqno, NULL);
 }
 
 /**
@@ -895,49 +966,26 @@ int avc_ss_reset(u32 seqno)
 {
 	struct avc_callback_node *c;
 	int i, rc = 0;
-	struct avc_node *node, *tmp;
-	unsigned long flags;
-
-	avc_hash_eval("reset");
-
-	spin_lock_irqsave(&avc_lock,flags);
+	unsigned long flag;
+	struct avc_node *node;
 
 	for (i = 0; i < AVC_CACHE_SLOTS; i++) {
-		node = avc_cache.slots[i];
-		while (node) {
-			tmp = node;
-			node = node->next;
-			tmp->ae.ssid = tmp->ae.tsid = SECSID_NULL;
-			tmp->ae.tclass = SECCLASS_NULL;
-			tmp->ae.avd.allowed = tmp->ae.avd.decided = 0;
-			tmp->ae.avd.auditallow = tmp->ae.avd.auditdeny = 0;
-			tmp->ae.used = 0;
-			tmp->next = avc_node_freelist;
-			avc_node_freelist = tmp;
-			avc_cache.active_nodes--;
-		}
-		avc_cache.slots[i] = 0;
+		spin_lock_irqsave(&avc_cache.slots_lock[i], flag);
+		list_for_each_entry(node, &avc_cache.slots[i], list)
+			avc_node_delete(node);
+		spin_unlock_irqrestore(&avc_cache.slots_lock[i], flag);
 	}
-	avc_cache.lru_hint = 0;
-
-	spin_unlock_irqrestore(&avc_lock,flags);
-
-	for (i = 0; i < AVC_NSTATS; i++)
-		avc_cache_stats[i] = 0;
 
 	for (c = avc_callbacks; c; c = c->next) {
 		if (c->events & AVC_CALLBACK_RESET) {
 			rc = c->callback(AVC_CALLBACK_RESET,
-					 0, 0, 0, 0, 0);
+					 0, 0, 0, 0, NULL);
 			if (rc)
 				goto out;
 		}
 	}
 
-	spin_lock_irqsave(&avc_lock,flags);
-	if (seqno > avc_cache.latest_notif)
-		avc_cache.latest_notif = seqno;
-	spin_unlock_irqrestore(&avc_lock,flags);
+	avc_latest_notif_update(seqno, 0);
 out:
 	return rc;
 }
@@ -956,10 +1004,10 @@ int avc_ss_set_auditallow(u32 ssid, u32 tsid, u16 tclass,
 {
 	if (enable)
 		return avc_control(AVC_CALLBACK_AUDITALLOW_ENABLE,
-				   ssid, tsid, tclass, perms, seqno, 0);
+				   ssid, tsid, tclass, perms, seqno, NULL);
 	else
 		return avc_control(AVC_CALLBACK_AUDITALLOW_DISABLE,
-				   ssid, tsid, tclass, perms, seqno, 0);
+				   ssid, tsid, tclass, perms, seqno, NULL);
 }
 
 /**
@@ -976,10 +1024,10 @@ int avc_ss_set_auditdeny(u32 ssid, u32 tsid, u16 tclass,
 {
 	if (enable)
 		return avc_control(AVC_CALLBACK_AUDITDENY_ENABLE,
-				   ssid, tsid, tclass, perms, seqno, 0);
+				   ssid, tsid, tclass, perms, seqno, NULL);
 	else
 		return avc_control(AVC_CALLBACK_AUDITDENY_DISABLE,
-				   ssid, tsid, tclass, perms, seqno, 0);
+				   ssid, tsid, tclass, perms, seqno, NULL);
 }
 
 /**
@@ -988,14 +1036,12 @@ int avc_ss_set_auditdeny(u32 ssid, u32 tsid, u16 tclass,
  * @tsid: target security identifier
  * @tclass: target security class
  * @requested: requested permissions, interpreted based on @tclass
- * @aeref:  AVC entry reference
  * @avd: access vector decisions
  *
  * Check the AVC to determine whether the @requested permissions are granted
  * for the SID pair (@ssid, @tsid), interpreting the permissions
  * based on @tclass, and call the security server on a cache miss to obtain
- * a new decision and add it to the cache.  Update @aeref to refer to an AVC
- * entry with the resulting decisions, and return a copy of the decisions
+ * a new decision and add it to the cache.  Return a copy of the decisions
  * in @avd.  Return %0 if all @requested permissions are granted,
  * -%EACCES if any permissions are denied, or another -errno upon
  * other errors.  This function is typically called by avc_has_perm(),
@@ -1005,72 +1051,42 @@ int avc_ss_set_auditdeny(u32 ssid, u32 tsid, u16 tclass,
  */
 int avc_has_perm_noaudit(u32 ssid, u32 tsid,
                          u16 tclass, u32 requested,
-                         struct avc_entry_ref *aeref, struct av_decision *avd)
+                         struct av_decision *avd)
 {
-	struct avc_entry *ae;
+	struct avc_node *node;
+	struct avc_entry entry, *p_ae;
 	int rc = 0;
-	unsigned long flags;
-	struct avc_entry entry;
 	u32 denied;
-	struct avc_entry_ref ref;
 
-	if (!aeref) {
-		avc_entry_ref_init(&ref);
-		aeref = &ref;
+	rcu_read_lock();
+
+	node = avc_lookup(ssid, tsid, tclass, requested);
+	if (!node) {
+		rcu_read_unlock();
+		rc = security_compute_av(ssid,tsid,tclass,requested,&entry.avd);
+		if (rc)
+			goto out;
+		rcu_read_lock();
+		node = avc_insert(ssid,tsid,tclass,&entry);
 	}
 
-	spin_lock_irqsave(&avc_lock, flags);
-	avc_cache_stats_incr(AVC_ENTRY_LOOKUPS);
-	ae = aeref->ae;
-	if (ae) {
-		if (ae->ssid == ssid &&
-		    ae->tsid == tsid &&
-		    ae->tclass == tclass &&
-		    ((ae->avd.decided & requested) == requested)) {
-			avc_cache_stats_incr(AVC_ENTRY_HITS);
-			ae->used = 1;
-		} else {
-			avc_cache_stats_incr(AVC_ENTRY_DISCARDS);
-			ae = 0;
-		}
-	}
-
-	if (!ae) {
-		avc_cache_stats_incr(AVC_ENTRY_MISSES);
-		rc = avc_lookup(ssid, tsid, tclass, requested, aeref);
-		if (rc) {
-			spin_unlock_irqrestore(&avc_lock,flags);
-			rc = security_compute_av(ssid,tsid,tclass,requested,&entry.avd);
-			if (rc)
-				goto out;
-			spin_lock_irqsave(&avc_lock, flags);
-			rc = avc_insert(ssid,tsid,tclass,&entry,aeref);
-			if (rc) {
-				spin_unlock_irqrestore(&avc_lock,flags);
-				goto out;
-			}
-		}
-		ae = aeref->ae;
-	}
+	p_ae = node ? &node->ae : &entry;
 
 	if (avd)
-		memcpy(avd, &ae->avd, sizeof(*avd));
+		memcpy(avd, &p_ae->avd, sizeof(*avd));
 
-	denied = requested & ~(ae->avd.allowed);
+	denied = requested & ~(p_ae->avd.allowed);
 
 	if (!requested || denied) {
-		if (selinux_enforcing) {
-			spin_unlock_irqrestore(&avc_lock,flags);
+		if (selinux_enforcing)
 			rc = -EACCES;
-			goto out;
-		} else {
-			ae->avd.allowed |= requested;
-			spin_unlock_irqrestore(&avc_lock,flags);
-			goto out;
-		}
+		else
+			if (node)
+				avc_update_node(AVC_CALLBACK_GRANT,requested,
+						ssid,tsid,tclass);
 	}
 
-	spin_unlock_irqrestore(&avc_lock,flags);
+	rcu_read_unlock();
 out:
 	return rc;
 }
@@ -1081,37 +1097,23 @@ out:
  * @tsid: target security identifier
  * @tclass: target security class
  * @requested: requested permissions, interpreted based on @tclass
- * @aeref:  AVC entry reference
  * @auditdata: auxiliary audit data
  *
  * Check the AVC to determine whether the @requested permissions are granted
  * for the SID pair (@ssid, @tsid), interpreting the permissions
  * based on @tclass, and call the security server on a cache miss to obtain
- * a new decision and add it to the cache.  Update @aeref to refer to an AVC
- * entry with the resulting decisions.  Audit the granting or denial of
+ * a new decision and add it to the cache.  Audit the granting or denial of
  * permissions in accordance with the policy.  Return %0 if all @requested
  * permissions are granted, -%EACCES if any permissions are denied, or
  * another -errno upon other errors.
  */
 int avc_has_perm(u32 ssid, u32 tsid, u16 tclass,
-                 u32 requested, struct avc_entry_ref *aeref,
-                 struct avc_audit_data *auditdata)
+                 u32 requested, struct avc_audit_data *auditdata)
 {
 	struct av_decision avd;
 	int rc;
 
-	rc = avc_has_perm_noaudit(ssid, tsid, tclass, requested, aeref, &avd);
+	rc = avc_has_perm_noaudit(ssid, tsid, tclass, requested, &avd);
 	avc_audit(ssid, tsid, tclass, requested, &avd, rc, auditdata);
 	return rc;
 }
-
-static int __init avc_log_level_setup(char *str)
-{
-	avc_log_level = simple_strtol(str, NULL, 0);
-	if (avc_log_level > 7)
-		avc_log_level = 7;
-	return 1;
-}
-
-__setup("avc_log_level=", avc_log_level_setup);
-

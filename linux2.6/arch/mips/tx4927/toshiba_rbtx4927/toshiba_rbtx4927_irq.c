@@ -124,7 +124,6 @@ JP7 is not bus master -- do NOT use -- only 4 pci bus master's allowed -- SouthB
 #include <linux/timex.h>
 #include <asm/bootinfo.h>
 #include <asm/page.h>
-#include <asm/bootinfo.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/pci.h>
@@ -132,14 +131,13 @@ JP7 is not bus master -- do NOT use -- only 4 pci bus master's allowed -- SouthB
 #include <asm/ptrace.h>
 #include <asm/reboot.h>
 #include <asm/time.h>
-#include <linux/version.h>
 #include <linux/bootmem.h>
 #include <linux/blkdev.h>
 #ifdef CONFIG_RTC_DS1742
-#include <asm/rtc_ds1742.h>
+#include <linux/ds1742rtc.h>
 #endif
 #ifdef CONFIG_TOSHIBA_FPCIB0
-#include <asm/smsc_fdc37m81x.h>
+#include <asm/tx4927/smsc_fdc37m81x.h>
 #endif
 #include <asm/tx4927/toshiba_rbtx4927.h>
 
@@ -250,7 +248,7 @@ static void toshiba_rbtx4927_irq_isa_mask_and_ack(unsigned int irq);
 static void toshiba_rbtx4927_irq_isa_end(unsigned int irq);
 #endif
 
-static spinlock_t toshiba_rbtx4927_ioc_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(toshiba_rbtx4927_ioc_lock);
 
 
 #define TOSHIBA_RBTX4927_IOC_NAME "RBTX4927-IOC"
@@ -339,8 +337,8 @@ int toshiba_rbtx4927_irq_nested(int sw_irq)
 	return (sw_irq);
 }
 
-//#define TOSHIBA_RBTX4927_PIC_ACTION(s) { no_action, 0, 0, s, NULL, NULL }
-#define TOSHIBA_RBTX4927_PIC_ACTION(s) { no_action, SA_SHIRQ, 0, s, NULL, NULL }
+//#define TOSHIBA_RBTX4927_PIC_ACTION(s) { no_action, 0, CPU_MASK_NONE, s, NULL, NULL }
+#define TOSHIBA_RBTX4927_PIC_ACTION(s) { no_action, SA_SHIRQ, CPU_MASK_NONE, s, NULL, NULL }
 static struct irqaction toshiba_rbtx4927_irq_ioc_action =
 TOSHIBA_RBTX4927_PIC_ACTION(TOSHIBA_RBTX4927_IOC_NAME);
 #ifdef CONFIG_TOSHIBA_FPCIB0
@@ -667,11 +665,11 @@ static void toshiba_rbtx4927_irq_isa_end(unsigned int irq)
 #endif
 
 
-void __init init_IRQ(void)
+void __init arch_init_irq(void)
 {
 	extern void tx4927_irq_init(void);
 
-	cli();
+	local_irq_disable();
 
 	tx4927_irq_init();
 	toshiba_rbtx4927_irq_ioc_init();
@@ -680,13 +678,6 @@ void __init init_IRQ(void)
 		if (tx4927_using_backplane) {
 			toshiba_rbtx4927_irq_isa_init();
 		}
-	}
-#endif
-
-#ifdef CONFIG_PCI
-	{
-		extern void toshiba_rbtx4927_pci_irq_init(void);
-		toshiba_rbtx4927_pci_irq_init();
 	}
 #endif
 

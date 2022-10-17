@@ -130,6 +130,17 @@ decode_sattr(u32 *p, struct iattr *iap)
 		iap->ia_valid |= ATTR_MTIME | ATTR_MTIME_SET;
 		iap->ia_mtime.tv_sec = tmp;
 		iap->ia_mtime.tv_nsec = tmp1 * 1000; 
+		/*
+		 * Passing the invalid value useconds=1000000 for mtime
+		 * is a Sun convention for "set both mtime and atime to
+		 * current server time".  It's needed to make permissions
+		 * checks for the "touch" program across v2 mounts to
+		 * Solaris and Irix boxes work correctly. See description of
+		 * sattr in section 6.1 of "NFS Illustrated" by
+		 * Brent Callaghan, Addison-Wesley, ISBN 0-201-32750-5
+		 */
+		if (tmp1 == 1000000)
+			iap->ia_valid &= ~(ATTR_ATIME_SET|ATTR_MTIME_SET);
 	}
 	return p;
 }
@@ -223,7 +234,7 @@ int
 nfssvc_decode_readargs(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd_readargs *args)
 {
-	int len;
+	unsigned int len;
 	int v,pn;
 	if (!(p = decode_fh(p, &args->fh)))
 		return 0;
@@ -244,8 +255,8 @@ nfssvc_decode_readargs(struct svc_rqst *rqstp, u32 *p,
 		svc_take_page(rqstp);
 		args->vec[v].iov_base = page_address(rqstp->rq_respages[pn]);
 		args->vec[v].iov_len = len < PAGE_SIZE?len:PAGE_SIZE;
+		len -= args->vec[v].iov_len;
 		v++;
-		len -= PAGE_SIZE;
 	}
 	args->vlen = v;
 	return xdr_argsize_check(rqstp, p);
@@ -255,7 +266,7 @@ int
 nfssvc_decode_writeargs(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd_writeargs *args)
 {
-	int len;
+	unsigned int len;
 	int v;
 	if (!(p = decode_fh(p, &args->fh)))
 		return 0;
@@ -473,7 +484,7 @@ nfssvc_encode_entry(struct readdir_cd *ccd, const char *name,
 
 	slen = XDR_QUADLEN(namlen);
 	if ((buflen = cd->buflen - slen - 4) < 0) {
-		cd->common.err = nfserr_readdir_nospc;
+		cd->common.err = nfserr_toosmall;
 		return -EINVAL;
 	}
 	*p++ = xdr_one;				/* mark entry present */

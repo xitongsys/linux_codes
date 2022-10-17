@@ -8,6 +8,7 @@
  * published by the Free Software Foundation.
  */
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
 #include <linux/ioport.h>
@@ -21,7 +22,9 @@
 #include <linux/init.h>
 #include <linux/root_dev.h>
 #include <linux/cpu.h>
+#include <linux/interrupt.h>
 
+#include <asm/cpu.h>
 #include <asm/elf.h>
 #include <asm/hardware.h>
 #include <asm/io.h>
@@ -33,6 +36,7 @@
 
 #include <asm/mach/arch.h>
 #include <asm/mach/irq.h>
+#include <asm/mach/time.h>
 
 #ifndef MEM_SIZE
 #define MEM_SIZE	(16*1024*1024)
@@ -54,17 +58,26 @@ extern unsigned int mem_fclk_21285;
 extern void paging_init(struct meminfo *, struct machine_desc *desc);
 extern void convert_to_tag_list(struct tag *tags);
 extern void squash_mem_tags(struct tag *tag);
-extern void bootmem_init(struct meminfo *);
 extern void reboot_setup(char *str);
 extern int root_mountflags;
-extern int _stext, _text, _etext, _edata, _end;
+extern void _stext, _text, _etext, __data_start, _edata, _end;
 
 unsigned int processor_id;
 unsigned int __machine_arch_type;
+EXPORT_SYMBOL(__machine_arch_type);
+
 unsigned int system_rev;
+EXPORT_SYMBOL(system_rev);
+
 unsigned int system_serial_low;
+EXPORT_SYMBOL(system_serial_low);
+
 unsigned int system_serial_high;
+EXPORT_SYMBOL(system_serial_high);
+
 unsigned int elf_hwcap;
+EXPORT_SYMBOL(elf_hwcap);
+
 
 #ifdef MULTI_CPU
 struct processor processor;
@@ -80,8 +93,10 @@ struct cpu_cache_fns cpu_cache;
 #endif
 
 unsigned char aux_device_present;
+
 char elf_platform[ELF_PLATFORM_SIZE];
-char saved_command_line[COMMAND_LINE_SIZE];
+EXPORT_SYMBOL(elf_platform);
+
 unsigned long phys_initrd_start __initdata = 0;
 unsigned long phys_initrd_size __initdata = 0;
 
@@ -94,12 +109,14 @@ static char default_command_line[COMMAND_LINE_SIZE] __initdata = CONFIG_CMDLINE;
 static union { char c[4]; unsigned long l; } endian_test __initdata = { { 'l', '?', '?', 'b' } };
 #define ENDIANNESS ((char)endian_test.l)
 
+DEFINE_PER_CPU(struct cpuinfo_arm, cpu_data);
+
 /*
  * Standard memory resources
  */
 static struct resource mem_res[] = {
 	{ "Video RAM",   0,     0,     IORESOURCE_MEM			},
-	{ "Kernel code", 0,     0,     IORESOURCE_MEM			},
+	{ "Kernel text", 0,     0,     IORESOURCE_MEM			},
 	{ "Kernel data", 0,     0,     IORESOURCE_MEM			}
 };
 
@@ -132,7 +149,7 @@ static const char *cache_types[16] = {
 	"undefined 11",
 	"undefined 12",
 	"undefined 13",
-	"undefined 14",
+	"write-back",
 	"undefined 15",
 };
 
@@ -151,7 +168,7 @@ static const char *cache_clean[16] = {
 	"undefined 11",
 	"undefined 12",
 	"undefined 13",
-	"undefined 14",
+	"cp15 c7 ops",
 	"undefined 15",
 };
 
@@ -170,7 +187,7 @@ static const char *cache_lockdown[16] = {
 	"undefined 11",
 	"undefined 12",
 	"undefined 13",
-	"undefined 14",
+	"format C",
 	"undefined 15",
 };
 
@@ -183,7 +200,7 @@ static const char *proc_arch[] = {
 	"5T",
 	"5TE",
 	"5TEJ",
-	"?(9)",
+	"6TEJ",
 	"?(10)",
 	"?(11)",
 	"?(12)",
@@ -204,12 +221,12 @@ static const char *proc_arch[] = {
 #define CACHE_M(y)	((y) & (1 << 2))
 #define CACHE_LINE(y)	((y) & 3)
 
-static inline void dump_cache(const char *prefix, unsigned int cache)
+static inline void dump_cache(const char *prefix, int cpu, unsigned int cache)
 {
 	unsigned int mult = 2 + (CACHE_M(cache) ? 1 : 0);
 
-	printk("%s: %d bytes, associativity %d, %d byte lines, %d sets\n",
-		prefix,
+	printk("CPU%u: %s: %d bytes, associativity %d, %d byte lines, %d sets\n",
+		cpu, prefix,
 		mult << (8 + CACHE_SIZE(cache)),
 		(mult << CACHE_ASSOC(cache)) >> 1,
 		8 << CACHE_LINE(cache),
@@ -217,19 +234,18 @@ static inline void dump_cache(const char *prefix, unsigned int cache)
 			CACHE_LINE(cache)));
 }
 
-static void __init dump_cpu_info(void)
+static void __init dump_cpu_info(int cpu)
 {
-	unsigned int info;
-
-	asm("mrc p15, 0, %0, c0, c0, 1" : "=r" (info));
+	unsigned int info = read_cpuid(CPUID_CACHETYPE);
 
 	if (info != processor_id) {
-		printk("CPU: D %s cache\n", cache_types[CACHE_TYPE(info)]);
+		printk("CPU%u: D %s %s cache\n", cpu, cache_is_vivt() ? "VIVT" : "VIPT",
+		       cache_types[CACHE_TYPE(info)]);
 		if (CACHE_S(info)) {
-			dump_cache("CPU: I cache", CACHE_ISIZE(info));
-			dump_cache("CPU: D cache", CACHE_DSIZE(info));
+			dump_cache("I cache", cpu, CACHE_ISIZE(info));
+			dump_cache("D cache", cpu, CACHE_DSIZE(info));
 		} else {
-			dump_cache("CPU: cache", CACHE_ISIZE(info));
+			dump_cache("cache", cpu, CACHE_ISIZE(info));
 		}
 	}
 }
@@ -243,7 +259,7 @@ int cpu_architecture(void)
 	} else if ((processor_id & 0x0000f000) == 0x00007000) {
 		cpu_arch = (processor_id & (1 << 23)) ? CPU_ARCH_ARMv4T : CPU_ARCH_ARMv3;
 	} else {
-		cpu_arch = (processor_id >> 16) & 15;
+		cpu_arch = (processor_id >> 16) & 7;
 		if (cpu_arch)
 			cpu_arch += CPU_ARCH_ARMv3;
 	}
@@ -251,9 +267,15 @@ int cpu_architecture(void)
 	return cpu_arch;
 }
 
+/*
+ * These functions re-use the assembly code in head.S, which
+ * already provide the required functionality.
+ */
+extern struct proc_info_list *lookup_processor_type(void);
+extern struct machine_desc *lookup_machine_type(unsigned int);
+
 static void __init setup_processor(void)
 {
-	extern struct proc_info_list __proc_info_begin, __proc_info_end;
 	struct proc_info_list *list;
 
 	/*
@@ -261,15 +283,8 @@ static void __init setup_processor(void)
 	 * types.  The linker builds this table for us from the
 	 * entries in arch/arm/mm/proc-*.S
 	 */
-	for (list = &__proc_info_begin; list < &__proc_info_end ; list++)
-		if ((processor_id & list->cpu_mask) == list->cpu_val)
-			break;
-
-	/*
-	 * If processor type is unrecognised, then we
-	 * can do nothing...
-	 */
-	if (list >= &__proc_info_end) {
+	list = lookup_processor_type();
+	if (!list) {
 		printk("CPU configuration botched (ID %08x), unable "
 		       "to continue.\n", processor_id);
 		while (1);
@@ -294,7 +309,7 @@ static void __init setup_processor(void)
 	       cpu_name, processor_id, (int)processor_id & 15,
 	       proc_arch[cpu_architecture()]);
 
-	dump_cpu_info();
+	dump_cpu_info(smp_processor_id());
 
 	sprintf(system_utsname.machine, "%s%c", list->arch_name, ENDIANNESS);
 	sprintf(elf_platform, "%s%c", list->elf_name, ENDIANNESS);
@@ -305,22 +320,14 @@ static void __init setup_processor(void)
 
 static struct machine_desc * __init setup_machine(unsigned int nr)
 {
-	extern struct machine_desc __arch_info_begin, __arch_info_end;
 	struct machine_desc *list;
 
 	/*
-	 * locate architecture in the list of supported architectures.
+	 * locate machine in the list of supported machines.
 	 */
-	for (list = &__arch_info_begin; list < &__arch_info_end; list++)
-		if (list->nr == nr)
-			break;
-
-	/*
-	 * If the architecture type is not recognised, then we
-	 * can co nothing...
-	 */
-	if (list >= &__arch_info_end) {
-		printk("Architecture configuration botched (nr %d), unable "
+	list = lookup_machine_type(nr);
+	if (!list) {
+		printk("Machine configuration botched (nr %d), unable "
 		       "to continue.\n", nr);
 		while (1);
 	}
@@ -435,10 +442,10 @@ request_standard_resources(struct meminfo *mi, struct machine_desc *mdesc)
 	struct resource *res;
 	int i;
 
-	kernel_code.start  = __virt_to_phys(init_mm.start_code);
-	kernel_code.end    = __virt_to_phys(init_mm.end_code - 1);
-	kernel_data.start  = __virt_to_phys(init_mm.end_code);
-	kernel_data.end    = __virt_to_phys(init_mm.brk - 1);
+	kernel_code.start   = virt_to_phys(&_text);
+	kernel_code.end     = virt_to_phys(&_etext - 1);
+	kernel_data.start   = virt_to_phys(&__data_start);
+	kernel_data.end     = virt_to_phys(&_end - 1);
 
 	for (i = 0; i < mi->nr_banks; i++) {
 		unsigned long virt_start, virt_end;
@@ -654,6 +661,17 @@ static struct init_tags {
 	{ 0, ATAG_NONE }
 };
 
+static void (*init_machine)(void) __initdata;
+
+static int __init customize_machine(void)
+{
+	/* customizes platform devices, or adds new ones */
+	if (init_machine)
+		init_machine();
+	return 0;
+}
+arch_initcall(customize_machine);
+
 void __init setup_arch(char **cmdline_p)
 {
 	struct tag *tags = (struct tag *)&init_tags;
@@ -696,7 +714,6 @@ void __init setup_arch(char **cmdline_p)
 	memcpy(saved_command_line, from, COMMAND_LINE_SIZE);
 	saved_command_line[COMMAND_LINE_SIZE-1] = '\0';
 	parse_cmdline(cmdline_p, from);
-	bootmem_init(&meminfo);
 	paging_init(&meminfo, mdesc);
 	request_standard_resources(&meminfo, mdesc);
 
@@ -704,6 +721,8 @@ void __init setup_arch(char **cmdline_p)
 	 * Set up various architecture-specific pointers
 	 */
 	init_arch_irq = mdesc->init_irq;
+	system_timer = mdesc->timer;
+	init_machine = mdesc->init_machine;
 
 #ifdef CONFIG_VT
 #if defined(CONFIG_VGA_CONSOLE)
@@ -714,11 +733,15 @@ void __init setup_arch(char **cmdline_p)
 #endif
 }
 
-static struct cpu cpu[1];
 
 static int __init topology_init(void)
 {
-	return register_cpu(cpu, 0, NULL);
+	int cpu;
+
+	for_each_cpu(cpu)
+		register_cpu(&per_cpu(cpu_data, cpu).cpu, cpu, NULL);
+
+	return 0;
 }
 
 subsys_initcall(topology_init);
@@ -732,6 +755,7 @@ static const char *hwcap_str[] = {
 	"fpa",
 	"vfp",
 	"edsp",
+	"java",
 	NULL
 };
 
@@ -758,9 +782,18 @@ static int c_show(struct seq_file *m, void *v)
 	seq_printf(m, "Processor\t: %s rev %d (%s)\n",
 		   cpu_name, (int)processor_id & 15, elf_platform);
 
+#if defined(CONFIG_SMP)
+	for_each_online_cpu(i) {
+		seq_printf(m, "Processor\t: %d\n", i);
+		seq_printf(m, "BogoMIPS\t: %lu.%02lu\n\n",
+			   per_cpu(cpu_data, i).loops_per_jiffy / (500000UL/HZ),
+			   (per_cpu(cpu_data, i).loops_per_jiffy / (5000UL/HZ)) % 100);
+	}
+#else /* CONFIG_SMP */
 	seq_printf(m, "BogoMIPS\t: %lu.%02lu\n",
 		   loops_per_jiffy / (500000/HZ),
 		   (loops_per_jiffy / (5000/HZ)) % 100);
+#endif
 
 	/* dump out the processor features */
 	seq_puts(m, "Features\t: ");
@@ -791,9 +824,7 @@ static int c_show(struct seq_file *m, void *v)
 	seq_printf(m, "CPU revision\t: %d\n", processor_id & 15);
 
 	{
-		unsigned int cache_info;
-
-		asm("mrc p15, 0, %0, c0, c0, 1" : "=r" (cache_info));
+		unsigned int cache_info = read_cpuid(CPUID_CACHETYPE);
 		if (cache_info != processor_id) {
 			seq_printf(m, "Cache type\t: %s\n"
 				      "Cache clean\t: %s\n"

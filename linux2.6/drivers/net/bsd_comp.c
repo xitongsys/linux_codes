@@ -1160,7 +1160,7 @@ static struct compressor ppp_bsd_compress = {
  * Module support routines
  *************************************************************/
 
-int __init bsdcomp_init(void)
+static int __init bsdcomp_init(void)
 {
 	int answer = ppp_register_compressor(&ppp_bsd_compress);
 	if (answer == 0)
@@ -1168,7 +1168,7 @@ int __init bsdcomp_init(void)
 	return answer;
 }
 
-void __exit bsdcomp_cleanup(void)
+static void __exit bsdcomp_cleanup(void)
 {
 	ppp_unregister_compressor(&ppp_bsd_compress);
 }
@@ -1176,3 +1176,4 @@ void __exit bsdcomp_cleanup(void)
 module_init(bsdcomp_init);
 module_exit(bsdcomp_cleanup);
 MODULE_LICENSE("Dual BSD/GPL");
+MODULE_ALIAS("ppp-compress-" __stringify(CI_BSD_COMPRESS));

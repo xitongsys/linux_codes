@@ -15,6 +15,7 @@
 #include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/err.h>
+#include <linux/init.h>
 #include <asm/semaphore.h>
 
 /*
@@ -48,12 +49,12 @@
  *    we cannot lose wakeup events.
  */
 
-void __up(struct semaphore *sem)
+fastcall void __up(struct semaphore *sem)
 {
 	wake_up(&sem->wait);
 }
 
-void __down(struct semaphore * sem)
+fastcall void __sched __down(struct semaphore * sem)
 {
 	struct task_struct *tsk = current;
 	DECLARE_WAITQUEUE(wait, tsk);
@@ -90,7 +91,7 @@ void __down(struct semaphore * sem)
 	tsk->state = TASK_RUNNING;
 }
 
-int __down_interruptible(struct semaphore * sem)
+fastcall int __sched __down_interruptible(struct semaphore * sem)
 {
 	int retval = 0;
 	struct task_struct *tsk = current;
@@ -153,7 +154,7 @@ int __down_interruptible(struct semaphore * sem)
  * single "cmpxchg" without failure cases,
  * but then it wouldn't work on a 386.
  */
-int __down_trylock(struct semaphore * sem)
+fastcall int __down_trylock(struct semaphore * sem)
 {
 	int sleepers;
 	unsigned long flags;
@@ -182,12 +183,12 @@ int __down_trylock(struct semaphore * sem)
  * need to convert that sequence back into the C sequence when
  * there is contention on the semaphore.
  *
- * %ecx contains the semaphore pointer on entry. Save the C-clobbered
- * registers (%eax, %edx and %ecx) except %eax when used as a return
- * value..
+ * %eax contains the semaphore pointer on entry. Save the C-clobbered
+ * registers (%eax, %edx and %ecx) except %eax whish is either a return
+ * value or just clobbered..
  */
 asm(
-".text\n"
+".section .sched.text\n"
 ".align 4\n"
 ".globl __down_failed\n"
 "__down_failed:\n\t"
@@ -195,13 +196,11 @@ asm(
 	"pushl %ebp\n\t"
 	"movl  %esp,%ebp\n\t"
 #endif
-	"pushl %eax\n\t"
 	"pushl %edx\n\t"
 	"pushl %ecx\n\t"
 	"call __down\n\t"
 	"popl %ecx\n\t"
 	"popl %edx\n\t"
-	"popl %eax\n\t"
 #if defined(CONFIG_FRAME_POINTER)
 	"movl %ebp,%esp\n\t"
 	"popl %ebp\n\t"
@@ -210,7 +209,7 @@ asm(
 );
 
 asm(
-".text\n"
+".section .sched.text\n"
 ".align 4\n"
 ".globl __down_failed_interruptible\n"
 "__down_failed_interruptible:\n\t"
@@ -231,7 +230,7 @@ asm(
 );
 
 asm(
-".text\n"
+".section .sched.text\n"
 ".align 4\n"
 ".globl __down_failed_trylock\n"
 "__down_failed_trylock:\n\t"
@@ -252,17 +251,15 @@ asm(
 );
 
 asm(
-".text\n"
+".section .sched.text\n"
 ".align 4\n"
 ".globl __up_wakeup\n"
 "__up_wakeup:\n\t"
-	"pushl %eax\n\t"
 	"pushl %edx\n\t"
 	"pushl %ecx\n\t"
 	"call __up\n\t"
 	"popl %ecx\n\t"
 	"popl %edx\n\t"
-	"popl %eax\n\t"
 	"ret"
 );
 
@@ -271,7 +268,7 @@ asm(
  */
 #if defined(CONFIG_SMP)
 asm(
-".text\n"
+".section .sched.text\n"
 ".align	4\n"
 ".globl	__write_lock_failed\n"
 "__write_lock_failed:\n\t"
@@ -285,7 +282,7 @@ asm(
 );
 
 asm(
-".text\n"
+".section .sched.text\n"
 ".align	4\n"
 ".globl	__read_lock_failed\n"
 "__read_lock_failed:\n\t"

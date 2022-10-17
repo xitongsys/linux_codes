@@ -44,15 +44,22 @@
  * with this program; if not, write to the Free Software Foundation, Inc.,
  * 675 Mass Ave, Cambridge, MA 02139, USA.
  */
+
+#include <linux/slab.h>
+#include <linux/module.h>
+
+#include <scsi/scsi.h>
+#include <scsi/scsi_cmnd.h>
+#include <scsi/scsi_devinfo.h>
+#include <scsi/scsi_device.h>
+#include <scsi/scsi_eh.h>
+#include <scsi/scsi_host.h>
+
 #include "scsiglue.h"
 #include "usb.h"
 #include "debug.h"
 #include "transport.h"
-
-#include <linux/slab.h>
-#include <linux/module.h>
-#include <scsi/scsi_devinfo.h>
-
+#include "protocol.h"
 
 /***********************************************************************
  * Host functions 
@@ -63,34 +70,126 @@ static const char* host_info(struct Scsi_Host *host)
 	return "SCSI emulation for USB Mass Storage devices";
 }
 
-static int slave_configure (struct scsi_device *sdev)
+static int slave_alloc (struct scsi_device *sdev)
 {
-	/* this is to satisify the compiler, tho I don't think the 
+	/*
+	 * Set the INQUIRY transfer length to 36.  We don't use any of
+	 * the extra data and many devices choke if asked for more or
+	 * less than 36 bytes.
+	 */
+	sdev->inquiry_len = 36;
+	return 0;
+}
+
+static int slave_configure(struct scsi_device *sdev)
+{
+	struct us_data *us = (struct us_data *) sdev->host->hostdata[0];
+
+	/* Scatter-gather buffers (all but the last) must have a length
+	 * divisible by the bulk maxpacket size.  Otherwise a data packet
+	 * would end up being short, causing a premature end to the data
+	 * transfer.  Since high-speed bulk pipes have a maxpacket size
+	 * of 512, we'll use that as the scsi device queue's DMA alignment
+	 * mask.  Guaranteeing proper alignment of the first buffer will
+	 * have the desired effect because, except at the beginning and
+	 * the end, scatter-gather buffers follow page boundaries. */
+	blk_queue_dma_alignment(sdev->request_queue, (512 - 1));
+
+	/* Set the SCSI level to at least 2.  We'll leave it at 3 if that's
+	 * what is originally reported.  We need this to avoid confusing
+	 * the SCSI layer with devices that report 0 or 1, but need 10-byte
+	 * commands (ala ATAPI devices behind certain bridges, or devices
+	 * which simply have broken INQUIRY data).
+	 *
+	 * NOTE: This means /dev/sg programs (ala cdrecord) will get the
+	 * actual information.  This seems to be the preference for
+	 * programs like that.
+	 *
+	 * NOTE: This also means that /proc/scsi/scsi and sysfs may report
+	 * the actual value or the modified one, depending on where the
+	 * data comes from.
+	 */
+	if (sdev->scsi_level < SCSI_2)
+		sdev->scsi_level = SCSI_2;
+
+	/* According to the technical support people at Genesys Logic,
+	 * devices using their chips have problems transferring more than
+	 * 32 KB at a time.  In practice people have found that 64 KB
+	 * works okay and that's what Windows does.  But we'll be
+	 * conservative; people can always use the sysfs interface to
+	 * increase max_sectors. */
+	if (le16_to_cpu(us->pusb_dev->descriptor.idVendor) == USB_VENDOR_ID_GENESYS &&
+			sdev->request_queue->max_sectors > 64)
+		blk_queue_max_sectors(sdev->request_queue, 64);
+
+	/* We can't put these settings in slave_alloc() because that gets
+	 * called before the device type is known.  Consequently these
+	 * settings can't be overridden via the scsi devinfo mechanism. */
+	if (sdev->type == TYPE_DISK) {
+
+		/* Disk-type devices use MODE SENSE(6) if the protocol
+		 * (SubClass) is Transparent SCSI, otherwise they use
+		 * MODE SENSE(10). */
+		if (us->subclass != US_SC_SCSI)
+			sdev->use_10_for_ms = 1;
+
+		/* Many disks only accept MODE SENSE transfer lengths of
+		 * 192 bytes (that's what Windows uses). */
+		sdev->use_192_bytes_for_3f = 1;
+
+		/* A number of devices have problems with MODE SENSE for
+		 * page x08, so we will skip it. */
+		sdev->skip_ms_page_8 = 1;
+
+#ifndef CONFIG_USB_STORAGE_RW_DETECT
+		/* Some devices may not like MODE SENSE with page=0x3f.
+		 * Now that we're using 192-byte transfers this may no
+		 * longer be a problem.  So this will be a configuration
+		 * option. */
+		sdev->skip_ms_page_3f = 1;
+#endif
+
+	} else {
+
+		/* Non-disk-type devices don't need to blacklist any pages
+		 * or to force 192-byte transfer lengths for MODE SENSE.
+		 * But they do need to use MODE SENSE(10). */
+		sdev->use_10_for_ms = 1;
+	}
+
+	/* this is to satisfy the compiler, tho I don't think the 
 	 * return code is ever checked anywhere. */
 	return 0;
 }
 
 /* queue a command */
 /* This is always called with scsi_lock(srb->host) held */
-static int queuecommand( Scsi_Cmnd *srb , void (*done)(Scsi_Cmnd *))
+static int queuecommand(struct scsi_cmnd *srb,
+			void (*done)(struct scsi_cmnd *))
 {
 	struct us_data *us = (struct us_data *)srb->device->host->hostdata[0];
 
 	US_DEBUGP("%s called\n", __FUNCTION__);
 	srb->host_scribble = (unsigned char *)us;
 
-	/* enqueue the command */
-	if (us->sm_state != US_STATE_IDLE || us->srb != NULL) {
-		printk(KERN_ERR USB_STORAGE "Error in %s: " 
-			"state = %d, us->srb = %p\n",
-			__FUNCTION__, us->sm_state, us->srb);
+	/* check for state-transition errors */
+	if (us->srb != NULL) {
+		printk(KERN_ERR USB_STORAGE "Error in %s: us->srb = %p\n",
+			__FUNCTION__, us->srb);
 		return SCSI_MLQUEUE_HOST_BUSY;
 	}
 
+	/* fail the command if we are disconnecting */
+	if (test_bit(US_FLIDX_DISCONNECTING, &us->flags)) {
+		US_DEBUGP("Fail command during disconnect\n");
+		srb->result = DID_NO_CONNECT << 16;
+		done(srb);
+		return 0;
+	}
+
+	/* enqueue the command and wake up the control thread */
 	srb->scsi_done = done;
 	us->srb = srb;
-
-	/* wake up the process task */
 	up(&(us->sema));
 
 	return 0;
@@ -100,9 +199,9 @@ static int queuecommand( Scsi_Cmnd *srb , void (*done)(Scsi_Cmnd *))
  * Error handling functions
  ***********************************************************************/
 
-/* Command abort */
+/* Command timeout and abort */
 /* This is always called with scsi_lock(srb->host) held */
-static int command_abort( Scsi_Cmnd *srb )
+static int command_abort(struct scsi_cmnd *srb )
 {
 	struct Scsi_Host *host = srb->device->host;
 	struct us_data *us = (struct us_data *) host->hostdata[0];
@@ -115,23 +214,17 @@ static int command_abort( Scsi_Cmnd *srb )
 		return FAILED;
 	}
 
-	/* Normally the current state is RUNNING.  If the control thread
-	 * hasn't even started processing this command, the state will be
-	 * IDLE.  Anything else is a bug. */
-	if (us->sm_state != US_STATE_RUNNING
-				&& us->sm_state != US_STATE_IDLE) {
-		printk(KERN_ERR USB_STORAGE "Error in %s: "
-			"invalid state %d\n", __FUNCTION__, us->sm_state);
-		return FAILED;
+	/* Set the TIMED_OUT bit.  Also set the ABORTING bit, but only if
+	 * a device reset isn't already in progress (to avoid interfering
+	 * with the reset).  To prevent races with auto-reset, we must
+	 * stop any ongoing USB transfers while still holding the host
+	 * lock. */
+	set_bit(US_FLIDX_TIMED_OUT, &us->flags);
+	if (!test_bit(US_FLIDX_RESETTING, &us->flags)) {
+		set_bit(US_FLIDX_ABORTING, &us->flags);
+		usb_stor_stop_transport(us);
 	}
-
-	/* Set state to ABORTING, set the ABORTING bit, and release the lock */
-	us->sm_state = US_STATE_ABORTING;
-	set_bit(US_FLIDX_ABORTING, &us->flags);
 	scsi_unlock(host);
-
-	/* Stop an ongoing USB transfer */
-	usb_stor_stop_transport(us);
 
 	/* Wait for the aborted command to finish */
 	wait_for_completion(&us->notify);
@@ -139,26 +232,20 @@ static int command_abort( Scsi_Cmnd *srb )
 	/* Reacquire the lock and allow USB transfers to resume */
 	scsi_lock(host);
 	clear_bit(US_FLIDX_ABORTING, &us->flags);
+	clear_bit(US_FLIDX_TIMED_OUT, &us->flags);
 	return SUCCESS;
 }
 
 /* This invokes the transport reset mechanism to reset the state of the
  * device */
 /* This is always called with scsi_lock(srb->host) held */
-static int device_reset( Scsi_Cmnd *srb )
+static int device_reset(struct scsi_cmnd *srb)
 {
 	struct us_data *us = (struct us_data *)srb->device->host->hostdata[0];
 	int result;
 
 	US_DEBUGP("%s called\n", __FUNCTION__);
-	if (us->sm_state != US_STATE_IDLE) {
-		printk(KERN_ERR USB_STORAGE "Error in %s: "
-			"invalid state %d\n", __FUNCTION__, us->sm_state);
-		return FAILED;
-	}
 
-	/* set the state and release the lock */
-	us->sm_state = US_STATE_RESETTING;
 	scsi_unlock(srb->device->host);
 
 	/* lock the device pointers and do the reset */
@@ -170,9 +257,8 @@ static int device_reset( Scsi_Cmnd *srb )
 		result = us->transport_reset(us);
 	up(&(us->dev_semaphore));
 
-	/* lock access to the state and clear it */
+	/* lock the host for the return */
 	scsi_lock(srb->device->host);
-	us->sm_state = US_STATE_IDLE;
 	return result;
 }
 
@@ -180,20 +266,13 @@ static int device_reset( Scsi_Cmnd *srb )
 /* It refuses to work if there's more than one interface in
  * the device, so that other users are not affected. */
 /* This is always called with scsi_lock(srb->host) held */
-static int bus_reset( Scsi_Cmnd *srb )
+static int bus_reset(struct scsi_cmnd *srb)
 {
 	struct us_data *us = (struct us_data *)srb->device->host->hostdata[0];
-	int result;
+	int result, rc;
 
 	US_DEBUGP("%s called\n", __FUNCTION__);
-	if (us->sm_state != US_STATE_IDLE) {
-		printk(KERN_ERR USB_STORAGE "Error in %s: "
-			"invalid state %d\n", __FUNCTION__, us->sm_state);
-		return FAILED;
-	}
 
-	/* set the state and release the lock */
-	us->sm_state = US_STATE_RESETTING;
 	scsi_unlock(srb->device->host);
 
 	/* The USB subsystem doesn't handle synchronisation between
@@ -208,15 +287,36 @@ static int bus_reset( Scsi_Cmnd *srb )
 		result = -EBUSY;
 		US_DEBUGP("Refusing to reset a multi-interface device\n");
 	} else {
-		result = usb_reset_device(us->pusb_dev);
-		US_DEBUGP("usb_reset_device returns %d\n", result);
+		rc = usb_lock_device_for_reset(us->pusb_dev, us->pusb_intf);
+		if (rc < 0) {
+			US_DEBUGP("unable to lock device for reset: %d\n", rc);
+			result = rc;
+		} else {
+			result = usb_reset_device(us->pusb_dev);
+			if (rc)
+				usb_unlock_device(us->pusb_dev);
+			US_DEBUGP("usb_reset_device returns %d\n", result);
+		}
 	}
 	up(&(us->dev_semaphore));
 
-	/* lock access to the state and clear it */
+	/* lock the host for the return */
 	scsi_lock(srb->device->host);
-	us->sm_state = US_STATE_IDLE;
 	return result < 0 ? FAILED : SUCCESS;
+}
+
+/* Report a driver-initiated device reset to the SCSI layer.
+ * Calling this for a SCSI-initiated reset is unnecessary but harmless.
+ * The caller must own the SCSI host lock. */
+void usb_stor_report_device_reset(struct us_data *us)
+{
+	int i;
+
+	scsi_report_device_reset(us->host, 0, 0);
+	if (us->flags & US_FL_SCM_MULT_TARG) {
+		for (i = 1; i < us->host->max_id; ++i)
+			scsi_report_device_reset(us->host, 0, i);
+	}
 }
 
 /***********************************************************************
@@ -227,13 +327,14 @@ static int bus_reset( Scsi_Cmnd *srb )
 #undef SPRINTF
 #define SPRINTF(args...) \
 	do { if (pos < buffer+length) pos += sprintf(pos, ## args); } while (0)
+#define DO_FLAG(a) \
+	do { if (us->flags & US_FL_##a) pos += sprintf(pos, " " #a); } while(0)
 
 static int proc_info (struct Scsi_Host *hostptr, char *buffer, char **start, off_t offset,
 		int length, int inout)
 {
 	struct us_data *us;
 	char *pos = buffer;
-	unsigned long f;
 
 	/* if someone is sending us data, just throw it away */
 	if (inout)
@@ -256,17 +357,14 @@ static int proc_info (struct Scsi_Host *hostptr, char *buffer, char **start, off
 	/* show the device flags */
 	if (pos < buffer + length) {
 		pos += sprintf(pos, "       Quirks:");
-		f = us->flags;
 
-#define DO_FLAG(a)  	if (f & US_FL_##a)  pos += sprintf(pos, " " #a)
 		DO_FLAG(SINGLE_LUN);
 		DO_FLAG(SCM_MULT_TARG);
 		DO_FLAG(FIX_INQUIRY);
 		DO_FLAG(FIX_CAPACITY);
-#undef DO_FLAG
 
 		*(pos++) = '\n';
-		}
+	}
 
 	/*
 	 * Calculate start of next buffer, and return value.
@@ -280,6 +378,40 @@ static int proc_info (struct Scsi_Host *hostptr, char *buffer, char **start, off
 	else
 		return (length);
 }
+
+/***********************************************************************
+ * Sysfs interface
+ ***********************************************************************/
+
+/* Output routine for the sysfs max_sectors file */
+static ssize_t show_max_sectors(struct device *dev, char *buf)
+{
+	struct scsi_device *sdev = to_scsi_device(dev);
+
+	return sprintf(buf, "%u\n", sdev->request_queue->max_sectors);
+}
+
+/* Input routine for the sysfs max_sectors file */
+static ssize_t store_max_sectors(struct device *dev, const char *buf,
+		size_t count)
+{
+	struct scsi_device *sdev = to_scsi_device(dev);
+	unsigned short ms;
+
+	if (sscanf(buf, "%hu", &ms) > 0 && ms <= SCSI_DEFAULT_MAX_SECTORS) {
+		blk_queue_max_sectors(sdev->request_queue, ms);
+		return strlen(buf);
+	}
+	return -EINVAL;	
+}
+
+static DEVICE_ATTR(max_sectors, S_IRUGO | S_IWUSR, show_max_sectors,
+		store_max_sectors);
+
+static struct device_attribute *sysfs_device_attr_list[] = {
+		&dev_attr_max_sectors,
+		NULL,
+		};
 
 /*
  * this defines our host template, with which we'll allocate hosts
@@ -307,6 +439,7 @@ struct scsi_host_template usb_stor_host_template = {
 	/* unknown initiator id */
 	.this_id =			-1,
 
+	.slave_alloc =			slave_alloc,
 	.slave_configure =		slave_configure,
 
 	/* lots of sg segments can be handled */
@@ -319,13 +452,16 @@ struct scsi_host_template usb_stor_host_template = {
 	 * periodically someone should test to see which setting is more
 	 * optimal.
 	 */
-	.use_clustering =		TRUE,
+	.use_clustering =		1,
 
 	/* emulated HBA */
-	.emulated =			TRUE,
+	.emulated =			1,
 
-	/* modify scsi_device bits on probe */
-	.flags = (BLIST_MS_SKIP_PAGE_08 | BLIST_USE_10_BYTE_MS),
+	/* we do our own delay after a device or bus reset */
+	.skip_settle_delay =		1,
+
+	/* sysfs device attributes */
+	.sdev_attrs =			sysfs_device_attr_list,
 
 	/* module management */
 	.module =			THIS_MODULE

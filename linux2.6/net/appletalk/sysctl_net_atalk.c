@@ -7,13 +7,9 @@
  */
 
 #include <linux/config.h>
-
-#ifdef CONFIG_SYSCTL
 #include <linux/sysctl.h>
-extern int sysctl_aarp_expiry_time;
-extern int sysctl_aarp_tick_time;
-extern int sysctl_aarp_retransmit_limit;
-extern int sysctl_aarp_resolve_time;
+#include <net/sock.h>
+#include <linux/atalk.h>
 
 static struct ctl_table atalk_table[] = {
 	{
@@ -23,6 +19,7 @@ static struct ctl_table atalk_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec_jiffies,
+		.strategy	= &sysctl_jiffies,
 	},
 	{
 		.ctl_name	= NET_ATALK_AARP_TICK_TIME,
@@ -31,6 +28,7 @@ static struct ctl_table atalk_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec_jiffies,
+		.strategy	= &sysctl_jiffies,
 	},
 	{
 		.ctl_name	= NET_ATALK_AARP_RETRANSMIT_LIMIT,
@@ -47,6 +45,7 @@ static struct ctl_table atalk_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec_jiffies,
+		.strategy	= &sysctl_jiffies,
 	},
 	{ 0 },
 };
@@ -82,13 +81,3 @@ void atalk_unregister_sysctl(void)
 {
 	unregister_sysctl_table(atalk_table_header);
 }
-
-#else /* CONFIG_PROC_FS */
-void atalk_register_sysctl(void)
-{
-}
-
-void atalk_unregister_sysctl(void)
-{
-}
-#endif /* CONFIG_PROC_FS */ 

@@ -24,10 +24,11 @@
 
 
 struct ufs_buffer_head * _ubh_bread_ (struct ufs_sb_private_info * uspi,
-	struct super_block *sb, unsigned fragment, unsigned size)
+	struct super_block *sb, u64 fragment, u64 size)
 {
 	struct ufs_buffer_head * ubh;
-	unsigned i, j, count;
+	unsigned i, j ;
+	u64  count = 0;
 	if (size & ~uspi->s_fmask)
 		return NULL;
 	count = size >> uspi->s_fshift;
@@ -53,9 +54,10 @@ failed:
 }
 
 struct ufs_buffer_head * ubh_bread_uspi (struct ufs_sb_private_info * uspi,
-	struct super_block *sb, unsigned fragment, unsigned size)
+	struct super_block *sb, u64 fragment, u64 size)
 {
-	unsigned i, j, count;
+	unsigned i, j;
+	u64 count = 0;
 	if (size & ~uspi->s_fmask)
 		return NULL;
 	count = size >> uspi->s_fshift;
@@ -199,4 +201,57 @@ void _ubh_memcpyubh_(struct ufs_sb_private_info * uspi,
 		size -= len;
 		bhno++;
 	}
+}
+
+dev_t
+ufs_get_inode_dev(struct super_block *sb, struct ufs_inode_info *ufsi)
+{
+	__fs32 fs32;
+	dev_t dev;
+
+	if ((UFS_SB(sb)->s_flags & UFS_ST_MASK) == UFS_ST_SUNx86)
+		fs32 = ufsi->i_u1.i_data[1];
+	else
+		fs32 = ufsi->i_u1.i_data[0];
+	fs32 = fs32_to_cpu(sb, fs32);
+	switch (UFS_SB(sb)->s_flags & UFS_ST_MASK) {
+	case UFS_ST_SUNx86:
+	case UFS_ST_SUN:
+		if ((fs32 & 0xffff0000) == 0 ||
+		    (fs32 & 0xffff0000) == 0xffff0000)
+			dev = old_decode_dev(fs32 & 0x7fff);
+		else
+			dev = MKDEV(sysv_major(fs32), sysv_minor(fs32));
+		break;
+
+	default:
+		dev = old_decode_dev(fs32);
+		break;
+	}
+	return dev;
+}
+
+void
+ufs_set_inode_dev(struct super_block *sb, struct ufs_inode_info *ufsi, dev_t dev)
+{
+	__fs32 fs32;
+
+	switch (UFS_SB(sb)->s_flags & UFS_ST_MASK) {
+	case UFS_ST_SUNx86:
+	case UFS_ST_SUN:
+		fs32 = sysv_encode_dev(dev);
+		if ((fs32 & 0xffff8000) == 0) {
+			fs32 = old_encode_dev(dev);
+		}
+		break;
+
+	default:
+		fs32 = old_encode_dev(dev);
+		break;
+	}
+	fs32 = cpu_to_fs32(sb, fs32);
+	if ((UFS_SB(sb)->s_flags & UFS_ST_MASK) == UFS_ST_SUNx86)
+		ufsi->i_u1.i_data[1] = fs32;
+	else
+		ufsi->i_u1.i_data[0] = fs32;
 }

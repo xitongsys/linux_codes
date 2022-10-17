@@ -7,12 +7,11 @@
 # list of DOCBOOKS.
 
 DOCBOOKS := wanbook.sgml z8530book.sgml mcabook.sgml videobook.sgml \
-	    parportbook.sgml kernel-hacking.sgml \
-	    kernel-locking.sgml via-audio.sgml mousedrivers.sgml \
+	    kernel-hacking.sgml kernel-locking.sgml via-audio.sgml \
 	    deviceiobook.sgml procfs-guide.sgml tulip-user.sgml \
 	    writing_usb_driver.sgml scsidrivers.sgml sis900.sgml \
 	    kernel-api.sgml journal-api.sgml lsm.sgml usb.sgml \
-	    gadget.sgml libata.sgml
+	    gadget.sgml libata.sgml mtdnand.sgml librs.sgml
 
 ###
 # The build process is as follows (targets):
@@ -47,7 +46,7 @@ installmandocs: mandocs
 ###
 #External programs used
 KERNELDOC = scripts/kernel-doc
-DOCPROC   = scripts/docproc
+DOCPROC   = scripts/basic/docproc
 SPLITMAN  = $(PERL) $(srctree)/scripts/split-man
 MAKEMAN   = $(PERL) $(srctree)/scripts/makeman
 
@@ -59,14 +58,14 @@ MAKEMAN   = $(PERL) $(srctree)/scripts/makeman
 # The following rules are used to generate the .sgml documentation
 # required to generate the final targets. (ps, pdf, html).
 quiet_cmd_docproc = DOCPROC $@
-      cmd_docproc = $(DOCPROC) doc $< >$@
+      cmd_docproc = SRCTREE=$(srctree)/ $(DOCPROC) doc $< >$@
 define rule_docproc
 	set -e;								\
         $(if $($(quiet)cmd_$(1)),echo '  $($(quiet)cmd_$(1))';) 	\
         $(cmd_$(1)); 							\
         ( 								\
           echo 'cmd_$@ := $(cmd_$(1))'; 				\
-          echo $@: `$(DOCPROC) depend $<`; 				\
+          echo $@: `SRCTREE=$(srctree) $(DOCPROC) depend $<`; 		\
         ) > $(dir $@).$(notdir $@).cmd
 endef
 
@@ -91,16 +90,6 @@ $(BOOKS): $(KERNELDOC)
 C-procfs-example = procfs_example.sgml
 C-procfs-example2 = $(addprefix $(obj)/,$(C-procfs-example))
 $(obj)/procfs-guide.sgml: $(C-procfs-example2)
-
-###
-# The parportbook includes a few images.
-# Force them to be build before the books 
-IMG-parportbook := parport-share.fig parport-multi.fig parport-structure.fig
-IMG-parportbook2 := $(addprefix $(obj)/,$(IMG-parportbook))
-EPS-parportbook := $(patsubst %.fig,%.eps, $(IMG-parportbook2))
-PNG-parportbook := $(patsubst %.fig,%.png, $(IMG-parportbook2))
-$(obj)/parportbook.html: $(PNG-parportbook)
-$(obj)/parportbook.ps $(obj)/parportbook.pdf: $(EPS-parportbook) $(PNG-parportbook)
 
 ###
 # Rules to generate postscript, PDF and HTML
@@ -140,6 +129,9 @@ quiet_cmd_db2html = DB2HTML $@
 # Rule to generate man files - output is placed in the man subdirectory
 
 %.9:	%.sgml
+ifneq ($(KBUILD_SRC),)
+	$(Q)mkdir -p $(objtree)/Documentation/DocBook/man
+endif
 	$(SPLITMAN) $< $(objtree)/Documentation/DocBook/man "$(VERSION).$(PATCHLEVEL).$(SUBLEVEL)"
 	$(MAKEMAN) convert $(objtree)/Documentation/DocBook/man $<
 
@@ -149,12 +141,18 @@ quiet_cmd_fig2eps = FIG2EPS $@
       cmd_fig2eps = fig2dev -Leps $< $@
 
 %.eps: %.fig
+	@(which fig2dev > /dev/null 2>&1) || \
+	 (echo "*** You need to install transfig ***"; \
+	  exit 1)
 	$(call cmd,fig2eps)
 
 quiet_cmd_fig2png = FIG2PNG $@
       cmd_fig2png = fig2dev -Lpng $< $@
 
 %.png: %.fig
+	@(which fig2dev > /dev/null 2>&1) || \
+	 (echo "*** You need to install transfig ***"; \
+	  exit 1)
 	$(call cmd,fig2png)
 
 ###
@@ -188,13 +186,9 @@ clean-files := $(DOCBOOKS) \
 	$(patsubst %.sgml, %.pdf,  $(DOCBOOKS)) \
 	$(patsubst %.sgml, %.html, $(DOCBOOKS)) \
 	$(patsubst %.sgml, %.9,    $(DOCBOOKS)) \
-	$(patsubst %.fig,%.eps,    $(IMG-parportbook)) \
-	$(patsubst %.fig,%.png,    $(IMG-parportbook)) \
 	$(C-procfs-example)
 
-ifneq ($(wildcard $(patsubst %.html,%,$(HTML))),)
-clean-rule := rm -rf $(wildcard $(patsubst %.html,%,$(HTML)))
-endif
+clean-dirs := $(patsubst %.sgml,%,$(DOCBOOKS))
 
 #man put files in man subdir - traverse down
 subdir- := man/

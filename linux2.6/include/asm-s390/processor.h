@@ -63,15 +63,20 @@ extern struct task_struct *last_task_used_math;
 
 # define TASK_SIZE		(0x80000000UL)
 # define TASK_UNMAPPED_BASE	(TASK_SIZE / 2)
+# define DEFAULT_TASK_SIZE	(0x80000000UL)
 
 #else /* __s390x__ */
 
-# define TASK_SIZE		(0x20000000000UL)
-# define TASK31_SIZE		(0x80000000UL)
-# define TASK_UNMAPPED_BASE	(test_thread_flag(TIF_31BIT) ? \
-					(TASK31_SIZE / 2) : (TASK_SIZE / 2))
+# define TASK_SIZE		(test_thread_flag(TIF_31BIT) ? \
+					(0x80000000UL) : (0x40000000000UL))
+# define TASK_UNMAPPED_BASE	(TASK_SIZE / 2)
+# define DEFAULT_TASK_SIZE	(0x40000000000UL)
 
 #endif /* __s390x__ */
+
+#define MM_VM_SIZE(mm)		DEFAULT_TASK_SIZE
+
+#define HAVE_ARCH_PICK_MMAP_LAYOUT
 
 typedef struct {
         __u32 ar4;
@@ -82,10 +87,10 @@ typedef struct {
  */
 struct thread_struct {
 	s390_fp_regs fp_regs;
-	unsigned int ar2;		/* kernel access register 2         */
-        unsigned int ar4;               /* kernel access register 4         */
+	unsigned int  acrs[NUM_ACRS];
         unsigned long ksp;              /* kernel stack pointer             */
         unsigned long user_seg;         /* HSTD                             */
+	mm_segment_t mm_segment;
         unsigned long prot_addr;        /* address of protection-excep.     */
         unsigned int error_code;        /* error-code of last prog-excep.   */
         unsigned int trap_no;
@@ -98,6 +103,27 @@ struct thread_struct {
 
 typedef struct thread_struct thread_struct;
 
+/*
+ * Stack layout of a C stack frame.
+ */
+#ifndef __PACK_STACK
+struct stack_frame {
+	unsigned long back_chain;
+	unsigned long empty1[5];
+	unsigned long gprs[10];
+	unsigned int  empty2[8];
+};
+#else
+struct stack_frame {
+	unsigned long empty1[5];
+	unsigned int  empty2[8];
+	unsigned long gprs[10];
+	unsigned long back_chain;
+};
+#endif
+
+#define ARCH_MIN_TASKALIGN	8
+
 #ifndef __s390x__
 # define __SWAPPER_PG_DIR __pa(&swapper_pg_dir[0]) + _SEGMENT_TABLE
 #else /* __s390x__ */
@@ -106,9 +132,10 @@ typedef struct thread_struct thread_struct;
 
 #define INIT_THREAD {{0,{{0},{0},{0},{0},{0},{0},{0},{0},{0},{0},	       \
 			    {0},{0},{0},{0},{0},{0}}},			       \
-		     0, 0,						       \
+		     {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},	       \
 		     sizeof(init_stack) + (unsigned long) &init_stack,	       \
 		     __SWAPPER_PG_DIR,					       \
+		     {0},						       \
 		     0,0,0,						       \
 		     (per_struct) {{{{0,}}},0,0,0,0,{{0,}}},		       \
 		     0, 0						       \
@@ -167,7 +194,7 @@ extern void show_trace(struct task_struct *task, unsigned long *sp);
 
 unsigned long get_wchan(struct task_struct *p);
 #define __KSTK_PTREGS(tsk) ((struct pt_regs *) \
-        (((unsigned long) tsk->thread_info + THREAD_SIZE - sizeof(struct pt_regs)) & -8L))
+        ((unsigned long) tsk->thread_info + THREAD_SIZE - sizeof(struct pt_regs)))
 #define KSTK_EIP(tsk)	(__KSTK_PTREGS(tsk)->psw.addr)
 #define KSTK_ESP(tsk)	(__KSTK_PTREGS(tsk)->gprs[15])
 
@@ -200,14 +227,14 @@ static inline void __load_psw_mask (unsigned long mask)
 		"    st	  %0,4(%1)\n"
 		"    lpsw 0(%1)\n"
 		"1:"
-		: "=&d" (addr) : "a" (&psw) : "memory", "cc" );
+		: "=&d" (addr) : "a" (&psw), "m" (psw) : "memory", "cc" );
 #else /* __s390x__ */
 	asm volatile (
 		"    larl  %0,1f\n"
 		"    stg   %0,8(%1)\n"
 		"    lpswe 0(%1)\n"
 		"1:"
-		: "=&d" (addr) : "a" (&psw) : "memory", "cc" );
+		: "=&d" (addr) : "a" (&psw), "m" (psw) : "memory", "cc" );
 #endif /* __s390x__ */
 }
  
@@ -229,14 +256,16 @@ static inline void enabled_wait(void)
 		"    oi   4(%1),0x80\n"
 		"    lpsw 0(%1)\n"
 		"1:"
-		: "=&a" (reg) : "a" (&wait_psw) : "memory", "cc" );
+		: "=&a" (reg) : "a" (&wait_psw), "m" (wait_psw)
+		: "memory", "cc" );
 #else /* __s390x__ */
 	asm volatile (
 		"    larl  %0,0f\n"
 		"    stg   %0,8(%1)\n"
 		"    lpswe 0(%1)\n"
 		"0:"
-		: "=&a" (reg) : "a" (&wait_psw) : "memory", "cc" );
+		: "=&a" (reg) : "a" (&wait_psw), "m" (wait_psw)
+		: "memory", "cc" );
 #endif /* __s390x__ */
 }
 
@@ -247,7 +276,7 @@ static inline void enabled_wait(void)
 static inline void disabled_wait(unsigned long code)
 {
         char psw_buffer[2*sizeof(psw_t)];
-        char ctl_buf[4];
+        unsigned long ctl_buf;
         psw_t *dw_psw = (psw_t *)(((unsigned long) &psw_buffer+sizeof(psw_t)-1)
                                   & -sizeof(psw_t));
 
@@ -258,9 +287,9 @@ static inline void disabled_wait(unsigned long code)
          * the processor is dead afterwards
          */
 #ifndef __s390x__
-        asm volatile ("    stctl 0,0,0(%1)\n"
-                      "    ni    0(%1),0xef\n" /* switch off protection */
-                      "    lctl  0,0,0(%1)\n"
+        asm volatile ("    stctl 0,0,0(%2)\n"
+                      "    ni    0(%2),0xef\n" /* switch off protection */
+                      "    lctl  0,0,0(%2)\n"
                       "    stpt  0xd8\n"       /* store timer */
                       "    stckc 0xe0\n"       /* store clock comparator */
                       "    stpx  0x108\n"      /* store prefix register */
@@ -271,13 +300,14 @@ static inline void disabled_wait(unsigned long code)
                       "    std   6,0x178\n"    /* store f6 */
                       "    stm   0,15,0x180\n" /* store general registers */
                       "    stctl 0,15,0x1c0\n" /* store control registers */
-                      "    oi    0(%1),0x10\n" /* fake protection bit */
-                      "    lpsw 0(%0)"
-                      : : "a" (dw_psw), "a" (&ctl_buf) : "cc" );
+                      "    oi    0x1c0,0x10\n" /* fake protection bit */
+                      "    lpsw 0(%1)"
+                      : "=m" (ctl_buf)
+		      : "a" (dw_psw), "a" (&ctl_buf), "m" (dw_psw) : "cc" );
 #else /* __s390x__ */
-        asm volatile ("    stctg 0,0,0(%1)\n"
-                      "    ni    4(%1),0xef\n" /* switch off protection */
-                      "    lctlg 0,0,0(%1)\n"
+        asm volatile ("    stctg 0,0,0(%2)\n"
+                      "    ni    4(%2),0xef\n" /* switch off protection */
+                      "    lctlg 0,0,0(%2)\n"
                       "    lghi  1,0x1000\n"
                       "    stpt  0x328(1)\n"      /* store timer */
                       "    stckc 0x330(1)\n"      /* store clock comparator */
@@ -303,10 +333,22 @@ static inline void disabled_wait(unsigned long code)
                       "    stmg  0,15,0x280(1)\n" /* store general registers */
                       "    stctg 0,15,0x380(1)\n" /* store control registers */
                       "    oi    0x384(1),0x10\n" /* fake protection bit */
-                      "    lpswe 0(%0)"
-                      : : "a" (dw_psw), "a" (&ctl_buf) : "cc", "0", "1");
+                      "    lpswe 0(%1)"
+                      : "=m" (ctl_buf)
+		      : "a" (dw_psw), "a" (&ctl_buf),
+		        "m" (dw_psw) : "cc", "0", "1");
 #endif /* __s390x__ */
 }
+
+/*
+ * CPU idle notifier chain.
+ */
+#define CPU_IDLE	0
+#define CPU_NOT_IDLE	1
+
+struct notifier_block;
+int register_idle_notifier(struct notifier_block *nb);
+int unregister_idle_notifier(struct notifier_block *nb);
 
 #endif
 

@@ -55,6 +55,7 @@ __u32 reiserfs_get_unused_objectid (struct reiserfs_transaction_handle *th)
     __u32 * map = objectid_map (s, rs);
     __u32 unused_objectid;
 
+    BUG_ON (!th->t_trans_id);
 
     check_objectid_map (s, map);
 
@@ -62,7 +63,7 @@ __u32 reiserfs_get_unused_objectid (struct reiserfs_transaction_handle *th)
                                 /* comment needed -Hans */
     unused_objectid = le32_to_cpu (map[1]);
     if (unused_objectid == U32_MAX) {
-	printk ("REISERFS: get_objectid: no more object ids\n");
+	reiserfs_warning (s, "%s: no more object ids", __FUNCTION__);
 	reiserfs_restore_prepared_buffer(s, SB_BUFFER_WITH_SB(s)) ;
 	return 0;
     }
@@ -86,7 +87,6 @@ __u32 reiserfs_get_unused_objectid (struct reiserfs_transaction_handle *th)
     }
 
     journal_mark_dirty(th, s, SB_BUFFER_WITH_SB (s));
-    s->s_dirt = 1;
     return unused_objectid;
 }
 
@@ -100,13 +100,12 @@ void reiserfs_release_objectid (struct reiserfs_transaction_handle *th,
     __u32 * map = objectid_map (s, rs);
     int i = 0;
 
+    BUG_ON (!th->t_trans_id);
     //return;
     check_objectid_map (s, map);
 
     reiserfs_prepare_for_journal(s, SB_BUFFER_WITH_SB(s), 1) ;
     journal_mark_dirty(th, s, SB_BUFFER_WITH_SB (s)); 
-    s->s_dirt = 1;
-
 
     /* start at the beginning of the objectid map (i = 0) and go to
        the end of it (i = disk_sb->s_oid_cursize).  Linear search is
@@ -162,7 +161,7 @@ void reiserfs_release_objectid (struct reiserfs_transaction_handle *th,
 	i += 2;
     }
 
-    reiserfs_warning ("vs-15011: reiserfs_release_objectid: tried to free free object id (%lu)\n", 
+    reiserfs_warning (s, "vs-15011: reiserfs_release_objectid: tried to free free object id (%lu)",
 		      ( long unsigned ) objectid_to_release);
 }
 

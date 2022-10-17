@@ -23,6 +23,18 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+/*
+ * ACPI power-managed devices may be controlled in two ways:
+ * 1. via "Device Specific (D-State) Control"
+ * 2. via "Power Resource Control".
+ * This module is used to manage devices relying on Power Resource Control.
+ * 
+ * An ACPI "power resource object" describes a software controllable power
+ * plane, clock plane, or other resource used by a power managed device.
+ * A device may rely on multiple power resources, and a power resource
+ * may be shared by multiple devices.
+ */
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -276,6 +288,86 @@ acpi_power_off_device (
 	return_VALUE(0);
 }
 
+/*
+ * Prepare a wakeup device, two steps (Ref ACPI 2.0:P229):
+ * 1. Power on the power resources required for the wakeup device 
+ * 2. Enable _PSW (power state wake) for the device if present
+ */
+int acpi_enable_wakeup_device_power (struct acpi_device *dev)
+{
+	union acpi_object 		arg = {ACPI_TYPE_INTEGER};
+	struct acpi_object_list	arg_list = {1, &arg};
+	acpi_status			status = AE_OK;
+	int					i;
+	int 					ret = 0;
+
+	ACPI_FUNCTION_TRACE("acpi_enable_wakeup_device_power");
+	if (!dev || !dev->wakeup.flags.valid)
+		return_VALUE(-1);
+
+	arg.integer.value = 1;
+	/* Open power resource */
+	for (i = 0; i < dev->wakeup.resources.count; i++) {
+		ret = acpi_power_on(dev->wakeup.resources.handles[i]);
+		if (ret) {
+			ACPI_DEBUG_PRINT((ACPI_DB_ERROR, 
+				"Error transition power state\n"));
+			dev->wakeup.flags.valid = 0;
+			return_VALUE(-1);
+		}
+	}
+
+	/* Execute PSW */
+	status = acpi_evaluate_object(dev->handle, "_PSW", &arg_list, NULL);
+	if (ACPI_FAILURE(status) && (status != AE_NOT_FOUND)) {
+		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Error evaluate _PSW\n"));
+		dev->wakeup.flags.valid = 0;
+		ret = -1;
+	}
+
+	return_VALUE(ret);
+}
+
+/*
+ * Shutdown a wakeup device, counterpart of above method
+ * 1. Disable _PSW (power state wake)
+ * 2. Shutdown down the power resources
+ */
+int acpi_disable_wakeup_device_power (struct acpi_device *dev)
+{
+	union acpi_object 		arg = {ACPI_TYPE_INTEGER};
+	struct acpi_object_list	arg_list = {1, &arg};
+	acpi_status			status = AE_OK;
+	int					i;
+	int 					ret = 0;
+
+	ACPI_FUNCTION_TRACE("acpi_disable_wakeup_device_power");
+
+	if (!dev || !dev->wakeup.flags.valid)
+		return_VALUE(-1);
+
+	arg.integer.value = 0;	
+	/* Execute PSW */
+	status = acpi_evaluate_object(dev->handle, "_PSW", &arg_list, NULL);
+	if (ACPI_FAILURE(status) && (status != AE_NOT_FOUND)) {
+		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Error evaluate _PSW\n"));
+		dev->wakeup.flags.valid = 0;
+		return_VALUE(-1);
+	}
+
+	/* Close power resource */
+	for (i = 0; i < dev->wakeup.resources.count; i++) {
+		ret = acpi_power_off_device(dev->wakeup.resources.handles[i]);
+		if (ret) {
+			ACPI_DEBUG_PRINT((ACPI_DB_ERROR, 
+				"Error transition power state\n"));
+			dev->wakeup.flags.valid = 0;
+			return_VALUE(-1);
+		}
+	}
+
+	return_VALUE(ret);
+}
 
 /* --------------------------------------------------------------------------
                              Device Power Management
@@ -387,7 +479,7 @@ end:
                               FS Interface (/proc)
    -------------------------------------------------------------------------- */
 
-struct proc_dir_entry		*acpi_power_dir = NULL;
+struct proc_dir_entry		*acpi_power_dir;
 
 static int acpi_power_seq_show(struct seq_file *seq, void *offset)
 {
@@ -421,7 +513,7 @@ static int acpi_power_seq_show(struct seq_file *seq, void *offset)
 			resource->references);
 
 end:
-	return 0;
+	return_VALUE(0);
 }
 
 static int acpi_power_open_fs(struct inode *inode, struct file *file)
@@ -470,6 +562,8 @@ acpi_power_remove_fs (
 	ACPI_FUNCTION_TRACE("acpi_power_remove_fs");
 
 	if (acpi_device_dir(device)) {
+		remove_proc_entry(ACPI_POWER_FILE_STATUS,
+				  acpi_device_dir(device));
 		remove_proc_entry(acpi_device_bid(device), acpi_power_dir);
 		acpi_device_dir(device) = NULL;
 	}
@@ -503,9 +597,9 @@ acpi_power_add (
 	memset(resource, 0, sizeof(struct acpi_power_resource));
 
 	resource->handle = device->handle;
-	sprintf(resource->name, "%s", device->pnp.bus_id);
-	sprintf(acpi_device_name(device), "%s", ACPI_POWER_DEVICE_NAME);
-	sprintf(acpi_device_class(device), "%s", ACPI_POWER_CLASS);
+	strcpy(resource->name, device->pnp.bus_id);
+	strcpy(acpi_device_name(device), ACPI_POWER_DEVICE_NAME);
+	strcpy(acpi_device_class(device), ACPI_POWER_CLASS);
 	acpi_driver_data(device) = resource;
 
 	/* Evalute the object to get the system level and resource order. */

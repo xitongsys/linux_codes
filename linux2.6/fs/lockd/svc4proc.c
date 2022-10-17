@@ -53,8 +53,9 @@ nlm4svc_retrieve_args(struct svc_rqst *rqstp, struct nlm_args *argp,
 		*filp = file;
 
 		/* Set up the missing parts of the file_lock structure */
-		lock->fl.fl_file  = &file->f_file;
+		lock->fl.fl_file  = file->f_file;
 		lock->fl.fl_owner = (fl_owner_t) host;
+		lock->fl.fl_lmops = &nlmsvc_lock_operations;
 	}
 
 	return 0;
@@ -453,6 +454,24 @@ nlm4svc_proc_sm_notify(struct svc_rqst *rqstp, struct nlm_reboot *argp,
 }
 
 /*
+ * client sent a GRANTED_RES, let's remove the associated block
+ */
+static int
+nlm4svc_proc_granted_res(struct svc_rqst *rqstp, struct nlm_res  *argp,
+                                                void            *resp)
+{
+        if (!nlmsvc_ops)
+                return rpc_success;
+
+        dprintk("lockd: GRANTED_RES   called\n");
+
+        nlmsvc_grant_reply(rqstp, &argp->cookie, argp->status);
+        return rpc_success;
+}
+
+
+
+/*
  * This is the generic lockd callback for async RPC calls
  */
 static u32
@@ -515,7 +534,6 @@ nlm4svc_callback_exit(struct rpc_task *task)
 #define nlm4svc_proc_lock_res	nlm4svc_proc_null
 #define nlm4svc_proc_cancel_res	nlm4svc_proc_null
 #define nlm4svc_proc_unlock_res	nlm4svc_proc_null
-#define nlm4svc_proc_granted_res	nlm4svc_proc_null
 
 struct nlm_void			{ int dummy; };
 
@@ -528,10 +546,10 @@ struct nlm_void			{ int dummy; };
    .pc_ressize	= sizeof(struct nlm_##rest),		\
    .pc_xdrressize = respsize,				\
  }
-#define	Ck	(1+8)	/* cookie */
-#define	No	(1+1024/4)	/* netobj */
-#define	St	1	/* status */
-#define	Rg	4	/* range (offset + length) */
+#define	Ck	(1+XDR_QUADLEN(NLM_MAXCOOKIELEN))	/* cookie */
+#define	No	(1+1024/4)				/* netobj */
+#define	St	1					/* status */
+#define	Rg	4					/* range (offset + length) */
 struct svc_procedure		nlmsvc_procedures4[] = {
   PROC(null,		void,		void,		void,	void, 1),
   PROC(test,		testargs,	testres,	args,	res, Ck+St+2+No+Rg),
@@ -548,7 +566,7 @@ struct svc_procedure		nlmsvc_procedures4[] = {
   PROC(lock_res,	lockres,	norep,		res,	void, 1),
   PROC(cancel_res,	cancelres,	norep,		res,	void, 1),
   PROC(unlock_res,	unlockres,	norep,		res,	void, 1),
-  PROC(granted_res,	grantedres,	norep,		res,	void, 1),
+  PROC(granted_res,	res,		norep,		res,	void, 1),
   /* statd callback */
   PROC(sm_notify,	reboot,		void,		reboot,	void, 1),
   PROC(none,		void,		void,		void,	void, 0),

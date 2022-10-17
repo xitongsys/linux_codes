@@ -1,6 +1,8 @@
 /*
- *  Parisc tlb and cache flushing support
- *  Copyright (C) 2000 Hewlett-Packard (John Marvin)
+ *  PARISC TLB and cache flushing support
+ *  Copyright (C) 2000-2001 Hewlett-Packard (John Marvin)
+ *  Copyright (C) 2001 Matthew Wilcox (willy at parisc-linux.org)
+ *  Copyright (C) 2002 Richard Hirst (rhirst with parisc-linux.org)
  *
  *    This program is free software; you can redistribute it and/or modify
  *    it under the terms of the GNU General Public License as published by
@@ -14,7 +16,7 @@
  *
  *    You should have received a copy of the GNU General Public License
  *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 /*
@@ -66,7 +68,7 @@ flush_tlb_all_local:
 	 * consolidated.
 	 */
 
-	rsm     PSW_SM_I,%r19      /* relied upon translation! */
+	rsm     PSW_SM_I,%r19	/* relied upon translation! PA 2.0 Arch. F-5 */
 	nop
 	nop
 	nop
@@ -79,13 +81,13 @@ flush_tlb_all_local:
 	ldil    L%REAL_MODE_PSW, %r1
 	ldo     R%REAL_MODE_PSW(%r1), %r1
 	mtctl	%r1, %cr22
-	mtctl	%r0, %cr17
-	mtctl	%r0, %cr17
+	mtctl	%r0, %cr17	/* Clear IIASQ tail */
+	mtctl	%r0, %cr17	/* Clear IIASQ head */
 	ldil    L%PA(1f),%r1
 	ldo     R%PA(1f)(%r1),%r1
-	mtctl	%r1, %cr18
+	mtctl	%r1, %cr18	/* IIAOQ head */
 	ldo	4(%r1), %r1
-	mtctl	%r1, %cr18
+	mtctl	%r1, %cr18	/* IIAOQ tail */
 	rfi
 	nop
 
@@ -185,13 +187,13 @@ fdtdone:
 	ldo	R%KERNEL_PSW(%r1), %r1
 	or      %r1,%r19,%r1    /* Set I bit if set on entry */
 	mtctl	%r1, %cr22
-	mtctl	%r0, %cr17
-	mtctl	%r0, %cr17
+	mtctl	%r0, %cr17	/* Clear IIASQ tail */
+	mtctl	%r0, %cr17	/* Clear IIASQ head */
 	ldil    L%(2f), %r1
 	ldo     R%(2f)(%r1), %r1
-	mtctl	%r1, %cr18
+	mtctl	%r1, %cr18	/* IIAOQ head */
 	ldo	4(%r1), %r1
-	mtctl	%r1, %cr18
+	mtctl	%r1, %cr18	/* IIAOQ tail */
 	rfi
 	nop
 
@@ -219,6 +221,7 @@ flush_instruction_cache_local:
 	LDREG           ICACHE_STRIDE(%r1),%arg1
 	LDREG           ICACHE_COUNT(%r1),%arg2
 	LDREG           ICACHE_LOOP(%r1),%arg3
+	rsm             PSW_SM_I,%r22		/* No mmgt ops during loop*/
 	ADDIB=          -1,%arg3,fioneloop      /* Preadjust and test */
 	movb,<,n        %arg3,%r31,fisync       /* If loop < 0, do sync */
 
@@ -235,6 +238,7 @@ fioneloop:                                      /* Loop if LOOP = 1 */
 
 fisync:
 	sync
+	mtsm	%r22
 	bv      %r0(%r2)
 	nop
 	.exit
@@ -345,10 +349,6 @@ copy_user_page_asm:
 	.exit
 
 	.procend
-
-#if (TMPALIAS_MAP_START >= 0x80000000UL)
-Warning TMPALIAS_MAP_START changed. If > 2 Gb, code in pacache.S is bogus
-#endif
 
 /*
  * NOTE: Code in clear_user_page has a hard coded dependency on the
@@ -475,9 +475,9 @@ copy_user_page_asm:
 	.procend
 #endif
 
-	.export clear_user_page_asm,code
+	.export __clear_user_page_asm,code
 
-clear_user_page_asm:
+__clear_user_page_asm:
 	.proc
 	.callinfo NO_CALLS
 	.entry
@@ -486,6 +486,9 @@ clear_user_page_asm:
 
 	ldil    L%(TMPALIAS_MAP_START),%r28
 #ifdef __LP64__
+#if (TMPALIAS_MAP_START >= 0x80000000)
+	depdi	0,31,32,%r28	/* clear any sign extension */
+#endif
 	extrd,u %r26,56,32,%r26 /* convert phys addr to tlb insert format */
 	depd    %r25,63,22,%r28 /* Form aliased virtual address 'to' */
 	depdi   0,63,12,%r28    /* Clear any offset bits */
@@ -570,6 +573,95 @@ flush_kernel_dcache_page:
 	.exit
 
 	.procend
+	
+	.export flush_user_dcache_page
+
+flush_user_dcache_page:
+	.proc
+	.callinfo NO_CALLS
+	.entry
+
+	ldil    L%dcache_stride,%r1
+	ldw     R%dcache_stride(%r1),%r23
+
+#ifdef __LP64__
+	depdi,z 1,63-PAGE_SHIFT,1,%r25
+#else
+	depwi,z 1,31-PAGE_SHIFT,1,%r25
+#endif
+	add     %r26,%r25,%r25
+	sub     %r25,%r23,%r25
+
+
+1:      fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	fdc,m   %r23(%sr3,%r26)
+	CMPB<<  %r26,%r25,1b
+	fdc,m   %r23(%sr3,%r26)
+
+	sync
+	bv      %r0(%r2)
+	nop
+	.exit
+
+	.procend
+
+	.export flush_user_icache_page
+
+flush_user_icache_page:
+	.proc
+	.callinfo NO_CALLS
+	.entry
+
+	ldil    L%dcache_stride,%r1
+	ldw     R%dcache_stride(%r1),%r23
+
+#ifdef __LP64__
+	depdi,z 1,63-PAGE_SHIFT,1,%r25
+#else
+	depwi,z 1,31-PAGE_SHIFT,1,%r25
+#endif
+	add     %r26,%r25,%r25
+	sub     %r25,%r23,%r25
+
+
+1:      fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	fic,m   %r23(%sr3,%r26)
+	CMPB<<  %r26,%r25,1b
+	fic,m   %r23(%sr3,%r26)
+
+	sync
+	bv      %r0(%r2)
+	nop
+	.exit
+
+	.procend
+
 
 	.export purge_kernel_dcache_page
 
@@ -837,13 +929,13 @@ disable_sr_hashing_asm:
 	ldil    L%REAL_MODE_PSW, %r1
 	ldo     R%REAL_MODE_PSW(%r1), %r1
 	mtctl	%r1, %cr22
-	mtctl	%r0, %cr17
-	mtctl	%r0, %cr17
+	mtctl	%r0, %cr17	/* Clear IIASQ tail */
+	mtctl	%r0, %cr17	/* Clear IIASQ head */
 	ldil    L%PA(1f),%r1
 	ldo     R%PA(1f)(%r1),%r1
-	mtctl	%r1, %cr18
+	mtctl	%r1, %cr18	/* IIAOQ head */
 	ldo	4(%r1), %r1
-	mtctl	%r1, %cr18
+	mtctl	%r1, %cr18	/* IIAOQ tail */
 	rfi
 	nop
 
@@ -889,13 +981,13 @@ srdis_done:
 	ldil	L%KERNEL_PSW, %r1
 	ldo	R%KERNEL_PSW(%r1), %r1
 	mtctl	%r1, %cr22
-	mtctl	%r0, %cr17
-	mtctl	%r0, %cr17
+	mtctl	%r0, %cr17	/* Clear IIASQ tail */
+	mtctl	%r0, %cr17	/* Clear IIASQ head */
 	ldil    L%(2f), %r1
 	ldo     R%(2f)(%r1), %r1
-	mtctl	%r1, %cr18
+	mtctl	%r1, %cr18	/* IIAOQ head */
 	ldo	4(%r1), %r1
-	mtctl	%r1, %cr18
+	mtctl	%r1, %cr18	/* IIAOQ tail */
 	rfi
 	nop
 

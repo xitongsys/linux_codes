@@ -18,6 +18,8 @@ struct bug_entry {
 	const char	*function;
 };
 
+struct bug_entry *find_bug(unsigned long bugaddr);
+
 /*
  * If this bit is set in the line number it means that the trap
  * is for WARN_ON rather than BUG or BUG_ON.
@@ -43,8 +45,6 @@ struct bug_entry {
 		    "i" (__FUNCTION__));			\
 } while (0)
 
-#define PAGE_BUG(page) do { BUG(); } while (0)
-
 #define WARN_ON(x) do {						\
 	__asm__ __volatile__(					\
 		"1:	tdnei %0,0\n"				\
@@ -56,4 +56,10 @@ struct bug_entry {
 } while (0)
 
 #endif
+
+#define HAVE_ARCH_BUG
+#define HAVE_ARCH_BUG_ON
+#define HAVE_ARCH_WARN_ON
+#include <asm-generic/bug.h>
+
 #endif

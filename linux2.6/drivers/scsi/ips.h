@@ -96,7 +96,11 @@
    #endif
 
    #if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0)
-      typedef void irqreturn_t;
+   
+      #ifndef irqreturn_t
+         typedef void irqreturn_t;
+      #endif 
+      
       #define IRQ_NONE
       #define IRQ_HANDLED
       #define IRQ_RETVAL(x)
@@ -246,6 +250,8 @@
    #define IPS_SUBDEVICEID_5I1          0x0258
    #define IPS_SUBDEVICEID_6M           0x0279
    #define IPS_SUBDEVICEID_6I           0x028C
+   #define IPS_SUBDEVICEID_7k           0x028E
+   #define IPS_SUBDEVICEID_7M           0x028F
    #define IPS_IOCTL_SIZE               8192
    #define IPS_STATUS_SIZE              4
    #define IPS_STATUS_Q_SIZE            (IPS_MAX_CMDS+1) * IPS_STATUS_SIZE
@@ -330,6 +336,9 @@
    #define IPS_ADTYPE_SERVERAID5I1      0x0D
    #define IPS_ADTYPE_SERVERAID6M       0x0E
    #define IPS_ADTYPE_SERVERAID6I       0x0F
+   #define IPS_ADTYPE_SERVERAID7t       0x10
+   #define IPS_ADTYPE_SERVERAID7k       0x11
+   #define IPS_ADTYPE_SERVERAID7M       0x12
 
    /*
     * Adapter Command/Status Packet Definitions
@@ -711,7 +720,6 @@ typedef struct {
    volatile PIPS_STATUS p_status_tail;
    volatile uint32_t    hw_status_start;
    volatile uint32_t    hw_status_tail;
-   IPS_LD_INFO          logical_drive_info;
 } IPS_ADAPTER, *PIPS_ADAPTER;
 
 typedef struct {
@@ -1084,6 +1092,8 @@ typedef struct ips_ha {
    ips_scb_queue_t    scb_activelist;     /* Active SCB list            */
    IPS_IO_CMD        *dummy;              /* dummy command              */
    IPS_ADAPTER       *adapt;              /* Adapter status area        */
+   IPS_LD_INFO       *logical_drive_info; /* Adapter Logical Drive Info */
+   dma_addr_t         logical_drive_info_dma_addr; /* Logical Drive Info DMA Address */
    IPS_ENQ           *enq;                /* Adapter Enquiry data       */
    IPS_CONF          *conf;               /* Adapter config data        */
    IPS_NVRAM_P5      *nvram;              /* NVRAM page 5 data          */
@@ -1107,8 +1117,8 @@ typedef struct ips_ha {
    uint32_t           mem_addr;           /* Memory mapped address      */
    uint32_t           io_len;             /* Size of IO Address         */
    uint32_t           mem_len;            /* Size of memory address     */
-   char              *mem_ptr;            /* Memory mapped Ptr          */
-   char              *ioremap_ptr;        /* ioremapped memory pointer  */
+   char              __iomem *mem_ptr;    /* Memory mapped Ptr          */
+   char              __iomem *ioremap_ptr;/* ioremapped memory pointer  */
    ips_hw_func_t      func;               /* hw function pointers       */
    struct pci_dev    *pcidev;             /* PCI device handle          */
    char              *flash_data;         /* Save Area for flash data   */
@@ -1132,7 +1142,7 @@ typedef struct ips_scb {
    uint8_t           lun;
    uint8_t           cdb[12];
    uint32_t          scb_busaddr;
-   uint32_t          data_busaddr;
+   uint32_t          old_data_busaddr;  // Obsolete, but kept for old utility compatibility
    uint32_t          timeout;
    uint8_t           basic_status;
    uint8_t           extended_status;
@@ -1148,6 +1158,7 @@ typedef struct ips_scb {
    ips_scb_callback  callback;
    uint32_t          sg_busaddr;
    int               sg_count;
+   dma_addr_t        data_busaddr;
 } ips_scb_t;
 
 typedef struct ips_scb_pt {
@@ -1201,50 +1212,54 @@ typedef struct {
 *
 *************************************************************************/
 
-#define IPS_VER_MAJOR 6
-#define IPS_VER_MAJOR_STRING "6"
+#define IPS_VER_MAJOR 7
+#define IPS_VER_MAJOR_STRING "7"
 #define IPS_VER_MINOR 10
 #define IPS_VER_MINOR_STRING "10"
-#define IPS_VER_BUILD 90
-#define IPS_VER_BUILD_STRING "90"
-#define IPS_VER_STRING "6.10.90"
-#define IPS_RELEASE_ID 0x00010000
-#define IPS_BUILD_IDENT 364
-#define IPS_LEGALCOPYRIGHT_STRING "(C) Copyright IBM Corp. 1994, 2003. All Rights Reserved."
-#define IPS_ADAPTECCOPYRIGHT_STRING "(c) Copyright Adaptec, Inc. 2002 to present. All Rights Reserved."
-#define IPS_NT_LEGALCOPYRIGHT_STRING "(C) Copyright IBM Corp. 1994, 2003."
+#define IPS_VER_BUILD 18
+#define IPS_VER_BUILD_STRING "18"
+#define IPS_VER_STRING "7.10.18"
+#define IPS_RELEASE_ID 0x00020000
+#define IPS_BUILD_IDENT 731
+#define IPS_LEGALCOPYRIGHT_STRING "(C) Copyright IBM Corp. 1994, 2002. All Rights Reserved."
+#define IPS_ADAPTECCOPYRIGHT_STRING "(c) Copyright Adaptec, Inc. 2002 to 2004. All Rights Reserved."
+#define IPS_DELLCOPYRIGHT_STRING "(c) Copyright Dell 2004. All Rights Reserved."
+#define IPS_NT_LEGALCOPYRIGHT_STRING "(C) Copyright IBM Corp. 1994, 2002."
 
 /* Version numbers for various adapters */
 #define IPS_VER_SERVERAID1 "2.25.01"
 #define IPS_VER_SERVERAID2 "2.88.13"
 #define IPS_VER_NAVAJO "2.88.13"
 #define IPS_VER_SERVERAID3 "6.10.24"
-#define IPS_VER_SERVERAID4H "6.10.24"
-#define IPS_VER_SERVERAID4MLx "6.10.24"
-#define IPS_VER_SARASOTA "6.10.24"
-#define IPS_VER_MARCO "6.10.24"
-#define IPS_VER_SEBRING "6.10.24"
+#define IPS_VER_SERVERAID4H "7.10.11"
+#define IPS_VER_SERVERAID4MLx "7.10.18"
+#define IPS_VER_SARASOTA "7.10.18"
+#define IPS_VER_MARCO "7.10.18"
+#define IPS_VER_SEBRING "7.10.18"
+#define IPS_VER_KEYWEST "7.10.18"
 
 /* Compatability IDs for various adapters */
 #define IPS_COMPAT_UNKNOWN ""
-#define IPS_COMPAT_CURRENT "SB610"
+#define IPS_COMPAT_CURRENT "KW710"
 #define IPS_COMPAT_SERVERAID1 "2.25.01"
 #define IPS_COMPAT_SERVERAID2 "2.88.13"
 #define IPS_COMPAT_NAVAJO  "2.88.13"
 #define IPS_COMPAT_KIOWA "2.88.13"
 #define IPS_COMPAT_SERVERAID3H  "SB610"
 #define IPS_COMPAT_SERVERAID3L  "SB610"
-#define IPS_COMPAT_SERVERAID4H  "SB610"
-#define IPS_COMPAT_SERVERAID4M  "SB610"
-#define IPS_COMPAT_SERVERAID4L  "SB610"
-#define IPS_COMPAT_SERVERAID4Mx "SB610"
-#define IPS_COMPAT_SERVERAID4Lx "SB610"
-#define IPS_COMPAT_SARASOTA     "SB610"
-#define IPS_COMPAT_MARCO        "SB610"
-#define IPS_COMPAT_SEBRING      "SB610"
-#define IPS_COMPAT_BIOS "SB610"
+#define IPS_COMPAT_SERVERAID4H  "KW710"
+#define IPS_COMPAT_SERVERAID4M  "KW710"
+#define IPS_COMPAT_SERVERAID4L  "KW710"
+#define IPS_COMPAT_SERVERAID4Mx "KW710"
+#define IPS_COMPAT_SERVERAID4Lx "KW710"
+#define IPS_COMPAT_SARASOTA     "KW710"
+#define IPS_COMPAT_MARCO        "KW710"
+#define IPS_COMPAT_SEBRING      "KW710"
+#define IPS_COMPAT_TAMPA        "KW710"
+#define IPS_COMPAT_KEYWEST      "KW710"
+#define IPS_COMPAT_BIOS "KW710"
 
-#define IPS_COMPAT_MAX_ADAPTER_TYPE 16
+#define IPS_COMPAT_MAX_ADAPTER_TYPE 18
 #define IPS_COMPAT_ID_LENGTH 8
 
 #define IPS_DEFINE_COMPAT_TABLE(tablename) \
@@ -1264,7 +1279,9 @@ typedef struct {
       IPS_COMPAT_SARASOTA,         /* one-channel variety of SARASOTA */  \
       IPS_COMPAT_SARASOTA,         /* two-channel variety of SARASOTA */  \
       IPS_COMPAT_MARCO, \
-      IPS_COMPAT_SEBRING \
+      IPS_COMPAT_SEBRING, \
+      IPS_COMPAT_TAMPA, \
+      IPS_COMPAT_KEYWEST \
    }
 
 

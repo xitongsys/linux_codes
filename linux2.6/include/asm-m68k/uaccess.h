@@ -14,7 +14,7 @@
 /* We let the MMU do all checking */
 #define access_ok(type,addr,size) 1
 
-extern inline int verify_area(int type, const void * addr, unsigned long size)
+static inline int verify_area(int type, const void *addr, unsigned long size)
 {
 	return access_ok(type,addr,size)?0:-EFAULT;
 }
@@ -520,6 +520,9 @@ __constant_copy_from_user(void *to, const void *from, unsigned long n)
 	 : "=a"(to), "=a"(from), "=d"(n)		\
 	 : "0"(to), "1"(from), "2"(n/4)			\
 	 : "d0", "memory")
+
+#define __copy_to_user_inatomic __copy_to_user
+#define __copy_from_user_inatomic __copy_from_user
 
 static inline unsigned long
 __constant_copy_to_user(void *to, const void *from, unsigned long n)

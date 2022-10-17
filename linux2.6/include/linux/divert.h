@@ -46,7 +46,7 @@ typedef union _divert_cf_arg
 	u32		uint32;
 	s64		int64;
 	u64		uint64;
-	void	*ptr;
+	void	__user *ptr;
 } divert_cf_arg;
 
 
@@ -109,9 +109,11 @@ struct divert_cf
 #include <linux/skbuff.h>
 
 #ifdef CONFIG_NET_DIVERT
+#include <linux/netdevice.h>
+
 int alloc_divert_blk(struct net_device *);
 void free_divert_blk(struct net_device *);
-int divert_ioctl(unsigned int cmd, struct divert_cf *arg);
+int divert_ioctl(unsigned int cmd, struct divert_cf __user *arg);
 void divert_frame(struct sk_buff *skb);
 static inline void handle_diverter(struct sk_buff *skb)
 {

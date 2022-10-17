@@ -24,6 +24,7 @@
 #include <linux/list.h>
 #include <linux/security.h>
 #include <linux/sched.h>
+#include <linux/syscalls.h>
 #include <asm/current.h>
 #include <asm/uaccess.h>
 #include "util.h"
@@ -49,11 +50,6 @@ struct msg_receiver {
 struct msg_sender {
 	struct list_head list;
 	struct task_struct* tsk;
-};
-
-struct msg_msgseg {
-	struct msg_msgseg* next;
-	/* the next part of the message follows immediately */
 };
 
 #define SEARCH_ANY		1
@@ -85,7 +81,7 @@ void __init msg_init (void)
 	ipc_init_ids(&msg_ids,msg_ctlmni);
 
 #ifdef CONFIG_PROC_FS
-	create_proc_read_entry("sysvipc/msg", 0, 0, sysvipc_msg_read_proc, NULL);
+	create_proc_read_entry("sysvipc/msg", 0, NULL, sysvipc_msg_read_proc, NULL);
 #endif
 }
 
@@ -105,14 +101,14 @@ static int newque (key_t key, int msgflg)
 	msq->q_perm.security = NULL;
 	retval = security_msg_queue_alloc(msq);
 	if (retval) {
-		ipc_rcu_free(msq, sizeof(*msq));
+		ipc_rcu_putref(msq);
 		return retval;
 	}
 
 	id = ipc_addid(&msg_ids, &msq->q_perm, msg_ctlmni);
 	if(id == -1) {
 		security_msg_queue_free(msq);
-		ipc_rcu_free(msq, sizeof(*msq));
+		ipc_rcu_putref(msq);
 		return -ENOSPC;
 	}
 
@@ -127,106 +123,6 @@ static int newque (key_t key, int msgflg)
 	msg_unlock(msq);
 
 	return msg_buildid(id,msq->q_perm.seq);
-}
-
-static void free_msg(struct msg_msg* msg)
-{
-	struct msg_msgseg* seg;
-
-	security_msg_msg_free(msg);
-
-	seg = msg->next;
-	kfree(msg);
-	while(seg != NULL) {
-		struct msg_msgseg* tmp = seg->next;
-		kfree(seg);
-		seg = tmp;
-	}
-}
-
-static struct msg_msg* load_msg(void* src, int len)
-{
-	struct msg_msg* msg;
-	struct msg_msgseg** pseg;
-	int err;
-	int alen;
-
-	alen = len;
-	if(alen > DATALEN_MSG)
-		alen = DATALEN_MSG;
-
-	msg = (struct msg_msg *) kmalloc (sizeof(*msg) + alen, GFP_KERNEL);
-	if(msg==NULL)
-		return ERR_PTR(-ENOMEM);
-
-	msg->next = NULL;
-	msg->security = NULL;
-
-	if (copy_from_user(msg+1, src, alen)) {
-		err = -EFAULT;
-		goto out_err;
-	}
-
-	len -= alen;
-	src = ((char*)src)+alen;
-	pseg = &msg->next;
-	while(len > 0) {
-		struct msg_msgseg* seg;
-		alen = len;
-		if(alen > DATALEN_SEG)
-			alen = DATALEN_SEG;
-		seg = (struct msg_msgseg *) kmalloc (sizeof(*seg) + alen, GFP_KERNEL);
-		if(seg==NULL) {
-			err=-ENOMEM;
-			goto out_err;
-		}
-		*pseg = seg;
-		seg->next = NULL;
-		if(copy_from_user (seg+1, src, alen)) {
-			err = -EFAULT;
-			goto out_err;
-		}
-		pseg = &seg->next;
-		len -= alen;
-		src = ((char*)src)+alen;
-	}
-	
-	err = security_msg_msg_alloc(msg);
-	if (err)
-		goto out_err;
-
-	return msg;
-
-out_err:
-	free_msg(msg);
-	return ERR_PTR(err);
-}
-
-static int store_msg(void* dest, struct msg_msg* msg, int len)
-{
-	int alen;
-	struct msg_msgseg *seg;
-
-	alen = len;
-	if(alen > DATALEN_MSG)
-		alen = DATALEN_MSG;
-	if(copy_to_user (dest, msg+1, alen))
-		return -1;
-
-	len -= alen;
-	dest = ((char*)dest)+alen;
-	seg = msg->next;
-	while(len > 0) {
-		alen = len;
-		if(alen > DATALEN_SEG)
-			alen = DATALEN_SEG;
-		if(copy_to_user (dest, seg+1, alen))
-			return -1;
-		len -= alen;
-		dest = ((char*)dest)+alen;
-		seg=seg->next;
-	}
-	return 0;
 }
 
 static inline void ss_add(struct msg_queue* msq, struct msg_sender* mss)
@@ -268,8 +164,10 @@ static void expunge_all(struct msg_queue* msq, int res)
 		
 		msr = list_entry(tmp,struct msg_receiver,r_list);
 		tmp = tmp->next;
-		msr->r_msg = ERR_PTR(res);
+		msr->r_msg = NULL;
 		wake_up_process(msr->r_tsk);
+		smp_mb();
+		msr->r_msg = ERR_PTR(res);
 	}
 }
 /* 
@@ -298,7 +196,7 @@ static void freeque (struct msg_queue *msq, int id)
 	}
 	atomic_sub(msq->q_cbytes, &msg_bytes);
 	security_msg_queue_free(msq);
-	ipc_rcu_free(msq, sizeof(struct msg_queue));
+	ipc_rcu_putref(msq);
 }
 
 asmlinkage long sys_msgget (key_t key, int msgflg)
@@ -334,7 +232,7 @@ asmlinkage long sys_msgget (key_t key, int msgflg)
 	return ret;
 }
 
-static inline unsigned long copy_msqid_to_user(void *buf, struct msqid64_ds *in, int version)
+static inline unsigned long copy_msqid_to_user(void __user *buf, struct msqid64_ds *in, int version)
 {
 	switch(version) {
 	case IPC_64:
@@ -385,7 +283,7 @@ struct msq_setbuf {
 	mode_t		mode;
 };
 
-static inline unsigned long copy_msqid_from_user(struct msq_setbuf *out, void *buf, int version)
+static inline unsigned long copy_msqid_from_user(struct msq_setbuf *out, void __user *buf, int version)
 {
 	switch(version) {
 	case IPC_64:
@@ -425,7 +323,7 @@ static inline unsigned long copy_msqid_from_user(struct msq_setbuf *out, void *b
 	}
 }
 
-asmlinkage long sys_msgctl (int msqid, int cmd, struct msqid_ds *buf)
+asmlinkage long sys_msgctl (int msqid, int cmd, struct msqid_ds __user *buf)
 {
 	int err, version;
 	struct msg_queue *msq;
@@ -483,7 +381,7 @@ asmlinkage long sys_msgctl (int msqid, int cmd, struct msqid_ds *buf)
 		int success_return;
 		if (!buf)
 			return -EFAULT;
-		if(cmd == MSG_STAT && msqid >= msg_ids.size)
+		if(cmd == MSG_STAT && msqid >= msg_ids.entries->size)
 			return -EINVAL;
 
 		memset(&tbuf,0,sizeof(tbuf));
@@ -557,6 +455,7 @@ asmlinkage long sys_msgctl (int msqid, int cmd, struct msqid_ds *buf)
 	switch (cmd) {
 	case IPC_SET:
 	{
+		err = -EPERM;
 		if (setbuf.qbytes > msg_ctlmnb && !capable(CAP_SYS_RESOURCE))
 			goto out_unlock_up;
 
@@ -629,13 +528,17 @@ static inline int pipelined_send(struct msg_queue* msq, struct msg_msg* msg)
 		   !security_msg_queue_msgrcv(msq, msg, msr->r_tsk, msr->r_msgtype, msr->r_mode)) {
 			list_del(&msr->r_list);
 			if(msr->r_maxsize < msg->m_ts) {
-				msr->r_msg = ERR_PTR(-E2BIG);
+				msr->r_msg = NULL;
 				wake_up_process(msr->r_tsk);
+				smp_mb();
+				msr->r_msg = ERR_PTR(-E2BIG);
 			} else {
-				msr->r_msg = msg;
+				msr->r_msg = NULL;
 				msq->q_lrpid = msr->r_tsk->pid;
 				msq->q_rtime = get_seconds();
 				wake_up_process(msr->r_tsk);
+				smp_mb();
+				msr->r_msg = msg;
 				return 1;
 			}
 		}
@@ -643,7 +546,7 @@ static inline int pipelined_send(struct msg_queue* msq, struct msg_msg* msg)
 	return 0;
 }
 
-asmlinkage long sys_msgsnd (int msqid, struct msgbuf *msgp, size_t msgsz, int msgflg)
+asmlinkage long sys_msgsnd (int msqid, struct msgbuf __user *msgp, size_t msgsz, int msgflg)
 {
 	struct msg_queue *msq;
 	struct msg_msg *msg;
@@ -668,43 +571,49 @@ asmlinkage long sys_msgsnd (int msqid, struct msgbuf *msgp, size_t msgsz, int ms
 	err=-EINVAL;
 	if(msq==NULL)
 		goto out_free;
-retry:
+
 	err= -EIDRM;
 	if (msg_checkid(msq,msqid))
 		goto out_unlock_free;
 
-	err=-EACCES;
-	if (ipcperms(&msq->q_perm, S_IWUGO)) 
-		goto out_unlock_free;
-
-	err = security_msg_queue_msgsnd(msq, msg, msgflg);
-	if (err)
-		goto out_unlock_free;
-
-	if(msgsz + msq->q_cbytes > msq->q_qbytes ||
-		1 + msq->q_qnum > msq->q_qbytes) {
+	for (;;) {
 		struct msg_sender s;
 
+		err=-EACCES;
+		if (ipcperms(&msq->q_perm, S_IWUGO))
+			goto out_unlock_free;
+
+		err = security_msg_queue_msgsnd(msq, msg, msgflg);
+		if (err)
+			goto out_unlock_free;
+
+		if(msgsz + msq->q_cbytes <= msq->q_qbytes &&
+				1 + msq->q_qnum <= msq->q_qbytes) {
+			break;
+		}
+
+		/* queue full, wait: */
 		if(msgflg&IPC_NOWAIT) {
 			err=-EAGAIN;
 			goto out_unlock_free;
 		}
 		ss_add(msq, &s);
+		ipc_rcu_getref(msq);
 		msg_unlock(msq);
 		schedule();
-		current->state= TASK_RUNNING;
 
-		msq = msg_lock(msqid);
-		err = -EIDRM;
-		if(msq==NULL)
-			goto out_free;
+		ipc_lock_by_ptr(&msq->q_perm);
+		ipc_rcu_putref(msq);
+		if (msq->q_perm.deleted) {
+			err = -EIDRM;
+			goto out_unlock_free;
+		}
 		ss_del(&s);
 		
 		if (signal_pending(current)) {
-			err=-EINTR;
+			err=-ERESTARTNOHAND;
 			goto out_unlock_free;
 		}
-		goto retry;
 	}
 
 	msq->q_lspid = current->tgid;
@@ -749,14 +658,11 @@ static inline int convert_mode(long* msgtyp, int msgflg)
 	return SEARCH_EQUAL;
 }
 
-asmlinkage long sys_msgrcv (int msqid, struct msgbuf *msgp, size_t msgsz,
+asmlinkage long sys_msgrcv (int msqid, struct msgbuf __user *msgp, size_t msgsz,
 			    long msgtyp, int msgflg)
 {
 	struct msg_queue *msq;
-	struct msg_receiver msr_d;
-	struct list_head* tmp;
-	struct msg_msg* msg, *found_msg;
-	int err;
+	struct msg_msg *msg;
 	int mode;
 
 	if (msqid < 0 || (long) msgsz < 0)
@@ -766,62 +672,57 @@ asmlinkage long sys_msgrcv (int msqid, struct msgbuf *msgp, size_t msgsz,
 	msq = msg_lock(msqid);
 	if(msq==NULL)
 		return -EINVAL;
-retry:
-	err = -EIDRM;
+
+	msg = ERR_PTR(-EIDRM);
 	if (msg_checkid(msq,msqid))
 		goto out_unlock;
 
-	err=-EACCES;
-	if (ipcperms (&msq->q_perm, S_IRUGO))
-		goto out_unlock;
+	for (;;) {
+		struct msg_receiver msr_d;
+		struct list_head* tmp;
 
-	tmp = msq->q_messages.next;
-	found_msg=NULL;
-	while (tmp != &msq->q_messages) {
-		msg = list_entry(tmp,struct msg_msg,m_list);
-		if(testmsg(msg,msgtyp,mode) &&
-		   !security_msg_queue_msgrcv(msq, msg, current, msgtyp, mode)) {
-			found_msg = msg;
-			if(mode == SEARCH_LESSEQUAL && msg->m_type != 1) {
-				found_msg=msg;
-				msgtyp=msg->m_type-1;
-			} else {
-				found_msg=msg;
-				break;
-			}
-		}
-		tmp = tmp->next;
-	}
-	if(found_msg) {
-		msg=found_msg;
-		if ((msgsz < msg->m_ts) && !(msgflg & MSG_NOERROR)) {
-			err=-E2BIG;
+		msg = ERR_PTR(-EACCES);
+		if (ipcperms (&msq->q_perm, S_IRUGO))
 			goto out_unlock;
+
+		msg = ERR_PTR(-EAGAIN);
+		tmp = msq->q_messages.next;
+		while (tmp != &msq->q_messages) {
+			struct msg_msg *walk_msg;
+			walk_msg = list_entry(tmp,struct msg_msg,m_list);
+			if(testmsg(walk_msg,msgtyp,mode) &&
+			   !security_msg_queue_msgrcv(msq, walk_msg, current, msgtyp, mode)) {
+				msg = walk_msg;
+				if(mode == SEARCH_LESSEQUAL && walk_msg->m_type != 1) {
+					msg=walk_msg;
+					msgtyp=walk_msg->m_type-1;
+				} else {
+					msg=walk_msg;
+					break;
+				}
+			}
+			tmp = tmp->next;
 		}
-		list_del(&msg->m_list);
-		msq->q_qnum--;
-		msq->q_rtime = get_seconds();
-		msq->q_lrpid = current->tgid;
-		msq->q_cbytes -= msg->m_ts;
-		atomic_sub(msg->m_ts,&msg_bytes);
-		atomic_dec(&msg_hdrs);
-		ss_wakeup(&msq->q_senders,0);
-		msg_unlock(msq);
-out_success:
-		msgsz = (msgsz > msg->m_ts) ? msg->m_ts : msgsz;
-		if (put_user (msg->m_type, &msgp->mtype) ||
-		    store_msg(msgp->mtext, msg, msgsz)) {
-			    msgsz = -EFAULT;
+		if(!IS_ERR(msg)) {
+			/* Found a suitable message. Unlink it from the queue. */
+			if ((msgsz < msg->m_ts) && !(msgflg & MSG_NOERROR)) {
+				msg = ERR_PTR(-E2BIG);
+				goto out_unlock;
+			}
+			list_del(&msg->m_list);
+			msq->q_qnum--;
+			msq->q_rtime = get_seconds();
+			msq->q_lrpid = current->tgid;
+			msq->q_cbytes -= msg->m_ts;
+			atomic_sub(msg->m_ts,&msg_bytes);
+			atomic_dec(&msg_hdrs);
+			ss_wakeup(&msq->q_senders,0);
+			msg_unlock(msq);
+			break;
 		}
-		free_msg(msg);
-		return msgsz;
-	} else
-	{
-		/* no message waiting. Prepare for pipelined
-		 * receive.
-		 */
+		/* No message waiting. Wait for a message */
 		if (msgflg & IPC_NOWAIT) {
-			err=-ENOMSG;
+			msg = ERR_PTR(-ENOMSG);
 			goto out_unlock;
 		}
 		list_add_tail(&msr_d.r_list,&msq->q_receivers);
@@ -831,52 +732,76 @@ out_success:
 		if(msgflg & MSG_NOERROR)
 			msr_d.r_maxsize = INT_MAX;
 		 else
-		 	msr_d.r_maxsize = msgsz;
+			msr_d.r_maxsize = msgsz;
 		msr_d.r_msg = ERR_PTR(-EAGAIN);
 		current->state = TASK_INTERRUPTIBLE;
 		msg_unlock(msq);
 
 		schedule();
 
-		/*
-		 * The below optimisation is buggy.  A sleeping thread that is
-		 * woken up checks if it got a message and if so, copies it to
-		 * userspace and just returns without taking any locks.
-		 * But this return to user space can be faster than the message
-		 * send, and if the receiver immediately exits the
-		 * wake_up_process performed by the sender will oops.
+		/* Lockless receive, part 1:
+		 * Disable preemption.  We don't hold a reference to the queue
+		 * and getting a reference would defeat the idea of a lockless
+		 * operation, thus the code relies on rcu to guarantee the
+		 * existance of msq:
+		 * Prior to destruction, expunge_all(-EIRDM) changes r_msg.
+		 * Thus if r_msg is -EAGAIN, then the queue not yet destroyed.
+		 * rcu_read_lock() prevents preemption between reading r_msg
+		 * and the spin_lock() inside ipc_lock_by_ptr().
 		 */
-#if 0
-		msg = (struct msg_msg*) msr_d.r_msg;
-		if(!IS_ERR(msg)) 
-			goto out_success;
-#endif
+		rcu_read_lock();
 
-		msq = msg_lock(msqid);
-		msg = (struct msg_msg*)msr_d.r_msg;
-		if(!IS_ERR(msg)) {
-			/* our message arived while we waited for
-			 * the spinlock. Process it.
-			 */
-			if(msq)
-				msg_unlock(msq);
-			goto out_success;
+		/* Lockless receive, part 2:
+		 * Wait until pipelined_send or expunge_all are outside of
+		 * wake_up_process(). There is a race with exit(), see
+		 * ipc/mqueue.c for the details.
+		 */
+		msg = (struct msg_msg*) msr_d.r_msg;
+		while (msg == NULL) {
+			cpu_relax();
+			msg = (struct msg_msg*) msr_d.r_msg;
 		}
-		err = PTR_ERR(msg);
-		if(err == -EAGAIN) {
-			if(!msq)
-				BUG();
-			list_del(&msr_d.r_list);
-			if (signal_pending(current))
-				err=-EINTR;
-			 else
-				goto retry;
+
+		/* Lockless receive, part 3:
+		 * If there is a message or an error then accept it without
+		 * locking.
+		 */
+		if(msg != ERR_PTR(-EAGAIN)) {
+			rcu_read_unlock();
+			break;
+		}
+
+		/* Lockless receive, part 3:
+		 * Acquire the queue spinlock.
+		 */
+		ipc_lock_by_ptr(&msq->q_perm);
+		rcu_read_unlock();
+
+		/* Lockless receive, part 4:
+		 * Repeat test after acquiring the spinlock.
+		 */
+		msg = (struct msg_msg*)msr_d.r_msg;
+		if(msg != ERR_PTR(-EAGAIN))
+			goto out_unlock;
+
+		list_del(&msr_d.r_list);
+		if (signal_pending(current)) {
+			msg = ERR_PTR(-ERESTARTNOHAND);
+out_unlock:
+			msg_unlock(msq);
+			break;
 		}
 	}
-out_unlock:
-	if(msq)
-		msg_unlock(msq);
-	return err;
+	if (IS_ERR(msg))
+       		return PTR_ERR(msg);
+
+	msgsz = (msgsz > msg->m_ts) ? msg->m_ts : msgsz;
+	if (put_user (msg->m_type, &msgp->mtype) ||
+	    store_msg(msgp->mtext, msg, msgsz)) {
+		    msgsz = -EFAULT;
+	}
+	free_msg(msg);
+	return msgsz;
 }
 
 #ifdef CONFIG_PROC_FS

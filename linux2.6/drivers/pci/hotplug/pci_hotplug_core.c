@@ -29,6 +29,7 @@
 
 #include <linux/config.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/list.h>
@@ -45,11 +46,7 @@
 #include "pci_hotplug.h"
 
 
-#if !defined(CONFIG_HOTPLUG_PCI_MODULE)
-	#define MY_NAME	"pci_hotplug"
-#else
-	#define MY_NAME	THIS_MODULE->name
-#endif
+#define MY_NAME	"pci_hotplug"
 
 #define dbg(fmt, arg...) do { if (debug) printk(KERN_DEBUG "%s: %s: " fmt , MY_NAME , __FUNCTION__ , ## arg); } while (0)
 #define err(format, arg...) printk(KERN_ERR "%s: " format , MY_NAME , ## arg)
@@ -104,8 +101,7 @@ static struct kobj_type hotplug_slot_ktype = {
 	.release = &hotplug_slot_release,
 };
 
-decl_subsys(pci_hotplug_slots, &hotplug_slot_ktype, NULL);
-
+decl_subsys_name(pci_hotplug_slots, slots, &hotplug_slot_ktype, NULL);
 
 /* these strings match up with the values in pci_bus_speed */
 static char *pci_bus_speed_strings[] = {
@@ -129,6 +125,7 @@ static char *pci_bus_speed_strings[] = {
 	"66 MHz PCIX 533",	/* 0x11 */
 	"100 MHz PCIX 533",	/* 0x12 */
 	"133 MHz PCIX 533",	/* 0x13 */
+	"25 GBps PCI-E",	/* 0x14 */
 };
 
 #ifdef CONFIG_HOTPLUG_PCI_CPCI
@@ -159,6 +156,7 @@ GET_STATUS(power_status, u8)
 GET_STATUS(attention_status, u8)
 GET_STATUS(latch_status, u8)
 GET_STATUS(adapter_status, u8)
+GET_STATUS(address, u32)
 GET_STATUS(max_bus_speed, enum pci_bus_speed)
 GET_STATUS(cur_bus_speed, enum pci_bus_speed)
 
@@ -279,7 +277,7 @@ exit:
 }
 
 static struct hotplug_slot_attribute hotplug_slot_attr_latch = {
-	.attr = {.name = "latch", .mode = S_IFREG | S_IRUGO | S_IWUSR},
+	.attr = {.name = "latch", .mode = S_IFREG | S_IRUGO},
 	.show = latch_read_file,
 };
 
@@ -298,8 +296,30 @@ exit:
 }
 
 static struct hotplug_slot_attribute hotplug_slot_attr_presence = {
-	.attr = {.name = "adapter", .mode = S_IFREG | S_IRUGO | S_IWUSR},
+	.attr = {.name = "adapter", .mode = S_IFREG | S_IRUGO},
 	.show = presence_read_file,
+};
+
+static ssize_t address_read_file (struct hotplug_slot *slot, char *buf)
+{
+	int retval;
+	u32 address;
+
+	retval = get_address (slot, &address);
+	if (retval)
+		goto exit;
+	retval = sprintf (buf, "%04x:%02x:%02x\n",
+			  (address >> 16) & 0xffff,
+			  (address >> 8) & 0xff,
+			  address & 0xff);
+
+exit:
+	return retval;
+}
+
+static struct hotplug_slot_attribute hotplug_slot_attr_address = {
+	.attr = {.name = "address", .mode = S_IFREG | S_IRUGO},
+	.show = address_read_file,
 };
 
 static char *unknown_speed = "Unknown bus speed";
@@ -326,7 +346,7 @@ exit:
 }
 
 static struct hotplug_slot_attribute hotplug_slot_attr_max_bus_speed = {
-	.attr = {.name = "max_bus_speed", .mode = S_IFREG | S_IRUGO | S_IWUSR},
+	.attr = {.name = "max_bus_speed", .mode = S_IFREG | S_IRUGO},
 	.show = max_bus_speed_read_file,
 };
 
@@ -352,7 +372,7 @@ exit:
 }
 
 static struct hotplug_slot_attribute hotplug_slot_attr_cur_bus_speed = {
-	.attr = {.name = "cur_bus_speed", .mode = S_IFREG | S_IRUGO | S_IWUSR},
+	.attr = {.name = "cur_bus_speed", .mode = S_IFREG | S_IRUGO},
 	.show = cur_bus_speed_read_file,
 };
 
@@ -425,6 +445,15 @@ static int has_adapter_file (struct hotplug_slot *slot)
 	return -ENOENT;
 }
 
+static int has_address_file (struct hotplug_slot *slot)
+{
+	if ((!slot) || (!slot->ops))
+		return -ENODEV;
+	if (slot->ops->get_address)
+		return 0;
+	return -ENOENT;
+}
+
 static int has_max_bus_speed_file (struct hotplug_slot *slot)
 {
 	if ((!slot) || (!slot->ops))
@@ -466,6 +495,9 @@ static int fs_add_slot (struct hotplug_slot *slot)
 	if (has_adapter_file(slot) == 0)
 		sysfs_create_file(&slot->kobj, &hotplug_slot_attr_presence.attr);
 
+	if (has_address_file(slot) == 0)
+		sysfs_create_file(&slot->kobj, &hotplug_slot_attr_address.attr);
+
 	if (has_max_bus_speed_file(slot) == 0)
 		sysfs_create_file(&slot->kobj, &hotplug_slot_attr_max_bus_speed.attr);
 
@@ -491,6 +523,9 @@ static void fs_remove_slot (struct hotplug_slot *slot)
 
 	if (has_adapter_file(slot) == 0)
 		sysfs_remove_file(&slot->kobj, &hotplug_slot_attr_presence.attr);
+
+	if (has_address_file(slot) == 0)
+		sysfs_remove_file(&slot->kobj, &hotplug_slot_attr_address.attr);
 
 	if (has_max_bus_speed_file(slot) == 0)
 		sysfs_remove_file(&slot->kobj, &hotplug_slot_attr_max_bus_speed.attr);
@@ -533,7 +568,7 @@ int pci_hp_register (struct hotplug_slot *slot)
 	if ((slot->info == NULL) || (slot->ops == NULL))
 		return -EINVAL;
 
-	strlcpy(slot->kobj.name, slot->name, KOBJ_NAME_LEN);
+	kobject_set_name(&slot->kobj, "%s", slot->name);
 	kobj_set_kset_s(slot, pci_hotplug_slots_subsys);
 
 	/* this can fail if we have already registered a slot with the same name */
@@ -612,6 +647,10 @@ int pci_hp_change_slot_info (struct hotplug_slot *slot, struct hotplug_slot_info
 	    (slot->info->adapter_status != info->adapter_status))
 		sysfs_update_file(&slot->kobj, &hotplug_slot_attr_presence.attr);
 
+	if ((has_address_file(slot) == 0) &&
+	    (slot->info->address != info->address))
+		sysfs_update_file(&slot->kobj, &hotplug_slot_attr_address.attr);
+
 	if ((has_max_bus_speed_file(slot) == 0) &&
 	    (slot->info->max_bus_speed != info->max_bus_speed))
 		sysfs_update_file(&slot->kobj, &hotplug_slot_attr_max_bus_speed.attr);
@@ -662,7 +701,7 @@ module_exit(pci_hotplug_exit);
 MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
-MODULE_PARM(debug, "i");
+module_param(debug, bool, 0644);
 MODULE_PARM_DESC(debug, "Debugging mode enabled or not");
 
 EXPORT_SYMBOL_GPL(pci_hotplug_slots_subsys);

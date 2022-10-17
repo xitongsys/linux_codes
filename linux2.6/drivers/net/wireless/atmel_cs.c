@@ -54,7 +54,6 @@
 #include <asm/io.h>
 #include <asm/system.h>
 #include <linux/wireless.h>
-#include <linux/802_11.h>
 
 
 /*
@@ -66,7 +65,7 @@
 */
 #ifdef PCMCIA_DEBUG
 static int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
+module_param(pc_debug, int, 0);
 static char *version = "$Revision: 1.2 $";
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args);
 #else
@@ -75,20 +74,10 @@ static char *version = "$Revision: 1.2 $";
 
 /*====================================================================*/
 
-/* Parameters that can be set with 'insmod' */
-
-/* The old way: bit map of interrupts to choose from */
-/* This means pick from 15, 14, 12, 11, 10, 9, 7, 5, 4, and 3 */
-static u_int irq_mask = 0xdeb8;
-/* Newer, simpler way of listing specific interrupts */
-static int irq_list[4] = { -1 };
-
 MODULE_AUTHOR("Simon Kelley");
 MODULE_DESCRIPTION("Support for Atmel at76c50x 802.11 wireless ethernet cards.");
 MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("Atmel at76c50x PCMCIA cards");
-MODULE_PARM(irq_mask, "i");
-MODULE_PARM(irq_list, "1-4i");
 
 /*====================================================================*/
 
@@ -101,10 +90,10 @@ MODULE_PARM(irq_list, "1-4i");
    event handler. 
 */
 
-struct net_device *init_atmel_card(int, int, char *, int, struct device *, 
+struct net_device *init_atmel_card(int, int, char *, struct device *, 
 				    int (*present_func)(void *), void * );
 void stop_atmel_card( struct net_device *, int );
-int reset_atmel_card( struct net_device * );
+int atmel_open( struct net_device * );
 
 static void atmel_config(dev_link_t *link);
 static void atmel_release(dev_link_t *link);
@@ -191,7 +180,7 @@ static dev_link_t *atmel_attach(void)
 	client_reg_t client_reg;
 	dev_link_t *link;
 	local_info_t *local;
-	int ret, i;
+	int ret;
 	
 	DEBUG(0, "atmel_attach()\n");
 
@@ -205,12 +194,7 @@ static dev_link_t *atmel_attach(void)
 	
 	/* Interrupt setup */
 	link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
-	link->irq.IRQInfo1 = IRQ_INFO2_VALID|IRQ_LEVEL_ID;
-	if (irq_list[0] == -1)
-		link->irq.IRQInfo2 = irq_mask;
-	else
-		for (i = 0; i < 4; i++)
-			link->irq.IRQInfo2 |= 1 << irq_list[i];
+	link->irq.IRQInfo1 = IRQ_LEVEL_ID;
 	link->irq.Handler = NULL;
 	
 	/*
@@ -238,7 +222,6 @@ static dev_link_t *atmel_attach(void)
 	link->next = dev_list;
 	dev_list = link;
 	client_reg.dev_info = &dev_info;
-	client_reg.Attributes = INFO_IO_CLIENT | INFO_CARD_SHARE;
 	client_reg.EventMask =
 		CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL |
 		CS_EVENT_RESET_PHYSICAL | CS_EVENT_CARD_RESET |
@@ -246,7 +229,7 @@ static dev_link_t *atmel_attach(void)
 	client_reg.event_handler = &atmel_event;
 	client_reg.Version = 0x0210;
 	client_reg.event_callback_args.client_data = link;
-	ret = CardServices(RegisterClient, &link->handle, &client_reg);
+	ret = pcmcia_register_client(&link->handle, &client_reg);
 	if (ret != 0) {
 		cs_error(link->handle, RegisterClient, ret);
 		atmel_detach(link);
@@ -282,7 +265,7 @@ static void atmel_detach(dev_link_t *link)
 		
 	/* Break the link with Card Services */
 	if (link->handle)
-		CardServices(DeregisterClient, link->handle);
+		pcmcia_deregister_client(link->handle);
 
 	/* Unlink device structure, free pieces */
 	*linkp = link->next;
@@ -299,11 +282,8 @@ static void atmel_detach(dev_link_t *link)
   
   ======================================================================*/
 
-#define CS_CHECK(fn, args...) \
-while ((last_ret=CardServices(last_fn=(fn),args))!=0) goto cs_failed
-
-#define CFG_CHECK(fn, args...) \
-if (CardServices(fn, args) != 0) goto next_entry
+#define CS_CHECK(fn, ret) \
+do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
 
 /* Call-back function to interrogate PCMCIA-specific information
    about the current existance of the card */
@@ -330,25 +310,25 @@ static struct {
 	char *firmware;
 	char *name;
 } card_table[] = {
-	{ 0, 0, "WLAN/802.11b PC CARD", "atmel_at76c502d.bin", "Actiontec 802CAT1" },  
-	{ 0, 0, "ATMEL/AT76C502AR", "atmel_at76c502.bin", "NoName-RFMD" }, 
-	{ 0, 0, "ATMEL/AT76C502AR_D", "atmel_at76c502d.bin", "NoName-revD" }, 
-	{ 0, 0, "ATMEL/AT76C502AR_E", "atmel_at76c502e.bin", "NoName-revE" },
-	{ 0, 0, "ATMEL/AT76C504", "atmel_at76c504.bin", "NoName-504" },
-	{ MANFID_3COM, 0x0620, NULL, "atmel_at76c502_3com.bin", "3com 3CRWE62092B" }, 
-	{ MANFID_3COM, 0x0696, NULL, "atmel_at76c502_3com.bin", "3com 3CRSHPW_96" }, 
-	{ 0, 0, "SMC/2632W-V2", "atmel_at76c502.bin", "SMC 2632W-V2" },
-        { 0, 0, "SMC/2632W", "atmel_at76c502d.bin", "SMC 2632W-V3" },
-	{ 0xd601, 0x0007, NULL, "atmel_at76c502.bin", "Sitecom WLAN-011"}, /* suspect - from a usenet posting. */
-	{ 0x01bf, 0x3302, NULL, "atmel_at76c502d.bin", "Belkin F5D6060u"},  /*    "        "  "    "      "     */
-	{ 0, 0, "BT/Voyager 1020 Laptop Adapter", "atmel_at76c502.bin", "BT Voyager 1020"},
-        { 0, 0, "IEEE 802.11b/Wireless LAN PC Card", "atmel_at76c502.bin", "Siemens Gigaset PC Card II" },
-	{ 0, 0, "CNet/CNWLC 11Mbps Wireless PC Card V-5", "atmel_at76c502e.bin", "CNet CNWLC-811ARL" }
-};
-
-/* This is strictly temporary, until PCMCIA devices get integrated into the device model. */
-static struct device atmel_device = {
-        .bus_id    = "pcmcia",
+	{ 0, 0, "WLAN/802.11b PC CARD", "atmel_at76c502d%s.bin", "Actiontec 802CAT1" },  
+	{ 0, 0, "ATMEL/AT76C502AR", "atmel_at76c502%s.bin", "NoName-RFMD" }, 
+	{ 0, 0, "ATMEL/AT76C502AR_D", "atmel_at76c502d%s.bin", "NoName-revD" }, 
+	{ 0, 0, "ATMEL/AT76C502AR_E", "atmel_at76c502e%s.bin", "NoName-revE" },
+	{ 0, 0, "ATMEL/AT76C504", "atmel_at76c504%s.bin", "NoName-504" },
+	{ 0, 0, "ATMEL/AT76C504A", "atmel_at76c504a_2958%s.bin", "NoName-504a-2958" },
+	{ 0, 0, "ATMEL/AT76C504_R", "atmel_at76c504_2958%s.bin", "NoName-504-2958" },
+	{ MANFID_3COM, 0x0620, NULL, "atmel_at76c502_3com%s.bin", "3com 3CRWE62092B" }, 
+	{ MANFID_3COM, 0x0696, NULL, "atmel_at76c502_3com%s.bin", "3com 3CRSHPW196" }, 
+	{ 0, 0, "SMC/2632W-V2", "atmel_at76c502%s.bin", "SMC 2632W-V2" },
+        { 0, 0, "SMC/2632W", "atmel_at76c502d%s.bin", "SMC 2632W-V3" },
+	{ 0xd601, 0x0007, NULL, "atmel_at76c502%s.bin", "Sitecom WLAN-011" }, 
+	{ 0x01bf, 0x3302, NULL, "atmel_at76c502e%s.bin", "Belkin F5D6020-V2" }, 
+	{ 0, 0, "BT/Voyager 1020 Laptop Adapter", "atmel_at76c502%s.bin", "BT Voyager 1020" },
+        { 0, 0, "IEEE 802.11b/Wireless LAN PC Card", "atmel_at76c502%s.bin", "Siemens Gigaset PC Card II" },
+	{ 0, 0, "CNet/CNWLC 11Mbps Wireless PC Card V-5", "atmel_at76c502e%s.bin", "CNet CNWLC-811ARL" },
+	{ 0, 0, "Wireless/PC_CARD", "atmel_at76c502d%s.bin", "Planet WL-3552" },
+	{ 0, 0, "OEM/11Mbps Wireless LAN PC Card V-3", "atmel_at76c502%s.bin", "OEM 11Mbps WLAN PCMCIA Card" },
+	{ 0, 0, "11WAVE/11WP611AL-E", "atmel_at76c502e%s.bin", "11WAVE WaveBuddy" } 
 };
 
 static void atmel_config(dev_link_t *link)
@@ -372,11 +352,11 @@ static void atmel_config(dev_link_t *link)
 	tuple.TupleOffset = 0;
 	
 	tuple.DesiredTuple = CISTPL_MANFID;
-	if (CardServices(GetFirstTuple, handle, &tuple) == 0) {
+	if (pcmcia_get_first_tuple(handle, &tuple) == 0) {
 		int i;
 		cistpl_manfid_t *manfid;
-		CS_CHECK(GetTupleData, handle, &tuple);
-		CS_CHECK(ParseTuple, handle, &tuple, &parse);
+		CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
+		CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
 		manfid = &(parse.manfid);
 		for (i = 0; i < sizeof(card_table)/sizeof(card_table[0]); i++) {
 			if (!card_table[i].ver1 &&
@@ -389,11 +369,11 @@ static void atmel_config(dev_link_t *link)
 	}
 
 	tuple.DesiredTuple = CISTPL_VERS_1;
-	if (!done && (CardServices(GetFirstTuple, handle, &tuple) == 0)) {
+	if (!done && (pcmcia_get_first_tuple(handle, &tuple) == 0)) {
 		int i, j, k;
 		cistpl_vers_1_t *ver1;
-		CS_CHECK(GetTupleData, handle, &tuple);
-		CS_CHECK(ParseTuple, handle, &tuple, &parse);
+		CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
+		CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
 		ver1 = &(parse.version_1);
 		
 		for (i = 0; i < sizeof(card_table)/sizeof(card_table[0]); i++) {
@@ -429,9 +409,9 @@ static void atmel_config(dev_link_t *link)
 	  registers.
 	*/
 	tuple.DesiredTuple = CISTPL_CONFIG;
-	CS_CHECK(GetFirstTuple, handle, &tuple);
-	CS_CHECK(GetTupleData, handle, &tuple);
-	CS_CHECK(ParseTuple, handle, &tuple, &parse);
+	CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
+	CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
+	CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
 	link->conf.ConfigBase = parse.config.base;
 	link->conf.Present = parse.config.rmask[0];
 	
@@ -451,12 +431,13 @@ static void atmel_config(dev_link_t *link)
 	  will only use the CIS to fill in implementation-defined details.
 	*/
 	tuple.DesiredTuple = CISTPL_CFTABLE_ENTRY;
-	CS_CHECK(GetFirstTuple, handle, &tuple);
+	CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
 	while (1) {
 		cistpl_cftable_entry_t dflt = { 0 };
 		cistpl_cftable_entry_t *cfg = &(parse.cftable_entry);
-		CFG_CHECK(GetTupleData, handle, &tuple);
-		CFG_CHECK(ParseTuple, handle, &tuple, &parse);
+		if (pcmcia_get_tuple_data(handle, &tuple) != 0 ||
+				pcmcia_parse_tuple(handle, &tuple, &parse) != 0)
+			goto next_entry;
 		
 		if (cfg->flags & CISTPL_CFTABLE_DEFAULT) dflt = *cfg;
 		if (cfg->index == 0) goto next_entry;
@@ -505,12 +486,14 @@ static void atmel_config(dev_link_t *link)
 		}
 		
 		/* This reserves IO space but doesn't actually enable it */
-		CFG_CHECK(RequestIO, link->handle, &link->io); 
+		if (pcmcia_request_io(link->handle, &link->io) != 0)
+			goto next_entry;
+
 		/* If we got this far, we're cool! */
 		break;
 		
 	next_entry:
-		CS_CHECK(GetNextTuple, handle, &tuple);
+		CS_CHECK(GetNextTuple, pcmcia_get_next_tuple(handle, &tuple));
 	}
 	
 	/*
@@ -519,27 +502,26 @@ static void atmel_config(dev_link_t *link)
 	  irq structure is initialized.
 	*/
 	if (link->conf.Attributes & CONF_ENABLE_IRQ)
-		CS_CHECK(RequestIRQ, link->handle, &link->irq);
+		CS_CHECK(RequestIRQ, pcmcia_request_irq(link->handle, &link->irq));
 	
 	/*
 	  This actually configures the PCMCIA socket -- setting up
 	  the I/O windows and the interrupt mapping, and putting the
 	  card and host interface into "Memory and IO" mode.
 	*/
-	CS_CHECK(RequestConfiguration, link->handle, &link->conf);
+	CS_CHECK(RequestConfiguration, pcmcia_request_configuration(link->handle, &link->conf));
 	
 	if (link->irq.AssignedIRQ == 0) {
 		printk(KERN_ALERT 
 		       "atmel: cannot assign IRQ: check that CONFIG_ISA is set in kernel config.");
 		goto cs_failed;
 	}
-	
+       
 	((local_info_t*)link->priv)->eth_dev = 
 		init_atmel_card(link->irq.AssignedIRQ,
 				link->io.BasePort1,
 				card_index == -1 ? NULL :  card_table[card_index].firmware,
-				card_index == -1 ? 0 : (card_table[card_index].manf == MANFID_3COM),
-				&atmel_device,
+				&handle_to_dev(handle),
 				card_present, 
 				link);
 	if (!((local_info_t*)link->priv)->eth_dev) 
@@ -599,14 +581,14 @@ static void atmel_release(dev_link_t *link)
 	
 	if (dev) 
 		stop_atmel_card(dev, 0);
-	((local_info_t*)link->priv)->eth_dev = 0; 
+	((local_info_t*)link->priv)->eth_dev = NULL; 
 	
 	/* Don't bother checking to see if these succeed or not */
-	CardServices(ReleaseConfiguration, link->handle);
+	pcmcia_release_configuration(link->handle);
 	if (link->io.NumPorts1)
-		CardServices(ReleaseIO, link->handle, &link->io);
+		pcmcia_release_io(link->handle, &link->io);
 	if (link->irq.AssignedIRQ)
-		CardServices(ReleaseIRQ, link->handle, &link->irq);
+		pcmcia_release_irq(link->handle, &link->irq);
 	link->state &= ~DEV_CONFIG;
 }
 
@@ -648,7 +630,7 @@ static int atmel_event(event_t event, int priority,
 	case CS_EVENT_RESET_PHYSICAL:
 		if (link->state & DEV_CONFIG) {
 			netif_device_detach(local->eth_dev);
-			CardServices(ReleaseConfiguration, link->handle);
+			pcmcia_release_configuration(link->handle);
 		}
 		break;
 	case CS_EVENT_PM_RESUME:
@@ -656,8 +638,8 @@ static int atmel_event(event_t event, int priority,
 		/* Fall through... */
 	case CS_EVENT_CARD_RESET:
 		if (link->state & DEV_CONFIG) {
-			CardServices(RequestConfiguration, link->handle, &link->conf);
-			reset_atmel_card(local->eth_dev);
+			pcmcia_request_configuration(link->handle, &link->conf);
+			atmel_open(local->eth_dev);
 			netif_device_attach(local->eth_dev);
 		}
 		break;
@@ -683,13 +665,7 @@ static int atmel_cs_init(void)
 static void atmel_cs_cleanup(void)
 {
         pcmcia_unregister_driver(&atmel_driver);
-
-        /* XXX: this really needs to move into generic code.. */
-        while (dev_list != NULL) {
-                if (dev_list->state & DEV_CONFIG)
-                        atmel_release(dev_list);
-                atmel_detach(dev_list);
-        }
+	BUG_ON(dev_list != NULL);
 }
 
 /*

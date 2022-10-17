@@ -2,10 +2,6 @@
  * Handle the memory map.
  * The functions here do the job until bootmem takes over.
  * $Id: e820.c,v 1.4 2002/09/19 19:25:32 ak Exp $
-
- * AK: some of these functions are not used in 2.5 yet but they will be when
- * NUMA is completely merged.
-
  */
 #include <linux/config.h>
 #include <linux/kernel.h>
@@ -38,7 +34,7 @@ unsigned long end_pfn_map;
  */
 unsigned long end_user_pfn = MAXMEM>>PAGE_SHIFT;  
 
-extern struct resource code_resource, data_resource, vram_resource;
+extern struct resource code_resource, data_resource;
 
 /* Check for some hardcoded bad areas that early boot is not allowed to touch */ 
 static inline int bad_addr(unsigned long *addrp, unsigned long size)

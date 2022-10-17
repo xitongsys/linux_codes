@@ -21,6 +21,7 @@
 #include <linux/config.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
+#include <linux/syscalls.h>
 #include <linux/kdev_t.h>
 #include <linux/major.h>
 #include <linux/string.h>
@@ -42,9 +43,10 @@
 #include <asm/idprom.h>
 #include <asm/head.h>
 #include <asm/starfire.h>
-#include <asm/hardirq.h>
 #include <asm/mmu_context.h>
 #include <asm/timer.h>
+#include <asm/sections.h>
+#include <asm/setup.h>
 
 #ifdef CONFIG_IP_PNP
 #include <net/ipconfig.h>
@@ -70,7 +72,6 @@ struct screen_info screen_info = {
 
 void (*prom_palette)(int);
 void (*prom_keyboard)(void);
-asmlinkage void sys_sync(void);	/* it's really int */
 
 static void
 prom_console_write(struct console *con, const char *s, unsigned n)
@@ -150,6 +151,7 @@ int prom_callback(long *args)
 			struct task_struct *p;
 			struct mm_struct *mm = NULL;
 			pgd_t *pgdp;
+			pud_t *pudp;
 			pmd_t *pmdp;
 			pte_t *ptep;
 
@@ -165,7 +167,10 @@ int prom_callback(long *args)
 			pgdp = pgd_offset(mm, va);
 			if (pgd_none(*pgdp))
 				goto done;
-			pmdp = pmd_offset(pgdp, va);
+			pudp = pud_offset(pgdp, va);
+			if (pud_none(*pudp))
+				goto done;
+			pmdp = pmd_offset(pudp, va);
 			if (pmd_none(*pmdp))
 				goto done;
 
@@ -207,6 +212,7 @@ int prom_callback(long *args)
 			 * vmalloc or prom_inherited mapping.
 			 */
 			pgd_t *pgdp;
+			pud_t *pudp;
 			pmd_t *pmdp;
 			pte_t *ptep;
 			int error;
@@ -220,7 +226,10 @@ int prom_callback(long *args)
 			pgdp = pgd_offset_k(va);
 			if (pgd_none(*pgdp))
 				goto done;
-			pmdp = pmd_offset(pgdp, va);
+			pudp = pud_offset(pgdp, va);
+			if (pud_none(*pudp))
+				goto done;
+			pmdp = pmd_offset(pudp, va);
 			if (pmd_none(*pmdp))
 				goto done;
 
@@ -292,7 +301,7 @@ int prom_callback(long *args)
 		unsigned long tte;
 
 		tte = args[3];
-		prom_printf("%lx ", (tte & 0x07FC000000000000) >> 50);
+		prom_printf("%lx ", (tte & 0x07FC000000000000UL) >> 50);
 
 		args[2] = 2;
 		args[args[1] + 3] = 0;
@@ -319,8 +328,6 @@ int prom_callback(long *args)
 unsigned int boot_flags = 0;
 #define BOOTME_DEBUG  0x1
 #define BOOTME_SINGLE 0x2
-
-static int console_fb __initdata = 0;
 
 /* Exported for mm/init.c:paging_init. */
 unsigned long cmdline_memory_size = 0;
@@ -374,6 +381,33 @@ static void __init process_switch(char c)
 	}
 }
 
+static void __init process_console(char *commands)
+{
+	serial_console = 0;
+	commands += 8;
+	/* Linux-style serial */
+	if (!strncmp(commands, "ttyS", 4))
+		serial_console = simple_strtoul(commands + 4, NULL, 10) + 1;
+	else if (!strncmp(commands, "tty", 3)) {
+		char c = *(commands + 3);
+		/* Solaris-style serial */
+		if (c == 'a' || c == 'b') {
+			serial_console = c - 'a' + 1;
+			prom_printf ("Using /dev/tty%c as console.\n", c);
+		}
+		/* else Linux-style fbcon, not serial */
+	}
+#if defined(CONFIG_PROM_CONSOLE)
+	if (!strncmp(commands, "prom", 4)) {
+		char *p;
+
+		for (p = commands - 8; *p && *p != ' '; p++)
+			*p = ' ';
+		conswitchp = &prom_con;
+	}
+#endif
+}
+
 static void __init boot_flags_init(char *commands)
 {
 	while (*commands) {
@@ -384,49 +418,31 @@ static void __init boot_flags_init(char *commands)
 		/* Process any command switches, otherwise skip it. */
 		if (*commands == '\0')
 			break;
-		else if (*commands == '-') {
+		if (*commands == '-') {
 			commands++;
 			while (*commands && *commands != ' ')
 				process_switch(*commands++);
-		} else {
-			if (!strncmp(commands, "console=", 8)) {
-				commands += 8;
-				if (!strncmp (commands, "ttya", 4)) {
-					console_fb = 2;
-					prom_printf ("Using /dev/ttya as console.\n");
-				} else if (!strncmp (commands, "ttyb", 4)) {
-					console_fb = 3;
-					prom_printf ("Using /dev/ttyb as console.\n");
-#if defined(CONFIG_PROM_CONSOLE)
-				} else if (!strncmp (commands, "prom", 4)) {
-					char *p;
-					
-					for (p = commands - 8; *p && *p != ' '; p++)
-						*p = ' ';
-					conswitchp = &prom_con;
-					console_fb = 1;
-#endif
-				} else {
-					console_fb = 1;
-				}
-			} else if (!strncmp(commands, "mem=", 4)) {
-				/*
-				 * "mem=XXX[kKmM]" overrides the PROM-reported
-				 * memory size.
-				 */
-				cmdline_memory_size = simple_strtoul(commands + 4,
-								     &commands, 0);
-				if (*commands == 'K' || *commands == 'k') {
-					cmdline_memory_size <<= 10;
-					commands++;
-				} else if (*commands=='M' || *commands=='m') {
-					cmdline_memory_size <<= 20;
-					commands++;
-				}
-			}
-			while (*commands && *commands != ' ')
-				commands++;
+			continue;
 		}
+		if (!strncmp(commands, "console=", 8)) {
+			process_console(commands);
+		} else if (!strncmp(commands, "mem=", 4)) {
+			/*
+			 * "mem=XXX[kKmM]" overrides the PROM-reported
+			 * memory size.
+			 */
+			cmdline_memory_size = simple_strtoul(commands + 4,
+							     &commands, 0);
+			if (*commands == 'K' || *commands == 'k') {
+				cmdline_memory_size <<= 10;
+				commands++;
+			} else if (*commands=='M' || *commands=='m') {
+				cmdline_memory_size <<= 20;
+				commands++;
+			}
+		}
+		while (*commands && *commands != ' ')
+			commands++;
 	}
 }
 
@@ -443,8 +459,7 @@ extern unsigned short ram_flags;
 
 extern int root_mountflags;
 
-char saved_command_line[256];
-char reboot_command[256];
+char reboot_command[COMMAND_LINE_SIZE];
 
 static struct pt_regs fake_swapper_regs = { { 0, }, 0, 0, 0, 0 };
 
@@ -515,6 +530,22 @@ void __init setup_arch(char **cmdline_p)
 	}
 	pfn_base = phys_base >> PAGE_SHIFT;
 
+	switch (tlb_type) {
+	default:
+	case spitfire:
+		kern_base = spitfire_get_itlb_data(sparc64_highest_locked_tlbent());
+		kern_base &= _PAGE_PADDR_SF;
+		break;
+
+	case cheetah:
+	case cheetah_plus:
+		kern_base = cheetah_get_litlb_data(sparc64_highest_locked_tlbent());
+		kern_base &= _PAGE_PADDR;
+		break;
+	};
+
+	kern_size = (unsigned long)&_end - (unsigned long)KERNBASE;
+
 	if (!root_flags)
 		root_mountflags &= ~MS_RDONLY;
 	ROOT_DEV = old_decode_dev(root_dev);
@@ -546,43 +577,38 @@ void __init setup_arch(char **cmdline_p)
 	}
 #endif
 
-	switch (console_fb) {
-	case 0: /* Let's get our io devices from prom */
-		{
-			int idev = prom_query_input_device();
-			int odev = prom_query_output_device();
-			if (idev == PROMDEV_IKBD && odev == PROMDEV_OSCREEN) {
-				serial_console = 0;
-			} else if (idev == PROMDEV_ITTYA && odev == PROMDEV_OTTYA) {
-				serial_console = 1;
-			} else if (idev == PROMDEV_ITTYB && odev == PROMDEV_OTTYB) {
-				serial_console = 2;
-			} else {
-				prom_printf("Inconsistent console: "
-					    "input %d, output %d\n",
-					    idev, odev);
-				prom_halt();
-			}
-		}
-		break;
-	case 1: /* Force one of the framebuffers as console */
-		serial_console = 0;
-		break;
-	case 2: /* Force ttya as console */
-		serial_console = 1;
-		break;
-	case 3: /* Force ttyb as console */
-		serial_console = 2;
-		break;
-	};
-
 	paging_init();
 }
 
-asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int on)
+static int __init set_preferred_console(void)
 {
-	return -EIO;
+	int idev, odev;
+
+	/* The user has requested a console so this is already set up. */
+	if (serial_console >= 0)
+		return -EBUSY;
+
+	idev = prom_query_input_device();
+	odev = prom_query_output_device();
+	if (idev == PROMDEV_IKBD && odev == PROMDEV_OSCREEN) {
+		serial_console = 0;
+	} else if (idev == PROMDEV_ITTYA && odev == PROMDEV_OTTYA) {
+		serial_console = 1;
+	} else if (idev == PROMDEV_ITTYB && odev == PROMDEV_OTTYB) {
+		serial_console = 2;
+	} else {
+		prom_printf("Inconsistent console: "
+			    "input %d, output %d\n",
+			    idev, odev);
+		prom_halt();
+	}
+
+	if (serial_console)
+		return add_preferred_console("ttyS", serial_console - 1, NULL);
+
+	return -ENODEV;
 }
+console_initcall(set_preferred_console);
 
 /* BUFFER is PAGE_SIZE bytes long. */
 
@@ -665,13 +691,13 @@ void sun_do_break(void)
 	if (!stop_a_enabled)
 		return;
 
-	printk("\n");
+	prom_printf("\n");
 	flush_user_windows();
 
 	prom_cmdline();
 }
 
-int serial_console;
+int serial_console = -1;
 int stop_a_enabled = 1;
 
 static int __init topology_init(void)

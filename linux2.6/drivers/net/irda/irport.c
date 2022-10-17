@@ -51,14 +51,14 @@
 #include <linux/spinlock.h>
 #include <linux/delay.h>
 #include <linux/rtnetlink.h>
+#include <linux/bitops.h>
 
 #include <asm/system.h>
-#include <asm/bitops.h>
 #include <asm/io.h>
 
 #include <net/irda/irda.h>
 #include <net/irda/wrapper.h>
-#include <net/irda/irport.h>
+#include "irport.h"
 
 #define IO_EXTENT 8
 
@@ -98,7 +98,7 @@ EXPORT_SYMBOL(irport_change_speed);
 EXPORT_SYMBOL(irport_net_open);
 EXPORT_SYMBOL(irport_net_close);
 
-int __init irport_init(void)
+static int __init irport_init(void)
 {
  	int i;
 
@@ -178,9 +178,6 @@ irport_open(int i, unsigned int iobase, unsigned int irq)
 	self->qos.min_turn_time.bits = qos_mtt_bits;
 	irda_qos_bits_to_value(&self->qos);
 	
-	self->flags = IFF_SIR|IFF_PIO;
-	self->mode = IRDA_IRLAP;
-
 	/* Bootstrap ZeroCopy Rx */
 	self->rx_buff.truesize = IRDA_SKB_MAX_MTU;
 	self->rx_buff.skb = __dev_alloc_skb(self->rx_buff.truesize,
@@ -455,7 +452,7 @@ int __irport_change_speed(struct irda_task *task)
 			task->state = IRDA_TASK_WAIT;
 
 			/* Try again later */
-			ret = MSECS_TO_JIFFIES(20);
+			ret = msecs_to_jiffies(20);
 			break;
 		}
 
@@ -477,7 +474,7 @@ int __irport_change_speed(struct irda_task *task)
 			irda_task_next_state(task, IRDA_TASK_CHILD_WAIT);
 
 			/* Give dongle 1 sec to finish */
-			ret = MSECS_TO_JIFFIES(1000);
+			ret = msecs_to_jiffies(1000);
 		} else
 			/* Child finished immediately */
 			irda_task_next_state(task, IRDA_TASK_CHILD_DONE);

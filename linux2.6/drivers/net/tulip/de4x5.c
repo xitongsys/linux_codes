@@ -467,16 +467,16 @@
 #include <linux/ctype.h>
 #include <linux/dma-mapping.h>
 #include <linux/moduleparam.h>
+#include <linux/bitops.h>
 
-#include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <asm/byteorder.h>
 #include <asm/unaligned.h>
 #include <asm/uaccess.h>
-#ifdef CONFIG_PPC
+#ifdef CONFIG_PPC_MULTIPLATFORM
 #include <asm/machdep.h>
-#endif /* CONFIG_PPC */
+#endif /* CONFIG_PPC_MULTIPLATFORM */
 
 #include "de4x5.h"
 
@@ -1086,7 +1086,7 @@ static int __devinit
 de4x5_hw_init(struct net_device *dev, u_long iobase, struct device *gendev)
 {
     char name[DE4X5_NAME_LENGTH + 1];
-    struct de4x5_private *lp = dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     struct pci_dev *pdev = NULL;
     int i, status=0;
 
@@ -1141,7 +1141,7 @@ de4x5_hw_init(struct net_device *dev, u_long iobase, struct device *gendev)
 	lp->asBitValid = TRUE;
 	lp->timeout = -1;
 	lp->gendev = gendev;
-	lp->lock = (spinlock_t) SPIN_LOCK_UNLOCKED;
+	spin_lock_init(&lp->lock);
 	init_timer(&lp->timer);
 	de4x5_parse_params(dev);
 
@@ -1294,7 +1294,7 @@ de4x5_hw_init(struct net_device *dev, u_long iobase, struct device *gendev)
 static int
 de4x5_open(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int i, status = 0;
     s32 omr;
@@ -1316,7 +1316,7 @@ de4x5_open(struct net_device *dev)
     ** Re-initialize the DE4X5... 
     */
     status = de4x5_init(dev);
-    lp->lock = (spinlock_t) SPIN_LOCK_UNLOCKED;
+    spin_lock_init(&lp->lock);
     lp->state = OPEN;
     de4x5_dbg_open(dev);
     
@@ -1384,7 +1384,7 @@ de4x5_init(struct net_device *dev)
 static int
 de4x5_sw_reset(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int i, j, status = 0;
     s32 bmr, omr;
@@ -1462,7 +1462,7 @@ de4x5_sw_reset(struct net_device *dev)
 static int
 de4x5_queue_pkt(struct sk_buff *skb, struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int status = 0;
     u_long flags = 0;
@@ -1551,7 +1551,7 @@ de4x5_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	printk ("de4x5_interrupt(): irq %d for unknown device.\n", irq);
 	return IRQ_NONE;
     }
-    lp = (struct de4x5_private *)dev->priv;
+    lp = netdev_priv(dev);
     spin_lock(&lp->lock);
     iobase = dev->base_addr;
 	
@@ -1610,7 +1610,7 @@ de4x5_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 static int
 de4x5_rx(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int entry;
     s32 status;
@@ -1701,7 +1701,7 @@ de4x5_free_tx_buff(struct de4x5_private *lp, int entry)
 static int
 de4x5_tx(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int entry;
     s32 status;
@@ -1753,7 +1753,7 @@ de4x5_tx(struct net_device *dev)
 static int
 de4x5_ast(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int next_tick = DE4X5_AUTOSENSE_MS;
     
     disable_ast(dev);
@@ -1776,7 +1776,7 @@ de4x5_ast(struct net_device *dev)
 static int
 de4x5_txur(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int omr;
 
@@ -1799,7 +1799,7 @@ de4x5_txur(struct net_device *dev)
 static int 
 de4x5_rx_ovfc(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int omr;
 
@@ -1820,7 +1820,7 @@ de4x5_rx_ovfc(struct net_device *dev)
 static int
 de4x5_close(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     s32 imr, omr;
     
@@ -1856,7 +1856,7 @@ de4x5_close(struct net_device *dev)
 static struct net_device_stats *
 de4x5_get_stats(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     
     lp->stats.rx_missed_errors = (int)(inl(DE4X5_MFC) & (MFC_OVFL | MFC_CNTR));
@@ -1867,7 +1867,7 @@ de4x5_get_stats(struct net_device *dev)
 static void
 de4x5_local_stats(struct net_device *dev, char *buf, int pkt_len)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int i;
 
     for (i=1; i<DE4X5_PKT_STAT_SZ-1; i++) {
@@ -1906,7 +1906,7 @@ de4x5_local_stats(struct net_device *dev, char *buf, int pkt_len)
 static void
 load_packet(struct net_device *dev, char *buf, u32 flags, struct sk_buff *skb)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int entry = (lp->tx_new ? lp->tx_new-1 : lp->txRingSize-1);
     dma_addr_t buf_dma = dma_map_single(lp->gendev, buf, flags & TD_TBS1, DMA_TO_DEVICE);
 
@@ -1927,7 +1927,7 @@ load_packet(struct net_device *dev, char *buf, u32 flags, struct sk_buff *skb)
 static void
 set_multicast_list(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
 
     /* First, double check that the adapter is open */
@@ -1957,7 +1957,7 @@ set_multicast_list(struct net_device *dev)
 static void
 SetMulticastFilter(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     struct dev_mc_list *dmi=dev->mc_list;
     u_long iobase = dev->base_addr;
     int i, j, bit, byte;
@@ -2036,7 +2036,7 @@ static int __init de4x5_eisa_probe (struct device *gendev)
 		status = -ENOMEM;
 		goto release_reg_2;
 	}
-	lp = dev->priv;
+	lp = netdev_priv(dev);
 	
 	cfid = (u32) inl(PCI_CFID);
 	lp->cfrv = (u_short) inl(PCI_CFRV);
@@ -2142,7 +2142,7 @@ srom_search(struct net_device *dev, struct pci_dev *pdev)
     u_int irq = 0, device;
     u_long iobase = 0;                     /* Clear upper 32 bits in Alphas */
     int i, j, cfrv;
-    struct de4x5_private *lp = dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     struct list_head *walk = &pdev->bus_list;
 
     for (walk = walk->next; walk != &pdev->bus_list; walk = walk->next) {
@@ -2242,10 +2242,15 @@ static int __devinit de4x5_pci_probe (struct pci_dev *pdev,
 		return -ENODEV;
 
 	/* Ok, the device seems to be for us. */
-	if (!(dev = alloc_etherdev (sizeof (struct de4x5_private))))
-		return -ENOMEM;
+	if ((error = pci_enable_device (pdev)))
+		return error;
 
-	lp = dev->priv;
+	if (!(dev = alloc_etherdev (sizeof (struct de4x5_private)))) {
+		error = -ENOMEM;
+		goto disable_dev;
+	}
+
+	lp = netdev_priv(dev);
 	lp->bus = PCI;
 	lp->bus_num = 0;
 	
@@ -2327,6 +2332,8 @@ static int __devinit de4x5_pci_probe (struct pci_dev *pdev,
 	release_region (iobase, DE4X5_PCI_TOTAL_SIZE);
  free_dev:
 	free_netdev (dev);
+ disable_dev:
+	pci_disable_device (pdev);
 	return error;
 }
 
@@ -2341,6 +2348,7 @@ static void __devexit de4x5_pci_remove (struct pci_dev *pdev)
 	unregister_netdev (dev);
 	free_netdev (dev);
 	release_region (iobase, DE4X5_PCI_TOTAL_SIZE);
+	pci_disable_device (pdev);
 }
 
 static struct pci_device_id de4x5_pci_tbl[] = {
@@ -2374,7 +2382,7 @@ static struct pci_driver de4x5_pci_driver = {
 static int
 autoconf_media(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int next_tick = DE4X5_AUTOSENSE_MS;
 
@@ -2415,7 +2423,7 @@ autoconf_media(struct net_device *dev)
 static int
 dc21040_autoconf(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int next_tick = DE4X5_AUTOSENSE_MS;
     s32 imr;
@@ -2488,7 +2496,7 @@ dc21040_state(struct net_device *dev, int csr13, int csr14, int csr15, int timeo
 	      int next_state, int suspect_state, 
 	      int (*fn)(struct net_device *, int))
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int next_tick = DE4X5_AUTOSENSE_MS;
     int linkBad;
 
@@ -2527,7 +2535,7 @@ de4x5_suspect_state(struct net_device *dev, int timeout, int prev_state,
 		      int (*fn)(struct net_device *, int),
 		      int (*asfn)(struct net_device *))
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int next_tick = DE4X5_AUTOSENSE_MS;
     int linkBad;
 
@@ -2569,7 +2577,7 @@ de4x5_suspect_state(struct net_device *dev, int timeout, int prev_state,
 static int
 dc21041_autoconf(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     s32 sts, irqs, irq_mask, imr, omr;
     int next_tick = DE4X5_AUTOSENSE_MS;
@@ -2771,7 +2779,7 @@ dc21041_autoconf(struct net_device *dev)
 static int
 dc21140m_autoconf(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int ana, anlpa, cap, cr, slnk, sr;
     int next_tick = DE4X5_AUTOSENSE_MS;
     u_long imr, omr, iobase = dev->base_addr;
@@ -2955,7 +2963,7 @@ dc21140m_autoconf(struct net_device *dev)
 static int
 dc2114x_autoconf(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     s32 cr, anlpa, ana, cap, irqs, irq_mask, imr, omr, slnk, sr, sts;
     int next_tick = DE4X5_AUTOSENSE_MS;
@@ -3206,7 +3214,7 @@ printk("Huh?: media:%02x\n", lp->media);
 static int
 srom_autoconf(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
 
     return lp->infoleaf_fn(dev);
 }
@@ -3219,7 +3227,7 @@ srom_autoconf(struct net_device *dev)
 static int
 srom_map_media(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
 
     lp->fdx = 0;
     if (lp->infoblock_media == lp->media) 
@@ -3284,7 +3292,7 @@ srom_map_media(struct net_device *dev)
 static void
 de4x5_init_connection(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     u_long flags = 0;
 
@@ -3313,7 +3321,7 @@ de4x5_init_connection(struct net_device *dev)
 static int
 de4x5_reset_phy(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int next_tick = 0;
 
@@ -3347,7 +3355,7 @@ de4x5_reset_phy(struct net_device *dev)
 static int
 test_media(struct net_device *dev, s32 irqs, s32 irq_mask, s32 csr13, s32 csr14, s32 csr15, s32 msec)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     s32 sts, csr12;
     
@@ -3385,7 +3393,7 @@ test_media(struct net_device *dev, s32 irqs, s32 irq_mask, s32 csr13, s32 csr14,
 static int
 test_tp(struct net_device *dev, s32 msec)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int sisr;
     
@@ -3414,7 +3422,7 @@ test_tp(struct net_device *dev, s32 msec)
 static int
 test_for_100Mb(struct net_device *dev, int msec)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int gep = 0, ret = ((lp->chipset & ~0x00ff)==DC2114x? -1 :GEP_SLNK);
 
     if (lp->timeout < 0) {
@@ -3445,7 +3453,7 @@ test_for_100Mb(struct net_device *dev, int msec)
 static int
 wait_for_link(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
 
     if (lp->timeout < 0) {
 	lp->timeout = 1;
@@ -3467,7 +3475,7 @@ wait_for_link(struct net_device *dev)
 static int
 test_mii_reg(struct net_device *dev, int reg, int mask, int pol, long msec)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int test;
     u_long iobase = dev->base_addr;
     
@@ -3491,7 +3499,7 @@ test_mii_reg(struct net_device *dev, int reg, int mask, int pol, long msec)
 static int
 is_spd_100(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int spd;
     
@@ -3515,7 +3523,7 @@ is_spd_100(struct net_device *dev)
 static int
 is_100_up(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     
     if (lp->useMII) {
@@ -3536,7 +3544,7 @@ is_100_up(struct net_device *dev)
 static int
 is_10_up(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     
     if (lp->useMII) {
@@ -3559,7 +3567,7 @@ is_10_up(struct net_device *dev)
 static int
 is_anc_capable(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     
     if (lp->phy[lp->active].id && (!lp->useSROM || lp->useMII)) {
@@ -3578,7 +3586,7 @@ is_anc_capable(struct net_device *dev)
 static int
 ping_media(struct net_device *dev, int msec)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int sisr;
     
@@ -3619,7 +3627,7 @@ ping_media(struct net_device *dev, int msec)
 static struct sk_buff *
 de4x5_alloc_rx_buff(struct net_device *dev, int index, int len)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     struct sk_buff *p;
 
 #if !defined(__alpha__) && !defined(__powerpc__) && !defined(__sparc_v9__) && !defined(DE4X5_DO_MEMCPY)
@@ -3667,7 +3675,7 @@ de4x5_alloc_rx_buff(struct net_device *dev, int index, int len)
 static void
 de4x5_free_rx_buffs(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int i;
 
     for (i=0; i<lp->rxRingSize; i++) {
@@ -3684,7 +3692,7 @@ de4x5_free_rx_buffs(struct net_device *dev)
 static void
 de4x5_free_tx_buffs(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int i;
 
     for (i=0; i<lp->txRingSize; i++) {
@@ -3711,7 +3719,7 @@ de4x5_free_tx_buffs(struct net_device *dev)
 static void
 de4x5_save_skbs(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     s32 omr;
 
@@ -3732,7 +3740,7 @@ de4x5_save_skbs(struct net_device *dev)
 static void
 de4x5_rst_desc_ring(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int i;
     s32 omr;
@@ -3765,7 +3773,7 @@ de4x5_rst_desc_ring(struct net_device *dev)
 static void
 de4x5_cache_state(struct net_device *dev, int flag)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
 
     switch(flag) {
@@ -3795,7 +3803,7 @@ de4x5_cache_state(struct net_device *dev, int flag)
 static void
 de4x5_put_cache(struct net_device *dev, struct sk_buff *skb)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     struct sk_buff *p;
 
     if (lp->cache.skb) {
@@ -3812,7 +3820,7 @@ de4x5_put_cache(struct net_device *dev, struct sk_buff *skb)
 static void
 de4x5_putb_cache(struct net_device *dev, struct sk_buff *skb)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     struct sk_buff *p = lp->cache.skb;
 
     lp->cache.skb = skb;
@@ -3824,7 +3832,7 @@ de4x5_putb_cache(struct net_device *dev, struct sk_buff *skb)
 static struct sk_buff *
 de4x5_get_cache(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     struct sk_buff *p = lp->cache.skb;
 
     if (p) {
@@ -3842,7 +3850,7 @@ de4x5_get_cache(struct net_device *dev)
 static int
 test_ans(struct net_device *dev, s32 irqs, s32 irq_mask, s32 msec)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     s32 sts, ans;
     
@@ -3870,7 +3878,7 @@ test_ans(struct net_device *dev, s32 irqs, s32 irq_mask, s32 msec)
 static void
 de4x5_setup_intr(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     s32 imr, sts;
     
@@ -3891,7 +3899,7 @@ de4x5_setup_intr(struct net_device *dev)
 static void
 reset_init_sia(struct net_device *dev, s32 csr13, s32 csr14, s32 csr15)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
 
     RESET_SIA;
@@ -4014,7 +4022,7 @@ static void
 DevicePresent(struct net_device *dev, u_long aprom_addr)
 {
     int i, j=0;
-    struct de4x5_private *lp = (struct de4x5_private *) dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     
     if (lp->chipset == DC21040) {
 	if (lp->bus == EISA) {
@@ -4095,7 +4103,7 @@ get_hw_addr(struct net_device *dev)
     u_long iobase = dev->base_addr;
     int broken, i, k, tmp, status = 0;
     u_short j,chksum;
-    struct de4x5_private *lp = dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
 
     broken = de4x5_bad_srom(lp);
 
@@ -4146,12 +4154,12 @@ get_hw_addr(struct net_device *dev)
     /* If possible, try to fix a broken card - SMC only so far */
     srom_repair(dev, broken);
 
-#ifdef CONFIG_PPC
+#ifdef CONFIG_PPC_MULTIPLATFORM
     /* 
     ** If the address starts with 00 a0, we have to bit-reverse
     ** each byte of the address.
     */
-    if ( (ppc_md.ppc_machine & _MACH_Pmac) &&
+    if ( (_machine & _MACH_Pmac) &&
 	 (dev->dev_addr[0] == 0) &&
 	 (dev->dev_addr[1] == 0xa0) )
     {
@@ -4163,7 +4171,7 @@ get_hw_addr(struct net_device *dev)
 		    dev->dev_addr[i] = ((x & 0x55) << 1) + ((x & 0xaa) >> 1);
 	    }
     }
-#endif /* CONFIG_PPC */
+#endif /* CONFIG_PPC_MULTIPLATFORM */
 
     /* Test for a bad enet address */
     status = test_bad_enet(dev, status);
@@ -4210,7 +4218,7 @@ de4x5_strncmp(char *a, char *b, int n)
 static void
 srom_repair(struct net_device *dev, int card)
 {
-    struct de4x5_private *lp = dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
 
     switch(card) {
       case SMC:
@@ -4231,7 +4239,7 @@ srom_repair(struct net_device *dev, int card)
 static int
 test_bad_enet(struct net_device *dev, int status)
 {
-    struct de4x5_private *lp = dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int i, tmp;
 
     for (tmp=0,i=0; i<ETH_ALEN; i++) tmp += (u_char)dev->dev_addr[i];
@@ -4384,7 +4392,7 @@ getfrom_srom(u_long addr)
 static int
 srom_infoleaf_info(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int i, count;
     u_char *p;
 
@@ -4432,7 +4440,7 @@ srom_infoleaf_info(struct net_device *dev)
 static void
 srom_init(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_char *p = (u_char *)&lp->srom + lp->infoleaf_offset;
     u_char count;
 
@@ -4477,7 +4485,7 @@ srom_init(struct net_device *dev)
 static void
 srom_exec(struct net_device *dev, u_char *p)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     u_char count = (p ? *p++ : 0);
     u_short *w = (u_short *)p;
@@ -4514,7 +4522,7 @@ dc21041_infoleaf(struct net_device *dev)
 static int 
 dc21140_infoleaf(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_char count = 0;
     u_char *p = (u_char *)&lp->srom + lp->infoleaf_offset;
     int next_tick = DE4X5_AUTOSENSE_MS;
@@ -4552,7 +4560,7 @@ dc21140_infoleaf(struct net_device *dev)
 static int 
 dc21142_infoleaf(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_char count = 0;
     u_char *p = (u_char *)&lp->srom + lp->infoleaf_offset;
     int next_tick = DE4X5_AUTOSENSE_MS;
@@ -4587,7 +4595,7 @@ dc21142_infoleaf(struct net_device *dev)
 static int 
 dc21143_infoleaf(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_char count = 0;
     u_char *p = (u_char *)&lp->srom + lp->infoleaf_offset;
     int next_tick = DE4X5_AUTOSENSE_MS;
@@ -4625,7 +4633,7 @@ dc21143_infoleaf(struct net_device *dev)
 static int 
 compact_infoblock(struct net_device *dev, u_char count, u_char *p)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_char flags, csr6;
 
     /* Recursively figure out the info blocks */
@@ -4665,7 +4673,7 @@ compact_infoblock(struct net_device *dev, u_char count, u_char *p)
 static int 
 type0_infoblock(struct net_device *dev, u_char count, u_char *p)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_char flags, csr6, len = (*p & BLOCK_LEN)+1;
 
     /* Recursively figure out the info blocks */
@@ -4705,7 +4713,7 @@ type0_infoblock(struct net_device *dev, u_char count, u_char *p)
 static int 
 type1_infoblock(struct net_device *dev, u_char count, u_char *p)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_char len = (*p & BLOCK_LEN)+1;
 
     /* Recursively figure out the info blocks */
@@ -4721,8 +4729,8 @@ type1_infoblock(struct net_device *dev, u_char count, u_char *p)
     if (lp->state == INITIALISED) {
         lp->ibn = 1;
 	lp->active = *p++;
-	lp->phy[lp->active].gep = (*p ? p : 0); p += (*p + 1);
-	lp->phy[lp->active].rst = (*p ? p : 0); p += (*p + 1);
+	lp->phy[lp->active].gep = (*p ? p : NULL); p += (*p + 1);
+	lp->phy[lp->active].rst = (*p ? p : NULL); p += (*p + 1);
 	lp->phy[lp->active].mc  = TWIDDLE(p); p += 2;
 	lp->phy[lp->active].ana = TWIDDLE(p); p += 2;
 	lp->phy[lp->active].fdx = TWIDDLE(p); p += 2;
@@ -4744,7 +4752,7 @@ type1_infoblock(struct net_device *dev, u_char count, u_char *p)
 static int 
 type2_infoblock(struct net_device *dev, u_char count, u_char *p)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_char len = (*p & BLOCK_LEN)+1;
 
     /* Recursively figure out the info blocks */
@@ -4785,7 +4793,7 @@ type2_infoblock(struct net_device *dev, u_char count, u_char *p)
 static int 
 type3_infoblock(struct net_device *dev, u_char count, u_char *p)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_char len = (*p & BLOCK_LEN)+1;
 
     /* Recursively figure out the info blocks */
@@ -4802,8 +4810,8 @@ type3_infoblock(struct net_device *dev, u_char count, u_char *p)
         lp->ibn = 3;
         lp->active = *p++;
 	if (MOTO_SROM_BUG) lp->active = 0;
-	lp->phy[lp->active].gep = (*p ? p : 0); p += (2 * (*p) + 1);
-	lp->phy[lp->active].rst = (*p ? p : 0); p += (2 * (*p) + 1);
+	lp->phy[lp->active].gep = (*p ? p : NULL); p += (2 * (*p) + 1);
+	lp->phy[lp->active].rst = (*p ? p : NULL); p += (2 * (*p) + 1);
 	lp->phy[lp->active].mc  = TWIDDLE(p); p += 2;
 	lp->phy[lp->active].ana = TWIDDLE(p); p += 2;
 	lp->phy[lp->active].fdx = TWIDDLE(p); p += 2;
@@ -4827,7 +4835,7 @@ type3_infoblock(struct net_device *dev, u_char count, u_char *p)
 static int 
 type4_infoblock(struct net_device *dev, u_char count, u_char *p)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_char flags, csr6, len = (*p & BLOCK_LEN)+1;
 
     /* Recursively figure out the info blocks */
@@ -4872,7 +4880,7 @@ type4_infoblock(struct net_device *dev, u_char count, u_char *p)
 static int 
 type5_infoblock(struct net_device *dev, u_char count, u_char *p)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_char len = (*p & BLOCK_LEN)+1;
 
     /* Recursively figure out the info blocks */
@@ -5072,7 +5080,7 @@ mii_get_oui(u_char phyaddr, u_long ioaddr)
 static int
 mii_get_phy(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     int i, j, k, n, limit=sizeof(phy_info)/sizeof(struct phy_table);
     int id;
@@ -5081,7 +5089,7 @@ mii_get_phy(struct net_device *dev)
     lp->useMII = TRUE;
 
     /* Search the MII address space for possible PHY devices */
-    for (n=0, lp->mii_cnt=0, i=1; !((i==1) && (n==1)); i=(++i)%DE4X5_MAX_MII) {
+    for (n=0, lp->mii_cnt=0, i=1; !((i==1) && (n==1)); i=(i+1)%DE4X5_MAX_MII) {
 	lp->phy[lp->active].addr = i;
 	if (i==0) n++;                             /* Count cycles */
 	while (de4x5_reset_phy(dev)<0) udelay(100);/* Wait for reset */
@@ -5136,7 +5144,7 @@ mii_get_phy(struct net_device *dev)
 static char *
 build_setup_frame(struct net_device *dev, int mode)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int i;
     char *pa = lp->setup_frame;
     
@@ -5176,7 +5184,7 @@ enable_ast(struct net_device *dev, u32 time_out)
 static void
 disable_ast(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     
     del_timer(&lp->timer);
     
@@ -5186,7 +5194,7 @@ disable_ast(struct net_device *dev)
 static long
 de4x5_switch_mac_port(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     s32 omr;
 
@@ -5222,7 +5230,7 @@ de4x5_switch_mac_port(struct net_device *dev)
 static void
 gep_wr(s32 data, struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
 
     if (lp->chipset == DC21140) {
@@ -5237,7 +5245,7 @@ gep_wr(s32 data, struct net_device *dev)
 static int
 gep_rd(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
 
     if (lp->chipset == DC21140) {
@@ -5252,7 +5260,7 @@ gep_rd(struct net_device *dev)
 static void
 timeout(struct net_device *dev, void (*fn)(u_long data), u_long data, u_long msec)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int dt;
     
     /* First, cancel any pending timer events */
@@ -5275,7 +5283,7 @@ timeout(struct net_device *dev, void (*fn)(u_long data), u_long data, u_long mse
 static void
 yawn(struct net_device *dev, int state)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
 
     if ((lp->chipset == DC21040) || (lp->chipset == DC21140)) return;
@@ -5321,7 +5329,7 @@ yawn(struct net_device *dev, int state)
 static void
 de4x5_parse_params(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     char *p, *q, t;
 
     lp->params.fdx = 0;
@@ -5364,7 +5372,7 @@ de4x5_parse_params(struct net_device *dev)
 static void
 de4x5_dbg_open(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     int i;
     
     if (de4x5_debug & DEBUG_OPEN) {
@@ -5415,7 +5423,7 @@ de4x5_dbg_open(struct net_device *dev)
 static void
 de4x5_dbg_mii(struct net_device *dev, int k)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     u_long iobase = dev->base_addr;
     
     if (de4x5_debug & DEBUG_MII) {
@@ -5443,7 +5451,7 @@ de4x5_dbg_mii(struct net_device *dev, int k)
 static void
 de4x5_dbg_media(struct net_device *dev)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
+    struct de4x5_private *lp = netdev_priv(dev);
     
     if (lp->media != lp->c_media) {
 	if (de4x5_debug & DEBUG_MEDIA) {
@@ -5534,8 +5542,8 @@ de4x5_dbg_rx(struct sk_buff *skb, int len)
 static int
 de4x5_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
-    struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
-    struct de4x5_ioctl *ioc = (struct de4x5_ioctl *) &rq->ifr_data;
+    struct de4x5_private *lp = netdev_priv(dev);
+    struct de4x5_ioctl *ioc = (struct de4x5_ioctl *) &rq->ifr_ifru;
     u_long iobase = dev->base_addr;
     int i, j, status = 0;
     s32 omr;
@@ -5745,7 +5753,7 @@ static int __init de4x5_module_init (void)
 {
 	int err = 0;
 
-#if CONFIG_PCI
+#ifdef CONFIG_PCI
 	err = pci_module_init (&de4x5_pci_driver);
 #endif
 #ifdef CONFIG_EISA
@@ -5757,7 +5765,7 @@ static int __init de4x5_module_init (void)
 
 static void __exit de4x5_module_exit (void)
 {
-#if CONFIG_PCI
+#ifdef CONFIG_PCI
 	pci_unregister_driver (&de4x5_pci_driver);
 #endif
 #ifdef CONFIG_EISA

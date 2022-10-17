@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -42,6 +42,8 @@
  */
 
 #define DEFINE_ACPI_GLOBALS
+
+#include <linux/module.h>
 
 #include <acpi/acpi.h>
 #include <acpi/acnamesp.h>
@@ -142,16 +144,13 @@ unknown:
  */
 
 /* Debug switch - level and trace mask */
-
-#ifdef ACPI_DEBUG_OUTPUT
 u32                                 acpi_dbg_level = ACPI_DEBUG_DEFAULT;
-#else
-u32                                 acpi_dbg_level = ACPI_NORMAL_DEFAULT;
-#endif
+EXPORT_SYMBOL(acpi_dbg_level);
 
 /* Debug switch - layer (component) mask */
 
-u32                                 acpi_dbg_layer = ACPI_COMPONENT_DEFAULT;
+u32                                 acpi_dbg_layer = ACPI_COMPONENT_DEFAULT | ACPI_ALL_DRIVERS;
+EXPORT_SYMBOL(acpi_dbg_layer);
 u32                                 acpi_gbl_nesting_level = 0;
 
 
@@ -171,13 +170,40 @@ u8                                  acpi_gbl_shutdown = TRUE;
 
 const u8                            acpi_gbl_decode_to8bit [8] = {1,2,4,8,16,32,64,128};
 
-const char                          *acpi_gbl_db_sleep_states[ACPI_S_STATE_COUNT] = {
-			  "\\_S0_",
-			  "\\_S1_",
-			  "\\_S2_",
-			  "\\_S3_",
-			  "\\_S4_",
-			  "\\_S5_"};
+const char                          *acpi_gbl_sleep_state_names[ACPI_S_STATE_COUNT] =
+{
+	"\\_S0_",
+	"\\_S1_",
+	"\\_S2_",
+	"\\_S3_",
+	"\\_S4_",
+	"\\_S5_"
+};
+
+const char                          *acpi_gbl_highest_dstate_names[4] =
+{
+	"_S1D",
+	"_S2D",
+	"_S3D",
+	"_S4D"
+};
+
+/*
+ * Strings supported by the _OSI predefined (internal) method.
+ * When adding strings, be sure to update ACPI_NUM_OSI_STRINGS.
+ */
+const char                          *acpi_gbl_valid_osi_strings[ACPI_NUM_OSI_STRINGS] =
+{
+	"Linux",
+	"Windows 2000",
+	"Windows 2001",
+	"Windows 2001.1",
+	"Windows 2001 SP0",
+	"Windows 2001 SP1",
+	"Windows 2001 SP2",
+	"Windows 2001 SP3",
+	"Windows 2001 SP4"
+};
 
 
 /******************************************************************************
@@ -190,26 +216,24 @@ const char                          *acpi_gbl_db_sleep_states[ACPI_S_STATE_COUNT
 /*
  * Predefined ACPI Names (Built-in to the Interpreter)
  *
- * Initial values are currently supported only for types String and Number.
- * Both are specified as strings in this table.
- *
  * NOTES:
- * 1) _SB_ is defined to be a device to allow _SB_/_INI to be run
+ * 1) _SB_ is defined to be a device to allow \_SB_._INI to be run
  *    during the initialization sequence.
+ * 2) _TZ_ is defined to be a thermal zone in order to allow ASL code to
+ *    perform a Notify() operation on it.
  */
-
 const struct acpi_predefined_names      acpi_gbl_pre_defined_names[] =
 { {"_GPE",    ACPI_TYPE_LOCAL_SCOPE,      NULL},
 	{"_PR_",    ACPI_TYPE_LOCAL_SCOPE,      NULL},
 	{"_SB_",    ACPI_TYPE_DEVICE,           NULL},
 	{"_SI_",    ACPI_TYPE_LOCAL_SCOPE,      NULL},
-	{"_TZ_",    ACPI_TYPE_LOCAL_SCOPE,      NULL},
-	{"_REV",    ACPI_TYPE_INTEGER,          "2"},
+	{"_TZ_",    ACPI_TYPE_THERMAL,          NULL},
+	{"_REV",    ACPI_TYPE_INTEGER,          (char *) ACPI_CA_SUPPORT_LEVEL},
 	{"_OS_",    ACPI_TYPE_STRING,           ACPI_OS_NAME},
-	{"_GL_",    ACPI_TYPE_MUTEX,            "0"},
+	{"_GL_",    ACPI_TYPE_MUTEX,            (char *) 1},
 
-#if defined (ACPI_NO_METHOD_EXECUTION) || defined (ACPI_CONSTANT_EVAL_ONLY)
-	{"_OSI",    ACPI_TYPE_METHOD,           "1"},
+#if !defined (ACPI_NO_METHOD_EXECUTION) || defined (ACPI_CONSTANT_EVAL_ONLY)
+	{"_OSI",    ACPI_TYPE_METHOD,           (char *) 1},
 #endif
 	{NULL,      ACPI_TYPE_ANY,              NULL}              /* Table terminator */
 };
@@ -219,7 +243,6 @@ const struct acpi_predefined_names      acpi_gbl_pre_defined_names[] =
  * Properties of the ACPI Object Types, both internal and external.
  * The table is indexed by values of acpi_object_type
  */
-
 const u8                                acpi_gbl_ns_properties[] =
 {
 	ACPI_NS_NORMAL,                     /* 00 Any              */
@@ -244,14 +267,15 @@ const u8                                acpi_gbl_ns_properties[] =
 	ACPI_NS_NORMAL,                     /* 19 index_field      */
 	ACPI_NS_NORMAL,                     /* 20 Reference        */
 	ACPI_NS_NORMAL,                     /* 21 Alias            */
-	ACPI_NS_NORMAL,                     /* 22 Notify           */
-	ACPI_NS_NORMAL,                     /* 23 Address Handler  */
-	ACPI_NS_NEWSCOPE | ACPI_NS_LOCAL,   /* 24 Resource Desc    */
-	ACPI_NS_NEWSCOPE | ACPI_NS_LOCAL,   /* 25 Resource Field   */
-	ACPI_NS_NEWSCOPE,                   /* 26 Scope            */
-	ACPI_NS_NORMAL,                     /* 27 Extra            */
-	ACPI_NS_NORMAL,                     /* 28 Data             */
-	ACPI_NS_NORMAL                      /* 29 Invalid          */
+	ACPI_NS_NORMAL,                     /* 22 method_alias     */
+	ACPI_NS_NORMAL,                     /* 23 Notify           */
+	ACPI_NS_NORMAL,                     /* 24 Address Handler  */
+	ACPI_NS_NEWSCOPE | ACPI_NS_LOCAL,   /* 25 Resource Desc    */
+	ACPI_NS_NEWSCOPE | ACPI_NS_LOCAL,   /* 26 Resource Field   */
+	ACPI_NS_NEWSCOPE,                   /* 27 Scope            */
+	ACPI_NS_NORMAL,                     /* 28 Extra            */
+	ACPI_NS_NORMAL,                     /* 29 Data             */
+	ACPI_NS_NORMAL                      /* 30 Invalid          */
 };
 
 
@@ -298,9 +322,7 @@ acpi_ut_hex_to_ascii_char (
  *
  ******************************************************************************/
 
-
 struct acpi_table_list              acpi_gbl_table_lists[NUM_ACPI_TABLE_TYPES];
-
 
 struct acpi_table_support           acpi_gbl_table_data[NUM_ACPI_TABLE_TYPES] =
 {
@@ -358,7 +380,7 @@ struct acpi_fixed_event_info        acpi_gbl_fixed_event_info[ACPI_NUM_FIXED_EVE
 	/* ACPI_EVENT_GLOBAL        */  {ACPI_BITREG_GLOBAL_LOCK_STATUS,    ACPI_BITREG_GLOBAL_LOCK_ENABLE,  ACPI_BITMASK_GLOBAL_LOCK_STATUS,    ACPI_BITMASK_GLOBAL_LOCK_ENABLE},
 	/* ACPI_EVENT_POWER_BUTTON  */  {ACPI_BITREG_POWER_BUTTON_STATUS,   ACPI_BITREG_POWER_BUTTON_ENABLE, ACPI_BITMASK_POWER_BUTTON_STATUS,   ACPI_BITMASK_POWER_BUTTON_ENABLE},
 	/* ACPI_EVENT_SLEEP_BUTTON  */  {ACPI_BITREG_SLEEP_BUTTON_STATUS,   ACPI_BITREG_SLEEP_BUTTON_ENABLE, ACPI_BITMASK_SLEEP_BUTTON_STATUS,   ACPI_BITMASK_SLEEP_BUTTON_ENABLE},
-	/* ACPI_EVENT_RTC           */  {ACPI_BITREG_RT_CLOCK_STATUS,       ACPI_BITREG_RT_CLOCK_ENABLE,     0,                                  0},
+	/* ACPI_EVENT_RTC           */  {ACPI_BITREG_RT_CLOCK_STATUS,       ACPI_BITREG_RT_CLOCK_ENABLE,     ACPI_BITMASK_RT_CLOCK_STATUS,       ACPI_BITMASK_RT_CLOCK_ENABLE},
 };
 
 /*****************************************************************************
@@ -465,9 +487,8 @@ acpi_ut_get_event_name (
  *
  * The type ACPI_TYPE_ANY (Untyped) is used as a "don't care" when searching; when
  * stored in a table it really means that we have thus far seen no evidence to
- * indicatewhat type is actually going to be stored for this entry.
+ * indicate what type is actually going to be stored for this entry.
  */
-
 static const char                   acpi_gbl_bad_type[] = "UNDEFINED";
 #define TYPE_NAME_LENGTH    12                           /* Maximum length of each string */
 
@@ -495,14 +516,15 @@ static const char                   *acpi_gbl_ns_type_names[] = /* printable nam
 	/* 19 */ "index_field",
 	/* 20 */ "Reference",
 	/* 21 */ "Alias",
-	/* 22 */ "Notify",
-	/* 23 */ "addr_handler",
-	/* 24 */ "resource_desc",
-	/* 25 */ "resource_fld",
-	/* 26 */ "Scope",
-	/* 27 */ "Extra",
-	/* 28 */ "Data",
-	/* 39 */ "Invalid"
+	/* 22 */ "method_alias",
+	/* 23 */ "Notify",
+	/* 24 */ "addr_handler",
+	/* 25 */ "resource_desc",
+	/* 26 */ "resource_fld",
+	/* 27 */ "Scope",
+	/* 28 */ "Extra",
+	/* 29 */ "Data",
+	/* 30 */ "Invalid"
 };
 
 
@@ -531,6 +553,113 @@ acpi_ut_get_object_type_name (
 	}
 
 	return (acpi_ut_get_type_name (ACPI_GET_OBJECT_TYPE (obj_desc)));
+}
+
+
+/*****************************************************************************
+ *
+ * FUNCTION:    acpi_ut_get_node_name
+ *
+ * PARAMETERS:  Object               - A namespace node
+ *
+ * RETURN:      Pointer to a string
+ *
+ * DESCRIPTION: Validate the node and return the node's ACPI name.
+ *
+ ****************************************************************************/
+
+char *
+acpi_ut_get_node_name (
+	void                            *object)
+{
+	struct acpi_namespace_node      *node = (struct acpi_namespace_node *) object;
+
+
+	/* Must return a string of exactly 4 characters == ACPI_NAME_SIZE */
+
+	if (!object)
+	{
+		return ("NULL");
+	}
+
+	/* Check for Root node */
+
+	if ((object == ACPI_ROOT_OBJECT) ||
+		(object == acpi_gbl_root_node))
+	{
+		return ("\"\\\" ");
+	}
+
+	/* Descriptor must be a namespace node */
+
+	if (node->descriptor != ACPI_DESC_TYPE_NAMED)
+	{
+		return ("####");
+	}
+
+	/* Name must be a valid ACPI name */
+
+	if (!acpi_ut_valid_acpi_name (* (u32 *) node->name.ascii))
+	{
+		return ("????");
+	}
+
+	/* Return the name */
+
+	return (node->name.ascii);
+}
+
+
+/*****************************************************************************
+ *
+ * FUNCTION:    acpi_ut_get_descriptor_name
+ *
+ * PARAMETERS:  Object               - An ACPI object
+ *
+ * RETURN:      Pointer to a string
+ *
+ * DESCRIPTION: Validate object and return the descriptor type
+ *
+ ****************************************************************************/
+
+static const char                   *acpi_gbl_desc_type_names[] = /* printable names of descriptor types */
+{
+	/* 00 */ "Invalid",
+	/* 01 */ "Cached",
+	/* 02 */ "State-Generic",
+	/* 03 */ "State-Update",
+	/* 04 */ "State-Package",
+	/* 05 */ "State-Control",
+	/* 06 */ "State-root_parse_scope",
+	/* 07 */ "State-parse_scope",
+	/* 08 */ "State-walk_scope",
+	/* 09 */ "State-Result",
+	/* 10 */ "State-Notify",
+	/* 11 */ "State-Thread",
+	/* 12 */ "Walk",
+	/* 13 */ "Parser",
+	/* 14 */ "Operand",
+	/* 15 */ "Node"
+};
+
+
+char *
+acpi_ut_get_descriptor_name (
+	void                            *object)
+{
+
+	if (!object)
+	{
+		return ("NULL OBJECT");
+	}
+
+	if (ACPI_GET_DESCRIPTOR_TYPE (object) > ACPI_DESC_TYPE_MAX)
+	{
+		return ((char *) acpi_gbl_bad_type);
+	}
+
+	return ((char *) acpi_gbl_desc_type_names[ACPI_GET_DESCRIPTOR_TYPE (object)]);
+
 }
 
 
@@ -679,6 +808,7 @@ acpi_ut_init_globals (
 
 	ACPI_FUNCTION_TRACE ("ut_init_globals");
 
+
 	/* Memory allocation and cache lists */
 
 	ACPI_MEMSET (acpi_gbl_memory_lists, 0, sizeof (struct acpi_memory_list) * ACPI_NUM_MEM_LISTS);
@@ -737,6 +867,7 @@ acpi_ut_init_globals (
 
 	acpi_gbl_system_notify.handler      = NULL;
 	acpi_gbl_device_notify.handler      = NULL;
+	acpi_gbl_exception_handler          = NULL;
 	acpi_gbl_init_handler               = NULL;
 
 	/* Global "typed" ACPI table pointers */
@@ -771,6 +902,7 @@ acpi_ut_init_globals (
 	/* Hardware oriented */
 
 	acpi_gbl_events_initialized         = FALSE;
+	acpi_gbl_system_awake_and_running   = TRUE;
 
 	/* Namespace */
 

@@ -9,16 +9,15 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
-#define __KERNEL_SYSCALLS__
 #include <stdarg.h>
 
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/kallsyms.h>
 #include <linux/mm.h>
 #include <linux/stddef.h>
-#include <linux/unistd.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/user.h>
@@ -29,6 +28,7 @@
 #include <linux/reboot.h>
 #include <linux/delay.h>
 #include <linux/pm.h>
+#include <linux/init.h>
 
 #include <asm/auxio.h>
 #include <asm/oplib.h>
@@ -41,10 +41,11 @@
 #include <asm/processor.h>
 #include <asm/psr.h>
 #include <asm/elf.h>
+#include <asm/unistd.h>
 
 /* 
  * Power management idle function 
- * Set in pm platform drivers
+ * Set in pm platform drivers (apc.c and pmc.c)
  */
 void (*pm_idle)(void);
 
@@ -54,6 +55,12 @@ void (*pm_idle)(void);
  * handler when auxio is not present-- unused for now...
  */
 void (*pm_power_off)(void);
+
+/*
+ * sysctl - toggle power-off restriction for serial console 
+ * systems in machine_power_off()
+ */
+int scons_pwroff = 1;
 
 extern void fpsave(unsigned long *, unsigned long *, void *, unsigned long *);
 
@@ -74,10 +81,8 @@ void default_idle(void)
 /*
  * the idle loop on a Sparc... ;)
  */
-int cpu_idle(void)
+void cpu_idle(void)
 {
-	int ret = -EPERM;
-
 	if (current->pid != 0)
 		goto out;
 
@@ -115,21 +120,20 @@ int cpu_idle(void)
 		}
 
 		while((!need_resched()) && pm_idle) {
-			(*pm_idle)();		/* XXX Huh? On sparc?! */
+			(*pm_idle)();
 		}
 
 		schedule();
 		check_pgt_cache();
 	}
-	ret = 0;
 out:
-	return ret;
+	return;
 }
 
 #else
 
 /* This is being executed in task 0 'user space'. */
-int cpu_idle(void)
+void cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
 	while(1) {
@@ -147,11 +151,12 @@ extern char reboot_command [];
 
 extern void (*prom_palette)(int);
 
+/* XXX cli/sti -> local_irq_xxx here, check this works once SMP is fixed. */
 void machine_halt(void)
 {
-	sti();
+	local_irq_enable();
 	mdelay(8);
-	cli();
+	local_irq_disable();
 	if (!serial_console && prom_palette)
 		prom_palette (1);
 	prom_halt();
@@ -164,9 +169,9 @@ void machine_restart(char * cmd)
 {
 	char *p;
 	
-	sti();
+	local_irq_enable();
 	mdelay(8);
-	cli();
+	local_irq_disable();
 
 	p = strchr (reboot_command, '\n');
 	if (p) *p = 0;
@@ -185,7 +190,7 @@ EXPORT_SYMBOL(machine_restart);
 void machine_power_off(void)
 {
 #ifdef CONFIG_SUN_AUXIO
-	if (auxio_power_register && !serial_console)
+	if (auxio_power_register && (!serial_console || scons_pwroff))
 		*auxio_power_register |= AUXIO_POWER_OFF;
 #endif
 	machine_halt();
@@ -193,7 +198,7 @@ void machine_power_off(void)
 
 EXPORT_SYMBOL(machine_power_off);
 
-static spinlock_t sparc_backtrace_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(sparc_backtrace_lock);
 
 void __show_backtrace(unsigned long fp)
 {
@@ -207,11 +212,12 @@ void __show_backtrace(unsigned long fp)
         while(rw && (((unsigned long) rw) >= PAGE_OFFSET) &&
             !(((unsigned long) rw) & 0x7)) {
 		printk("CPU[%d]: ARGS[%08lx,%08lx,%08lx,%08lx,%08lx,%08lx] "
-		       "FP[%08lx] CALLER[%08lx]\n", cpu,
+		       "FP[%08lx] CALLER[%08lx]: ", cpu,
 		       rw->ins[0], rw->ins[1], rw->ins[2], rw->ins[3],
 		       rw->ins[4], rw->ins[5],
 		       rw->ins[6],
 		       rw->ins[7]);
+		print_symbol("%s\n", rw->ins[7]);
 		rw = (struct reg_window *) rw->ins[6];
 	}
 	spin_unlock_irqrestore(&sparc_backtrace_lock, flags);
@@ -279,12 +285,14 @@ void show_regs(struct pt_regs *r)
 
         printk("PSR: %08lx PC: %08lx NPC: %08lx Y: %08lx    %s\n",
 	       r->psr, r->pc, r->npc, r->y, print_tainted());
+	print_symbol("PC: <%s>\n", r->pc);
 	printk("%%G: %08lx %08lx  %08lx %08lx  %08lx %08lx  %08lx %08lx\n",
 	       r->u_regs[0], r->u_regs[1], r->u_regs[2], r->u_regs[3],
 	       r->u_regs[4], r->u_regs[5], r->u_regs[6], r->u_regs[7]);
 	printk("%%O: %08lx %08lx  %08lx %08lx  %08lx %08lx  %08lx %08lx\n",
 	       r->u_regs[8], r->u_regs[9], r->u_regs[10], r->u_regs[11],
 	       r->u_regs[12], r->u_regs[13], r->u_regs[14], r->u_regs[15]);
+	print_symbol("RPC: <%s>\n", r->u_regs[15]);
 
 	printk("%%L: %08lx %08lx  %08lx %08lx  %08lx %08lx  %08lx %08lx\n",
 	       rw->locals[0], rw->locals[1], rw->locals[2], rw->locals[3],
@@ -313,12 +321,13 @@ void show_stack(struct task_struct *tsk, unsigned long *_ksp)
 	fp = (unsigned long) _ksp;
 	do {
 		/* Bogus frame pointer? */
-		if (fp < (task_base + sizeof(struct task_struct)) ||
+		if (fp < (task_base + sizeof(struct thread_info)) ||
 		    fp >= (task_base + (PAGE_SIZE << 1)))
 			break;
 		rw = (struct reg_window *) fp;
 		pc = rw->ins[7];
-		printk("[%08lx] ", pc);
+		printk("[%08lx : ", pc);
+		print_symbol("%s ] ", pc);
 		fp = rw->ins[6];
 	} while (++count < 16);
 	printk("\n");
@@ -340,7 +349,7 @@ void exit_thread(void)
 #ifndef CONFIG_SMP
 	if(last_task_used_math == current) {
 #else
-	if(current->flags & PF_USEDFPU) {
+	if(current_thread_info()->flags & _TIF_USEDFPU) {
 #endif
 		/* Keep process from leaving FPU in a bogon state. */
 		put_psr(get_psr() | PSR_EF);
@@ -349,21 +358,21 @@ void exit_thread(void)
 #ifndef CONFIG_SMP
 		last_task_used_math = NULL;
 #else
-		current->flags &= ~PF_USEDFPU;
+		current_thread_info()->flags &= ~_TIF_USEDFPU;
 #endif
 	}
 }
 
 void flush_thread(void)
 {
-	current->thread.w_saved = 0;
+	current_thread_info()->w_saved = 0;
 
 	/* No new signal delivery by default */
 	current->thread.new_signal = 0;
 #ifndef CONFIG_SMP
 	if(last_task_used_math == current) {
 #else
-	if(current->flags & PF_USEDFPU) {
+	if(current_thread_info()->flags & _TIF_USEDFPU) {
 #endif
 		/* Clean the fpu. */
 		put_psr(get_psr() | PSR_EF);
@@ -372,7 +381,7 @@ void flush_thread(void)
 #ifndef CONFIG_SMP
 		last_task_used_math = NULL;
 #else
-		current->flags &= ~PF_USEDFPU;
+		current_thread_info()->flags &= ~_TIF_USEDFPU;
 #endif
 	}
 
@@ -388,23 +397,30 @@ void flush_thread(void)
 	}
 }
 
-static __inline__ struct sparc_stackf *
-clone_stackframe(struct sparc_stackf *dst, struct sparc_stackf *src)
+static __inline__ struct sparc_stackf __user *
+clone_stackframe(struct sparc_stackf __user *dst,
+		 struct sparc_stackf __user *src)
 {
-	unsigned long size;
-	struct sparc_stackf *sp;
+	unsigned long size, fp;
+	struct sparc_stackf *tmp;
+	struct sparc_stackf __user *sp;
 
-	size = ((unsigned long)src->fp) - ((unsigned long)src);
-	sp = (struct sparc_stackf *)(((unsigned long)dst) - size); 
+	if (get_user(tmp, &src->fp))
+		return NULL;
+
+	fp = (unsigned long) tmp;
+	size = (fp - ((unsigned long) src));
+	fp = (unsigned long) dst;
+	sp = (struct sparc_stackf __user *)(fp - size); 
 
 	/* do_fork() grabs the parent semaphore, we must release it
 	 * temporarily so we can build the child clone stack frame
 	 * without deadlocking.
 	 */
-	if (copy_to_user(sp, src, size))
-		sp = (struct sparc_stackf *) 0;
-	else if (put_user(dst, &sp->fp))
-		sp = (struct sparc_stackf *) 0;
+	if (__copy_user(sp, src, size))
+		sp = NULL;
+	else if (put_user(fp, &sp->fp))
+		sp = NULL;
 
 	return sp;
 }
@@ -416,15 +432,13 @@ asmlinkage int sparc_do_fork(unsigned long clone_flags,
 {
 	unsigned long parent_tid_ptr, child_tid_ptr;
 
-	clone_flags &= ~CLONE_IDLETASK;
-
 	parent_tid_ptr = regs->u_regs[UREG_I2];
 	child_tid_ptr = regs->u_regs[UREG_I4];
 
 	return do_fork(clone_flags, stack_start,
 		       regs, stack_size,
-		       (int *) parent_tid_ptr,
-		       (int *) child_tid_ptr);
+		       (int __user *) parent_tid_ptr,
+		       (int __user *) child_tid_ptr);
 }
 
 /* Copy a Sparc thread.  The fork() return value conventions
@@ -453,17 +467,15 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 #ifndef CONFIG_SMP
 	if(last_task_used_math == current) {
 #else
-	if(current->flags & PF_USEDFPU) {
+	if(current_thread_info()->flags & _TIF_USEDFPU) {
 #endif
 		put_psr(get_psr() | PSR_EF);
 		fpsave(&p->thread.float_regs[0], &p->thread.fsr,
 		       &p->thread.fpqueue[0], &p->thread.fpqdepth);
 #ifdef CONFIG_SMP
-		current->flags &= ~PF_USEDFPU;
+		current_thread_info()->flags &= ~_TIF_USEDFPU;
 #endif
 	}
-
-	p->set_child_tid = p->clear_child_tid = NULL;
 
 	/*
 	 *  p->thread_info         new_stack   childregs
@@ -490,9 +502,6 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 	ti->kpsr = current->thread.fork_kpsr | PSR_PIL;
 	ti->kwim = current->thread.fork_kwim;
 
-	/* This is used for sun4c only */
-	atomic_set(&p->thread.refcount, 1);
-
 	if(regs->psr & PSR_PS) {
 		extern struct pt_regs fake_swapper_regs;
 
@@ -510,15 +519,17 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 		p->thread.current_ds = USER_DS;
 
 		if (sp != regs->u_regs[UREG_FP]) {
-			struct sparc_stackf *childstack;
-			struct sparc_stackf *parentstack;
+			struct sparc_stackf __user *childstack;
+			struct sparc_stackf __user *parentstack;
 
 			/*
 			 * This is a clone() call with supplied user stack.
 			 * Set some valid stack frames to give to the child.
 			 */
-			childstack = (struct sparc_stackf *) (sp & ~0x7UL);
-			parentstack = (struct sparc_stackf *) regs->u_regs[UREG_FP];
+			childstack = (struct sparc_stackf __user *)
+				(sp & ~0x7UL);
+			parentstack = (struct sparc_stackf __user *)
+				regs->u_regs[UREG_FP];
 
 #if 0
 			printk("clone: parent stack:\n");
@@ -537,6 +548,11 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 			childregs->u_regs[UREG_FP] = (unsigned long)childstack;
 		}
 	}
+
+#ifdef CONFIG_SMP
+	/* FPU must be disabled on SMP. */
+	childregs->psr &= ~PSR_EF;
+#endif
 
 	/* Set the return value for the child. */
 	childregs->u_regs[UREG_I0] = current->pid;
@@ -588,19 +604,19 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
  */
 int dump_fpu (struct pt_regs * regs, elf_fpregset_t * fpregs)
 {
-	if (current->used_math == 0) {
+	if (used_math()) {
 		memset(fpregs, 0, sizeof(*fpregs));
 		fpregs->pr_q_entrysize = 8;
 		return 1;
 	}
 #ifdef CONFIG_SMP
-	if (current->flags & PF_USEDFPU) {
+	if (current_thread_info()->flags & _TIF_USEDFPU) {
 		put_psr(get_psr() | PSR_EF);
 		fpsave(&current->thread.float_regs[0], &current->thread.fsr,
 		       &current->thread.fpqueue[0], &current->thread.fpqdepth);
 		if (regs != NULL) {
 			regs->psr &= ~(PSR_EF);
-			current->flags &= ~(PF_USEDFPU);
+			current_thread_info()->flags &= ~(_TIF_USEDFPU);
 		}
 	}
 #else
@@ -610,7 +626,7 @@ int dump_fpu (struct pt_regs * regs, elf_fpregset_t * fpregs)
 		       &current->thread.fpqueue[0], &current->thread.fpqdepth);
 		if (regs != NULL) {
 			regs->psr &= ~(PSR_EF);
-			last_task_used_math = 0;
+			last_task_used_math = NULL;
 		}
 	}
 #endif
@@ -645,15 +661,20 @@ asmlinkage int sparc_execve(struct pt_regs *regs)
 	if(regs->u_regs[UREG_G1] == 0)
 		base = 1;
 
-	filename = getname((char *)regs->u_regs[base + UREG_I0]);
+	filename = getname((char __user *)regs->u_regs[base + UREG_I0]);
 	error = PTR_ERR(filename);
 	if(IS_ERR(filename))
 		goto out;
-	error = do_execve(filename, (char **) regs->u_regs[base + UREG_I1],
-			  (char **) regs->u_regs[base + UREG_I2], regs);
+	error = do_execve(filename,
+			  (char __user * __user *)regs->u_regs[base + UREG_I1],
+			  (char __user * __user *)regs->u_regs[base + UREG_I2],
+			  regs);
 	putname(filename);
-	if (error == 0)
+	if (error == 0) {
+		task_lock(current);
 		current->ptrace &= ~PT_DTRACE;
+		task_unlock(current);
+	}
 out:
 	return error;
 }
@@ -670,30 +691,27 @@ pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	long retval;
 
-	__asm__ __volatile("mov %4, %%g2\n\t"    /* Set aside fn ptr... */
-			   "mov %5, %%g3\n\t"    /* and arg. */
-			   "mov %1, %%g1\n\t"
-			   "mov %2, %%o0\n\t"    /* Clone flags. */
-			   "mov 0, %%o1\n\t"     /* usp arg == 0 */
-			   "t 0x10\n\t"          /* Linux/Sparc clone(). */
-			   "cmp %%o1, 0\n\t"
-			   "be 1f\n\t"           /* The parent, just return. */
-			   " nop\n\t"            /* Delay slot. */
-			   "jmpl %%g2, %%o7\n\t" /* Call the function. */
-			   " mov %%g3, %%o0\n\t" /* Get back the arg in delay. */
-			   "mov %3, %%g1\n\t"
-			   "t 0x10\n\t"          /* Linux/Sparc exit(). */
-			   /* Notreached by child. */
-			   "1: mov %%o0, %0\n\t" :
-			   "=r" (retval) :
-			   "i" (__NR_clone), "r" (flags | CLONE_VM | CLONE_UNTRACED),
-			   "i" (__NR_exit),  "r" (fn), "r" (arg) :
-			   "g1", "g2", "g3", "o0", "o1", "memory", "cc");
+	__asm__ __volatile__("mov %4, %%g2\n\t"    /* Set aside fn ptr... */
+			     "mov %5, %%g3\n\t"    /* and arg. */
+			     "mov %1, %%g1\n\t"
+			     "mov %2, %%o0\n\t"    /* Clone flags. */
+			     "mov 0, %%o1\n\t"     /* usp arg == 0 */
+			     "t 0x10\n\t"          /* Linux/Sparc clone(). */
+			     "cmp %%o1, 0\n\t"
+			     "be 1f\n\t"           /* The parent, just return. */
+			     " nop\n\t"            /* Delay slot. */
+			     "jmpl %%g2, %%o7\n\t" /* Call the function. */
+			     " mov %%g3, %%o0\n\t" /* Get back the arg in delay. */
+			     "mov %3, %%g1\n\t"
+			     "t 0x10\n\t"          /* Linux/Sparc exit(). */
+			     /* Notreached by child. */
+			     "1: mov %%o0, %0\n\t" :
+			     "=r" (retval) :
+			     "i" (__NR_clone), "r" (flags | CLONE_VM | CLONE_UNTRACED),
+			     "i" (__NR_exit),  "r" (fn), "r" (arg) :
+			     "g1", "g2", "g3", "o0", "o1", "memory", "cc");
 	return retval;
 }
-
-extern void scheduling_functions_start_here(void);
-extern void scheduling_functions_end_here(void);
 
 unsigned long get_wchan(struct task_struct *task)
 {
@@ -710,13 +728,12 @@ unsigned long get_wchan(struct task_struct *task)
 	fp = task->thread_info->ksp + bias;
 	do {
 		/* Bogus frame pointer? */
-		if (fp < (task_base + sizeof(struct task_struct)) ||
+		if (fp < (task_base + sizeof(struct thread_info)) ||
 		    fp >= (task_base + (2 * PAGE_SIZE)))
 			break;
 		rw = (struct reg_window *) fp;
 		pc = rw->ins[7];
-		if (pc < ((unsigned long) scheduling_functions_start_here) ||
-                    pc >= ((unsigned long) scheduling_functions_end_here)) {
+		if (!in_sched_functions(pc)) {
 			ret = pc;
 			goto out;
 		}

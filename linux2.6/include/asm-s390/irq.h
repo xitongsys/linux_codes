@@ -2,7 +2,7 @@
 #define _ASM_IRQ_H
 
 #ifdef __KERNEL__
-#include <asm/hardirq.h>
+#include <linux/hardirq.h>
 
 /*
  * the definition of irqs has changed in 2.5.46:
@@ -20,6 +20,10 @@ enum interruption_class {
 };
 
 #define touch_nmi_watchdog() do { } while(0)
+
+struct irqaction;
+struct pt_regs;
+int handle_IRQ_event(unsigned int, struct pt_regs *, struct irqaction *);
 
 #endif /* __KERNEL__ */
 #endif

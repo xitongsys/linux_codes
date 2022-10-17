@@ -79,7 +79,7 @@
 #define PCMCIA_DEBUG 0
 #ifdef PCMCIA_DEBUG
 static int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
+module_param(pc_debug, int, 0);
 #define dprintk(n, format, args...) \
 	{ if (pc_debug > (n)) \
 		printk(KERN_INFO "%s: " format "\n", __FUNCTION__ , ##args); }
@@ -96,12 +96,6 @@ MODULE_PARM(pc_debug, "i");
 
 #define WL3501_RESUME	0
 #define WL3501_SUSPEND	1
-
-/* Parameters that can be set with 'insmod' */
-/* Bit map of interrupts to choose from */
-/* This means pick from 15, 14, 12, 11, 10, 9, 7, 5, 4, and 3 */
-static unsigned long wl3501_irq_mask = 0xdeb8;
-static int wl3501_irq_list[4] = { -1 };
 
 /*
  * The event() function is this driver's Card Services event handler.  It will
@@ -1306,10 +1300,6 @@ static int wl3501_close(struct net_device *dev)
 	/* Mask interrupts from the SUTRO */
 	wl3501_block_interrupt(this);
 
-	if (link->state & DEV_STALE_CONFIG) {
-		link->state |= DEV_RELEASE_PENDING;
-		wl3501_release(link);
-	}
 	rc = 0;
 	printk(KERN_INFO "%s: WL3501 closed\n", dev->name);
 out:
@@ -1449,18 +1439,6 @@ fail:
 	goto out;
 }
 
-/**
- * wl3501_init - "initialize" board
- * @dev - network device
- *
- * We never need to do anything when a wl3501 device is "initialized" by the net
- * software, because we only register already-found cards.
- */
-static int wl3501_init(struct net_device *dev)
-{
-	return 0;
-}
-
 struct net_device_stats *wl3501_get_stats(struct net_device *dev)
 {
 	struct wl3501_card *this = dev->priv;
@@ -1503,55 +1481,14 @@ struct iw_statistics *wl3501_get_wireless_stats(struct net_device *dev)
 	return wstats;
 }
 
-static inline int wl3501_ethtool_ioctl(struct net_device *dev, void *uaddr)
+static void wl3501_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
 {
-	u32 ethcmd;
-	int rc = -EFAULT;
-
-	if (copy_from_user(&ethcmd, uaddr, sizeof(ethcmd)))
-		goto out;
-
-	switch (ethcmd) {
-	case ETHTOOL_GDRVINFO: {
-		struct ethtool_drvinfo info = { .cmd = ETHTOOL_GDRVINFO, };
-
-		strlcpy(info.driver, wl3501_dev_info, sizeof(info.driver));
-		rc = copy_to_user(uaddr, &info, sizeof(info)) ? -EFAULT : 1;
-	}
-	default:
-		rc = -EOPNOTSUPP;
-		break;
-	}
-out:
-	return rc;
+	strlcpy(info->driver, wl3501_dev_info, sizeof(info->driver));
 }
 
-/**
- * wl3501_ioctl - Perform IOCTL call functions
- * @dev - network device
- * @ifreq - request
- * @cmd - command
- *
- * Perform IOCTL call functions here. Some are privileged operations and the
- * effective uid is checked in those cases.
- *
- * This part is optional. Needed only if you want to run wlu (unix version).
- *
- * CAUTION: To prevent interrupted by wl3501_interrupt() and timer-based
- * wl3501_hard_start_xmit() from other interrupts, this should be run
- * single-threaded.
- */
-static int wl3501_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
-{
-	int rc = -ENODEV;
-
-	if (netif_device_present(dev)) {
-		rc = -EOPNOTSUPP;
-		if (cmd == SIOCETHTOOL)
-			rc = wl3501_ethtool_ioctl(dev, (void *)rq->ifr_data);
-	}
-	return rc;
-}
+static struct ethtool_ops ops = {
+	.get_drvinfo = wl3501_get_drvinfo
+};
 
 /**
  * wl3501_detach - deletes a driver "instance"
@@ -1586,13 +1523,13 @@ static void wl3501_detach(dev_link_t *link)
 
 	/* Break the link with Card Services */
 	if (link->handle)
-		CardServices(DeregisterClient, link->handle);
+		pcmcia_deregister_client(link->handle);
 
 	/* Unlink device structure, free pieces */
 	*linkp = link->next;
 
 	if (link->priv)
-		kfree(link->priv);
+		free_netdev(link->priv);
 	kfree(link);
 out:
 	return;
@@ -2024,7 +1961,7 @@ static dev_link_t *wl3501_attach(void)
 	client_reg_t client_reg;
 	dev_link_t *link;
 	struct net_device *dev;
-	int ret, i;
+	int ret;
 
 	/* Initialize the dev_link_t structure */
 	link = kmalloc(sizeof(*link), GFP_KERNEL);
@@ -2039,11 +1976,7 @@ static dev_link_t *wl3501_attach(void)
 
 	/* Interrupt setup */
 	link->irq.Attributes	= IRQ_TYPE_EXCLUSIVE | IRQ_HANDLE_PRESENT;
-	link->irq.IRQInfo1	= IRQ_INFO2_VALID | IRQ_LEVEL_ID;
-	link->irq.IRQInfo2	= wl3501_irq_mask;
-	if (wl3501_irq_list[0] != -1)
-		for (i = 0; i < 4; i++)
-			link->irq.IRQInfo2 |= 1 << wl3501_irq_list[i];
+	link->irq.IRQInfo1	= IRQ_LEVEL_ID;
 	link->irq.Handler = wl3501_interrupt;
 
 	/* General socket configuration */
@@ -2056,7 +1989,6 @@ static dev_link_t *wl3501_attach(void)
 	dev = alloc_etherdev(sizeof(struct wl3501_card));
 	if (!dev)
 		goto out_link;
-	dev->init		= wl3501_init;
 	dev->open		= wl3501_open;
 	dev->stop		= wl3501_close;
 	dev->hard_start_xmit	= wl3501_hard_start_xmit;
@@ -2064,8 +1996,8 @@ static dev_link_t *wl3501_attach(void)
 	dev->watchdog_timeo	= 5 * HZ;
 	dev->get_stats		= wl3501_get_stats;
 	dev->get_wireless_stats = wl3501_get_wireless_stats;
-	dev->do_ioctl		= wl3501_ioctl;
 	dev->wireless_handlers	= (struct iw_handler_def *)&wl3501_handler_def;
+	SET_ETHTOOL_OPS(dev, &ops);
 	netif_stop_queue(dev);
 	link->priv = link->irq.Instance = dev;
 
@@ -2073,7 +2005,6 @@ static dev_link_t *wl3501_attach(void)
 	link->next		 = wl3501_dev_list;
 	wl3501_dev_list		 = link;
 	client_reg.dev_info	 = &wl3501_dev_info;
-	client_reg.Attributes	 = INFO_IO_CLIENT | INFO_CARD_SHARE;
 	client_reg.EventMask	 = CS_EVENT_CARD_INSERTION |
 				   CS_EVENT_RESET_PHYSICAL |
 				   CS_EVENT_CARD_RESET |
@@ -2083,7 +2014,7 @@ static dev_link_t *wl3501_attach(void)
 	client_reg.event_handler = wl3501_event;
 	client_reg.Version	 = 0x0210;
 	client_reg.event_callback_args.client_data = link;
-	ret = CardServices(RegisterClient, &link->handle, &client_reg);
+	ret = pcmcia_register_client(&link->handle, &client_reg);
 	if (ret) {
 		cs_error(link->handle, RegisterClient, ret);
 		wl3501_detach(link);
@@ -2097,8 +2028,8 @@ out_link:
 	goto out;
 }
 
-#define CS_CHECK(fn, args...) \
-while ((last_ret = CardServices(last_fn = (fn), args)) != 0) goto cs_failed
+#define CS_CHECK(fn, ret) \
+do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
 
 /**
  * wl3501_config - configure the PCMCIA socket and make eth device available
@@ -2121,12 +2052,12 @@ static void wl3501_config(dev_link_t *link)
 	/* This reads the card's CONFIG tuple to find its config registers. */
 	tuple.Attributes	= 0;
 	tuple.DesiredTuple	= CISTPL_CONFIG;
-	CS_CHECK(GetFirstTuple, handle, &tuple);
+	CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
 	tuple.TupleData		= bf;
 	tuple.TupleDataMax	= sizeof(bf);
 	tuple.TupleOffset	= 0;
-	CS_CHECK(GetTupleData, handle, &tuple);
-	CS_CHECK(ParseTuple, handle, &tuple, &parse);
+	CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
+	CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
 	link->conf.ConfigBase	= parse.config.base;
 	link->conf.Present	= parse.config.rmask[0];
 
@@ -2142,7 +2073,7 @@ static void wl3501_config(dev_link_t *link)
 		 * 0x200-0x2ff, and so on, because this seems safer */
 		link->io.BasePort1 = j;
 		link->io.BasePort2 = link->io.BasePort1 + 0x10;
-		i = CardServices(RequestIO, link->handle, &link->io);
+		i = pcmcia_request_io(link->handle, &link->io);
 		if (i == CS_SUCCESS)
 			break;
 	}
@@ -2154,15 +2085,16 @@ static void wl3501_config(dev_link_t *link)
 	/* Now allocate an interrupt line. Note that this does not actually
 	 * assign a handler to the interrupt. */
 
-	CS_CHECK(RequestIRQ, link->handle, &link->irq);
+	CS_CHECK(RequestIRQ, pcmcia_request_irq(link->handle, &link->irq));
 
 	/* This actually configures the PCMCIA socket -- setting up the I/O
 	 * windows and the interrupt mapping.  */
 
-	CS_CHECK(RequestConfiguration, link->handle, &link->conf);
+	CS_CHECK(RequestConfiguration, pcmcia_request_configuration(link->handle, &link->conf));
 
 	dev->irq = link->irq.AssignedIRQ;
 	dev->base_addr = link->io.BasePort1;
+	SET_NETDEV_DEV(dev, &handle_to_dev(handle));
 	if (register_netdev(dev)) {
 		printk(KERN_NOTICE "wl3501_cs: register_netdev() failed\n");
 		goto failed;
@@ -2233,15 +2165,6 @@ static void wl3501_release(dev_link_t *link)
 {
 	struct net_device *dev = link->priv;
 
-	/* If the device is currently in use, we won't release until it is
-	 * actually closed. */
-	if (link->open) {
-		dprintk(1, "release postponed, '%s' still open",
-			link->dev->dev_name);
-		link->state |= DEV_STALE_CONFIG;
-		goto out;
-	}
-
 	/* Unlink the device chain */
 	if (link->dev) {
 		unregister_netdev(dev);
@@ -2249,15 +2172,10 @@ static void wl3501_release(dev_link_t *link)
 	}
 
 	/* Don't bother checking to see if these succeed or not */
-	CardServices(ReleaseConfiguration, link->handle);
-	CardServices(ReleaseIO, link->handle, &link->io);
-	CardServices(ReleaseIRQ, link->handle, &link->irq);
+	pcmcia_release_configuration(link->handle);
+	pcmcia_release_io(link->handle, &link->io);
+	pcmcia_release_irq(link->handle, &link->irq);
 	link->state &= ~DEV_CONFIG;
-
-	if (link->state & DEV_STALE_CONFIG)
-		wl3501_detach(link);
-out:
-	return;
 }
 
 /**
@@ -2301,7 +2219,7 @@ static int wl3501_event(event_t event, int pri, event_callback_args_t *args)
 		if (link->state & DEV_CONFIG) {
 			if (link->open)
 				netif_device_detach(dev);
-			CardServices(ReleaseConfiguration, link->handle);
+			pcmcia_release_configuration(link->handle);
 		}
 		break;
 	case CS_EVENT_PM_RESUME:
@@ -2310,8 +2228,7 @@ static int wl3501_event(event_t event, int pri, event_callback_args_t *args)
 		/* Fall through... */
 	case CS_EVENT_CARD_RESET:
 		if (link->state & DEV_CONFIG) {
-			CardServices(RequestConfiguration, link->handle,
-				     &link->conf);
+			pcmcia_request_configuration(link->handle, &link->conf);
 			if (link->open) {
 				wl3501_reset(dev);
 				netif_device_attach(dev);
@@ -2340,20 +2257,12 @@ static void __exit wl3501_exit_module(void)
 {
 	dprintk(0, ": unloading");
 	pcmcia_unregister_driver(&wl3501_driver);
-	while (wl3501_dev_list) {
-		/* Mark the device as non-existing to minimize calls to card */
-		wl3501_dev_list->state &= ~DEV_PRESENT;
-		if (wl3501_dev_list->state & DEV_CONFIG)
-			wl3501_release(wl3501_dev_list);
-		wl3501_detach(wl3501_dev_list);
-	}
+	BUG_ON(wl3501_dev_list != NULL);
 }
 
 module_init(wl3501_init_module);
 module_exit(wl3501_exit_module);
 
-MODULE_PARM(wl3501_irq_mask, "i");
-MODULE_PARM(wl3501_irq_list, "1-4i");
 MODULE_AUTHOR("Fox Chen <mhchen@golf.ccl.itri.org.tw>, "
 	      "Arnaldo Carvalho de Melo <acme@conectiva.com.br>,"
 	      "Gustavo Niemeyer <niemeyer@conectiva.com>");

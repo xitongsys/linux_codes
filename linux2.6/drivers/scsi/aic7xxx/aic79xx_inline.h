@@ -37,7 +37,7 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGES.
  *
- * $Id: //depot/aic7xxx/aic7xxx/aic79xx_inline.h#50 $
+ * $Id: //depot/aic7xxx/aic7xxx/aic79xx_inline.h#51 $
  *
  * $FreeBSD$
  */
@@ -231,7 +231,7 @@ ahd_unpause(struct ahd_softc *ahd)
 
 /*********************** Scatter Gather List Handling *************************/
 static __inline void	*ahd_sg_setup(struct ahd_softc *ahd, struct scb *scb,
-				      void *sgptr, bus_addr_t addr,
+				      void *sgptr, dma_addr_t addr,
 				      bus_size_t len, int last);
 static __inline void	 ahd_setup_scb_common(struct ahd_softc *ahd,
 					      struct scb *scb);
@@ -242,10 +242,10 @@ static __inline void	 ahd_setup_noxfer_scb(struct ahd_softc *ahd,
 
 static __inline void *
 ahd_sg_setup(struct ahd_softc *ahd, struct scb *scb,
-	     void *sgptr, bus_addr_t addr, bus_size_t len, int last)
+	     void *sgptr, dma_addr_t addr, bus_size_t len, int last)
 {
 	scb->sg_count++;
-	if (sizeof(bus_addr_t) > 4
+	if (sizeof(dma_addr_t) > 4
 	 && (ahd->flags & AHD_64BIT_ADDRESSING) != 0) {
 		struct ahd_dma64_seg *sg;
 
@@ -361,7 +361,7 @@ ahd_sg_size(struct ahd_softc *ahd)
 static __inline void *
 ahd_sg_bus_to_virt(struct ahd_softc *ahd, struct scb *scb, uint32_t sg_busaddr)
 {
-	bus_addr_t sg_offset;
+	dma_addr_t sg_offset;
 
 	/* sg_list_phys points to entry 1, not 0 */
 	sg_offset = sg_busaddr - (scb->sg_list_busaddr - ahd_sg_size(ahd));
@@ -371,7 +371,7 @@ ahd_sg_bus_to_virt(struct ahd_softc *ahd, struct scb *scb, uint32_t sg_busaddr)
 static __inline uint32_t
 ahd_sg_virt_to_bus(struct ahd_softc *ahd, struct scb *scb, void *sg)
 {
-	bus_addr_t sg_offset;
+	dma_addr_t sg_offset;
 
 	/* sg_list_phys points to entry 1, not 0 */
 	sg_offset = ((uint8_t *)sg - (uint8_t *)scb->sg_list)
@@ -455,6 +455,8 @@ static __inline u_int	ahd_inb_scbram(struct ahd_softc *ahd, u_int offset);
 static __inline u_int	ahd_inw_scbram(struct ahd_softc *ahd, u_int offset);
 static __inline uint32_t
 			ahd_inl_scbram(struct ahd_softc *ahd, u_int offset);
+static __inline uint64_t
+			ahd_inq_scbram(struct ahd_softc *ahd, u_int offset);
 static __inline void	ahd_swap_with_next_hscb(struct ahd_softc *ahd,
 						struct scb *scb);
 static __inline void	ahd_queue_scb(struct ahd_softc *ahd, struct scb *scb);
@@ -697,10 +699,15 @@ ahd_inw_scbram(struct ahd_softc *ahd, u_int offset)
 static __inline uint32_t
 ahd_inl_scbram(struct ahd_softc *ahd, u_int offset)
 {
-	return (ahd_inb_scbram(ahd, offset)
-	      | (ahd_inb_scbram(ahd, offset+1) << 8)
-	      | (ahd_inb_scbram(ahd, offset+2) << 16)
-	      | (ahd_inb_scbram(ahd, offset+3) << 24));
+	return (ahd_inw_scbram(ahd, offset)
+	      | (ahd_inw_scbram(ahd, offset+2) << 16));
+}
+
+static __inline uint64_t
+ahd_inq_scbram(struct ahd_softc *ahd, u_int offset)
+{
+	return (ahd_inl_scbram(ahd, offset)
+	      | ((uint64_t)ahd_inl_scbram(ahd, offset+4)) << 32);
 }
 
 static __inline struct scb *

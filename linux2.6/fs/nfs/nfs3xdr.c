@@ -33,51 +33,51 @@ extern int			nfs_stat_to_errno(int);
  * Declare the space requirements for NFS arguments and replies as
  * number of 32bit-words
  */
-#define NFS3_fhandle_sz		1+16
-#define NFS3_fh_sz		NFS3_fhandle_sz	/* shorthand */
-#define NFS3_sattr_sz		15
-#define NFS3_filename_sz	1+(NFS3_MAXNAMLEN>>2)
-#define NFS3_path_sz		1+(NFS3_MAXPATHLEN>>2)
-#define NFS3_fattr_sz		21
-#define NFS3_wcc_attr_sz		6
-#define NFS3_pre_op_attr_sz	1+NFS3_wcc_attr_sz
-#define NFS3_post_op_attr_sz	1+NFS3_fattr_sz
-#define NFS3_wcc_data_sz		NFS3_pre_op_attr_sz+NFS3_post_op_attr_sz
+#define NFS3_fhandle_sz		(1+16)
+#define NFS3_fh_sz		(NFS3_fhandle_sz)	/* shorthand */
+#define NFS3_sattr_sz		(15)
+#define NFS3_filename_sz	(1+(NFS3_MAXNAMLEN>>2))
+#define NFS3_path_sz		(1+(NFS3_MAXPATHLEN>>2))
+#define NFS3_fattr_sz		(21)
+#define NFS3_wcc_attr_sz		(6)
+#define NFS3_pre_op_attr_sz	(1+NFS3_wcc_attr_sz)
+#define NFS3_post_op_attr_sz	(1+NFS3_fattr_sz)
+#define NFS3_wcc_data_sz		(NFS3_pre_op_attr_sz+NFS3_post_op_attr_sz)
 #define NFS3_fsstat_sz		
 #define NFS3_fsinfo_sz		
 #define NFS3_pathconf_sz		
-#define NFS3_entry_sz		NFS3_filename_sz+3
+#define NFS3_entry_sz		(NFS3_filename_sz+3)
 
-#define NFS3_sattrargs_sz	NFS3_fh_sz+NFS3_sattr_sz+3
-#define NFS3_diropargs_sz	NFS3_fh_sz+NFS3_filename_sz
-#define NFS3_accessargs_sz	NFS3_fh_sz+1
-#define NFS3_readlinkargs_sz	NFS3_fh_sz
-#define NFS3_readargs_sz	NFS3_fh_sz+3
-#define NFS3_writeargs_sz	NFS3_fh_sz+5
-#define NFS3_createargs_sz	NFS3_diropargs_sz+NFS3_sattr_sz
-#define NFS3_mkdirargs_sz	NFS3_diropargs_sz+NFS3_sattr_sz
-#define NFS3_symlinkargs_sz	NFS3_diropargs_sz+NFS3_path_sz+NFS3_sattr_sz
-#define NFS3_mknodargs_sz	NFS3_diropargs_sz+2+NFS3_sattr_sz
-#define NFS3_renameargs_sz	NFS3_diropargs_sz+NFS3_diropargs_sz
-#define NFS3_linkargs_sz		NFS3_fh_sz+NFS3_diropargs_sz
-#define NFS3_readdirargs_sz	NFS3_fh_sz+2
-#define NFS3_commitargs_sz	NFS3_fh_sz+3
+#define NFS3_sattrargs_sz	(NFS3_fh_sz+NFS3_sattr_sz+3)
+#define NFS3_diropargs_sz	(NFS3_fh_sz+NFS3_filename_sz)
+#define NFS3_accessargs_sz	(NFS3_fh_sz+1)
+#define NFS3_readlinkargs_sz	(NFS3_fh_sz)
+#define NFS3_readargs_sz	(NFS3_fh_sz+3)
+#define NFS3_writeargs_sz	(NFS3_fh_sz+5)
+#define NFS3_createargs_sz	(NFS3_diropargs_sz+NFS3_sattr_sz)
+#define NFS3_mkdirargs_sz	(NFS3_diropargs_sz+NFS3_sattr_sz)
+#define NFS3_symlinkargs_sz	(NFS3_diropargs_sz+NFS3_path_sz+NFS3_sattr_sz)
+#define NFS3_mknodargs_sz	(NFS3_diropargs_sz+2+NFS3_sattr_sz)
+#define NFS3_renameargs_sz	(NFS3_diropargs_sz+NFS3_diropargs_sz)
+#define NFS3_linkargs_sz		(NFS3_fh_sz+NFS3_diropargs_sz)
+#define NFS3_readdirargs_sz	(NFS3_fh_sz+2)
+#define NFS3_commitargs_sz	(NFS3_fh_sz+3)
 
-#define NFS3_attrstat_sz	1+NFS3_fattr_sz
-#define NFS3_wccstat_sz		1+NFS3_wcc_data_sz
-#define NFS3_lookupres_sz	1+NFS3_fh_sz+(2 * NFS3_post_op_attr_sz)
-#define NFS3_accessres_sz	1+NFS3_post_op_attr_sz+1
-#define NFS3_readlinkres_sz	1+NFS3_post_op_attr_sz
-#define NFS3_readres_sz		1+NFS3_post_op_attr_sz+3
-#define NFS3_writeres_sz	1+NFS3_wcc_data_sz+4
-#define NFS3_createres_sz	1+NFS3_fh_sz+NFS3_post_op_attr_sz+NFS3_wcc_data_sz
-#define NFS3_renameres_sz	1+(2 * NFS3_wcc_data_sz)
-#define NFS3_linkres_sz		1+NFS3_post_op_attr_sz+NFS3_wcc_data_sz
-#define NFS3_readdirres_sz	1+NFS3_post_op_attr_sz+2
-#define NFS3_fsstatres_sz	1+NFS3_post_op_attr_sz+13
-#define NFS3_fsinfores_sz	1+NFS3_post_op_attr_sz+12
-#define NFS3_pathconfres_sz	1+NFS3_post_op_attr_sz+6
-#define NFS3_commitres_sz	1+NFS3_wcc_data_sz+2
+#define NFS3_attrstat_sz	(1+NFS3_fattr_sz)
+#define NFS3_wccstat_sz		(1+NFS3_wcc_data_sz)
+#define NFS3_lookupres_sz	(1+NFS3_fh_sz+(2 * NFS3_post_op_attr_sz))
+#define NFS3_accessres_sz	(1+NFS3_post_op_attr_sz+1)
+#define NFS3_readlinkres_sz	(1+NFS3_post_op_attr_sz+1)
+#define NFS3_readres_sz		(1+NFS3_post_op_attr_sz+3)
+#define NFS3_writeres_sz	(1+NFS3_wcc_data_sz+4)
+#define NFS3_createres_sz	(1+NFS3_fh_sz+NFS3_post_op_attr_sz+NFS3_wcc_data_sz)
+#define NFS3_renameres_sz	(1+(2 * NFS3_wcc_data_sz))
+#define NFS3_linkres_sz		(1+NFS3_post_op_attr_sz+NFS3_wcc_data_sz)
+#define NFS3_readdirres_sz	(1+NFS3_post_op_attr_sz+2)
+#define NFS3_fsstatres_sz	(1+NFS3_post_op_attr_sz+13)
+#define NFS3_fsinfores_sz	(1+NFS3_post_op_attr_sz+12)
+#define NFS3_pathconfres_sz	(1+NFS3_post_op_attr_sz+6)
+#define NFS3_commitres_sz	(1+NFS3_wcc_data_sz+2)
 
 /*
  * Map file type to S_IFMT bits
@@ -103,18 +103,12 @@ static struct {
 static inline u32 *
 xdr_encode_fhandle(u32 *p, struct nfs_fh *fh)
 {
-	*p++ = htonl(fh->size);
-	memcpy(p, fh->data, fh->size);
-	return p + XDR_QUADLEN(fh->size);
+	return xdr_encode_array(p, fh->data, fh->size);
 }
 
 static inline u32 *
 xdr_decode_fhandle(u32 *p, struct nfs_fh *fh)
 {
-	/*
-	 * Zero all nonused bytes
-	 */
-	memset((u8 *)fh, 0, sizeof(*fh));
 	if ((fh->size = ntohl(*p++)) <= NFS3_FHSIZE) {
 		memcpy(fh->data, p, fh->size);
 		return p + XDR_QUADLEN(fh->size);
@@ -486,7 +480,7 @@ static int
 nfs3_xdr_readdirres(struct rpc_rqst *req, u32 *p, struct nfs3_readdirres *res)
 {
 	struct xdr_buf *rcvbuf = &req->rq_rcv_buf;
-	struct iovec *iov = rcvbuf->head;
+	struct kvec *iov = rcvbuf->head;
 	struct page **page;
 	int hdrlen, recvd;
 	int status, nr;
@@ -517,7 +511,7 @@ nfs3_xdr_readdirres(struct rpc_rqst *req, u32 *p, struct nfs3_readdirres *res)
 	}
 
 	pglen = rcvbuf->page_len;
-	recvd = req->rq_received - hdrlen;
+	recvd = rcvbuf->len - hdrlen;
 	if (pglen > recvd)
 		pglen = recvd;
 	page = rcvbuf->pages;
@@ -538,16 +532,16 @@ nfs3_xdr_readdirres(struct rpc_rqst *req, u32 *p, struct nfs3_readdirres *res)
 
 		if (res->plus) {
 			/* post_op_attr */
-			if (p > end)
+			if (p + 2 > end)
 				goto short_pkt;
 			if (*p++) {
 				p += 21;
-				if (p > end)
+				if (p + 1 > end)
 					goto short_pkt;
 			}
 			/* post_op_fh3 */
 			if (*p++) {
-				if (p > end)
+				if (p + 1 > end)
 					goto short_pkt;
 				len = ntohl(*p++);
 				if (len > NFS3_FHSIZE) {
@@ -705,14 +699,13 @@ nfs3_xdr_readlinkargs(struct rpc_rqst *req, u32 *p, struct nfs3_readlinkargs *ar
 {
 	struct rpc_auth *auth = req->rq_task->tk_auth;
 	unsigned int replen;
-	u32 count = args->count - 4;
 
 	p = xdr_encode_fhandle(p, args->fh);
 	req->rq_slen = xdr_adjust_iovec(req->rq_svec, p);
 
 	/* Inline the page array */
 	replen = (RPC_REPHDRSIZE + auth->au_rslack + NFS3_readlinkres_sz) << 2;
-	xdr_inline_pages(&req->rq_rcv_buf, replen, args->pages, 0, count);
+	xdr_inline_pages(&req->rq_rcv_buf, replen, args->pages, args->pgbase, args->pglen);
 	return 0;
 }
 
@@ -723,10 +716,9 @@ static int
 nfs3_xdr_readlinkres(struct rpc_rqst *req, u32 *p, struct nfs_fattr *fattr)
 {
 	struct xdr_buf *rcvbuf = &req->rq_rcv_buf;
-	struct iovec *iov = rcvbuf->head;
-	unsigned int hdrlen;
-	u32	*strlen, len;
-	char	*string;
+	struct kvec *iov = rcvbuf->head;
+	int hdrlen, len, recvd;
+	char	*kaddr;
 	int	status;
 
 	status = ntohl(*p++);
@@ -735,22 +727,33 @@ nfs3_xdr_readlinkres(struct rpc_rqst *req, u32 *p, struct nfs_fattr *fattr)
 	if (status != 0)
 		return -nfs_stat_to_errno(status);
 
+	/* Convert length of symlink */
+	len = ntohl(*p++);
+	if (len >= rcvbuf->page_len || len <= 0) {
+		dprintk(KERN_WARNING "nfs: server returned giant symlink!\n");
+		return -ENAMETOOLONG;
+	}
+
 	hdrlen = (u8 *) p - (u8 *) iov->iov_base;
-	if (iov->iov_len > hdrlen) {
+	if (iov->iov_len < hdrlen) {
+		printk(KERN_WARNING "NFS: READLINK reply header overflowed:"
+				"length %d > %Zu\n", hdrlen, iov->iov_len);
+		return -errno_NFSERR_IO;
+	} else if (iov->iov_len != hdrlen) {
 		dprintk("NFS: READLINK header is short. iovec will be shifted.\n");
 		xdr_shift_buf(rcvbuf, iov->iov_len - hdrlen);
 	}
+	recvd = req->rq_rcv_buf.len - hdrlen;
+	if (recvd < len) {
+		printk(KERN_WARNING "NFS: server cheating in readlink reply: "
+				"count %u > recvd %u\n", len, recvd);
+		return -EIO;
+	}
 
-	strlen = (u32*)kmap_atomic(rcvbuf->pages[0], KM_USER0);
-	/* Convert length of symlink */
-	len = ntohl(*strlen);
-	if (len > rcvbuf->page_len)
-		len = rcvbuf->page_len;
-	*strlen = len;
 	/* NULL terminate the string we got */
-	string = (char *)(strlen + 1);
-	string[len] = 0;
-	kunmap_atomic(strlen, KM_USER0);
+	kaddr = (char*)kmap_atomic(rcvbuf->pages[0], KM_USER0);
+	kaddr[len+rcvbuf->page_base] = '\0';
+	kunmap_atomic(kaddr, KM_USER0);
 	return 0;
 }
 
@@ -760,7 +763,7 @@ nfs3_xdr_readlinkres(struct rpc_rqst *req, u32 *p, struct nfs_fattr *fattr)
 static int
 nfs3_xdr_readres(struct rpc_rqst *req, u32 *p, struct nfs_readres *res)
 {
-	struct iovec *iov = req->rq_rvec;
+	struct kvec *iov = req->rq_rcv_buf.head;
 	int	status, count, ocount, recvd, hdrlen;
 
 	status = ntohl(*p++);
@@ -791,7 +794,7 @@ nfs3_xdr_readres(struct rpc_rqst *req, u32 *p, struct nfs_readres *res)
 		xdr_shift_buf(&req->rq_rcv_buf, iov->iov_len - hdrlen);
 	}
 
-	recvd = req->rq_received - hdrlen;
+	recvd = req->rq_rcv_buf.len - hdrlen;
 	if (count > recvd) {
 		printk(KERN_WARNING "NFS: server cheating in read reply: "
 			"count %d > recvd %d\n", count, recvd);

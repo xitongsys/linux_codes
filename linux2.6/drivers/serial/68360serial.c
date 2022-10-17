@@ -700,12 +700,8 @@ static void do_softint(void *private_)
 	if (!tty)
 		return;
 
-	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
-	}
+	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event))
+		tty_wakeup(tty);
 }
 
 
@@ -1051,7 +1047,7 @@ static void rs_360_put_char(struct tty_struct *tty, unsigned char ch)
 
 }
 
-static int rs_360_write(struct tty_struct * tty, int from_user,
+static int rs_360_write(struct tty_struct * tty,
 		    const unsigned char *buf, int count)
 {
 	int	c, ret = 0;
@@ -1083,16 +1079,8 @@ static int rs_360_write(struct tty_struct * tty, int from_user,
 			break;
 		}
 
-		if (from_user) {
-			if (copy_from_user((void *)bdp->buf, buf, c)) {
-				if (!ret)
-					ret = -EFAULT;
-				break;
-			}
-		} else {
-			/* memcpy(__va(bdp->buf), buf, c); */
-			memcpy((void *)bdp->buf, buf, c);
-		}
+		/* memcpy(__va(bdp->buf), buf, c); */
+		memcpy((void *)bdp->buf, buf, c);
 
 		bdp->length = c;
 		bdp->status |= BD_SC_READY;
@@ -1152,10 +1140,7 @@ static void rs_360_flush_buffer(struct tty_struct *tty)
 	/* There is nothing to "flush", whatever we gave the CPM
 	 * is on its way out.
 	 */
-	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 	info->flags &= ~TX_WAKEUP;
 }
 
@@ -1282,11 +1267,18 @@ static int get_lsr_info(struct async_struct * info, unsigned int *value)
 }
 #endif
 
-static int get_modem_info(ser_info_t *info, unsigned int *value)
+static int rs_360_tiocmget(struct tty_struct *tty, struct file *file)
 {
+	ser_info_t *info = (ser_info_t *)tty->driver_data;
 	unsigned int result = 0;
 #ifdef modem_control
 	unsigned char control, status;
+
+	if (serial_paranoia_check(info, tty->name, __FUNCTION__))
+		return -ENODEV;
+
+	if (tty->flags & (1 << TTY_IO_ERROR))
+		return -EIO;
 
 	control = info->MCR;
 	local_irq_disable();
@@ -1303,63 +1295,42 @@ static int get_modem_info(ser_info_t *info, unsigned int *value)
 		| ((status  & UART_MSR_DSR) ? TIOCM_DSR : 0)
 		| ((status  & UART_MSR_CTS) ? TIOCM_CTS : 0);
 #endif
-	/* return put_user(result,value); */
-	put_user(result,value);
-	return (0);
+	return result;
 }
 
-static int set_modem_info(ser_info_t *info, unsigned int cmd,
-			  unsigned int *value)
+static int rs_360_tiocmset(struct tty_struct *tty, struct file *file,
+			   unsigned int set, unsigned int clear)
 {
-	int error;
- 	unsigned int arg; 
-
-	error = get_user(arg,value);
-	if (error)
-		return error;
 #ifdef modem_control
-	switch (cmd) {
-	case TIOCMBIS: 
-		if (arg & TIOCM_RTS)
-			info->MCR |= UART_MCR_RTS;
-		if (arg & TIOCM_DTR)
-			info->MCR |= UART_MCR_DTR;
+	ser_info_t *info = (ser_info_t *)tty->driver_data;
+ 	unsigned int arg;
+
+	if (serial_paranoia_check(info, tty->name, __FUNCTION__))
+		return -ENODEV;
+
+	if (tty->flags & (1 << TTY_IO_ERROR))
+		return -EIO;
+
+ 	if (set & TIOCM_RTS)
+ 		info->mcr |= UART_MCR_RTS;
+ 	if (set & TIOCM_DTR)
+ 		info->mcr |= UART_MCR_DTR;
+	if (clear & TIOCM_RTS)
+		info->MCR &= ~UART_MCR_RTS;
+	if (clear & TIOCM_DTR)
+		info->MCR &= ~UART_MCR_DTR;
+
 #ifdef TIOCM_OUT1
-		if (arg & TIOCM_OUT1)
-			info->MCR |= UART_MCR_OUT1;
-		if (arg & TIOCM_OUT2)
-			info->MCR |= UART_MCR_OUT2;
+	if (set & TIOCM_OUT1)
+		info->MCR |= UART_MCR_OUT1;
+	if (set & TIOCM_OUT2)
+		info->MCR |= UART_MCR_OUT2;
+	if (clear & TIOCM_OUT1)
+		info->MCR &= ~UART_MCR_OUT1;
+	if (clear & TIOCM_OUT2)
+		info->MCR &= ~UART_MCR_OUT2;
 #endif
-		break;
-	case TIOCMBIC:
-		if (arg & TIOCM_RTS)
-			info->MCR &= ~UART_MCR_RTS;
-		if (arg & TIOCM_DTR)
-			info->MCR &= ~UART_MCR_DTR;
-#ifdef TIOCM_OUT1
-		if (arg & TIOCM_OUT1)
-			info->MCR &= ~UART_MCR_OUT1;
-		if (arg & TIOCM_OUT2)
-			info->MCR &= ~UART_MCR_OUT2;
-#endif
-		break;
-	case TIOCMSET:
-		info->MCR = ((info->MCR & ~(UART_MCR_RTS |
-#ifdef TIOCM_OUT1
-					    UART_MCR_OUT1 |
-					    UART_MCR_OUT2 |
-#endif
-					    UART_MCR_DTR))
-			     | ((arg & TIOCM_RTS) ? UART_MCR_RTS : 0)
-#ifdef TIOCM_OUT1
-			     | ((arg & TIOCM_OUT1) ? UART_MCR_OUT1 : 0)
-			     | ((arg & TIOCM_OUT2) ? UART_MCR_OUT2 : 0)
-#endif
-			     | ((arg & TIOCM_DTR) ? UART_MCR_DTR : 0));
-		break;
-	default:
-		return -EINVAL;
-	}
+
 	local_irq_disable();
 	serial_out(info, UART_MCR, info->MCR);
 	local_irq_enable();
@@ -1425,7 +1396,7 @@ static void end_break(ser_info_t *info)
  */
 static void send_break(ser_info_t *info, int duration)
 {
-	current->state = TASK_INTERRUPTIBLE;
+	set_current_state(TASK_INTERRUPTIBLE);
 #ifdef SERIAL_DEBUG_SEND_BREAK
 	printk("rs_send_break(%d) jiff=%lu...", duration, jiffies);
 #endif
@@ -1506,12 +1477,6 @@ static int rs_360_ioctl(struct tty_struct *tty, struct file * file,
 				((tty->termios->c_cflag & ~CLOCAL) |
 				 (arg ? CLOCAL : 0));
 			return 0;
-		case TIOCMGET:
-			return get_modem_info(info, (unsigned int *) arg);
-		case TIOCMBIS:
-		case TIOCMBIC:
-		case TIOCMSET:
-			return set_modem_info(info, cmd, (unsigned int *) arg);
 #ifdef maybe
 		case TIOCSERGETLSR: /* Get line status register */
 			return get_lsr_info(info, (unsigned int *) arg);
@@ -1670,7 +1635,6 @@ static void rs_360_close(struct tty_struct *tty, struct file * filp)
 	
 	if (tty_hung_up_p(filp)) {
 		DBG_CNT("before DEC-hung");
-		MOD_DEC_USE_COUNT;
 		local_irq_restore(flags);
 		return;
 	}
@@ -1697,7 +1661,6 @@ static void rs_360_close(struct tty_struct *tty, struct file * filp)
 	}
 	if (state->count) {
 		DBG_CNT("before DEC-2");
-		MOD_DEC_USE_COUNT;
 		local_irq_restore(flags);
 		return;
 	}
@@ -1738,21 +1701,18 @@ static void rs_360_close(struct tty_struct *tty, struct file * filp)
 	shutdown(info);
 	if (tty->driver->flush_buffer)
 		tty->driver->flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	tty_ldisc_flush(tty);		
 	tty->closing = 0;
 	info->event = 0;
 	info->tty = 0;
 	if (info->blocked_open) {
 		if (info->close_delay) {
-			current->state = TASK_INTERRUPTIBLE;
-			schedule_timeout(info->close_delay);
+			msleep_interruptible(jiffies_to_msecs(info->close_delay));
 		}
 		wake_up_interruptible(&info->open_wait);
 	}
 	info->flags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CLOSING);
 	wake_up_interruptible(&info->close_wait);
-	MOD_DEC_USE_COUNT;
 	local_irq_restore(flags);
 }
 
@@ -1800,9 +1760,8 @@ static void rs_360_wait_until_sent(struct tty_struct *tty, int timeout)
 #ifdef SERIAL_DEBUG_RS_WAIT_UNTIL_SENT
 		printk("lsr = %d (jiff=%lu)...", lsr, jiffies);
 #endif
-		current->state = TASK_INTERRUPTIBLE;
 /*		current->counter = 0;	 make us low-priority */
-		schedule_timeout(char_time);
+		msleep_interruptible(jiffies_to_msecs(char_time));
 		if (signal_pending(current))
 			break;
 		if (timeout && ((orig_jiffies + timeout) < jiffies))
@@ -2013,14 +1972,12 @@ static int rs_360_open(struct tty_struct *tty, struct file * filp)
 	if (retval)
 		return retval;
 
-	MOD_INC_USE_COUNT;
 	retval = block_til_ready(tty, filp, info);
 	if (retval) {
 #ifdef SERIAL_DEBUG_OPEN
 		printk("rs_open returning after block_til_ready with %d\n",
 		       retval);
 #endif
-		MOD_DEC_USE_COUNT;
 		return retval;
 	}
 
@@ -2496,6 +2453,7 @@ long console_360_init(long kmem_start, long kmem_end)
 static	int	baud_idx;
 
 static struct tty_operations rs_360_ops = {
+	.owner = THIS_MODULE,
 	.open = rs_360_open,
 	.close = rs_360_close,
 	.write = rs_360_write,
@@ -2513,6 +2471,8 @@ static struct tty_operations rs_360_ops = {
 	.hangup = rs_360_hangup,
 	/* .wait_until_sent = rs_360_wait_until_sent, */
 	/* .read_proc = rs_360_read_proc, */
+	.tiocmget = rs_360_tiocmget,
+	.tiocmset = rs_360_tiocmset,
 };
 
 /* int __init rs_360_init(void) */
@@ -2614,7 +2574,7 @@ int rs_360_init(void)
 		state->icount.rx = state->icount.tx = 0;
 		state->icount.frame = state->icount.parity = 0;
 		state->icount.overrun = state->icount.brk = 0;
-		printk(KERN_INFO "ttyS%02d at irq 0x%02x is an %s\n",
+		printk(KERN_INFO "ttyS%d at irq 0x%02x is an %s\n",
 		       i, (unsigned int)(state->irq),
 		       (state->smc_scc_num & NUM_IS_SCC) ? "SCC" : "SMC");
 

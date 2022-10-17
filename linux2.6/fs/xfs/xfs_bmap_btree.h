@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000,2002-2004 Silicon Graphics, Inc.  All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of version 2 of the GNU General Public License as
@@ -153,7 +153,7 @@ typedef enum {
  */
 typedef enum {
 	XFS_EXT_NORM, XFS_EXT_UNWRITTEN,
-	XFS_EXT_DMAPI_OFFLINE
+	XFS_EXT_DMAPI_OFFLINE, XFS_EXT_INVALID
 } xfs_exntst_t;
 
 /*
@@ -435,6 +435,10 @@ int xfs_bmap_sanity_check(struct xfs_mount *mp, xfs_bmbt_block_t *bb,
 	 INT_GET((bb)->bb_numrecs, ARCH_CONVERT) <= (mp)->m_bmap_dmxr[(level) != 0])
 #endif
 
+
+#ifdef __KERNEL__
+
+#if defined(XFS_BMBT_TRACE)
 /*
  * Trace buffer entry types.
  */
@@ -449,17 +453,8 @@ int xfs_bmap_sanity_check(struct xfs_mount *mp, xfs_bmbt_block_t *bb,
 
 #define XFS_BMBT_TRACE_SIZE	4096	/* size of global trace buffer */
 #define XFS_BMBT_KTRACE_SIZE	32	/* size of per-inode trace buffer */
-
-#if defined(XFS_ALL_TRACE)
-#define XFS_BMBT_TRACE
+extern ktrace_t	*xfs_bmbt_trace_buf;
 #endif
-
-#if !defined(DEBUG)
-#undef XFS_BMBT_TRACE
-#endif
-
-
-#ifdef __KERNEL__
 
 /*
  * Prototypes for xfs_bmap.c to call.
@@ -554,13 +549,6 @@ xfs_bmbt_increment(
 int
 xfs_bmbt_insert(
 	struct xfs_btree_cur *,
-	int *);
-
-int
-xfs_bmbt_insert_many(
-	struct xfs_btree_cur *,
-	int,
-	xfs_bmbt_rec_t *,
 	int *);
 
 void
@@ -678,7 +666,7 @@ xfs_bmbt_update(
 	xfs_filblks_t,
 	xfs_exntst_t);
 
-#ifdef XFSDEBUG
+#ifdef DEBUG
 /*
  * Get the data from the pointed-to record.
  */

@@ -9,9 +9,9 @@ terms and conditions.
 #include <string.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <errno.h>
 #include <sys/types.h>
 #include <sys/ptrace.h>
-#include <asm/ptrace.h>
 #include <linux/unistd.h>
 #include "ptrace_user.h"
 #include "user_util.h"

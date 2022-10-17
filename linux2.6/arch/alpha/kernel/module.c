@@ -234,6 +234,10 @@ apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 			   value was resolved from somewhere else.  */
 			if (sym->st_shndx == SHN_UNDEF)
 				goto reloc_overflow;
+			if ((sym->st_other & STO_ALPHA_STD_GPLOAD) ==
+			    STO_ALPHA_STD_GPLOAD)
+				/* Omit the prologue. */
+				value += 8;
 			/* FALLTHRU */
 		case R_ALPHA_BRADDR:
 			value -= (u64)location + 4;
@@ -259,7 +263,7 @@ apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 			*(u64 *)location = value;
 			break;
 		case R_ALPHA_GPRELHIGH:
-			value = (value - gp + 0x8000) >> 16;
+			value = (long)(value - gp + 0x8000) >> 16;
 			if ((short) value != value)
 				goto reloc_overflow;
 			*(u16 *)location = value;

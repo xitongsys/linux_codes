@@ -108,7 +108,7 @@ static void mark_offset_hpet(void)
 	offset = hpet_readl(HPET_T0_CMP) - hpet_tick;
 	if (unlikely(((offset - hpet_last) > hpet_tick) && (hpet_last != 0))) {
 		int lost_ticks = (offset - hpet_last) / hpet_tick;
-		jiffies += lost_ticks;
+		jiffies_64 += lost_ticks;
 	}
 	hpet_last = offset;
 
@@ -177,10 +177,15 @@ static int __init init_hpet(char* override)
 /************************************************************/
 
 /* tsc timer_opts struct */
-struct timer_opts timer_hpet = {
-	.init =			init_hpet,
+static struct timer_opts timer_hpet = {
+	.name = 		"hpet",
 	.mark_offset =		mark_offset_hpet,
 	.get_offset =		get_offset_hpet,
 	.monotonic_clock =	monotonic_clock_hpet,
 	.delay = 		delay_hpet,
+};
+
+struct init_timer_opts __initdata timer_hpet_init = {
+	.init =	init_hpet,
+	.opts = &timer_hpet,
 };

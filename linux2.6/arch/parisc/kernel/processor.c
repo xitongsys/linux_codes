@@ -27,24 +27,26 @@
  *
  */
 #include <linux/config.h>
-#include <linux/mm.h>
-#include <linux/slab.h>
-#include <linux/seq_file.h>
-#include <linux/init.h>
 #include <linux/delay.h>
-#define PCI_DEBUG
-#include <linux/pci.h>
-#undef PCI_DEBUG
+#include <linux/init.h>
+#include <linux/mm.h>
+#include <linux/module.h>
+#include <linux/seq_file.h>
+#include <linux/slab.h>
+#include <linux/cpu.h>
 
 #include <asm/cache.h>
 #include <asm/hardware.h>	/* for register_parisc_driver() stuff */
 #include <asm/processor.h>
 #include <asm/page.h>
 #include <asm/pdc.h>
+#include <asm/pdcpat.h>
 #include <asm/irq.h>		/* for struct irq_region */
 #include <asm/parisc-device.h>
 
 struct system_cpuinfo_parisc boot_cpu_data;
+EXPORT_SYMBOL(boot_cpu_data);
+
 struct cpuinfo_parisc cpu_data[NR_CPUS];
 
 /*
@@ -105,11 +107,11 @@ static int __init processor_probe(struct parisc_device *dev)
 		status = pdc_pat_cell_module(&bytecnt, dev->pcell_loc,
 			dev->mod_index, PA_VIEW, &pa_pdc_cell);
 
-		ASSERT(PDC_OK == status);
+		BUG_ON(PDC_OK != status);
 
 		/* verify it's the same as what do_pat_inventory() found */
-		ASSERT(dev->mod_info == pa_pdc_cell.mod_info);
-		ASSERT(dev->pmod_loc == pa_pdc_cell.mod_location);
+		BUG_ON(dev->mod_info != pa_pdc_cell.mod_info);
+		BUG_ON(dev->pmod_loc != pa_pdc_cell.mod_location);
 
 		txn_addr = pa_pdc_cell.mod[0];   /* id_eid for IO sapic */
 
@@ -122,7 +124,7 @@ static int __init processor_probe(struct parisc_device *dev)
 		/* get the cpu number */
 		status = pdc_pat_cpu_get_number(&cpu_info, dev->hpa);
 
-		ASSERT(PDC_OK == status);
+		BUG_ON(PDC_OK != status);
 
 		if (cpu_info.cpu_num >= NR_CPUS) {
 			printk(KERN_WARNING "IGNORING CPU at 0x%x,"
@@ -151,7 +153,7 @@ static int __init processor_probe(struct parisc_device *dev)
 	p->cpuid = cpuid;	/* save CPU id */
 	p->txn_addr = txn_addr;	/* save CPU IRQ address */
 #ifdef CONFIG_SMP
-	p->lock = SPIN_LOCK_UNLOCKED;
+	spin_lock_init(&p->lock);
 
 	/*
 	** FIXME: review if any other initialization is clobbered
@@ -187,6 +189,17 @@ static int __init processor_probe(struct parisc_device *dev)
 		cpu_irq_actions[cpuid] = actions;
 	}
 #endif
+
+	/* 
+	 * Bring this CPU up now! (ignore bootstrap cpuid == 0)
+	 */
+#ifdef CONFIG_SMP
+	if (cpuid) {
+		cpu_set(cpuid, cpu_present_map);
+		cpu_up(cpuid);
+	}
+#endif
+
 	return 0;
 }
 
@@ -231,9 +244,7 @@ void __init collect_boot_cpu_data(void)
 	boot_cpu_data.hversion =  boot_cpu_data.pdc.model.hversion;
 	boot_cpu_data.sversion =  boot_cpu_data.pdc.model.sversion;
 
-	boot_cpu_data.cpu_type =
-			parisc_get_cpu_type(boot_cpu_data.hversion);
-
+	boot_cpu_data.cpu_type = parisc_get_cpu_type(boot_cpu_data.hversion);
 	boot_cpu_data.cpu_name = cpu_name_version[boot_cpu_data.cpu_type][0];
 	boot_cpu_data.family_name = cpu_name_version[boot_cpu_data.cpu_type][1];
 }
@@ -276,6 +287,7 @@ int __init init_per_cpu(int cpunum)
 	int ret;
 	struct pdc_coproc_cfg coproc_cfg;
 
+	set_firmware_width();
 	ret = pdc_coproc_cfg(&coproc_cfg);
 
 	if(ret >= 0 && coproc_cfg.ccr_functional) {

@@ -24,6 +24,10 @@
 #include <linux/skbuff.h>
 #include <linux/netlink.h>
 #include <net/sock.h>
+#include <linux/xattr.h>
+#include <linux/hugetlb.h>
+#include <linux/ptrace.h>
+#include <linux/file.h>
 
 static int dummy_ptrace (struct task_struct *parent, struct task_struct *child)
 {
@@ -70,11 +74,8 @@ static int dummy_acct (struct file *file)
 
 static int dummy_capable (struct task_struct *tsk, int cap)
 {
-	if (cap_is_fs_cap (cap) ? tsk->fsuid == 0 : tsk->euid == 0)
-		/* capability granted */
+	if (cap_raised (tsk->cap_effective, cap))
 		return 0;
-
-	/* capability denied */
 	return -EPERM;
 }
 
@@ -88,64 +89,32 @@ static int dummy_quotactl (int cmds, int type, int id, struct super_block *sb)
 	return 0;
 }
 
-static int dummy_quota_on (struct file *f)
+static int dummy_quota_on (struct dentry *dentry)
 {
 	return 0;
 }
 
 static int dummy_syslog (int type)
 {
-	if ((type != 3) && current->euid)
+	if ((type != 3 && type != 10) && current->euid)
+		return -EPERM;
+	return 0;
+}
+
+static int dummy_settime(struct timespec *ts, struct timezone *tz)
+{
+	if (!capable(CAP_SYS_TIME))
 		return -EPERM;
 	return 0;
 }
 
 static int dummy_vm_enough_memory(long pages)
 {
-	unsigned long free, allowed;
+	int cap_sys_admin = 0;
 
-	vm_acct_memory(pages);
-
-        /*
-	 * Sometimes we want to use more memory than we have
-	 */
-	if (sysctl_overcommit_memory == 1)
-		return 0;
-
-	if (sysctl_overcommit_memory == 0) {
-		free = get_page_cache_size();
-		free += nr_free_pages();
-		free += nr_swap_pages;
-
-		/*
-		 * Any slabs which are created with the
-		 * SLAB_RECLAIM_ACCOUNT flag claim to have contents
-		 * which are reclaimable, under pressure.  The dentry
-		 * cache and most inode caches should fall into this
-		 */
-		free += atomic_read(&slab_reclaim_pages);
-
-		/*
-		 * Leave the last 3% for root
-		 */
-		if (current->euid)
-			free -= free / 32;
-
-		if (free > pages)
-			return 0;
-		vm_unacct_memory(pages);
-		return -ENOMEM;
-	}
-
-	allowed = totalram_pages * sysctl_overcommit_ratio / 100;
-	allowed += total_swap_pages;
-
-	if (atomic_read(&vm_committed_space) < allowed)
-		return 0;
-
-	vm_unacct_memory(pages);
-
-	return -ENOMEM;
+	if (dummy_capable(current, CAP_SYS_ADMIN) == 0)
+		cap_sys_admin = 1;
+	return __vm_enough_memory(pages, cap_sys_admin);
 }
 
 static int dummy_bprm_alloc_security (struct linux_binprm *bprm)
@@ -158,7 +127,24 @@ static void dummy_bprm_free_security (struct linux_binprm *bprm)
 	return;
 }
 
-static void dummy_bprm_compute_creds (struct linux_binprm *bprm)
+static void dummy_bprm_apply_creds (struct linux_binprm *bprm, int unsafe)
+{
+	if (bprm->e_uid != current->uid || bprm->e_gid != current->gid) {
+		current->mm->dumpable = 0;
+
+		if ((unsafe & ~LSM_UNSAFE_PTRACE_CAP) && !capable(CAP_SETUID)) {
+			bprm->e_uid = current->uid;
+			bprm->e_gid = current->gid;
+		}
+	}
+
+	current->suid = current->euid = current->fsuid = bprm->e_uid;
+	current->sgid = current->egid = current->fsgid = bprm->e_gid;
+
+	dummy_capget(current, &current->cap_effective, &current->cap_inheritable, &current->cap_permitted);
+}
+
+static void dummy_bprm_post_apply_creds (struct linux_binprm *bprm)
 {
 	return;
 }
@@ -193,7 +179,13 @@ static void dummy_sb_free_security (struct super_block *sb)
 	return;
 }
 
-static int dummy_sb_kern_mount (struct super_block *sb)
+static int dummy_sb_copy_data (struct file_system_type *type,
+			       void *orig, void *copy)
+{
+	return 0;
+}
+
+static int dummy_sb_kern_mount (struct super_block *sb, void *data)
 {
 	return 0;
 }
@@ -387,6 +379,10 @@ static void dummy_inode_delete (struct inode *ino)
 static int dummy_inode_setxattr (struct dentry *dentry, char *name, void *value,
 				size_t size, int flags)
 {
+	if (!strncmp(name, XATTR_SECURITY_PREFIX,
+		     sizeof(XATTR_SECURITY_PREFIX) - 1) &&
+	    !capable(CAP_SYS_ADMIN))
+		return -EPERM;
 	return 0;
 }
 
@@ -407,20 +403,24 @@ static int dummy_inode_listxattr (struct dentry *dentry)
 
 static int dummy_inode_removexattr (struct dentry *dentry, char *name)
 {
+	if (!strncmp(name, XATTR_SECURITY_PREFIX,
+		     sizeof(XATTR_SECURITY_PREFIX) - 1) &&
+	    !capable(CAP_SYS_ADMIN))
+		return -EPERM;
 	return 0;
 }
 
-static int dummy_inode_getsecurity(struct dentry *dentry, const char *name, void *buffer, size_t size)
+static int dummy_inode_getsecurity(struct inode *inode, const char *name, void *buffer, size_t size)
 {
 	return -EOPNOTSUPP;
 }
 
-static int dummy_inode_setsecurity(struct dentry *dentry, const char *name, const void *value, size_t size, int flags) 
+static int dummy_inode_setsecurity(struct inode *inode, const char *name, const void *value, size_t size, int flags)
 {
 	return -EOPNOTSUPP;
 }
 
-static int dummy_inode_listsecurity(struct dentry *dentry, char *buffer)
+static int dummy_inode_listsecurity(struct inode *inode, char *buffer, size_t buffer_size)
 {
 	return 0;
 }
@@ -474,8 +474,7 @@ static int dummy_file_set_fowner (struct file *file)
 }
 
 static int dummy_file_send_sigiotask (struct task_struct *tsk,
-				      struct fown_struct *fown, int fd,
-				      int reason)
+				      struct fown_struct *fown, int sig)
 {
 	return 0;
 }
@@ -507,6 +506,7 @@ static int dummy_task_setuid (uid_t id0, uid_t id1, uid_t id2, int flags)
 
 static int dummy_task_post_setuid (uid_t id0, uid_t id1, uid_t id2, int flags)
 {
+	dummy_capget(current, &current->cap_effective, &current->cap_inheritable, &current->cap_permitted);
 	return 0;
 }
 
@@ -530,7 +530,7 @@ static int dummy_task_getsid (struct task_struct *p)
 	return 0;
 }
 
-static int dummy_task_setgroups (int gidsetsize, gid_t * grouplist)
+static int dummy_task_setgroups (struct group_info *group_info)
 {
 	return 0;
 }
@@ -651,7 +651,7 @@ static int dummy_shm_shmctl (struct shmid_kernel *shp, int cmd)
 	return 0;
 }
 
-static int dummy_shm_shmat (struct shmid_kernel *shp, char *shmaddr,
+static int dummy_shm_shmat (struct shmid_kernel *shp, char __user *shmaddr,
 			    int shmflg)
 {
 	return 0;
@@ -683,12 +683,9 @@ static int dummy_sem_semop (struct sem_array *sma,
 	return 0;
 }
 
-static int dummy_netlink_send (struct sk_buff *skb)
+static int dummy_netlink_send (struct sock *sk, struct sk_buff *skb)
 {
-	if (current->euid == 0)
-		cap_raise (NETLINK_CB (skb).eff_cap, CAP_NET_ADMIN);
-	else
-		NETLINK_CB (skb).eff_cap = 0;
+	NETLINK_CB(skb).eff_cap = current->cap_effective;
 	return 0;
 }
 
@@ -713,13 +710,14 @@ static int dummy_unix_may_send (struct socket *sock,
 	return 0;
 }
 
-static int dummy_socket_create (int family, int type, int protocol)
+static int dummy_socket_create (int family, int type,
+				int protocol, int kern)
 {
 	return 0;
 }
 
 static void dummy_socket_post_create (struct socket *sock, int family, int type,
-				      int protocol)
+				      int protocol, int kern)
 {
 	return;
 }
@@ -793,6 +791,21 @@ static int dummy_socket_sock_rcv_skb (struct sock *sk, struct sk_buff *skb)
 {
 	return 0;
 }
+
+static int dummy_socket_getpeersec(struct socket *sock, char __user *optval,
+				   int __user *optlen, unsigned len)
+{
+	return -ENOPROTOOPT;
+}
+
+static inline int dummy_sk_alloc_security (struct sock *sk, int family, int priority)
+{
+	return 0;
+}
+
+static inline void dummy_sk_free_security (struct sock *sk)
+{
+}
 #endif	/* CONFIG_SECURITY_NETWORK */
 
 static int dummy_register_security (const char *name, struct security_operations *ops)
@@ -844,15 +857,18 @@ void security_fixup_ops (struct security_operations *ops)
 	set_to_dummy_if_null(ops, quota_on);
 	set_to_dummy_if_null(ops, sysctl);
 	set_to_dummy_if_null(ops, syslog);
+	set_to_dummy_if_null(ops, settime);
 	set_to_dummy_if_null(ops, vm_enough_memory);
 	set_to_dummy_if_null(ops, bprm_alloc_security);
 	set_to_dummy_if_null(ops, bprm_free_security);
-	set_to_dummy_if_null(ops, bprm_compute_creds);
+	set_to_dummy_if_null(ops, bprm_apply_creds);
+	set_to_dummy_if_null(ops, bprm_post_apply_creds);
 	set_to_dummy_if_null(ops, bprm_set_security);
 	set_to_dummy_if_null(ops, bprm_check_security);
 	set_to_dummy_if_null(ops, bprm_secureexec);
 	set_to_dummy_if_null(ops, sb_alloc_security);
 	set_to_dummy_if_null(ops, sb_free_security);
+	set_to_dummy_if_null(ops, sb_copy_data);
 	set_to_dummy_if_null(ops, sb_kern_mount);
 	set_to_dummy_if_null(ops, sb_statfs);
 	set_to_dummy_if_null(ops, sb_mount);
@@ -969,6 +985,9 @@ void security_fixup_ops (struct security_operations *ops)
 	set_to_dummy_if_null(ops, socket_getsockopt);
 	set_to_dummy_if_null(ops, socket_shutdown);
 	set_to_dummy_if_null(ops, socket_sock_rcv_skb);
+	set_to_dummy_if_null(ops, socket_getpeersec);
+	set_to_dummy_if_null(ops, sk_alloc_security);
+	set_to_dummy_if_null(ops, sk_free_security);
 #endif	/* CONFIG_SECURITY_NETWORK */
 }
 

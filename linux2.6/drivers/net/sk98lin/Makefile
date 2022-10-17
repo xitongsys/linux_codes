@@ -13,6 +13,7 @@
 obj-$(CONFIG_SK98LIN) += sk98lin.o
 sk98lin-objs    :=	\
 		skge.o		\
+		skethtool.o	\
 		skdim.o		\
 		skaddr.o	\
 		skgehwt.o	\
@@ -76,7 +77,7 @@ endif
 # SK_DBGCAT_DRV_INT_SRC         0x04000000      interrupts sources
 # SK_DBGCAT_DRV_EVENT           0x08000000      driver events
 
-EXTRA_CFLAGS += -Idrivers/net/sk98lin -DSK_USE_CSUM -DGENESIS -DYUKON $(DBGDEF) $(SKPARAM)
+EXTRA_CFLAGS += -Idrivers/net/sk98lin -DSK_DIAG_SUPPORT -DSK_USE_CSUM -DGENESIS -DYUKON $(DBGDEF) $(SKPARAM)
 
 clean:
 	rm -f core *.o *.a *.s

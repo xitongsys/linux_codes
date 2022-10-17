@@ -44,6 +44,7 @@
 #include <linux/parport.h>
 #include <linux/init.h>
 #include <linux/usb.h>
+#include <linux/delay.h>
 
 /*
  * Version Information
@@ -159,8 +160,7 @@ static int change_mode(struct parport *pp, int m)
 				if (time_after_eq (jiffies, expire))
 					/* The FIFO is stuck. */
 					return -EBUSY;
-				set_current_state(TASK_INTERRUPTIBLE);
-				schedule_timeout((HZ + 99) / 100);
+				msleep_interruptible(10);
 				if (signal_pending (current))
 					break;
 			}
@@ -333,7 +333,7 @@ static size_t parport_uss720_epp_read_data(struct parport *pp, void *buf, size_t
 	for (; got < length; got++) {
 		if (get_1284_register(pp, 4, (char *)buf))
 			break;
-		((char*)buf)++;
+		buf++;
 		if (priv->reg[0] & 0x01) {
 			clear_epp_timeout(pp);
 			break;
@@ -392,7 +392,7 @@ static size_t parport_uss720_epp_read_addr(struct parport *pp, void *buf, size_t
 	for (; got < length; got++) {
 		if (get_1284_register(pp, 3, (char *)buf))
 			break;
-		((char*)buf)++;
+		buf++;
 		if (priv->reg[0] & 0x01) {
 			clear_epp_timeout(pp);
 			break;
@@ -412,7 +412,7 @@ static size_t parport_uss720_epp_write_addr(struct parport *pp, const void *buf,
 	for (; written < length; written++) {
 		if (set_1284_register(pp, 3, *(char *)buf))
 			break;
-		((char*)buf)++;
+		buf++;
 		if (get_1284_register(pp, 1, NULL))
 			break;
 		if (priv->reg[0] & 0x01) {
@@ -469,7 +469,7 @@ static size_t parport_uss720_ecp_write_addr(struct parport *pp, const void *buff
 	for (; written < len; written++) {
 		if (set_1284_register(pp, 5, *(char *)buffer))
 			break;
-		((char*)buffer)++;
+		buffer++;
 	}
 	change_mode(pp, ECR_PS2);
 	return written;
@@ -544,7 +544,8 @@ static int uss720_probe(struct usb_interface *intf,
 	int i;
 
 	printk(KERN_DEBUG "uss720: probe: vendor id 0x%x, device id 0x%x\n",
-	       usbdev->descriptor.idVendor, usbdev->descriptor.idProduct);
+	       le16_to_cpu(usbdev->descriptor.idVendor),
+	       le16_to_cpu(usbdev->descriptor.idProduct));
 
 	/* our known interfaces have 3 alternate settings */
 	if (intf->num_altsetting != 3)
@@ -553,7 +554,7 @@ static int uss720_probe(struct usb_interface *intf,
 	i = usb_set_interface(usbdev, intf->altsetting->desc.bInterfaceNumber, 2);
 	printk(KERN_DEBUG "uss720: set inteface result %d\n", i);
 
-	interface = &intf->altsetting[2];
+	interface = intf->cur_altsetting;
 
 	/*
 	 * Allocate parport interface 
@@ -592,7 +593,6 @@ static int uss720_probe(struct usb_interface *intf,
 		goto probe_abort_port;
 	}
 #endif
-	parport_proc_register(pp);
 	parport_announce_port(pp);
 
 	usb_set_intfdata (intf, pp);
@@ -600,7 +600,7 @@ static int uss720_probe(struct usb_interface *intf,
 
 #if 0
 probe_abort_port:
-	parport_unregister_port(pp);
+	parport_put_port(pp);
 #endif
 probe_abort:
 	kfree(priv);
@@ -615,12 +615,12 @@ static void uss720_disconnect(struct usb_interface *intf)
 	usb_set_intfdata (intf, NULL);
 	if (pp) {
 		priv = pp->private_data;
+		parport_remove_port(pp);
 #if 0
 		usb_release_irq(usbdev, priv->irqhandle, priv->irqpipe);
 #endif
 		priv->usbdev = NULL;
-		parport_proc_unregister(pp);
-		parport_unregister_port(pp);
+		parport_put_port(pp);
 		kfree(priv);
 	}
 }

@@ -38,24 +38,6 @@ static inline int set_rtc_mmss(unsigned long nowtime)
   return -1;
 }
 
-static inline void do_profile (unsigned long pc)
-{
-	if (prof_buffer && current->pid) {
-		extern int _stext;
-		pc -= (unsigned long) &_stext;
-		pc >>= prof_shift;
-		if (pc < prof_len)
-			++prof_buffer[pc];
-		else
-		/*
-		 * Don't ignore out-of-bounds PC values silently,
-		 * put them into the last histogram slot, so if
-		 * present, they will show up as a sharp peak.
-		 */
-			++prof_buffer[prof_len-1];
-	}
-}
-
 /*
  * timer_interrupt() needs to keep up the real-time clock,
  * as well as call the "do_timer()" routine every clocktick
@@ -63,9 +45,10 @@ static inline void do_profile (unsigned long pc)
 static irqreturn_t timer_interrupt(int irq, void *dummy, struct pt_regs * regs)
 {
 	do_timer(regs);
-
-	if (!user_mode(regs))
-		do_profile(regs->pc);
+#ifndef CONFIG_SMP
+	update_process_times(user_mode(regs));
+#endif
+	profile_tick(CPU_PROFILING, regs);
 
 #ifdef CONFIG_HEARTBEAT
 	/* use power LED as a heartbeat instead -- much more useful
@@ -120,14 +103,28 @@ void do_gettimeofday(struct timeval *tv)
 	extern unsigned long wall_jiffies;
 	unsigned long seq;
 	unsigned long usec, sec, lost;
+	unsigned long max_ntp_tick = tick_usec - tickadj;
 
 	do {
 		seq = read_seqbegin_irqsave(&xtime_lock, flags);
 
 		usec = mach_gettimeoffset();
 		lost = jiffies - wall_jiffies;
-		if (lost)
-			usec += lost * (1000000/HZ);
+
+		/*
+		 * If time_adjust is negative then NTP is slowing the clock
+		 * so make sure not to go into next possible interval.
+		 * Better to lose some accuracy than have time go backwards..
+		 */
+		if (unlikely(time_adjust < 0)) {
+			usec = min(usec, max_ntp_tick);
+
+			if (lost)
+				usec += lost * max_ntp_tick;
+		}
+		else if (unlikely(lost))
+			usec += lost * tick_usec;
+
 		sec = xtime.tv_sec;
 		usec += xtime.tv_nsec/1000;
 	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
@@ -174,6 +171,7 @@ int do_settimeofday(struct timespec *tv)
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
 	write_sequnlock_irq(&xtime_lock);
+	clock_was_set();
 	return 0;
 }
 

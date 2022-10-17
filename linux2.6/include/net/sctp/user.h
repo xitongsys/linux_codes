@@ -1,7 +1,7 @@
 /* SCTP kernel reference Implementation
+ * (C) Copyright IBM Corp. 2001, 2004
  * Copyright (c) 1999-2000 Cisco, Inc.
  * Copyright (c) 1999-2001 Motorola, Inc.
- * Copyright (c) 2001-2003 International Business Machines, Corp.
  * Copyright (c) 2002 Intel Corp.
  *
  * This file is part of the SCTP kernel reference Implementation
@@ -55,7 +55,7 @@
 #include <linux/types.h>
 #include <linux/socket.h>
 
-typedef void * sctp_assoc_t;
+typedef __s32 sctp_assoc_t;
 
 /* The following symbols come from the Sockets API Extensions for
  * SCTP <draft-ietf-tsvwg-sctpsocket-07.txt>.
@@ -246,7 +246,7 @@ struct sctp_paddr_change {
  *   event that happened to the address.  They include:
  */
 enum sctp_spc_state {
-	SCTP_ADDR_REACHABLE,
+	SCTP_ADDR_AVAILABLE,
 	SCTP_ADDR_UNREACHABLE,
 	SCTP_ADDR_REMOVED,
 	SCTP_ADDR_ADDED,
@@ -338,8 +338,8 @@ struct sctp_adaption_event {
 /*
  * 5.3.1.7 SCTP_PARTIAL_DELIVERY_EVENT
  *
- *   When a reciever is engaged in a partial delivery of a
- *   message this notification will be used to inidicate
+ *   When a receiver is engaged in a partial delivery of a
+ *   message this notification will be used to indicate
  *   various events.
  */
 struct sctp_pdapi_event {
@@ -559,7 +559,7 @@ struct sctp_status {
 struct sctp_getaddrs {
 	sctp_assoc_t            assoc_id;
 	int			addr_num;
-	struct sockaddr		*addrs;
+	struct sockaddr		__user *addrs;
 };
 
 /* These are bit fields for msghdr->msg_flags.  See section 5.1.  */

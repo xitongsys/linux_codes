@@ -2,8 +2,10 @@
 #define _ASM_IA64_STATFS_H
 
 /*
- * Copyright (C) 1998, 1999, 2003 Hewlett-Packard Co
- *	David Mosberger-Tang <davidm@hpl.hp.com>
+ * Based on <asm-i386/statfs.h>.
+ *
+ * Modified 1998, 1999, 2003
+ *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
  */
 
 #ifndef __KERNEL_STRICT_NAMES
@@ -43,5 +45,18 @@ struct statfs64 {
 	long f_spare[5];
 };
 
+struct compat_statfs64 {
+	__u32 f_type;
+	__u32 f_bsize;
+	__u64 f_blocks;
+	__u64 f_bfree;
+	__u64 f_bavail;
+	__u64 f_files;
+	__u64 f_ffree;
+	__kernel_fsid_t f_fsid;
+	__u32 f_namelen;
+	__u32 f_frsize;
+	__u32 f_spare[5];
+} __attribute__((packed));
 
 #endif /* _ASM_IA64_STATFS_H */

@@ -77,7 +77,7 @@ struct prom_pmemblock * __init prom_getmdesc(void)
 	mdesc[1].base = 0x00001000;
 	mdesc[1].size = 0x000ef000;
 
-#if (CONFIG_MIPS_MALTA)
+#ifdef CONFIG_MIPS_MALTA
 	/*
 	 * The area 0x000f0000-0x000fffff is allocated for BIOS memory by the
 	 * south bridge and PCI access always forwarded to the ISA Bus and
@@ -96,10 +96,10 @@ struct prom_pmemblock * __init prom_getmdesc(void)
 
 	mdesc[3].type = yamon_dontuse;
 	mdesc[3].base = 0x00100000;
-	mdesc[3].size = PHYSADDR(PFN_ALIGN(&_end)) - mdesc[3].base;
+	mdesc[3].size = CPHYSADDR(PFN_ALIGN(&_end)) - mdesc[3].base;
 
 	mdesc[4].type = yamon_free;
-	mdesc[4].base = PHYSADDR(PFN_ALIGN(&_end));
+	mdesc[4].base = CPHYSADDR(PFN_ALIGN(&_end));
 	mdesc[4].size = memsize - mdesc[4].base;
 
 	return &mdesc[0];
@@ -147,12 +147,11 @@ void __init prom_meminit(void)
 	}
 }
 
-void __init
-prom_free_prom_memory (void)
+unsigned long __init prom_free_prom_memory(void)
 {
-	int i;
 	unsigned long freed = 0;
 	unsigned long addr;
+	int i;
 
 	for (i = 0; i < boot_mem_map.nr_map; i++) {
 		if (boot_mem_map.map[i].type != BOOT_MEM_ROM_DATA)
@@ -169,4 +168,6 @@ prom_free_prom_memory (void)
 		}
 	}
 	printk("Freeing prom memory: %ldkb freed\n", freed >> 10);
+
+	return freed;
 }

@@ -34,7 +34,7 @@
 /* Very few machines have more than one MCA bus.  However, there are
  * those that do (Voyager 35xx/5xxx), so we do it this way for future
  * expansion.  None that I know have more than 2 */
-struct mca_bus *mca_root_busses[MAX_MCA_BUSSES];
+static struct mca_bus *mca_root_busses[MAX_MCA_BUSSES];
 
 #define MCA_DEVINFO(i,s) { .pos = i, .name = s }
 
@@ -106,6 +106,7 @@ int __init mca_register_device(int bus, struct mca_device *mca_dev)
 	sprintf (mca_dev->dev.bus_id, "%02d:%02X", bus, mca_dev->slot);
 	mca_dev->dma_mask = mca_bus->default_dma_mask;
 	mca_dev->dev.dma_mask = &mca_dev->dma_mask;
+	mca_dev->dev.coherent_dma_mask = mca_dev->dma_mask;
 
 	if (device_register(&mca_dev->dev))
 		return 0;

@@ -5,7 +5,7 @@
  ******************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -203,10 +203,10 @@ acpi_ds_method_data_init_args (
 	while ((index < ACPI_METHOD_NUM_ARGS) && (index < max_param_count) && params[index]) {
 		/*
 		 * A valid parameter.
-		 * Store the argument in the method/walk descriptor
+		 * Store the argument in the method/walk descriptor.
+		 * Do not copy the arg in order to implement call by reference
 		 */
-		status = acpi_ds_store_object_to_local (AML_ARG_OP, index, params[index],
-				 walk_state);
+		status = acpi_ds_method_data_set_value (AML_ARG_OP, index, params[index], walk_state);
 		if (ACPI_FAILURE (status)) {
 			return_ACPI_STATUS (status);
 		}
@@ -312,7 +312,7 @@ acpi_ds_method_data_set_value (
 
 
 	ACPI_DEBUG_PRINT ((ACPI_DB_EXEC,
-		"obj %p op %X, ref count = %d [%s]\n", object,
+		"new_obj %p Opcode %X, Refs=%d [%s]\n", object,
 		opcode, object->common.reference_count,
 		acpi_ut_get_type_name (object->common.type)));
 
@@ -350,7 +350,7 @@ acpi_ds_method_data_set_value (
  * RETURN:      Data type of current value of the selected Arg or Local
  *
  ******************************************************************************/
-
+#ifdef ACPI_FUTURE_USAGE
 acpi_object_type
 acpi_ds_method_data_get_type (
 	u16                             opcode,
@@ -385,6 +385,7 @@ acpi_ds_method_data_get_type (
 
 	return_VALUE (ACPI_GET_OBJECT_TYPE (object));
 }
+#endif  /*  ACPI_FUTURE_USAGE  */
 
 
 /*******************************************************************************
@@ -448,7 +449,22 @@ acpi_ds_method_data_get_value (
 		 * was referenced by the method (via the ASL)
 		 * before it was initialized.  Either case is an error.
 		 */
-		switch (opcode) {
+
+		/* If slack enabled, init the local_x/arg_x to an Integer of value zero */
+
+		if (acpi_gbl_enable_interpreter_slack) {
+			object = acpi_ut_create_internal_object (ACPI_TYPE_INTEGER);
+			if (!object) {
+				return_ACPI_STATUS (AE_NO_MEMORY);
+			}
+
+			object->integer.value = 0;
+			node->object = object;
+		}
+
+		/* Otherwise, return the error */
+
+		else switch (opcode) {
 		case AML_ARG_OP:
 
 			ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "Uninitialized Arg[%d] at node %p\n",
@@ -464,6 +480,7 @@ acpi_ds_method_data_get_value (
 			return_ACPI_STATUS (AE_AML_UNINITIALIZED_LOCAL);
 
 		default:
+			ACPI_REPORT_ERROR (("Not Arg/Local opcode: %X\n", opcode));
 			return_ACPI_STATUS (AE_AML_INTERNAL);
 		}
 	}
@@ -567,12 +584,12 @@ acpi_ds_store_object_to_local (
 	acpi_status                     status;
 	struct acpi_namespace_node      *node;
 	union acpi_operand_object       *current_obj_desc;
+	union acpi_operand_object       *new_obj_desc;
 
 
 	ACPI_FUNCTION_TRACE ("ds_store_object_to_local");
-	ACPI_DEBUG_PRINT ((ACPI_DB_EXEC, "Opcode=%d Idx=%d Obj=%p\n",
+	ACPI_DEBUG_PRINT ((ACPI_DB_EXEC, "Opcode=%X Index=%d Obj=%p\n",
 		opcode, index, obj_desc));
-
 
 	/* Parameter validation */
 
@@ -592,6 +609,21 @@ acpi_ds_store_object_to_local (
 		ACPI_DEBUG_PRINT ((ACPI_DB_EXEC, "Obj=%p already installed!\n",
 			obj_desc));
 		return_ACPI_STATUS (status);
+	}
+
+	/*
+	 * If the reference count on the object is more than one, we must
+	 * take a copy of the object before we store.  A reference count
+	 * of exactly 1 means that the object was just created during the
+	 * evaluation of an expression, and we can safely use it since it
+	 * is not used anywhere else.
+	 */
+	new_obj_desc = obj_desc;
+	if (obj_desc->common.reference_count > 1) {
+		status = acpi_ut_copy_iobject_to_iobject (obj_desc, &new_obj_desc, walk_state);
+		if (ACPI_FAILURE (status)) {
+			return_ACPI_STATUS (status);
+		}
 	}
 
 	/*
@@ -624,8 +656,8 @@ acpi_ds_store_object_to_local (
 			 * operand objects of type Reference.
 			 */
 			if (ACPI_GET_DESCRIPTOR_TYPE (current_obj_desc) != ACPI_DESC_TYPE_OPERAND) {
-				ACPI_REPORT_ERROR (("Invalid descriptor type while storing to method arg: %X\n",
-					current_obj_desc->common.type));
+				ACPI_REPORT_ERROR (("Invalid descriptor type while storing to method arg: [%s]\n",
+						acpi_ut_get_descriptor_name (current_obj_desc)));
 				return_ACPI_STATUS (AE_AML_INTERNAL);
 			}
 
@@ -636,15 +668,23 @@ acpi_ds_store_object_to_local (
 			if ((current_obj_desc->common.type == ACPI_TYPE_LOCAL_REFERENCE) &&
 				(current_obj_desc->reference.opcode == AML_REF_OF_OP)) {
 				ACPI_DEBUG_PRINT ((ACPI_DB_EXEC,
-					"Arg (%p) is an obj_ref(Node), storing in node %p\n",
-					obj_desc, current_obj_desc));
+						"Arg (%p) is an obj_ref(Node), storing in node %p\n",
+						new_obj_desc, current_obj_desc));
 
 				/*
-				 * Store this object to the Node
-				 * (perform the indirect store)
+				 * Store this object to the Node (perform the indirect store)
+				 * NOTE: No implicit conversion is performed, as per the ACPI
+				 * specification rules on storing to Locals/Args.
 				 */
-				status = acpi_ex_store_object_to_node (obj_desc,
-						 current_obj_desc->reference.object, walk_state);
+				status = acpi_ex_store_object_to_node (new_obj_desc,
+						 current_obj_desc->reference.object, walk_state,
+						 ACPI_NO_IMPLICIT_CONVERSION);
+
+				/* Remove local reference if we copied the object above */
+
+				if (new_obj_desc != obj_desc) {
+					acpi_ut_remove_reference (new_obj_desc);
+				}
 				return_ACPI_STATUS (status);
 			}
 		}
@@ -657,12 +697,18 @@ acpi_ds_store_object_to_local (
 	}
 
 	/*
-	 * Install the obj_stack descriptor (*obj_desc) into
+	 * Install the Obj descriptor (*new_obj_desc) into
 	 * the descriptor for the Arg or Local.
-	 * Install the new object in the stack entry
 	 * (increments the object reference count by one)
 	 */
-	status = acpi_ds_method_data_set_value (opcode, index, obj_desc, walk_state);
+	status = acpi_ds_method_data_set_value (opcode, index, new_obj_desc, walk_state);
+
+	/* Remove local reference if we copied the object above */
+
+	if (new_obj_desc != obj_desc) {
+		acpi_ut_remove_reference (new_obj_desc);
+	}
+
 	return_ACPI_STATUS (status);
 }
 

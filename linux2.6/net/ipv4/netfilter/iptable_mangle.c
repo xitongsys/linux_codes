@@ -2,6 +2,11 @@
  * This is the 1999 rewrite of IP Firewalling, aiming for kernel 2.3.x.
  *
  * Copyright (C) 1999 Paul `Rusty' Russell & Michael J. Neuling
+ * Copyright (C) 2000-2004 Netfilter Core Team <coreteam@netfilter.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  * Extended to all five netfilter hooks by Brad Chapman & Harald Welte
  */
@@ -23,25 +28,6 @@ MODULE_DESCRIPTION("iptables mangle table");
 			    (1 << NF_IP_FORWARD) | \
 			    (1 << NF_IP_LOCAL_OUT) | \
 			    (1 << NF_IP_POST_ROUTING))
-
-/* Standard entry. */
-struct ipt_standard
-{
-	struct ipt_entry entry;
-	struct ipt_standard_target target;
-};
-
-struct ipt_error_target
-{
-	struct ipt_entry_target target;
-	char errorname[IPT_FUNCTION_MAXNAMELEN];
-};
-
-struct ipt_error
-{
-	struct ipt_entry entry;
-	struct ipt_error_target target;
-};
 
 /* Ouch - five different hooks? Maybe this should be a config option..... -- BC */
 static struct
@@ -120,7 +106,6 @@ static struct
 
 static struct ipt_table packet_mangler = {
 	.name		= "mangle",
-	.table		= &initial_table.repl,
 	.valid_hooks	= MANGLE_VALID_HOOKS,
 	.lock		= RW_LOCK_UNLOCKED,
 	.me		= THIS_MODULE,
@@ -168,7 +153,9 @@ ipt_local_hook(unsigned int hook,
 	if (ret != NF_DROP && ret != NF_STOLEN && ret != NF_QUEUE
 	    && ((*pskb)->nh.iph->saddr != saddr
 		|| (*pskb)->nh.iph->daddr != daddr
+#ifdef CONFIG_IP_ROUTE_FWMARK
 		|| (*pskb)->nfmark != nfmark
+#endif
 		|| (*pskb)->nh.iph->tos != tos))
 		return ip_route_me_harder(pskb) == 0 ? ret : NF_DROP;
 
@@ -218,7 +205,7 @@ static int __init init(void)
 	int ret;
 
 	/* Register table */
-	ret = ipt_register_table(&packet_mangler);
+	ret = ipt_register_table(&packet_mangler, &initial_table.repl);
 	if (ret < 0)
 		return ret;
 

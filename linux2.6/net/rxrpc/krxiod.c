@@ -25,10 +25,10 @@ static DECLARE_COMPLETION(rxrpc_krxiod_dead);
 static atomic_t rxrpc_krxiod_qcount = ATOMIC_INIT(0);
 
 static LIST_HEAD(rxrpc_krxiod_transportq);
-static spinlock_t rxrpc_krxiod_transportq_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(rxrpc_krxiod_transportq_lock);
 
 static LIST_HEAD(rxrpc_krxiod_callq);
-static spinlock_t rxrpc_krxiod_callq_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(rxrpc_krxiod_callq_lock);
 
 static volatile int rxrpc_krxiod_die;
 
@@ -43,12 +43,6 @@ static int rxrpc_krxiod(void *arg)
 	printk("Started krxiod %d\n",current->pid);
 
 	daemonize("krxiod");
-
-	/* only certain signals are of interest */
-	spin_lock_irq(&current->sighand->siglock);
-	siginitsetinv(&current->blocked, 0);
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
 
 	/* loop around waiting for work to do */
 	do {
@@ -116,7 +110,7 @@ static int rxrpc_krxiod(void *arg)
 
 			if (!list_empty(&rxrpc_krxiod_callq)) {
 				call = list_entry(rxrpc_krxiod_callq.next,
-						   struct rxrpc_call,
+						  struct rxrpc_call,
 						  rcv_krxiodq_lk);
 				list_del_init(&call->rcv_krxiodq_lk);
 				atomic_dec(&rxrpc_krxiod_qcount);
@@ -125,7 +119,7 @@ static int rxrpc_krxiod(void *arg)
 				 * away */
 				if (atomic_read(&call->usage) > 0) {
 					_debug("@@@ KRXIOD"
-					       " Begin Attend Call %p",call);
+					       " Begin Attend Call %p", call);
 					rxrpc_get_call(call);
 				}
 				else {

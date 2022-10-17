@@ -4,46 +4,14 @@
  * for more details.
  *
  * Copyright (C) 1994 by Waldorf GMBH, written by Ralf Baechle
- * Copyright (C) 1995, 96, 97, 98, 99, 2000, 01, 02 by Ralf Baechle
- * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
- * Copyright (C) 2001 Kanoj Sarcar
+ * Copyright (C) 1995, 96, 97, 98, 99, 2000, 01, 02, 03 by Ralf Baechle
  */
 #ifndef _ASM_IRQ_H
 #define _ASM_IRQ_H
 
 #include <linux/config.h>
 #include <linux/linkage.h>
-#include <asm/sn/arch.h>
-
-#ifdef CONFIG_SGI_IP27
-
-#define NR_IRQS 256
-
-/*
- * Number of levels in INT_PEND0. Can be set to 128 if we also
- * consider INT_PEND1.
- */
-#define PERNODE_LEVELS	64
-
-extern int node_level_to_irq[MAX_COMPACT_NODES][PERNODE_LEVELS];
-
-/*
- * we need to map irq's up to at least bit 7 of the INT_MASK0_A register
- * since bits 0-6 are pre-allocated for other purposes.
- */
-#define LEAST_LEVEL	7
-#define FAST_IRQ_TO_LEVEL(i)	((i) + LEAST_LEVEL)
-#define LEVEL_TO_IRQ(c, l) \
-			(node_level_to_irq[CPUID_TO_COMPACT_NODEID(c)][(l)])
-
-#else
-
-/*
- * Largest number of ints of all machines except IP27
- */
-#define NR_IRQS 128
-
-#endif
+#include <irq.h>
 
 #ifdef CONFIG_I8259
 static inline int irq_canonicalize(int irq)
@@ -54,16 +22,34 @@ static inline int irq_canonicalize(int irq)
 #define irq_canonicalize(irq) (irq)	/* Sane hardware, sane code ... */
 #endif
 
-extern void disable_irq(unsigned int);
-extern void disable_irq_nosync(unsigned int);
-extern void enable_irq(unsigned int);
-
 struct pt_regs;
-extern asmlinkage unsigned int do_IRQ(int irq, struct pt_regs *regs);
 
-/* Machine specific interrupt initialization  */
-extern void (*irq_setup)(void);
+#ifdef CONFIG_PREEMPT
 
-extern void init_generic_irq(void);
+extern asmlinkage unsigned int do_IRQ(unsigned int irq, struct pt_regs *regs);
+
+#else
+
+/*
+ * do_IRQ handles all normal device IRQ's (the special
+ * SMP cross-CPU interrupts have their own specific
+ * handlers).
+ *
+ * Ideally there should be away to get this into kernel/irq/handle.c to
+ * avoid the overhead of a call for just a tiny function ...
+ */
+#define do_IRQ(irq, regs)						\
+do {									\
+	irq_enter();							\
+	__do_IRQ((irq), (regs));					\
+	irq_exit();							\
+} while (0)
+
+#endif
+
+extern void arch_init_irq(void);
+
+struct irqaction;
+int handle_IRQ_event(unsigned int, struct pt_regs *, struct irqaction *);
 
 #endif /* _ASM_IRQ_H */

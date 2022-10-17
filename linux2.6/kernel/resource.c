@@ -39,7 +39,7 @@ struct resource iomem_resource = {
 
 EXPORT_SYMBOL(iomem_resource);
 
-static rwlock_t resource_lock = RW_LOCK_UNLOCKED;
+static DEFINE_RWLOCK(resource_lock);
 
 #ifdef CONFIG_PROC_FS
 
@@ -57,6 +57,7 @@ static void *r_next(struct seq_file *m, void *v, loff_t *pos)
 }
 
 static void *r_start(struct seq_file *m, loff_t *pos)
+	__acquires(resource_lock)
 {
 	struct resource *p = m->private;
 	loff_t l = 0;
@@ -67,6 +68,7 @@ static void *r_start(struct seq_file *m, loff_t *pos)
 }
 
 static void r_stop(struct seq_file *m, void *v)
+	__releases(resource_lock)
 {
 	read_unlock(&resource_lock);
 }
@@ -306,18 +308,21 @@ EXPORT_SYMBOL(allocate_resource);
  *
  * Returns 0 on success, -EBUSY if the resource can't be inserted.
  *
- * This function is equivalent of request_resource when no
- * conflict happens. If a conflict happens, and the conflicting
- * resources entirely fit within the range of the new resource,
- * then the new resource is inserted and the conflicting resources
- * become childs of the new resource. 
+ * This function is equivalent of request_resource when no conflict
+ * happens. If a conflict happens, and the conflicting resources
+ * entirely fit within the range of the new resource, then the new
+ * resource is inserted and the conflicting resources become childs of
+ * the new resource.  Otherwise the new resource becomes the child of
+ * the conflicting resource
  */
 int insert_resource(struct resource *parent, struct resource *new)
 {
-	int result = 0;
+	int result;
 	struct resource *first, *next;
 
 	write_lock(&resource_lock);
+ begin:
+ 	result = 0;
 	first = __request_resource(parent, new);
 	if (!first)
 		goto out;
@@ -326,13 +331,21 @@ int insert_resource(struct resource *parent, struct resource *new)
 	if (first == parent)
 		goto out;
 
-	for (next = first; next->sibling; next = next->sibling)
+	/* Resource fully contained by the clashing resource? Recurse into it */
+	if (first->start <= new->start && first->end >= new->end) {
+		parent = first;
+		goto begin;
+	}
+
+	for (next = first; ; next = next->sibling) {
+		/* Partial overlap? Bad, and unfixable */
+		if (next->start < new->start || next->end > new->end)
+			goto out;
+		if (!next->sibling)
+			break;
 		if (next->sibling->start > new->end)
 			break;
-
-	/* existing resource overlaps end of new resource */
-	if (next->end > new->end)
-		goto out;
+	}
 
 	result = 0;
 
@@ -359,6 +372,49 @@ int insert_resource(struct resource *parent, struct resource *new)
 }
 
 EXPORT_SYMBOL(insert_resource);
+
+/*
+ * Given an existing resource, change its start and size to match the
+ * arguments.  Returns -EBUSY if it can't fit.  Existing children of
+ * the resource are assumed to be immutable.
+ */
+int adjust_resource(struct resource *res, unsigned long start, unsigned long size)
+{
+	struct resource *tmp, *parent = res->parent;
+	unsigned long end = start + size - 1;
+	int result = -EBUSY;
+
+	write_lock(&resource_lock);
+
+	if ((start < parent->start) || (end > parent->end))
+		goto out;
+
+	for (tmp = res->child; tmp; tmp = tmp->sibling) {
+		if ((tmp->start < start) || (tmp->end > end))
+			goto out;
+	}
+
+	if (res->sibling && (res->sibling->start <= end))
+		goto out;
+
+	tmp = parent->child;
+	if (tmp != res) {
+		while (tmp->sibling != res)
+			tmp = tmp->sibling;
+		if (start <= tmp->end)
+			goto out;
+	}
+
+	res->start = start;
+	res->end = end;
+	result = 0;
+
+ out:
+	write_unlock(&resource_lock);
+	return result;
+}
+
+EXPORT_SYMBOL(adjust_resource);
 
 /*
  * This is compatibility stuff for IO resources.
@@ -432,6 +488,8 @@ void __release_region(struct resource *parent, unsigned long start, unsigned lon
 	p = &parent->child;
 	end = start + n - 1;
 
+	write_lock(&resource_lock);
+
 	for (;;) {
 		struct resource *res = *p;
 
@@ -445,11 +503,15 @@ void __release_region(struct resource *parent, unsigned long start, unsigned lon
 			if (res->start != start || res->end != end)
 				break;
 			*p = res->sibling;
+			write_unlock(&resource_lock);
 			kfree(res);
 			return;
 		}
 		p = &res->sibling;
 	}
+
+	write_unlock(&resource_lock);
+
 	printk(KERN_WARNING "Trying to free nonexistent resource <%08lx-%08lx>\n", start, end);
 }
 

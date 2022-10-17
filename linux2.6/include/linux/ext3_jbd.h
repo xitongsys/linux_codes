@@ -42,10 +42,9 @@
  * superblock only gets updated once, of course, so don't bother
  * counting that again for the quota updates. */
 
-#define EXT3_DATA_TRANS_BLOCKS		(3 * EXT3_SINGLEDATA_TRANS_BLOCKS + \
-					 EXT3_XATTR_TRANS_BLOCKS - 2)
-
-extern int ext3_writepage_trans_blocks(struct inode *inode);
+#define EXT3_DATA_TRANS_BLOCKS		(EXT3_SINGLEDATA_TRANS_BLOCKS + \
+					 EXT3_XATTR_TRANS_BLOCKS - 2 + \
+					 2*EXT3_QUOTA_TRANS_BLOCKS)
 
 /* Delete operations potentially hit one directory's namespace plus an
  * entire inode, plus arbitrary amounts of bitmap/indirection data.  Be
@@ -71,6 +70,19 @@ extern int ext3_writepage_trans_blocks(struct inode *inode);
 #define EXT3_RESERVE_TRANS_BLOCKS	12U
 
 #define EXT3_INDEX_EXTRA_TRANS_BLOCKS	8
+
+#ifdef CONFIG_QUOTA
+/* Amount of blocks needed for quota update - we know that the structure was
+ * allocated so we need to update only inode+data */
+#define EXT3_QUOTA_TRANS_BLOCKS 2
+/* Amount of blocks needed for quota insert/delete - we do some block writes
+ * but inode, sb and group updates are done only once */
+#define EXT3_QUOTA_INIT_BLOCKS (DQUOT_MAX_WRITES*\
+				(EXT3_SINGLEDATA_TRANS_BLOCKS-3)+3)
+#else
+#define EXT3_QUOTA_TRANS_BLOCKS 0
+#define EXT3_QUOTA_INIT_BLOCKS 0
+#endif
 
 int
 ext3_mark_iloc_dirty(handle_t *handle, 
@@ -124,10 +136,13 @@ ext3_journal_release_buffer(handle_t *handle, struct buffer_head *bh,
 	journal_release_buffer(handle, bh, credits);
 }
 
-static inline void
-ext3_journal_forget(handle_t *handle, struct buffer_head *bh)
+static inline int
+__ext3_journal_forget(const char *where, handle_t *handle, struct buffer_head *bh)
 {
-	journal_forget(handle, bh);
+	int err = journal_forget(handle, bh);
+	if (err)
+		ext3_journal_abort_handle(where, __FUNCTION__, bh, handle,err);
+	return err;
 }
 
 static inline int
@@ -173,9 +188,18 @@ __ext3_journal_dirty_metadata(const char *where,
 	__ext3_journal_get_create_access(__FUNCTION__, (handle), (bh))
 #define ext3_journal_dirty_metadata(handle, bh) \
 	__ext3_journal_dirty_metadata(__FUNCTION__, (handle), (bh))
+#define ext3_journal_forget(handle, bh) \
+	__ext3_journal_forget(__FUNCTION__, (handle), (bh))
 
-handle_t *ext3_journal_start(struct inode *inode, int nblocks);
+int ext3_journal_dirty_data(handle_t *handle, struct buffer_head *bh);
+
+handle_t *ext3_journal_start_sb(struct super_block *sb, int nblocks);
 int __ext3_journal_stop(const char *where, handle_t *handle);
+
+static inline handle_t *ext3_journal_start(struct inode *inode, int nblocks)
+{
+	return ext3_journal_start_sb(inode->i_sb, nblocks);
+}
 
 #define ext3_journal_stop(handle) \
 	__ext3_journal_stop(__FUNCTION__, (handle))
@@ -221,13 +245,24 @@ static inline int ext3_should_journal_data(struct inode *inode)
 
 static inline int ext3_should_order_data(struct inode *inode)
 {
-	return (test_opt(inode->i_sb, DATA_FLAGS) == EXT3_MOUNT_ORDERED_DATA);
+	if (!S_ISREG(inode->i_mode))
+		return 0;
+	if (EXT3_I(inode)->i_flags & EXT3_JOURNAL_DATA_FL)
+		return 0;
+	if (test_opt(inode->i_sb, DATA_FLAGS) == EXT3_MOUNT_ORDERED_DATA)
+		return 1;
+	return 0;
 }
 
 static inline int ext3_should_writeback_data(struct inode *inode)
 {
-	return !ext3_should_journal_data(inode) &&
-			!ext3_should_order_data(inode);
+	if (!S_ISREG(inode->i_mode))
+		return 0;
+	if (EXT3_I(inode)->i_flags & EXT3_JOURNAL_DATA_FL)
+		return 0;
+	if (test_opt(inode->i_sb, DATA_FLAGS) == EXT3_MOUNT_WRITEBACK_DATA)
+		return 1;
+	return 0;
 }
 
 #endif	/* _LINUX_EXT3_JBD_H */

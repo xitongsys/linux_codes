@@ -7,6 +7,8 @@
  *                                          Deep Blue Solutions Ltd.
  *  Copyright 2001 Altera Corporation
  *
+ *  Update for 2.6.4 by Dirk Behme <dirk.behme@de.bosch.com>
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
@@ -25,24 +27,25 @@
  *
  */
 #include <linux/config.h>
-#include <linux/module.h>
-#include <linux/tty.h>
-#include <linux/ioport.h>
-#include <linux/init.h>
-#include <linux/serial.h>
-#include <linux/console.h>
-#include <linux/sysrq.h>
-#include <linux/pld/pld_hotswap.h>
-
-#include <asm/io.h>
-#include <asm/irq.h>
-#include <asm/sizes.h>
 
 #if defined(CONFIG_SERIAL_UART00_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
 #define SUPPORT_SYSRQ
 #endif
 
+#include <linux/module.h>
+#include <linux/ioport.h>
+#include <linux/init.h>
+#include <linux/console.h>
+#include <linux/sysrq.h>
+#include <linux/tty.h>
+#include <linux/tty_flip.h>
 #include <linux/serial_core.h>
+#include <linux/serial.h>
+
+#include <asm/io.h>
+#include <asm/irq.h>
+#include <asm/sizes.h>
+
 #include <asm/arch/excalibur.h>
 #define UART00_TYPE (volatile unsigned int*)
 #include <asm/arch/uart00.h>
@@ -131,9 +134,8 @@ uart00_rx_chars(struct uart_port *port, struct pt_regs *regs)
 			goto ignore_char;
 
 	error_return:
-		*tty->flip.flag_buf_ptr++ = flg;
-		*tty->flip.char_buf_ptr++ = ch;
-		tty->flip.count++;
+		tty_insert_flip_char(tty, ch, flg);
+
 	ignore_char:
 		status = UART_GET_RSR(port);
 	}
@@ -173,11 +175,7 @@ uart00_rx_chars(struct uart_port *port, struct pt_regs *regs)
 		 * CHECK: does overrun affect the current character?
 		 * ASSUMPTION: it does not.
 		 */
-		*tty->flip.flag_buf_ptr++ = flg;
-		*tty->flip.char_buf_ptr++ = ch;
-		tty->flip.count++;
-		if (tty->flip.count >= TTY_FLIPBUF_SIZE)
-			goto ignore_char;
+		tty_insert_flip_char(tty, ch, flg);
 		ch = 0;
 		flg = TTY_OVERRUN;
 	}
@@ -251,7 +249,7 @@ static void uart00_modem_status(struct uart_port *port)
 	wake_up_interruptible(&port->info->delta_msr_wait);
 }
 
-static void uart00_int(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t uart00_int(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct uart_port *port = dev_id;
 	unsigned int status, pass_counter = 0;
@@ -269,6 +267,8 @@ static void uart00_int(int irq, void *dev_id, struct pt_regs *regs)
 
 		status = UART_GET_INT_STATUS(port);
 	} while (status);
+
+	return IRQ_HANDLED;
 }
 
 static unsigned int uart00_tx_empty(struct uart_port *port)
@@ -613,7 +613,7 @@ uart00_console_get_options(struct uart_port *port, int *baud,
 static int __init uart00_console_setup(struct console *co, char *options)
 {
 	struct uart_port *port;
-	int baud = 38400;
+	int baud = 115200;
 	int bits = 8;
 	int parity = 'n';
 	int flow = 'n';
@@ -639,7 +639,7 @@ static struct console uart00_console = {
 	.setup		= uart00_console_setup,
 	.flags		= CON_PRINTBUFFER,
 	.index		= 0,
-	.data		= &uart00_reg;
+	.data		= &uart00_reg,
 };
 
 static int __init uart00_console_init(void)
@@ -669,9 +669,10 @@ struct dev_port_entry{
 	struct uart_port *port;
 };
 
+#ifdef CONFIG_PLD_HOTSWAP
+
 static struct dev_port_entry dev_port_map[UART_NR];
 
-#ifdef CONFIG_PLD_HOTSWAP
 /*
  * Keep a mapping of dev_info addresses -> port lines to use when
  * removing ports dev==NULL indicates unused entry

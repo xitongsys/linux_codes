@@ -12,6 +12,7 @@
 #include <asm-ia64/ptrace.h>
 #include <asm-ia64/siginfo.h>
 #include <asm-ia64/sigcontext.h>
+#include <asm-ia64/mca.h>
 
 #include "../kernel/sigframe.h"
 
@@ -30,6 +31,11 @@ void foo(void)
 	DEFINE(IA64_CPU_SIZE, sizeof (struct cpuinfo_ia64));
 	DEFINE(SIGFRAME_SIZE, sizeof (struct sigframe));
 	DEFINE(UNW_FRAME_INFO_SIZE, sizeof (struct unw_frame_info));
+
+	BLANK();
+
+	DEFINE(TI_FLAGS, offsetof(struct thread_info, flags));
+	DEFINE(TI_PRE_COUNT, offsetof(struct thread_info, preempt_count));
 
 	BLANK();
 
@@ -187,21 +193,47 @@ void foo(void)
 	DEFINE(IA64_CLONE_VM, CLONE_VM);
 
 	BLANK();
-    /* used by fsys_gettimeofday in arch/ia64/kernel/fsys.S */
-	DEFINE(IA64_CPUINFO_ITM_DELTA_OFFSET, offsetof (struct cpuinfo_ia64, itm_delta));
-	DEFINE(IA64_CPUINFO_ITM_NEXT_OFFSET, offsetof (struct cpuinfo_ia64, itm_next));
-	DEFINE(IA64_CPUINFO_NSEC_PER_CYC_OFFSET, offsetof (struct cpuinfo_ia64, nsec_per_cyc));
-	DEFINE(IA64_TIMESPEC_TV_NSEC_OFFSET, offsetof (struct timespec, tv_nsec));
-
-
-	DEFINE(CLONE_IDLETASK_BIT, 12);
-#if CLONE_IDLETASK != (1 << 12)
-# error "CLONE_IDLETASK_BIT incorrect, please fix"
-#endif
+	DEFINE(IA64_CPUINFO_NSEC_PER_CYC_OFFSET,
+	       offsetof (struct cpuinfo_ia64, nsec_per_cyc));
+	DEFINE(IA64_CPUINFO_PTCE_BASE_OFFSET,
+	       offsetof (struct cpuinfo_ia64, ptce_base));
+	DEFINE(IA64_CPUINFO_PTCE_COUNT_OFFSET,
+	       offsetof (struct cpuinfo_ia64, ptce_count));
+	DEFINE(IA64_CPUINFO_PTCE_STRIDE_OFFSET,
+	       offsetof (struct cpuinfo_ia64, ptce_stride));
+	BLANK();
+	DEFINE(IA64_TIMESPEC_TV_NSEC_OFFSET,
+	       offsetof (struct timespec, tv_nsec));
 
 	DEFINE(CLONE_SETTLS_BIT, 19);
 #if CLONE_SETTLS != (1<<19)
 # error "CLONE_SETTLS_BIT incorrect, please fix"
 #endif
 
+	BLANK();
+	DEFINE(IA64_MCA_CPU_PROC_STATE_DUMP_OFFSET,
+	       offsetof (struct ia64_mca_cpu, proc_state_dump));
+	DEFINE(IA64_MCA_CPU_STACK_OFFSET,
+	       offsetof (struct ia64_mca_cpu, stack));
+	DEFINE(IA64_MCA_CPU_STACKFRAME_OFFSET,
+	       offsetof (struct ia64_mca_cpu, stackframe));
+	DEFINE(IA64_MCA_CPU_RBSTORE_OFFSET,
+	       offsetof (struct ia64_mca_cpu, rbstore));
+	DEFINE(IA64_MCA_CPU_INIT_STACK_OFFSET,
+	       offsetof (struct ia64_mca_cpu, init_stack));
+	BLANK();
+	/* used by fsys_gettimeofday in arch/ia64/kernel/fsys.S */
+	DEFINE(IA64_TIME_INTERPOLATOR_ADDRESS_OFFSET, offsetof (struct time_interpolator, addr));
+	DEFINE(IA64_TIME_INTERPOLATOR_SOURCE_OFFSET, offsetof (struct time_interpolator, source));
+	DEFINE(IA64_TIME_INTERPOLATOR_SHIFT_OFFSET, offsetof (struct time_interpolator, shift));
+	DEFINE(IA64_TIME_INTERPOLATOR_NSEC_OFFSET, offsetof (struct time_interpolator, nsec_per_cyc));
+	DEFINE(IA64_TIME_INTERPOLATOR_OFFSET_OFFSET, offsetof (struct time_interpolator, offset));
+	DEFINE(IA64_TIME_INTERPOLATOR_LAST_CYCLE_OFFSET, offsetof (struct time_interpolator, last_cycle));
+	DEFINE(IA64_TIME_INTERPOLATOR_LAST_COUNTER_OFFSET, offsetof (struct time_interpolator, last_counter));
+	DEFINE(IA64_TIME_INTERPOLATOR_JITTER_OFFSET, offsetof (struct time_interpolator, jitter));
+	DEFINE(IA64_TIME_INTERPOLATOR_MASK_OFFSET, offsetof (struct time_interpolator, mask));
+	DEFINE(IA64_TIME_SOURCE_CPU, TIME_SOURCE_CPU);
+	DEFINE(IA64_TIME_SOURCE_MMIO64, TIME_SOURCE_MMIO64);
+	DEFINE(IA64_TIME_SOURCE_MMIO32, TIME_SOURCE_MMIO32);
+	DEFINE(IA64_TIMESPEC_TV_NSEC_OFFSET, offsetof (struct timespec, tv_nsec));
 }

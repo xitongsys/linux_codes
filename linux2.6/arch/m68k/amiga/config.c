@@ -63,8 +63,21 @@ static char s_cdtv[] __initdata = "CDTV";
 static char s_cd32[] __initdata = "CD32";
 static char s_draco[] __initdata = "Draco";
 static char *amiga_models[] __initdata = {
-    s_a500, s_a500p, s_a600, s_a1000, s_a1200, s_a2000, s_a2500, s_a3000,
-    s_a3000t, s_a3000p, s_a4000, s_a4000t, s_cdtv, s_cd32, s_draco,
+    [AMI_500-AMI_500]		= s_a500,
+    [AMI_500PLUS-AMI_500]	= s_a500p,
+    [AMI_600-AMI_500]		= s_a600,
+    [AMI_1000-AMI_500]		= s_a1000,
+    [AMI_1200-AMI_500]		= s_a1200,
+    [AMI_2000-AMI_500]		= s_a2000,
+    [AMI_2500-AMI_500]		= s_a2500,
+    [AMI_3000-AMI_500]		= s_a3000,
+    [AMI_3000T-AMI_500]		= s_a3000t,
+    [AMI_3000PLUS-AMI_500]	= s_a3000p,
+    [AMI_4000-AMI_500]		= s_a4000,
+    [AMI_4000T-AMI_500]		= s_a4000t,
+    [AMI_CDTV-AMI_500]		= s_cdtv,
+    [AMI_CD32-AMI_500]		= s_cd32,
+    [AMI_DRACO-AMI_500]		= s_draco,
 };
 
 static char amiga_model_name[13] = "Amiga ";
@@ -121,14 +134,22 @@ static struct console amiga_console_driver = {
 static struct {
     struct resource _ciab, _ciaa, _custom, _kickstart;
 } mb_resources = {
-    ._ciab =		{ "CIA B", 0x00bfd000, 0x00bfdfff },
-    ._ciaa =		{ "CIA A", 0x00bfe000, 0x00bfefff },
-    ._custom =		{ "Custom I/O", 0x00dff000, 0x00dfffff },
-    ._kickstart =	{ "Kickstart ROM", 0x00f80000, 0x00ffffff }
+    ._ciab = {
+	.name = "CIA B", .start = 0x00bfd000, .end = 0x00bfdfff
+    },
+    ._ciaa = {
+	.name = "CIA A", .start = 0x00bfe000, .end = 0x00bfefff
+    },
+    ._custom = {
+	.name = "Custom I/O", .start = 0x00dff000, .end = 0x00dfffff
+    },
+    ._kickstart = {
+	.name = "Kickstart ROM", .start = 0x00f80000, .end = 0x00ffffff
+    }
 };
 
 static struct resource rtc_resource = {
-    NULL, 0x00dc0000, 0x00dcffff
+    .start = 0x00dc0000, .end = 0x00dcffff
 };
 
 static struct resource ram_resource[NUM_MEMINFO];
@@ -311,7 +332,7 @@ static void __init amiga_identify(void)
 
   case AMI_DRACO:
     panic("No support for Draco yet");
- 
+
   default:
     panic("Unknown Amiga Model");
   }
@@ -405,7 +426,7 @@ void __init config_amiga(void)
 				      */
 
   mach_set_clock_mmss  = amiga_set_clock_mmss;
-  mach_get_ss          = amiga_get_ss; 
+  mach_get_ss          = amiga_get_ss;
 #ifdef CONFIG_AMIGA_FLOPPY
   mach_floppy_setup    = amiga_floppy_setup;
 #endif
@@ -495,7 +516,7 @@ static void __init amiga_sched_init(irqreturn_t (*timer_routine)(int, void *,
 							  struct pt_regs *))
 {
 	static struct resource sched_res = {
-	    "timer", 0x00bfd400, 0x00bfd5ff,
+	    .name = "timer", .start = 0x00bfd400, .end = 0x00bfd5ff,
 	};
 	jiffy_ticks = (amiga_eclock+HZ/2)/HZ;
 
@@ -658,13 +679,13 @@ static int amiga_set_clock_mmss (unsigned long nowtime)
 		tod_3000.second2 = real_seconds % 10;
 		tod_3000.minute1 = real_minutes / 10;
 		tod_3000.minute2 = real_minutes % 10;
-		
+
 		tod_3000.cntrl1 = TOD3000_CNTRL1_FREE;
 	} else /* if (AMIGAHW_PRESENT(A2000_CLK)) */ {
 		int cnt = 5;
 
 		tod_2000.cntrl1 |= TOD2000_CNTRL1_HOLD;
-		
+
 		while ((tod_2000.cntrl1 & TOD2000_CNTRL1_BUSY) && cnt--)
 		{
 			tod_2000.cntrl1 &= ~TOD2000_CNTRL1_HOLD;
@@ -694,7 +715,7 @@ static unsigned int amiga_get_ss( void )
 		tod_3000.cntrl1 = TOD3000_CNTRL1_HOLD;
 		s = tod_3000.second1 * 10 + tod_3000.second2;
 		tod_3000.cntrl1 = TOD3000_CNTRL1_FREE;
-	} else /* if (AMIGAHW_PRESENT(A2000_CLK)) */ { 
+	} else /* if (AMIGAHW_PRESENT(A2000_CLK)) */ {
 		s = tod_2000.second1 * 10 + tod_2000.second2;
 	}
 	return s;
@@ -737,7 +758,7 @@ static void amiga_reset (void)
        : "a" (jmp_addr));
  jmp_addr_label040:
   /* disable translation on '040 now */
-  __asm__ __volatile__    
+  __asm__ __volatile__
     ("moveq #0,%/d0\n\t"
      ".chip 68040\n\t"
      "movec %%d0,%%tc\n\t"	/* disable MMU */
@@ -762,7 +783,7 @@ static void amiga_reset (void)
      "1:\n\t"
      "reset\n\t"
      "jmp   %/a0@" : /* Just that gcc scans it for % escapes */ );
-  
+
   for (;;);
 
 }
@@ -785,7 +806,7 @@ struct savekmsg {
     char data[0];
 };
 
-static struct savekmsg *savekmsg = NULL;
+static struct savekmsg *savekmsg;
 
 static void amiga_mem_console_write(struct console *co, const char *s,
 				    unsigned int count)
@@ -798,12 +819,12 @@ static void amiga_mem_console_write(struct console *co, const char *s,
 
 static void amiga_savekmsg_init(void)
 {
-    static struct resource debug_res = { "Debug" };
+    static struct resource debug_res = { .name = "Debug" };
 
     savekmsg = amiga_chip_alloc_res(SAVEKMSG_MAXMEM, &debug_res);
     savekmsg->magic1 = SAVEKMSG_MAGIC1;
     savekmsg->magic2 = SAVEKMSG_MAGIC2;
-    savekmsg->magicptr = virt_to_phys(savekmsg);
+    savekmsg->magicptr = ZTWO_PADDR(savekmsg);
     savekmsg->size = 0;
 }
 

@@ -23,13 +23,13 @@
 #include <linux/slab.h>
 #include <linux/cdrom.h>
 #include <linux/ide.h>
+#include <linux/bitops.h>
 
 #include <asm/byteorder.h>
 #include <asm/irq.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/unaligned.h>
-#include <asm/bitops.h>
 
 #define IDEDEFAULT_VERSION	"0.9.newide"
 /*
@@ -46,13 +46,13 @@ ide_driver_t idedefault_driver = {
 	.name		=	"ide-default",
 	.version	=	IDEDEFAULT_VERSION,
 	.attach		=	idedefault_attach,
+	.cleanup	=	ide_unregister_subdriver,
 	.drives		=	LIST_HEAD_INIT(idedefault_driver.drives)
 };
 
 static int idedefault_attach (ide_drive_t *drive)
 {
-	if (ide_register_subdriver(drive,
-			&idedefault_driver, IDE_SUBDRIVER_VERSION)) {
+	if (ide_register_subdriver(drive, &idedefault_driver)) {
 		printk(KERN_ERR "ide-default: %s: Failed to register the "
 			"driver with ide.c\n", drive->name);
 		return 1;

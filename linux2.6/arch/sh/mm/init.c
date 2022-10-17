@@ -1,9 +1,9 @@
-/* $Id: init.c,v 1.11 2003/05/27 16:21:23 lethal Exp $
+/* $Id: init.c,v 1.19 2004/02/21 04:42:16 kkojima Exp $
  *
  *  linux/arch/sh/mm/init.c
  *
  *  Copyright (C) 1999  Niibe Yutaka
- *  Copyright (C) 2002  Paul Mundt
+ *  Copyright (C) 2002, 2004  Paul Mundt
  *
  *  Based on linux/arch/i386/mm/init.c:
  *   Copyright (C) 1995  Linus Torvalds
@@ -24,6 +24,7 @@
 #include <linux/init.h>
 #include <linux/highmem.h>
 #include <linux/bootmem.h>
+#include <linux/pagemap.h>
 
 #include <asm/processor.h>
 #include <asm/system.h>
@@ -55,6 +56,9 @@ pg_data_t discontig_page_data[MAX_NUMNODES];
 bootmem_data_t discontig_node_bdata[MAX_NUMNODES];
 #endif
 
+void (*copy_page)(void *from, void *to);
+void (*clear_page)(void *to);
+
 void show_mem(void)
 {
 	int i, total = 0, reserved = 0;
@@ -62,7 +66,7 @@ void show_mem(void)
 
 	printk("Mem-info:\n");
 	show_free_areas();
-	printk("Free swap:       %6dkB\n",nr_swap_pages<<(PAGE_SHIFT-10));
+	printk("Free swap:       %6ldkB\n", nr_swap_pages<<(PAGE_SHIFT-10));
 	i = max_mapnr;
 	while (i-- > 0) {
 		total++;
@@ -77,6 +81,66 @@ void show_mem(void)
 	printk("%d reserved pages\n",reserved);
 	printk("%d pages shared\n",shared);
 	printk("%d pages swap cached\n",cached);
+}
+
+static void set_pte_phys(unsigned long addr, unsigned long phys, pgprot_t prot)
+{
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *pte;
+
+	pgd = swapper_pg_dir + pgd_index(addr);
+	if (pgd_none(*pgd)) {
+		pgd_ERROR(*pgd);
+		return;
+	}
+
+	pmd = pmd_offset(pgd, addr);
+	if (pmd_none(*pmd)) {
+		pte = (pte_t *)get_zeroed_page(GFP_ATOMIC);
+		set_pmd(pmd, __pmd(__pa(pte) | _KERNPG_TABLE | _PAGE_USER));
+		if (pte != pte_offset_kernel(pmd, 0)) {
+			pmd_ERROR(*pmd);
+			return;
+		}
+	}
+
+	pte = pte_offset_kernel(pmd, addr);
+	if (!pte_none(*pte)) {
+		pte_ERROR(*pte);
+		return;
+	}
+
+	set_pte(pte, pfn_pte(phys >> PAGE_SHIFT, prot));
+
+	__flush_tlb_page(get_asid(), addr);
+}
+
+/*
+ * As a performance optimization, other platforms preserve the fixmap mapping
+ * across a context switch, we don't presently do this, but this could be done
+ * in a similar fashion as to the wired TLB interface that sh64 uses (by way
+ * of the memorry mapped UTLB configuration) -- this unfortunately forces us to
+ * give up a TLB entry for each mapping we want to preserve. While this may be
+ * viable for a small number of fixmaps, it's not particularly useful for
+ * everything and needs to be carefully evaluated. (ie, we may want this for
+ * the vsyscall page).
+ *
+ * XXX: Perhaps add a _PAGE_WIRED flag or something similar that we can pass
+ * in at __set_fixmap() time to determine the appropriate behavior to follow.
+ *
+ *					 -- PFM.
+ */
+void __set_fixmap(enum fixed_addresses idx, unsigned long phys, pgprot_t prot)
+{
+	unsigned long address = __fix_to_virt(idx);
+
+	if (idx >= __end_of_fixed_addresses) {
+		BUG();
+		return;
+	}
+
+	set_pte_phys(address, phys, prot);
 }
 
 /* References to section boundaries */
@@ -112,13 +176,13 @@ void __init paging_init(void)
 	{
 		unsigned long max_dma, low, start_pfn;
 		pgd_t *pg_dir;
-	int i;
+		int i;
 
-	/* We don't need kernel mapping as hardware support that. */
-	pg_dir = swapper_pg_dir;
+		/* We don't need kernel mapping as hardware support that. */
+		pg_dir = swapper_pg_dir;
 
 		for (i = 0; i < PTRS_PER_PGD; i++)
-		pgd_val(pg_dir[i]) = 0;
+			pgd_val(pg_dir[i]) = 0;
 
 		/* Turn on the MMU */
 		enable_mmu();
@@ -130,11 +194,13 @@ void __init paging_init(void)
 
 		if (low < max_dma) {
 			zones_size[ZONE_DMA] = low - start_pfn;
+			zones_size[ZONE_NORMAL] = 0;
 		} else {
 			zones_size[ZONE_DMA] = max_dma - start_pfn;
 			zones_size[ZONE_NORMAL] = low - max_dma;
 		}
 	}
+
 #elif defined(CONFIG_CPU_SH3) || defined(CONFIG_CPU_SH4)
 	/*
 	 * If we don't have CONFIG_MMU set and the processor in question
@@ -148,18 +214,18 @@ void __init paging_init(void)
 	 */
 	disable_mmu();
 #endif
-
-		free_area_init_node(0, NODE_DATA(0), 0, zones_size, __MEMORY_START >> PAGE_SHIFT, 0);
+	NODE_DATA(0)->node_mem_map = NULL;
+	free_area_init_node(0, NODE_DATA(0), zones_size, __MEMORY_START >> PAGE_SHIFT, 0);
 	/* XXX: MRB-remove - this doesn't seem sane, should this be done somewhere else ?*/
-		mem_map = NODE_DATA(0)->node_mem_map;
+	mem_map = NODE_DATA(0)->node_mem_map;
 
 #ifdef CONFIG_DISCONTIGMEM
 	/*
 	 * And for discontig, do some more fixups on the zone sizes..
 	 */
-		zones_size[ZONE_DMA] = __MEMORY_SIZE_2ND >> PAGE_SHIFT;
-		zones_size[ZONE_NORMAL] = 0;
-		free_area_init_node(1, NODE_DATA(1), 0, zones_size, __MEMORY_START_2ND >> PAGE_SHIFT, 0);
+	zones_size[ZONE_DMA] = __MEMORY_SIZE_2ND >> PAGE_SHIFT;
+	zones_size[ZONE_NORMAL] = 0;
+	free_area_init_node(1, NODE_DATA(1), zones_size, __MEMORY_START_2ND >> PAGE_SHIFT, 0);
 #endif
 }
 
@@ -168,6 +234,7 @@ void __init mem_init(void)
 	extern unsigned long empty_zero_page[1024];
 	int codesize, reservedpages, datasize, initsize;
 	int tmp;
+	extern unsigned long memory_start;
 
 #ifdef CONFIG_MMU
 	high_memory = (void *)__va(MAX_LOW_PFN * PAGE_SIZE);
@@ -177,11 +244,18 @@ void __init mem_init(void)
 	high_memory = (void *)(memory_end & PAGE_MASK);
 #endif
 
-	max_mapnr = num_physpages = MAP_NR(high_memory);
+	max_mapnr = num_physpages = MAP_NR(high_memory) - MAP_NR(memory_start);
 
 	/* clear the zero-page */
 	memset(empty_zero_page, 0, PAGE_SIZE);
 	__flush_wback_region(empty_zero_page, PAGE_SIZE);
+
+	/* 
+	 * Setup wrappers for copy/clear_page(), these will get overridden
+	 * later in the boot process if a better method is available.
+	 */
+	copy_page = copy_page_slow;
+	clear_page = clear_page_slow;
 
 	/* this will put all low memory onto the freelists */
 	totalram_pages += free_all_bootmem_node(NODE_DATA(0));
@@ -195,6 +269,7 @@ void __init mem_init(void)
 		 */
 		if (PageReserved(mem_map+tmp))
 			reservedpages++;
+
 	codesize =  (unsigned long) &_etext - (unsigned long) &_text;
 	datasize =  (unsigned long) &_edata - (unsigned long) &_etext;
 	initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
@@ -237,76 +312,4 @@ void free_initrd_mem(unsigned long start, unsigned long end)
 	printk ("Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
 }
 #endif
-
-/*
- * Generic first-level cache init
- */
-void __init sh_cache_init(void)
-{
-	extern int detect_cpu_and_cache_system(void);
-	unsigned long ccr, flags = 0;
-
-	detect_cpu_and_cache_system();
-
-	if (cpu_data->type == CPU_SH_NONE)
-		panic("Unknown CPU");
-
-	jump_to_P2();
-	ccr = ctrl_inl(CCR);
-
-	/*
-	 * If the cache is already enabled .. flush it.
-	 */
-	if (ccr & CCR_CACHE_ENABLE) {
-		unsigned long entries, i, j;
-
-		entries = cpu_data->dcache.sets;
-
-		/*
-		 * If the OC is already in RAM mode, we only have
-		 * half of the entries to flush..
-		 */
-		if (ccr & CCR_CACHE_ORA)
-			entries >>= 1;
-
-		for (i = 0; i < entries; i++) {
-			for (j = 0; j < cpu_data->dcache.ways; j++) {
-				unsigned long data, addr;
-
-				addr = CACHE_OC_ADDRESS_ARRAY |
-					(j << cpu_data->dcache.way_shift) |
-					(i << cpu_data->dcache.entry_shift);
-
-				data = ctrl_inl(addr);
-
-				if ((data & (SH_CACHE_UPDATED | SH_CACHE_VALID))
-					== (SH_CACHE_UPDATED | SH_CACHE_VALID))
-					ctrl_outl(data & ~SH_CACHE_UPDATED, addr);
-		}
-		}
-	}
-
-	/* 
-	 * Default CCR values .. enable the caches
-	 * and flush them immediately..
-	 */
-	flags |= CCR_CACHE_ENABLE | CCR_CACHE_INVALIDATE | (ccr & CCR_CACHE_EMODE);
-
-#ifdef CONFIG_SH_WRITETHROUGH
-	/* Turn on Write-through caching */
-	flags |= CCR_CACHE_WT;
-#else
-	/* .. or default to Write-back */
-	flags |= CCR_CACHE_CB;
-#endif
-
-#ifdef CONFIG_SH_OCRAM
-	/* Turn on OCRAM -- halve the OC */
-	flags |= CCR_CACHE_ORA;
-	cpu_data->dcache.sets >>= 1;
-#endif
-
-	ctrl_outl(flags, CCR);
-	back_to_P1();
-}
 

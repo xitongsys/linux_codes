@@ -16,6 +16,8 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
+#ifndef _HVTYPES_H
+#define _HVTYPES_H
 
 //===========================================================================
 //                                                             Header File Id
@@ -29,13 +31,7 @@
 //
 //===========================================================================
 
-#ifndef _PPC_TYPES_H
-#include        <asm/types.h>
-#endif
-
-
-#ifndef _HVTYPES_H
-#define _HVTYPES_H
+#include <asm/types.h>
 
 //-------------------------------------------------------------------
 // Typedefs
@@ -69,6 +65,10 @@ typedef u8	HvAgentId;		// Hypervisor DevFn
 
 
 #define HVMAXARCHITECTEDLPS 32
+#define HVMAXARCHITECTEDVIRTUALLANS 16
+#define HVMAXARCHITECTEDVIRTUALDISKS 32
+#define HVMAXARCHITECTEDVIRTUALCDROMS 8
+#define HVMAXARCHITECTEDVIRTUALTAPES 8
 #define HVCHUNKSIZE 256 * 1024
 #define HVPAGESIZE 4 * 1024
 #define HVLPMINMEGSPRIMARY 256
@@ -124,4 +124,4 @@ struct HvLpBufferList {
 	u64 len;
 };
 
-#endif // _HVTYPES_H
+#endif /* _HVTYPES_H */

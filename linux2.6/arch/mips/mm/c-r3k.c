@@ -7,7 +7,7 @@
  * Tx39XX R4k style caches added. HK
  * Copyright (C) 1998, 1999, 2000 Harald Koerfgen
  * Copyright (C) 1998 Gleb Raiko & Vladimir Roganov
- * Copyright (C) 2001  Maciej W. Rozycki
+ * Copyright (C) 2001, 2004  Maciej W. Rozycki
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -22,9 +22,6 @@
 #include <asm/io.h>
 #include <asm/bootinfo.h>
 #include <asm/cpu.h>
-
-void r3k_clear_page(void * page);
-void r3k_copy_page(void * to, void * from);
 
 static unsigned long icache_size, dcache_size;		/* Size in bytes */
 static unsigned long icache_lsize, dcache_lsize;	/* Size in bytes */
@@ -244,6 +241,7 @@ static inline void r3k_flush_cache_all(void)
 
 static inline void r3k___flush_cache_all(void)
 {
+	r3k_flush_dcache_range(KSEG0, KSEG0 + dcache_size);
 	r3k_flush_icache_range(KSEG0, KSEG0 + icache_size);
 }
 
@@ -313,14 +311,17 @@ static void r3k_flush_cache_sigtramp(unsigned long addr)
 
 static void r3k_dma_cache_wback_inv(unsigned long start, unsigned long size)
 {
+	/* Catch bad driver code */
+	BUG_ON(size == 0);
+
 	iob();
 	r3k_flush_dcache_range(start, start + size);
 }
 
 void __init ld_mmu_r23000(void)
 {
-	_clear_page = r3k_clear_page;
-	_copy_page = r3k_copy_page;
+	extern void build_clear_page(void);
+	extern void build_copy_page(void);
 
 	r3k_probe_cache();
 
@@ -336,9 +337,14 @@ void __init ld_mmu_r23000(void)
 	flush_data_cache_page = r3k_flush_data_cache_page;
 
 	_dma_cache_wback_inv = r3k_dma_cache_wback_inv;
+	_dma_cache_wback = r3k_dma_cache_wback_inv;
+	_dma_cache_inv = r3k_dma_cache_wback_inv;
 
 	printk("Primary instruction cache %ldkB, linesize %ld bytes.\n",
 		icache_size >> 10, icache_lsize);
 	printk("Primary data cache %ldkB, linesize %ld bytes.\n",
 		dcache_size >> 10, dcache_lsize);
+
+	build_clear_page();
+	build_copy_page();
 }

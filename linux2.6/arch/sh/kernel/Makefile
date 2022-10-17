@@ -2,7 +2,7 @@
 # Makefile for the Linux/SuperH kernel.
 #
 
-extra-y	:= head.o init_task.o vmlinux.lds.s
+extra-y	:= head.o init_task.o vmlinux.lds
 
 obj-y	:= process.o signal.o entry.o traps.o irq.o \
 	ptrace.o setup.o time.o sys_sh.o semaphore.o \
@@ -16,12 +16,7 @@ obj-$(CONFIG_SH_STANDARD_BIOS)	+= sh_bios.o
 obj-$(CONFIG_SH_KGDB)		+= kgdb_stub.o kgdb_jmp.o
 obj-$(CONFIG_SH_CPU_FREQ)	+= cpufreq.o
 obj-$(CONFIG_MODULES)		+= module.o
-
-ifneq ($(CONFIG_SH_DREAMCAST),y)
-obj-$(CONFIG_PCI)		+= pci-dma.o
-endif
-obj-$(CONFIG_PCI)		+= pci.o
-obj-$(CONFIG_PCI_AUTO)		+= pci_auto.o
+obj-$(CONFIG_EARLY_PRINTK)	+= early_printk.o
 
 USE_STANDARD_AS_RULE := true
 

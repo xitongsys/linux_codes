@@ -58,16 +58,6 @@ struct Scsi_Host;
  */
 #define SCAN_WILD_CARD	~0
 
-/*
- * scsi_target: representation of a scsi target, for now, this is only
- * used for single_lun devices. If no one has active IO to the target,
- * starget_sdev_user is NULL, else it points to the active sdev.
- */
-struct scsi_target {
-	struct scsi_device	*starget_sdev_user;
-	unsigned int		starget_refcnt;
-};
-
 /* hosts.c */
 extern int scsi_init_hosts(void);
 extern void scsi_exit_hosts(void);
@@ -77,17 +67,26 @@ extern int scsi_dispatch_cmd(struct scsi_cmnd *cmd);
 extern int scsi_setup_command_freelist(struct Scsi_Host *shost);
 extern void scsi_destroy_command_freelist(struct Scsi_Host *shost);
 extern void scsi_done(struct scsi_cmnd *cmd);
-extern void scsi_finish_command(struct scsi_cmnd *cmd);
 extern int scsi_retry_command(struct scsi_cmnd *cmd);
 extern int scsi_insert_special_req(struct scsi_request *sreq, int);
 extern void scsi_init_cmd_from_req(struct scsi_cmnd *cmd,
 		struct scsi_request *sreq);
 extern void __scsi_release_request(struct scsi_request *sreq);
+extern void __scsi_done(struct scsi_cmnd *cmd);
+#ifdef CONFIG_SCSI_LOGGING
+void scsi_log_send(struct scsi_cmnd *cmd);
+void scsi_log_completion(struct scsi_cmnd *cmd, int disposition);
+#else
+static inline void scsi_log_send(struct scsi_cmnd *cmd) 
+	{ };
+static inline void scsi_log_completion(struct scsi_cmnd *cmd, int disposition)
+	{ };
+#endif
 
 /* scsi_devinfo.c */
 extern int scsi_get_device_flags(struct scsi_device *sdev,
 				 unsigned char *vendor, unsigned char *model);
-extern int scsi_init_devinfo(void);
+extern int __init scsi_init_devinfo(void);
 extern void scsi_exit_devinfo(void);
 
 /* scsi_error.c */
@@ -147,8 +146,20 @@ extern int scsi_sysfs_add_sdev(struct scsi_device *);
 extern int scsi_sysfs_add_host(struct Scsi_Host *);
 extern int scsi_sysfs_register(void);
 extern void scsi_sysfs_unregister(void);
+extern void scsi_sysfs_device_initialize(struct scsi_device *);
+extern int scsi_sysfs_target_initialize(struct scsi_device *);
+extern struct scsi_transport_template blank_transport_template;
 
 extern struct class sdev_class;
 extern struct bus_type scsi_bus_type;
+
+/* 
+ * internal scsi timeout functions: for use by mid-layer and transport
+ * classes.
+ */
+
+#define SCSI_DEVICE_BLOCK_MAX_TIMEOUT	(HZ*60)
+extern int scsi_internal_device_block(struct scsi_device *sdev);
+extern int scsi_internal_device_unblock(struct scsi_device *sdev);
 
 #endif /* _SCSI_PRIV_H */

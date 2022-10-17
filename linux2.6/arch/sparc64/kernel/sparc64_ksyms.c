@@ -19,9 +19,12 @@
 #include <linux/pci.h>
 #include <linux/interrupt.h>
 #include <linux/fs_struct.h>
+#include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/socket.h>
+#include <linux/syscalls.h>
 #include <linux/percpu.h>
+#include <linux/init.h>
 #include <net/compat.h>
 
 #include <asm/oplib.h>
@@ -31,7 +34,6 @@
 #include <asm/pgtable.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/hardirq.h>
 #include <asm/idprom.h>
 #include <asm/svr4.h>
 #include <asm/elf.h>
@@ -71,10 +73,7 @@ extern void *__bzero(void *, size_t);
 extern void *__memscan_zero(void *, size_t);
 extern void *__memscan_generic(void *, int, size_t);
 extern int __memcmp(const void *, const void *, __kernel_size_t);
-extern int __strncmp(const char *, const char *, __kernel_size_t);
-extern __kernel_size_t __strlen(const char *);
 extern __kernel_size_t strlen(const char *);
-extern char saved_command_line[];
 extern void linux_sparc_syscall(void);
 extern void rtrap(void);
 extern void show_regs(struct pt_regs *);
@@ -83,20 +82,14 @@ extern void syscall_trace(void);
 extern u32 sunos_sys_table[], sys_call_table32[];
 extern void tl0_solaris(void);
 extern void sys_sigsuspend(void);
-extern int sys_getppid(void);
-extern int sys_getpid(void);
-extern int sys_geteuid(void);
-extern int sys_getuid(void);
-extern int sys_getegid(void);
-extern int sys_getgid(void);
 extern int svr4_getcontext(svr4_ucontext_t *uc, struct pt_regs *regs);
 extern int svr4_setcontext(svr4_ucontext_t *uc, struct pt_regs *regs);
-extern int sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg);
 extern int compat_sys_ioctl(unsigned int fd, unsigned int cmd, u32 arg);
 extern int (*handle_mathemu)(struct pt_regs *, struct fpustate *);
-extern long sparc32_open(const char * filename, int flags, int mode);
+extern long sparc32_open(const char __user * filename, int flags, int mode);
 extern int io_remap_page_range(struct vm_area_struct *vma, unsigned long from, unsigned long offset, unsigned long size, pgprot_t prot, int space);
-                
+extern void (*prom_palette)(int);
+
 extern int __ashrdi3(int, int);
 
 extern void dump_thread(struct pt_regs *, struct user *);
@@ -110,6 +103,7 @@ extern void _do_read_lock(rwlock_t *rw, char *str);
 extern void _do_read_unlock(rwlock_t *rw, char *str);
 extern void _do_write_lock(rwlock_t *rw, char *str);
 extern void _do_write_unlock(rwlock_t *rw);
+extern int _do_write_trylock(rwlock_t *rw, char *str);
 #endif
 
 extern unsigned long phys_base;
@@ -137,20 +131,22 @@ EXPORT_SYMBOL(__read_unlock);
 EXPORT_SYMBOL(__write_lock);
 EXPORT_SYMBOL(__write_unlock);
 EXPORT_SYMBOL(__write_trylock);
+/* Out of line spin-locking implementation. */
+EXPORT_SYMBOL(_raw_spin_lock);
+EXPORT_SYMBOL(_raw_spin_lock_flags);
 #endif
 
 /* Hard IRQ locking */
 EXPORT_SYMBOL(synchronize_irq);
 
 #if defined(CONFIG_MCOUNT)
-extern void mcount(void);
-EXPORT_SYMBOL_NOVERS(mcount);
+extern void _mcount(void);
+EXPORT_SYMBOL(_mcount);
 #endif
 
 /* CPU online map and active count.  */
 EXPORT_SYMBOL(cpu_online_map);
 EXPORT_SYMBOL(phys_cpu_present_map);
-EXPORT_SYMBOL(sparc64_num_cpus_possible);
 
 /* Spinlock debugging library, optional. */
 #ifdef CONFIG_DEBUG_SPINLOCK
@@ -161,6 +157,7 @@ EXPORT_SYMBOL(_do_read_lock);
 EXPORT_SYMBOL(_do_read_unlock);
 EXPORT_SYMBOL(_do_write_lock);
 EXPORT_SYMBOL(_do_write_unlock);
+EXPORT_SYMBOL(_do_write_trylock);
 #endif
 
 EXPORT_SYMBOL(smp_call_function);
@@ -175,20 +172,30 @@ EXPORT_SYMBOL(down_interruptible);
 EXPORT_SYMBOL(up);
 
 /* Atomic counter implementation. */
-EXPORT_SYMBOL(__atomic_add);
-EXPORT_SYMBOL(__atomic_sub);
-EXPORT_SYMBOL(__atomic64_add);
-EXPORT_SYMBOL(__atomic64_sub);
+EXPORT_SYMBOL(atomic_add);
+EXPORT_SYMBOL(atomic_add_ret);
+EXPORT_SYMBOL(atomic_sub);
+EXPORT_SYMBOL(atomic_sub_ret);
+EXPORT_SYMBOL(atomic64_add);
+EXPORT_SYMBOL(atomic64_add_ret);
+EXPORT_SYMBOL(atomic64_sub);
+EXPORT_SYMBOL(atomic64_sub_ret);
 #ifdef CONFIG_SMP
-EXPORT_SYMBOL(atomic_dec_and_lock);
+EXPORT_SYMBOL(_atomic_dec_and_lock);
 #endif
 
 /* Atomic bit operations. */
-EXPORT_SYMBOL(___test_and_set_bit);
-EXPORT_SYMBOL(___test_and_clear_bit);
-EXPORT_SYMBOL(___test_and_change_bit);
-EXPORT_SYMBOL(___test_and_set_le_bit);
-EXPORT_SYMBOL(___test_and_clear_le_bit);
+EXPORT_SYMBOL(test_and_set_bit);
+EXPORT_SYMBOL(test_and_clear_bit);
+EXPORT_SYMBOL(test_and_change_bit);
+EXPORT_SYMBOL(set_bit);
+EXPORT_SYMBOL(clear_bit);
+EXPORT_SYMBOL(change_bit);
+
+/* Bit searching */
+EXPORT_SYMBOL(find_next_bit);
+EXPORT_SYMBOL(find_next_zero_bit);
+EXPORT_SYMBOL(find_next_zero_le_bit);
 
 EXPORT_SYMBOL(ivector_table);
 EXPORT_SYMBOL(enable_irq);
@@ -219,8 +226,10 @@ EXPORT_SYMBOL(sbus_map_single);
 EXPORT_SYMBOL(sbus_unmap_single);
 EXPORT_SYMBOL(sbus_map_sg);
 EXPORT_SYMBOL(sbus_unmap_sg);
-EXPORT_SYMBOL(sbus_dma_sync_single);
-EXPORT_SYMBOL(sbus_dma_sync_sg);
+EXPORT_SYMBOL(sbus_dma_sync_single_for_cpu);
+EXPORT_SYMBOL(sbus_dma_sync_single_for_device);
+EXPORT_SYMBOL(sbus_dma_sync_sg_for_cpu);
+EXPORT_SYMBOL(sbus_dma_sync_sg_for_device);
 #endif
 EXPORT_SYMBOL(outsb);
 EXPORT_SYMBOL(outsw);
@@ -238,8 +247,8 @@ EXPORT_SYMBOL(pci_map_single);
 EXPORT_SYMBOL(pci_unmap_single);
 EXPORT_SYMBOL(pci_map_sg);
 EXPORT_SYMBOL(pci_unmap_sg);
-EXPORT_SYMBOL(pci_dma_sync_single);
-EXPORT_SYMBOL(pci_dma_sync_sg);
+EXPORT_SYMBOL(pci_dma_sync_single_for_cpu);
+EXPORT_SYMBOL(pci_dma_sync_sg_for_cpu);
 EXPORT_SYMBOL(pci_dma_supported);
 #endif
 
@@ -252,7 +261,7 @@ EXPORT_SYMBOL(verify_compat_iovec);
 
 EXPORT_SYMBOL(dump_thread);
 EXPORT_SYMBOL(dump_fpu);
-EXPORT_SYMBOL(pte_alloc_one_kernel);
+EXPORT_SYMBOL(__pte_alloc_one_kernel);
 #ifndef CONFIG_SMP
 EXPORT_SYMBOL(pgt_quicklists);
 #endif
@@ -288,7 +297,6 @@ EXPORT_SYMBOL(__prom_getchild);
 EXPORT_SYMBOL(__prom_getsibling);
 
 /* sparc library symbols */
-EXPORT_SYMBOL(__strlen);
 EXPORT_SYMBOL(strlen);
 EXPORT_SYMBOL(strnlen);
 EXPORT_SYMBOL(__strlen_user);
@@ -321,14 +329,12 @@ EXPORT_SYMBOL(sys_getegid);
 EXPORT_SYMBOL(sys_getgid);
 EXPORT_SYMBOL(svr4_getcontext);
 EXPORT_SYMBOL(svr4_setcontext);
-EXPORT_SYMBOL(sys_ioctl);
 EXPORT_SYMBOL(compat_sys_ioctl);
 EXPORT_SYMBOL(sparc32_open);
+EXPORT_SYMBOL(sys_close);
 #endif
 
 /* Special internal versions of library functions. */
-EXPORT_SYMBOL(__memcpy);
-EXPORT_SYMBOL(__memset);
 EXPORT_SYMBOL(_clear_page);
 EXPORT_SYMBOL(clear_user_page);
 EXPORT_SYMBOL(copy_user_page);
@@ -336,17 +342,20 @@ EXPORT_SYMBOL(__bzero);
 EXPORT_SYMBOL(__memscan_zero);
 EXPORT_SYMBOL(__memscan_generic);
 EXPORT_SYMBOL(__memcmp);
-EXPORT_SYMBOL(__strncmp);
-EXPORT_SYMBOL(__memmove);
+EXPORT_SYMBOL(__memset);
 EXPORT_SYMBOL(memchr);
 
 EXPORT_SYMBOL(csum_partial);
 EXPORT_SYMBOL(csum_partial_copy_sparc64);
 EXPORT_SYMBOL(ip_fast_csum);
 
-/* Moving data to/from userspace. */
-EXPORT_SYMBOL(__copy_to_user);
-EXPORT_SYMBOL(__copy_from_user);
+/* Moving data to/from/in userspace. */
+EXPORT_SYMBOL(___copy_to_user);
+EXPORT_SYMBOL(___copy_from_user);
+EXPORT_SYMBOL(___copy_in_user);
+EXPORT_SYMBOL(copy_to_user_fixup);
+EXPORT_SYMBOL(copy_from_user_fixup);
+EXPORT_SYMBOL(copy_in_user_fixup);
 EXPORT_SYMBOL(__strncpy_from_user);
 EXPORT_SYMBOL(__bzero_noasi);
 
@@ -354,21 +363,30 @@ EXPORT_SYMBOL(__bzero_noasi);
 EXPORT_SYMBOL(phys_base);
 EXPORT_SYMBOL(pfn_base);
 EXPORT_SYMBOL(sparc64_valid_addr_bitmap);
+EXPORT_SYMBOL(page_to_pfn);
+EXPORT_SYMBOL(pfn_to_page);
 
 /* No version information on this, heavily used in inline asm,
  * and will always be 'void __ret_efault(void)'.
  */
-EXPORT_SYMBOL_NOVERS(__ret_efault);
+EXPORT_SYMBOL(__ret_efault);
 
 /* No version information on these, as gcc produces such symbols. */
-EXPORT_SYMBOL_NOVERS(memcmp);
-EXPORT_SYMBOL_NOVERS(memcpy);
-EXPORT_SYMBOL_NOVERS(memset);
-EXPORT_SYMBOL_NOVERS(memmove);
+EXPORT_SYMBOL(memcmp);
+EXPORT_SYMBOL(memcpy);
+EXPORT_SYMBOL(memset);
+EXPORT_SYMBOL(memmove);
+EXPORT_SYMBOL(strncmp);
+
+/* Delay routines. */
+EXPORT_SYMBOL(__udelay);
+EXPORT_SYMBOL(__ndelay);
+EXPORT_SYMBOL(__const_udelay);
+EXPORT_SYMBOL(__delay);
 
 void VISenter(void);
 /* RAID code needs this */
-EXPORT_SYMBOL_NOVERS(VISenter);
+EXPORT_SYMBOL(VISenter);
 
 /* for input/keybdev */
 EXPORT_SYMBOL(sun_do_break);
@@ -391,3 +409,5 @@ EXPORT_SYMBOL(xor_vis_2);
 EXPORT_SYMBOL(xor_vis_3);
 EXPORT_SYMBOL(xor_vis_4);
 EXPORT_SYMBOL(xor_vis_5);
+
+EXPORT_SYMBOL(prom_palette);

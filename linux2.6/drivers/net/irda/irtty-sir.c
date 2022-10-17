@@ -39,10 +39,10 @@
 #include "sir-dev.h"
 #include "irtty-sir.h"
 
-MODULE_PARM(qos_mtt_bits, "i");
-MODULE_PARM_DESC(qos_mtt_bits, "Minimum Turn Time");
-
 static int qos_mtt_bits = 0x03;      /* 5 ms or more */
+
+module_param(qos_mtt_bits, int, 0);
+MODULE_PARM_DESC(qos_mtt_bits, "Minimum Turn Time");
 
 /* ------------------------------------------------------- */
 
@@ -93,12 +93,12 @@ static void irtty_wait_until_sent(struct sir_dev *dev)
 	tty = priv->tty;
 	if (tty->driver->wait_until_sent) {
 		lock_kernel();
-		tty->driver->wait_until_sent(tty, MSECS_TO_JIFFIES(100));
+		tty->driver->wait_until_sent(tty, msecs_to_jiffies(100));
 		unlock_kernel();
 	}
 	else {
 		set_task_state(current, TASK_UNINTERRUPTIBLE);
-		schedule_timeout(MSECS_TO_JIFFIES(USBSERIAL_TX_DONE_DELAY));
+		schedule_timeout(msecs_to_jiffies(USBSERIAL_TX_DONE_DELAY));
 	}
 }
 
@@ -234,7 +234,7 @@ static int irtty_do_write(struct sir_dev *dev, const unsigned char *ptr, size_t 
 	}
 	else
 		writelen = len;
-	return tty->driver->write(tty, 0, ptr, writelen);
+	return tty->driver->write(tty, ptr, writelen);
 }
 
 /* ------------------------------------------------------- */
@@ -353,7 +353,8 @@ static inline void irtty_stop_receiver(struct tty_struct *tty, int stop)
 
 /*****************************************************************/
 
-DECLARE_MUTEX(irtty_sem);		/* serialize ldisc open/close with sir_dev */
+/* serialize ldisc open/close with sir_dev */
+static DECLARE_MUTEX(irtty_sem);
 
 /* notifier from sir_dev when irda% device gets opened (ifup) */
 
@@ -437,7 +438,6 @@ static int irtty_ioctl(struct tty_struct *tty, struct file *file, unsigned int c
 	struct irtty_info { char name[6]; } info;
 	struct sir_dev *dev;
 	struct sirtty_cb *priv = tty->disc_data;
-	int size = _IOC_SIZE(cmd);
 	int err = 0;
 
 	ASSERT(priv != NULL, return -ENODEV;);
@@ -448,13 +448,6 @@ static int irtty_ioctl(struct tty_struct *tty, struct file *file, unsigned int c
 	dev = priv->dev;
 	ASSERT(dev != NULL, return -1;);
 
-	if (_IOC_DIR(cmd) & _IOC_READ)
-		err = verify_area(VERIFY_WRITE, (void *) arg, size);
-	else if (_IOC_DIR(cmd) & _IOC_WRITE)
-		err = verify_area(VERIFY_READ, (void *) arg, size);
-	if (err)
-		return err;
-	
 	switch (cmd) {
 	case TCGETS:
 	case TCGETA:
@@ -472,7 +465,7 @@ static int irtty_ioctl(struct tty_struct *tty, struct file *file, unsigned int c
 		memset(&info, 0, sizeof(info)); 
 		strncpy(info.name, dev->netdev->name, sizeof(info.name)-1);
 
-		if (copy_to_user((void *)arg, &info, sizeof(info)))
+		if (copy_to_user((void __user *)arg, &info, sizeof(info)))
 			err = -EFAULT;
 		break;
 	default:
@@ -516,13 +509,6 @@ static int irtty_open(struct tty_struct *tty)
 	if (tty->driver->flush_buffer)
 		tty->driver->flush_buffer(tty);
 	
-/* from old irtty - but what is it good for?
- * we _are_ the ldisc and we _don't_ implement flush_buffer!
- *
- *	if (tty->ldisc.flush_buffer)
- *		tty->ldisc.flush_buffer(tty);
- */
-
 	/* apply mtt override */
 	sir_tty_drv.qos_mtt_bits = qos_mtt_bits;
 
@@ -591,7 +577,7 @@ static void irtty_close(struct tty_struct *tty)
 	 */
 
 	/* we are dead now */
-	tty->disc_data = 0;
+	tty->disc_data = NULL;
 
 	sirdev_put_instance(priv->dev);
 

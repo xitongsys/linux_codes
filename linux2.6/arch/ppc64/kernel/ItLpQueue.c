@@ -25,7 +25,7 @@ static __inline__ int set_inUse( struct ItLpQueue * lpQueue )
 
 	__asm__ __volatile__("\n\
 1:	lwarx	%0,0,%2		\n\
-	cmpi	0,%0,0		\n\
+	cmpwi	0,%0,0		\n\
 	li	%0,0		\n\
 	bne-	2f		\n\
 	addi	%0,%0,1		\n\
@@ -147,24 +147,21 @@ unsigned ItLpQueue_process( struct ItLpQueue * lpQueue, struct pt_regs *regs )
 				printk(KERN_INFO "Unexpected Lp Event type=%d\n", nextLpEvent->xType );
 			
 			ItLpQueue_clearValid( nextLpEvent );
-		}
-		else 	/* No more valid events
-			 * If overflow events are pending
-			 * process them
+		} else if ( lpQueue->xPlicOverflowIntPending )
+			/*
+			 * No more valid events. If overflow events are
+			 * pending process them
 			 */
-			if ( lpQueue->xPlicOverflowIntPending ) {
-				HvCallEvent_getOverflowLpEvents( 
-						lpQueue->xIndex);
-			}
-			else	/* If nothing left then we are done */
-				break;
+			HvCallEvent_getOverflowLpEvents( lpQueue->xIndex);
+		else
+			break;
 	}
 
 	ItLpQueueInProcess = 0;
 	mb();
 	clear_inUse( lpQueue );
 
-	get_paca()->lpEvent_count += numIntsProcessed;
+	get_paca()->lpevent_count += numIntsProcessed;
 
 	return numIntsProcessed;
 }

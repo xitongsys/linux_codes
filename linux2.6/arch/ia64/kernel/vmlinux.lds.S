@@ -12,6 +12,11 @@ OUTPUT_FORMAT("elf64-ia64-little")
 OUTPUT_ARCH(ia64)
 ENTRY(phys_start)
 jiffies = jiffies_64;
+PHDRS {
+  code   PT_LOAD;
+  percpu PT_LOAD;
+  data   PT_LOAD;
+}
 SECTIONS
 {
   /* Sections to be discarded */
@@ -26,6 +31,7 @@ SECTIONS
   v = PAGE_OFFSET;	/* this symbol is here to make debugging easier... */
   phys_start = _start - LOAD_OFFSET;
 
+  code : { } :code
   . = KERNEL_START;
 
   _text = .;
@@ -35,6 +41,8 @@ SECTIONS
     {
 	*(.text.ivt)
 	*(.text)
+	SCHED_TEXT
+	LOCK_TEXT
 	*(.gnu.linkonce.t*)
     }
   .text2 : AT(ADDR(.text2) - LOAD_OFFSET)
@@ -128,12 +136,6 @@ SECTIONS
 	  *(.init.setup)
 	  __setup_end = .;
 	}
-  __param : AT(ADDR(__param) - LOAD_OFFSET)
-        {
-	  __start___param = .;
-	  *(__param)
-	  __stop___param = .;
-	}
   .initcall.init : AT(ADDR(.initcall.init) - LOAD_OFFSET)
 	{
 	  __initcall_start = .;
@@ -151,7 +153,7 @@ SECTIONS
 	{ *(.con_initcall.init) }
   __con_initcall_end = .;
   __security_initcall_start = .;
-  .security_initcall.init : AT(ADDR(.security_initcall.init) - PAGE_OFFSET)
+  .security_initcall.init : AT(ADDR(.security_initcall.init) - LOAD_OFFSET)
 	{ *(.security_initcall.init) }
   __security_initcall_end = .;
   . = ALIGN(PAGE_SIZE);
@@ -173,6 +175,7 @@ SECTIONS
         { *(.data.cacheline_aligned) }
 
   /* Per-cpu data: */
+  percpu : { } :percpu
   . = ALIGN(PERCPU_PAGE_SIZE);
   __phys_per_cpu_start = .;
   .data.percpu PERCPU_ADDR : AT(__phys_per_cpu_start - LOAD_OFFSET)
@@ -183,14 +186,14 @@ SECTIONS
 	}
   . = __phys_per_cpu_start + PERCPU_PAGE_SIZE;	/* ensure percpu data fits into percpu page size */
 
+  data : { } :data
   .data : AT(ADDR(.data) - LOAD_OFFSET)
 	{ *(.data) *(.data1) *(.gnu.linkonce.d*) CONSTRUCTORS }
 
-  . = ALIGN(16);
-  __gp = . + 0x200000;	/* gp must be 16-byte aligned for exc. table */
-
+  . = ALIGN(16);	/* gp must be 16-byte aligned for exc. table */
   .got : AT(ADDR(.got) - LOAD_OFFSET)
 	{ *(.got.plt) *(.got) }
+  __gp = ADDR(.got) + 0x200000;
   /* We want the small data sections together, so single-instruction offsets
      can access them all, and initialized data all before uninitialized, so
      we can shorten the on-disk segment size.  */
@@ -205,6 +208,7 @@ SECTIONS
 
   _end = .;
 
+  code : { } :code
   /* Stabs debugging sections.  */
   .stab 0 : { *(.stab) }
   .stabstr 0 : { *(.stabstr) }

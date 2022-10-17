@@ -281,7 +281,31 @@
 #define __NR_remap_file_pages		(__NR_SYSCALL_BASE+253)
 					/* 254 for set_thread_area */
 					/* 255 for get_thread_area */
-					/* 256 for set_tid_address */
+#define __NR_set_tid_address		(__NR_SYSCALL_BASE+256)
+#define __NR_timer_create		(__NR_SYSCALL_BASE+257)
+#define __NR_timer_settime		(__NR_SYSCALL_BASE+258)
+#define __NR_timer_gettime		(__NR_SYSCALL_BASE+259)
+#define __NR_timer_getoverrun		(__NR_SYSCALL_BASE+260)
+#define __NR_timer_delete		(__NR_SYSCALL_BASE+261)
+#define __NR_clock_settime		(__NR_SYSCALL_BASE+262)
+#define __NR_clock_gettime		(__NR_SYSCALL_BASE+263)
+#define __NR_clock_getres		(__NR_SYSCALL_BASE+264)
+#define __NR_clock_nanosleep		(__NR_SYSCALL_BASE+265)
+#define __NR_statfs64			(__NR_SYSCALL_BASE+266)
+#define __NR_fstatfs64			(__NR_SYSCALL_BASE+267)
+#define __NR_tgkill			(__NR_SYSCALL_BASE+268)
+#define __NR_utimes			(__NR_SYSCALL_BASE+269)
+#define __NR_fadvise64_64		(__NR_SYSCALL_BASE+270)
+#define __NR_pciconfig_iobase		(__NR_SYSCALL_BASE+271)
+#define __NR_pciconfig_read		(__NR_SYSCALL_BASE+272)
+#define __NR_pciconfig_write		(__NR_SYSCALL_BASE+273)
+#define __NR_mq_open			(__NR_SYSCALL_BASE+274)
+#define __NR_mq_unlink			(__NR_SYSCALL_BASE+275)
+#define __NR_mq_timedsend		(__NR_SYSCALL_BASE+276)
+#define __NR_mq_timedreceive		(__NR_SYSCALL_BASE+277)
+#define __NR_mq_notify			(__NR_SYSCALL_BASE+278)
+#define __NR_mq_getsetattr		(__NR_SYSCALL_BASE+279)
+#define __NR_waitid			(__NR_SYSCALL_BASE+280)
 
 /*
  * The following SWIs are ARM private.
@@ -291,6 +315,8 @@
 #define __ARM_NR_cacheflush		(__ARM_NR_BASE+2)
 #define __ARM_NR_usr26			(__ARM_NR_BASE+3)
 #define __ARM_NR_usr32			(__ARM_NR_BASE+4)
+
+#define __ARM_NR_set_tls		(__ARM_NR_BASE+0x800)
 
 #define __sys2(x) #x
 #define __sys1(x) __sys2(x)
@@ -431,69 +457,49 @@ type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5, type6 arg6
   __syscall_return(type,__res);						\
 }
 
+#ifdef __KERNEL__
+#define __ARCH_WANT_IPC_PARSE_VERSION
+#define __ARCH_WANT_OLD_READDIR
+#define __ARCH_WANT_STAT64
+#define __ARCH_WANT_SYS_ALARM
+#define __ARCH_WANT_SYS_GETHOSTNAME
+#define __ARCH_WANT_SYS_PAUSE
+#define __ARCH_WANT_SYS_TIME
+#define __ARCH_WANT_SYS_UTIME
+#define __ARCH_WANT_SYS_SOCKETCALL
+#define __ARCH_WANT_SYS_FADVISE64
+#define __ARCH_WANT_SYS_GETPGRP
+#define __ARCH_WANT_SYS_LLSEEK
+#define __ARCH_WANT_SYS_NICE
+#define __ARCH_WANT_SYS_OLD_GETRLIMIT
+#define __ARCH_WANT_SYS_OLDUMOUNT
+#define __ARCH_WANT_SYS_SIGPENDING
+#define __ARCH_WANT_SYS_SIGPROCMASK
+#define __ARCH_WANT_SYS_RT_SIGACTION
+#endif
+
 #ifdef __KERNEL_SYSCALLS__
 
-struct rusage;
-asmlinkage long sys_wait4(pid_t pid,unsigned int * stat_addr, int options, struct rusage * ru);
+#include <linux/compiler.h>
+#include <linux/types.h>
+#include <linux/syscalls.h>
 
-static inline pid_t setsid(void)
-{
-	extern long sys_setsid(void);
-	return sys_setsid();
-}
+extern long execve(const char *file, char **argv, char **envp);
 
-static inline long write(int fd, const char *buf, off_t count)
-{
-	extern long sys_write(int, const char *, int);
-	return sys_write(fd, buf, count);
-}
-
-static inline long read(int fd, char *buf, off_t count)
-{
-	extern long sys_read(int, char *, int);
-	return sys_read(fd, buf, count);
-}
-
-static inline off_t lseek(int fd, off_t offset, int count)
-{
-	extern off_t sys_lseek(int, off_t, int);
-	return sys_lseek(fd, offset, count);
-}
-
-static inline long dup(int fd)
-{
-	extern long sys_dup(int);
-	return sys_dup(fd);
-}
-
-static inline long open(const char *file, int flag, int mode)
-{
-	extern long sys_open(const char *, int, int);
-	return sys_open(file, flag, mode);
-}
-
-static inline long close(int fd)
-{
-	extern long sys_close(unsigned int);
-	return sys_close(fd);
-}
-
-static inline long _exit(int exitcode)
-{
-	extern long sys_exit(int) __attribute__((noreturn));
-	return sys_exit(exitcode);
-}
-
-static inline pid_t waitpid(pid_t pid, int *wait_stat, int options)
-{
-	return sys_wait4((int)pid, wait_stat, options, NULL);
-}
-
-/*
- * The following two can't be eliminated yet - they rely on
- * specific conditions.
- */
-static inline _syscall3(int,execve,const char *,file,char **,argv,char **,envp);
+struct pt_regs;
+asmlinkage int sys_execve(char *filenamei, char **argv, char **envp,
+			struct pt_regs *regs);
+asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp,
+			struct pt_regs *regs);
+asmlinkage int sys_fork(struct pt_regs *regs);
+asmlinkage int sys_vfork(struct pt_regs *regs);
+asmlinkage int sys_pipe(unsigned long *fildes);
+asmlinkage int sys_ptrace(long request, long pid, long addr, long data);
+struct sigaction;
+asmlinkage long sys_rt_sigaction(int sig,
+				const struct sigaction __user *act,
+				struct sigaction __user *oact,
+				size_t sigsetsize);
 
 #endif
 

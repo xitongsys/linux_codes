@@ -26,7 +26,7 @@
 #include <media/saa7146_vv.h>
 
 static int debug = 0;
-MODULE_PARM(debug, "i");
+module_param(debug, int, 0);
 MODULE_PARM_DESC(debug, "debug verbosity");
 
 /* global variables */
@@ -78,7 +78,8 @@ static struct v4l2_queryctrl hexium_controls[] = {
 struct hexium
 {
 	int type;
-	struct video_device	video_dev;
+
+	struct video_device	*video_dev;
 	struct i2c_adapter	i2c_adapter;
 		
 	int 		cur_input;	/* current input */
@@ -159,18 +160,18 @@ static struct hexium_data hexium_input_select[] = {
 static struct saa7146_standard hexium_standards[] = {
 	{
 		.name	= "PAL", 	.id	= V4L2_STD_PAL,
-		.v_offset	= 28,	.v_field 	= 288,	.v_calc		= 576,
-		.h_offset	= 1,	.h_pixels 	= 680,	.h_calc		= 680+1,
+		.v_offset	= 28,	.v_field 	= 288,
+		.h_offset	= 1,	.h_pixels 	= 680,
 		.v_max_out	= 576,	.h_max_out	= 768,
 	}, {
 		.name	= "NTSC", 	.id	= V4L2_STD_NTSC,
-		.v_offset	= 28,	.v_field 	= 240,	.v_calc		= 480,
-		.h_offset	= 1,	.h_pixels 	= 640,	.h_calc		= 641+1,
+		.v_offset	= 28,	.v_field 	= 240,
+		.h_offset	= 1,	.h_pixels 	= 640,
 		.v_max_out	= 480,	.h_max_out	= 640,
 	}, {
 		.name	= "SECAM", 	.id	= V4L2_STD_SECAM,
-		.v_offset	= 28,	.v_field 	= 288,	.v_calc		= 576,
-		.h_offset	= 1,	.h_pixels 	= 720,	.h_calc		= 720+1,
+		.v_offset	= 28,	.v_field 	= 288,
+		.h_offset	= 1,	.h_pixels 	= 720,
 		.v_max_out	= 576,	.h_max_out	= 768,
 	}
 };		
@@ -245,11 +246,15 @@ static int hexium_attach(struct saa7146_dev *dev, struct saa7146_pci_extension_d
 		return -ENOMEM;
 	}
 	memset(hexium, 0x0, sizeof(struct hexium));
-	(struct hexium *) dev->ext_priv = hexium;
+	dev->ext_priv = hexium;
 
 	/* enable i2c-port pins */
 	saa7146_write(dev, MC1, (MASK_08 | MASK_24 | MASK_10 | MASK_26));
 
+	hexium->i2c_adapter = (struct i2c_adapter) {
+		.class = I2C_CLASS_TV_ANALOG,
+		.name = "hexium gemini",
+	};
 	saa7146_i2c_adapter_prepare(dev, &hexium->i2c_adapter, SAA7146_I2C_BUS_BIT_RATE_480);
 	if (i2c_add_adapter(&hexium->i2c_adapter) < 0) {
 		DEB_S(("cannot register i2c-device. skipping.\n"));

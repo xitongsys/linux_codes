@@ -6,7 +6,7 @@
  *  (C) Copyright 2003 Red Hat Inc, All Rights Reserved
  *
  *  Removed page pinning, fix privately mapped COW pages and other cleanups
- *  (C) Copyright 2003 Jamie Lokier
+ *  (C) Copyright 2003, 2004 Jamie Lokier
  *
  *  Thanks to Ben LaHaise for yelling "hashed waitqueues" loudly
  *  enough at me, Linus for the original (flawed) idea, Matthew
@@ -38,6 +38,7 @@
 #include <linux/futex.h>
 #include <linux/mount.h>
 #include <linux/pagemap.h>
+#include <linux/syscalls.h>
 
 #define FUTEX_HASHBITS 8
 
@@ -96,6 +97,7 @@ struct futex_q {
  */
 struct futex_hash_bucket {
        spinlock_t              lock;
+       unsigned int	    nqueued;
        struct list_head       chain;
 };
 
@@ -246,7 +248,7 @@ static inline void get_key_refs(union futex_key *key)
  * Drop a reference to the resource addressed by a key.
  * The hash bucket spinlock must not be held.
  */
-static inline void drop_key_refs(union futex_key *key)
+static void drop_key_refs(union futex_key *key)
 {
 	if (key->both.ptr != 0) {
 		if (key->both.offset & 1)
@@ -256,11 +258,23 @@ static inline void drop_key_refs(union futex_key *key)
 	}
 }
 
+static inline int get_futex_value_locked(int *dest, int __user *from)
+{
+	int ret;
+
+	inc_preempt_count();
+	ret = __copy_from_user_inatomic(dest, from, sizeof(int));
+	dec_preempt_count();
+	preempt_check_resched();
+
+	return ret ? -EFAULT : 0;
+}
+
 /*
  * The hash bucket lock must be held when this is called.
  * Afterwards, the futex_q must not be accessed.
  */
-static inline void wake_futex(struct futex_q *q)
+static void wake_futex(struct futex_q *q)
 {
 	list_del_init(&q->list);
 	if (q->filp)
@@ -274,7 +288,7 @@ static inline void wake_futex(struct futex_q *q)
 	 * The waiting task can free the futex_q as soon as this is written,
 	 * without taking any locks.  This must come last.
 	 */
-	q->lock_ptr = 0;
+	q->lock_ptr = NULL;
 }
 
 /*
@@ -318,14 +332,16 @@ out:
  * physical page.
  */
 static int futex_requeue(unsigned long uaddr1, unsigned long uaddr2,
-				int nr_wake, int nr_requeue)
+			 int nr_wake, int nr_requeue, int *valp)
 {
 	union futex_key key1, key2;
 	struct futex_hash_bucket *bh1, *bh2;
 	struct list_head *head1;
 	struct futex_q *this, *next;
 	int ret, drop_count = 0;
+	unsigned int nqueued;
 
+ retry:
 	down_read(&current->mm->mmap_sem);
 
 	ret = get_futex_key(uaddr1, &key1);
@@ -338,11 +354,51 @@ static int futex_requeue(unsigned long uaddr1, unsigned long uaddr2,
 	bh1 = hash_futex(&key1);
 	bh2 = hash_futex(&key2);
 
+	nqueued = bh1->nqueued;
+	if (likely(valp != NULL)) {
+		int curval;
+
+		/* In order to avoid doing get_user while
+		   holding bh1->lock and bh2->lock, nqueued
+		   (monotonically increasing field) must be first
+		   read, then *uaddr1 fetched from userland and
+		   after acquiring lock nqueued field compared with
+		   the stored value.  The smp_mb () below
+		   makes sure that bh1->nqueued is read from memory
+		   before *uaddr1.  */
+		smp_mb();
+
+		ret = get_futex_value_locked(&curval, (int __user *)uaddr1);
+
+		if (unlikely(ret)) {
+			/* If we would have faulted, release mmap_sem, fault
+			 * it in and start all over again.
+			 */
+			up_read(&current->mm->mmap_sem);
+
+			ret = get_user(curval, (int __user *)uaddr1);
+
+			if (!ret)
+				goto retry;
+
+			return ret;
+		}
+		if (curval != *valp) {
+			ret = -EAGAIN;
+			goto out;
+		}
+	}
+
 	if (bh1 < bh2)
 		spin_lock(&bh1->lock);
 	spin_lock(&bh2->lock);
 	if (bh1 > bh2)
 		spin_lock(&bh1->lock);
+
+	if (unlikely(nqueued != bh1->nqueued && valp != NULL)) {
+		ret = -EAGAIN;
+		goto out_unlock;
+	}
 
 	head1 = &bh1->chain;
 	list_for_each_entry_safe(this, next, head1, list) {
@@ -365,6 +421,7 @@ static int futex_requeue(unsigned long uaddr1, unsigned long uaddr2,
 		}
 	}
 
+out_unlock:
 	spin_unlock(&bh1->lock);
 	if (bh1 != bh2)
 		spin_unlock(&bh2->lock);
@@ -384,7 +441,7 @@ out:
  */
 
 /* The key must be already stored in q->key. */
-static inline void queue_me(struct futex_q *q, int fd, struct file *filp)
+static void queue_me(struct futex_q *q, int fd, struct file *filp)
 {
 	struct futex_hash_bucket *bh;
 
@@ -398,6 +455,7 @@ static inline void queue_me(struct futex_q *q, int fd, struct file *filp)
 	q->lock_ptr = &bh->lock;
 
 	spin_lock(&bh->lock);
+	bh->nqueued++;
 	list_add_tail(&q->list, &bh->chain);
 	spin_unlock(&bh->lock);
 }
@@ -430,11 +488,10 @@ static int unqueue_me(struct futex_q *q)
 			spin_unlock(lock_ptr);
 			goto retry;
 		}
-		if (likely(!list_empty(&q->list))) {
-			list_del(&q->list);
-			ret = 1;
-		}
+		WARN_ON(list_empty(&q->list));
+		list_del(&q->list);
 		spin_unlock(lock_ptr);
+		ret = 1;
 	}
 
 	drop_key_refs(&q->key);
@@ -447,6 +504,7 @@ static int futex_wait(unsigned long uaddr, int val, unsigned long time)
 	int ret, curval;
 	struct futex_q q;
 
+ retry:
 	down_read(&current->mm->mmap_sem);
 
 	ret = get_futex_key(uaddr, &q.key);
@@ -456,13 +514,42 @@ static int futex_wait(unsigned long uaddr, int val, unsigned long time)
 	queue_me(&q, -1, NULL);
 
 	/*
-	 * Access the page after the futex is queued.
+	 * Access the page AFTER the futex is queued.
+	 * Order is important:
+	 *
+	 *   Userspace waiter: val = var; if (cond(val)) futex_wait(&var, val);
+	 *   Userspace waker:  if (cond(var)) { var = new; futex_wake(&var); }
+	 *
+	 * The basic logical guarantee of a futex is that it blocks ONLY
+	 * if cond(var) is known to be true at the time of blocking, for
+	 * any cond.  If we queued after testing *uaddr, that would open
+	 * a race condition where we could block indefinitely with
+	 * cond(var) false, which would violate the guarantee.
+	 *
+	 * A consequence is that futex_wait() can return zero and absorb
+	 * a wakeup when *uaddr != val on entry to the syscall.  This is
+	 * rare, but normal.
+	 *
 	 * We hold the mmap semaphore, so the mapping cannot have changed
-	 * since we looked it up.
+	 * since we looked it up in get_futex_key.
 	 */
-	if (get_user(curval, (int *)uaddr) != 0) {
-		ret = -EFAULT;
-		goto out_unqueue;
+
+	ret = get_futex_value_locked(&curval, (int __user *)uaddr);
+
+	if (unlikely(ret)) {
+		/* If we would have faulted, release mmap_sem, fault it in and
+		 * start all over again.
+		 */
+		up_read(&current->mm->mmap_sem);
+
+		if (!unqueue_me(&q)) /* There's a chance we got woken already */
+			return 0;
+
+		ret = get_user(curval, (int __user *)uaddr);
+
+		if (!ret)
+			goto retry;
+		return ret;
 	}
 	if (curval != val) {
 		ret = -EWOULDBLOCK;
@@ -505,8 +592,8 @@ static int futex_wait(unsigned long uaddr, int val, unsigned long time)
 		return 0;
 	if (time == 0)
 		return -ETIMEDOUT;
-	/* A spurious wakeup should never happen. */
-	WARN_ON(!signal_pending(current));
+	/* We expect signal_pending(current), but another thread may
+	 * have handled it for us already. */
 	return -EINTR;
 
  out_unqueue:
@@ -577,6 +664,7 @@ static int futex_fd(unsigned long uaddr, int signal)
 	filp->f_op = &futex_fops;
 	filp->f_vfsmnt = mntget(futex_mnt);
 	filp->f_dentry = dget(futex_mnt->mnt_root);
+	filp->f_mapping = filp->f_dentry->d_inode->i_mapping;
 
 	if (signal) {
 		int err;
@@ -625,7 +713,7 @@ out:
 }
 
 long do_futex(unsigned long uaddr, int op, int val, unsigned long timeout,
-		unsigned long uaddr2, int val2)
+		unsigned long uaddr2, int val2, int val3)
 {
 	int ret;
 
@@ -641,7 +729,10 @@ long do_futex(unsigned long uaddr, int op, int val, unsigned long timeout,
 		ret = futex_fd(uaddr, val);
 		break;
 	case FUTEX_REQUEUE:
-		ret = futex_requeue(uaddr, uaddr2, val, val2);
+		ret = futex_requeue(uaddr, uaddr2, val, val2, NULL);
+		break;
+	case FUTEX_CMP_REQUEUE:
+		ret = futex_requeue(uaddr, uaddr2, val, val2, &val3);
 		break;
 	default:
 		ret = -ENOSYS;
@@ -651,7 +742,8 @@ long do_futex(unsigned long uaddr, int op, int val, unsigned long timeout,
 
 
 asmlinkage long sys_futex(u32 __user *uaddr, int op, int val,
-			  struct timespec __user *utime, u32 __user *uaddr2)
+			  struct timespec __user *utime, u32 __user *uaddr2,
+			  int val3)
 {
 	struct timespec t;
 	unsigned long timeout = MAX_SCHEDULE_TIMEOUT;
@@ -665,11 +757,11 @@ asmlinkage long sys_futex(u32 __user *uaddr, int op, int val,
 	/*
 	 * requeue parameter in 'utime' if op == FUTEX_REQUEUE.
 	 */
-	if (op == FUTEX_REQUEUE)
-		val2 = (int) (long) utime;
+	if (op >= FUTEX_REQUEUE)
+		val2 = (int) (unsigned long) utime;
 
 	return do_futex((unsigned long)uaddr, op, val, timeout,
-			(unsigned long)uaddr2, val2);
+			(unsigned long)uaddr2, val2, val3);
 }
 
 static struct super_block *
@@ -694,7 +786,7 @@ static int __init init(void)
 
 	for (i = 0; i < ARRAY_SIZE(futex_queues); i++) {
 		INIT_LIST_HEAD(&futex_queues[i].chain);
-		futex_queues[i].lock = SPIN_LOCK_UNLOCKED;
+		spin_lock_init(&futex_queues[i].lock);
 	}
 	return 0;
 }

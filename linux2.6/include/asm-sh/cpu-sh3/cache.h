@@ -10,7 +10,7 @@
 #ifndef __ASM_CPU_SH3_CACHE_H
 #define __ASM_CPU_SH3_CACHE_H
 
-#define        L1_CACHE_BYTES  16
+#define L1_CACHE_SHIFT	4
 
 #define CCR		0xffffffec	/* Address of Cache Control Register */
 
@@ -25,6 +25,13 @@
 
 #define CCR_CACHE_ENABLE	CCR_CACHE_CE
 #define CCR_CACHE_INVALIDATE	CCR_CACHE_CF
+
+#if defined(CONFIG_CPU_SUBTYPE_SH7705)
+#define CCR3	0xa40000b4
+#define CCR_CACHE_16KB  0x00010000
+#define CCR_CACHE_32KB	0x00020000
+#endif
+
 
 #endif /* __ASM_CPU_SH3_CACHE_H */
 

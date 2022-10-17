@@ -193,7 +193,7 @@ static int bpq_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_ty
 
 	bpq = (struct bpqdev *)dev->priv;
 
-	eth = (struct ethhdr *)skb->mac.raw;
+	eth = eth_hdr(skb);
 
 	if (!(bpq->acpt_addr[0] & 0x01) &&
 	    memcmp(eth->h_source, bpq->acpt_addr, ETH_ALEN))
@@ -331,7 +331,7 @@ static int bpq_set_mac_address(struct net_device *dev, void *addr)
  */
 static int bpq_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
-	struct bpq_ethaddr *ethaddr = (struct bpq_ethaddr *)ifr->ifr_data;
+	struct bpq_ethaddr __user *ethaddr = ifr->ifr_data;
 	struct bpqdev *bpq = dev->priv;
 	struct bpq_req req;
 
@@ -547,7 +547,7 @@ static int bpq_new_device(struct net_device *edev)
 
  error:
 	dev_put(edev);
-	kfree(ndev);
+	free_netdev(ndev);
 	return err;
 	
 }
@@ -606,7 +606,13 @@ static int bpq_device_event(struct notifier_block *this,unsigned long event, voi
  */
 static int __init bpq_init_driver(void)
 {
-	struct net_device *dev;
+#ifdef CONFIG_PROC_FS
+	if (!proc_net_fops_create("bpqether", S_IRUGO, &bpq_info_fops)) {
+		printk(KERN_ERR
+			"bpq: cannot create /proc/net/bpqether entry.\n");
+		return -ENOENT;
+	}
+#endif  /* CONFIG_PROC_FS */
 
 	dev_add_pack(&bpq_packet_type);
 
@@ -614,25 +620,6 @@ static int __init bpq_init_driver(void)
 
 	printk(banner);
 
-#ifdef CONFIG_PROC_FS
-	if (!proc_net_fops_create("bpqether", S_IRUGO, &bpq_info_fops)) {
-		printk(KERN_ERR
-			"bpq: cannot create /proc/net/bpqether entry.\n");
-		unregister_netdevice_notifier(&bpq_dev_notifier);
-		dev_remove_pack(&bpq_packet_type);
-		return -ENOENT;
-	}
-#endif  /* CONFIG_PROC_FS */
-
-	rtnl_lock();
-	for (dev = dev_base; dev != NULL; dev = dev->next) {
-		if (dev_is_ethdev(dev) && bpq_new_device(dev)) {
-			printk(KERN_ERR
-			       "bpq: cannot setup dev for '%s'\n",
-			       dev->name);
-		}
-	}
-	rtnl_unlock();
 	return 0;
 }
 

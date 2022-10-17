@@ -43,9 +43,6 @@ static inline int cpu_to_node(int cpu)
 	return cpu_2_node[cpu];
 }
 
-/* Returns the number of the node containing MemBlk 'memblk' */
-#define memblk_to_node(memblk) (memblk)
-
 /* Returns the number of the node containing Node 'node'.  This architecture is flat, 
    so it is a pretty simple function! */
 #define parent_node(node) (node)
@@ -63,17 +60,33 @@ static inline int node_to_first_cpu(int node)
 	return first_cpu(mask);
 }
 
-/* Returns the number of the first MemBlk on Node 'node' */
-#define node_to_memblk(node) (node)
-
 /* Returns the number of the node containing PCI bus 'bus' */
 static inline cpumask_t pcibus_to_cpumask(int bus)
 {
 	return node_to_cpumask(mp_bus_id_to_node[bus]);
 }
 
-/* Cross-node load balancing interval. */
-#define NODE_BALANCE_RATE 100
+/* sched_domains SD_NODE_INIT for NUMAQ machines */
+#define SD_NODE_INIT (struct sched_domain) {		\
+	.span			= CPU_MASK_NONE,	\
+	.parent			= NULL,			\
+	.groups			= NULL,			\
+	.min_interval		= 8,			\
+	.max_interval		= 32,			\
+	.busy_factor		= 32,			\
+	.imbalance_pct		= 125,			\
+	.cache_hot_time		= (10*1000000),		\
+	.cache_nice_tries	= 1,			\
+	.per_cpu_gain		= 100,			\
+	.flags			= SD_LOAD_BALANCE	\
+				| SD_BALANCE_EXEC	\
+				| SD_BALANCE_NEWIDLE	\
+				| SD_WAKE_IDLE		\
+				| SD_WAKE_BALANCE,	\
+	.last_balance		= jiffies,		\
+	.balance_interval	= 1,			\
+	.nr_balance_failed	= 0,			\
+}
 
 #else /* !CONFIG_NUMA */
 /*

@@ -20,18 +20,12 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
-#include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/errno.h>
 #include <linux/skbuff.h>
 #include <linux/in.h>
 #include <linux/ip.h>
-#include <linux/init.h>
 #include <net/protocol.h>
-#include <net/tcp.h>
-#include <net/udp.h>
 #include <asm/system.h>
 #include <linux/stat.h>
 #include <linux/proc_fs.h>
@@ -71,7 +65,7 @@ static inline void ip_vs_app_put(struct ip_vs_app *app)
 /*
  *	Allocate/initialize app incarnation and register it in proto apps.
  */
-int
+static int
 ip_vs_app_inc_new(struct ip_vs_app *app, __u16 proto, __u16 port)
 {
 	struct ip_vs_protocol *pp;

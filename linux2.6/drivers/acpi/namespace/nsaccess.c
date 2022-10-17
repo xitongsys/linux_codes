@@ -5,7 +5,7 @@
  ******************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -105,8 +105,15 @@ acpi_ns_root_initialize (void)
 		"Entering predefined entries into namespace\n"));
 
 	for (init_val = acpi_gbl_pre_defined_names; init_val->name; init_val++) {
+		/* _OSI is optional for now, will be permanent later */
+
+		if (!ACPI_STRCMP (init_val->name, "_OSI") && !acpi_gbl_create_osi_method) {
+			continue;
+		}
+
 		status = acpi_ns_lookup (NULL, init_val->name, init_val->type,
-				  ACPI_IMODE_LOAD_PASS2, ACPI_NS_NO_UPSEARCH, NULL, &new_node);
+				  ACPI_IMODE_LOAD_PASS2, ACPI_NS_NO_UPSEARCH,
+				  NULL, &new_node);
 
 		if (ACPI_FAILURE (status) || (!new_node)) /* Must be on same line for code converter */ {
 			ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
@@ -122,7 +129,8 @@ acpi_ns_root_initialize (void)
 		if (init_val->val) {
 			status = acpi_os_predefined_override (init_val, &val);
 			if (ACPI_FAILURE (status)) {
-				ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "Could not override predefined %s\n",
+				ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
+					"Could not override predefined %s\n",
 					init_val->name));
 			}
 
@@ -147,22 +155,27 @@ acpi_ns_root_initialize (void)
 			 */
 			switch (init_val->type) {
 			case ACPI_TYPE_METHOD:
-				obj_desc->method.param_count =
-						(u8) ACPI_STRTOUL (val, NULL, 10);
+				obj_desc->method.param_count = (u8) ACPI_TO_INTEGER (val);
 				obj_desc->common.flags |= AOPOBJ_DATA_VALID;
 
-#if defined (ACPI_NO_METHOD_EXECUTION) || defined (ACPI_CONSTANT_EVAL_ONLY)
+#if defined (_ACPI_ASL_COMPILER) || defined (_ACPI_DUMP_App)
 
-				/* Compiler cheats by putting parameter count in the owner_iD */
-
+				/*
+				 * i_aSL Compiler cheats by putting parameter count
+				 * in the owner_iD
+				 */
 				new_node->owner_id = obj_desc->method.param_count;
+#else
+				/* Mark this as a very SPECIAL method */
+
+				obj_desc->method.method_flags = AML_METHOD_INTERNAL_ONLY;
+				obj_desc->method.implementation = acpi_ut_osi_implementation;
 #endif
 				break;
 
 			case ACPI_TYPE_INTEGER:
 
-				obj_desc->integer.value =
-						(acpi_integer) ACPI_STRTOUL (val, NULL, 10);
+				obj_desc->integer.value = ACPI_TO_INTEGER (val);
 				break;
 
 
@@ -180,8 +193,7 @@ acpi_ns_root_initialize (void)
 			case ACPI_TYPE_MUTEX:
 
 				obj_desc->mutex.node = new_node;
-				obj_desc->mutex.sync_level =
-						 (u16) ACPI_STRTOUL (val, NULL, 10);
+				obj_desc->mutex.sync_level = (u8) (ACPI_TO_INTEGER (val) - 1);
 
 				if (ACPI_STRCMP (init_val->name, "_GL_") == 0) {
 					/*
@@ -191,6 +203,7 @@ acpi_ns_root_initialize (void)
 					status = acpi_os_create_semaphore (ACPI_NO_UNIT_LIMIT,
 							 1, &obj_desc->mutex.semaphore);
 					if (ACPI_FAILURE (status)) {
+						acpi_ut_remove_reference (obj_desc);
 						goto unlock_and_exit;
 					}
 
@@ -206,6 +219,7 @@ acpi_ns_root_initialize (void)
 					status = acpi_os_create_semaphore (1, 1,
 							   &obj_desc->mutex.semaphore);
 					if (ACPI_FAILURE (status)) {
+						acpi_ut_remove_reference (obj_desc);
 						goto unlock_and_exit;
 					}
 				}
@@ -213,6 +227,7 @@ acpi_ns_root_initialize (void)
 
 
 			default:
+
 				ACPI_REPORT_ERROR (("Unsupported initial type value %X\n",
 					init_val->type));
 				acpi_ut_remove_reference (obj_desc);
@@ -222,7 +237,8 @@ acpi_ns_root_initialize (void)
 
 			/* Store pointer to value descriptor in the Node */
 
-			status = acpi_ns_attach_object (new_node, obj_desc, ACPI_GET_OBJECT_TYPE (obj_desc));
+			status = acpi_ns_attach_object (new_node, obj_desc,
+					 ACPI_GET_OBJECT_TYPE (obj_desc));
 
 			/* Remove local reference to the object */
 
@@ -233,6 +249,14 @@ acpi_ns_root_initialize (void)
 
 unlock_and_exit:
 	(void) acpi_ut_release_mutex (ACPI_MTX_NAMESPACE);
+
+	/* Save a handle to "_GPE", it is always present */
+
+	if (ACPI_SUCCESS (status)) {
+		status = acpi_ns_get_node_by_path ("\\_GPE", NULL, ACPI_NS_NO_UPSEARCH,
+				  &acpi_gbl_fadt_gpe_device);
+	}
+
 	return_ACPI_STATUS (status);
 }
 
@@ -314,8 +338,8 @@ acpi_ns_lookup (
 	else {
 		prefix_node = scope_info->scope.node;
 		if (ACPI_GET_DESCRIPTOR_TYPE (prefix_node) != ACPI_DESC_TYPE_NAMED) {
-			ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "[%p] Not a namespace node\n",
-				prefix_node));
+			ACPI_REPORT_ERROR (("ns_lookup: %p is not a namespace node [%s]\n",
+					prefix_node, acpi_ut_get_descriptor_name (prefix_node)));
 			return_ACPI_STATUS (AE_AML_INTERNAL);
 		}
 
@@ -379,7 +403,7 @@ acpi_ns_lookup (
 
 			ACPI_DEBUG_PRINT ((ACPI_DB_NAMES,
 				"Searching relative to prefix scope [%4.4s] (%p)\n",
-				prefix_node->name.ascii, prefix_node));
+				acpi_ut_get_node_name (prefix_node), prefix_node));
 
 			/*
 			 * Handle multiple Parent Prefixes (carat) by just getting
@@ -413,7 +437,7 @@ acpi_ns_lookup (
 			if (search_parent_flag == ACPI_NS_NO_UPSEARCH) {
 				ACPI_DEBUG_PRINT ((ACPI_DB_NAMES,
 					"Search scope is [%4.4s], path has %d carat(s)\n",
-					this_node->name.ascii, num_carats));
+					acpi_ut_get_node_name (this_node), num_carats));
 			}
 		}
 
@@ -440,7 +464,8 @@ acpi_ns_lookup (
 			type = this_node->type;
 
 			ACPI_DEBUG_PRINT ((ACPI_DB_NAMES,
-				"Prefix-only Pathname (Zero name segments), Flags=%X\n", flags));
+				"Prefix-only Pathname (Zero name segments), Flags=%X\n",
+				flags));
 			break;
 
 		case AML_DUAL_NAME_PREFIX:
@@ -532,7 +557,7 @@ acpi_ns_lookup (
 		/* Try to find the single (4 character) ACPI name */
 
 		status = acpi_ns_search_and_enter (simple_name, walk_state, current_node,
-				  interpreter_mode, this_search_type, local_flags, &this_node);
+				 interpreter_mode, this_search_type, local_flags, &this_node);
 		if (ACPI_FAILURE (status)) {
 			if (status == AE_NOT_FOUND) {
 				/* Name not found in ACPI namespace */
@@ -563,6 +588,7 @@ acpi_ns_lookup (
 		if ((num_segments       == 0)                               &&
 			(type_to_check_for  != ACPI_TYPE_ANY)                   &&
 			(type_to_check_for  != ACPI_TYPE_LOCAL_ALIAS)           &&
+			(type_to_check_for  != ACPI_TYPE_LOCAL_METHOD_ALIAS)    &&
 			(type_to_check_for  != ACPI_TYPE_LOCAL_SCOPE)           &&
 			(this_node->type    != ACPI_TYPE_ANY)                   &&
 			(this_node->type    != type_to_check_for)) {

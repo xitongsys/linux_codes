@@ -16,9 +16,8 @@
  * Copyright (C) 2000, 2001 Kanoj Sarcar
  * Copyright (C) 2000, 2001 Ralf Baechle
  * Copyright (C) 2000, 2001 Silicon Graphics, Inc.
- * Copyright (C) 2000, 2001 Broadcom Corporation
+ * Copyright (C) 2000, 2001, 2003 Broadcom Corporation
  */
-#include <linux/config.h>
 #include <linux/cache.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -29,54 +28,28 @@
 #include <linux/time.h>
 #include <linux/timex.h>
 #include <linux/sched.h>
+#include <linux/cpumask.h>
 
 #include <asm/atomic.h>
 #include <asm/cpu.h>
 #include <asm/processor.h>
 #include <asm/system.h>
-#include <asm/hardirq.h>
 #include <asm/mmu_context.h>
 #include <asm/smp.h>
 
-int smp_threads_ready;	/* Not used */
-
-// static atomic_t cpus_booted = ATOMIC_INIT(0);
-atomic_t cpus_booted = ATOMIC_INIT(0);
-
-cpumask_t phys_cpu_present_map;		/* Bitmask of physically CPUs */
+cpumask_t phys_cpu_present_map;		/* Bitmask of available CPUs */
+volatile cpumask_t cpu_callin_map;	/* Bitmask of started secondaries */
 cpumask_t cpu_online_map;		/* Bitmask of currently online CPUs */
-int __cpu_number_map[NR_CPUS];
-int __cpu_logical_map[NR_CPUS];
+int __cpu_number_map[NR_CPUS];		/* Map physical to logical */
+int __cpu_logical_map[NR_CPUS];		/* Map logical to physical */
 
+EXPORT_SYMBOL(phys_cpu_present_map);
 EXPORT_SYMBOL(cpu_online_map);
-
-/* These are defined by the board-specific code. */
-
-/*
- * Cause the function described by call_data to be executed on the passed
- * cpu.  When the function has finished, increment the finished field of
- * call_data.
- */
-void core_send_ipi(int cpu, unsigned int action);
-
-/*
- * Clear all undefined state in the cpu, set up sp and gp to the passed
- * values, and kick the cpu into smp_bootstrap();
- */
-void prom_boot_secondary(int cpu, unsigned long sp, unsigned long gp);
-
-/*
- *  After we've done initial boot, this function is called to allow the
- *  board code to clean up state, if needed
- */
-void prom_init_secondary(void);
-
-void prom_smp_finish(void);
 
 cycles_t cacheflush_time;
 unsigned long cache_decay_ticks;
 
-void smp_tune_scheduling (void)
+static void smp_tune_scheduling (void)
 {
 	struct cache_desc *cd = &current_cpu_data.scache;
 	unsigned long cachesize;       /* kB   */
@@ -119,52 +92,38 @@ void smp_tune_scheduling (void)
 		(cache_decay_ticks + 1) * 1000 / HZ);
 }
 
-void __init smp_callin(void)
-{
-#if 0
-	calibrate_delay();
-	smp_store_cpu_info(cpuid);
-#endif
-}
+extern void __init calibrate_delay(void);
+extern ATTRIB_NORET void cpu_idle(void);
 
-#ifndef CONFIG_SGI_IP27
 /*
- * Hook for doing final board-specific setup after the generic smp setup
- * is done
+ * First C code run on the secondary CPUs after being started up by
+ * the master.
  */
 asmlinkage void start_secondary(void)
 {
 	unsigned int cpu = smp_processor_id();
 
 	cpu_probe();
-	prom_init_secondary();
+	cpu_report();
 	per_cpu_trap_init();
+	prom_init_secondary();
 
 	/*
 	 * XXX parity protection should be folded in here when it's converted
 	 * to an option instead of something based on .cputype
 	 */
-	pgd_current[cpu] = init_mm.pgd;
+
+	calibrate_delay();
 	cpu_data[cpu].udelay_val = loops_per_jiffy;
+
 	prom_smp_finish();
-	printk("Slave cpu booted successfully\n");
-	cpu_set(cpu, cpu_online_map);
-	atomic_inc(&cpus_booted);
+
+	cpu_set(cpu, cpu_callin_map);
+
 	cpu_idle();
 }
-#endif /* CONFIG_SGI_IP27 */
 
-/*
- * this function sends a 'reschedule' IPI to another CPU.
- * it goes straight through and wastes no time serializing
- * anything. Worst case is that we lose a reschedule ...
- */
-void smp_send_reschedule(int cpu)
-{
-	core_send_ipi(cpu, SMP_RESCHEDULE_YOURSELF);
-}
-
-spinlock_t smp_call_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(smp_call_lock);
 
 struct call_data_struct *call_data;
 
@@ -192,6 +151,9 @@ int smp_call_function (void (*func) (void *info), void *info, int retry,
 	if (!cpus)
 		return 0;
 
+	/* Can deadlock when called with interrupts disabled */
+	WARN_ON(irqs_disabled());
+
 	data.func = func;
 	data.info = info;
 	atomic_set(&data.started, 0);
@@ -201,10 +163,11 @@ int smp_call_function (void (*func) (void *info), void *info, int retry,
 
 	spin_lock(&smp_call_lock);
 	call_data = &data;
+	mb();
 
 	/* Send a message to all other CPUs and wait for them to respond */
 	for (i = 0; i < NR_CPUS; i++)
-		if (cpu_online(cpu) && i != cpu)
+		if (cpu_online(i) && i != cpu)
 			core_send_ipi(i, SMP_CALL_FUNCTION);
 
 	/* Wait for response */
@@ -259,6 +222,78 @@ static void stop_this_cpu(void *dummy)
 void smp_send_stop(void)
 {
 	smp_call_function(stop_this_cpu, NULL, 1, 0);
+}
+
+void __init smp_cpus_done(unsigned int max_cpus)
+{
+	prom_cpus_done();
+}
+
+/* called from main before smp_init() */
+void __init smp_prepare_cpus(unsigned int max_cpus)
+{
+	cpu_data[0].udelay_val = loops_per_jiffy;
+	init_new_context(current, &init_mm);
+	current_thread_info()->cpu = 0;
+	smp_tune_scheduling();
+	prom_prepare_cpus(max_cpus);
+}
+
+/* preload SMP state for boot cpu */
+void __devinit smp_prepare_boot_cpu(void)
+{
+	/*
+	 * This assumes that bootup is always handled by the processor
+	 * with the logic and physical number 0.
+	 */
+	__cpu_number_map[0] = 0;
+	__cpu_logical_map[0] = 0;
+	cpu_set(0, phys_cpu_present_map);
+	cpu_set(0, cpu_online_map);
+	cpu_set(0, cpu_callin_map);
+}
+
+/*
+ * Startup the CPU with this logical number
+ */
+static int __init do_boot_cpu(int cpu)
+{
+	struct task_struct *idle;
+
+	/*
+	 * The following code is purely to make sure
+	 * Linux can schedule processes on this slave.
+	 */
+	idle = fork_idle(cpu);
+	if (IS_ERR(idle))
+		panic("failed fork for CPU %d\n", cpu);
+
+	prom_boot_secondary(cpu, idle);
+
+	/* XXXKW timeout */
+	while (!cpu_isset(cpu, cpu_callin_map))
+		udelay(100);
+
+	cpu_set(cpu, cpu_online_map);
+
+	return 0;
+}
+
+/*
+ * Called once for each "cpu_possible(cpu)".  Needs to spin up the cpu
+ * and keep control until "cpu_online(cpu)" is set.  Note: cpu is
+ * physical, not logical.
+ */
+int __devinit __cpu_up(unsigned int cpu)
+{
+	int ret;
+
+	/* Processor goes to start_secondary(), sets online flag */
+	ret = do_boot_cpu(cpu);
+	if (ret < 0)
+		return ret;
+
+	return 0;
 }
 
 /* Not really SMP stuff ... */

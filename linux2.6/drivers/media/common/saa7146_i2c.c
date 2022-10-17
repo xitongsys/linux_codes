@@ -1,14 +1,7 @@
 #include <linux/version.h>
 #include <media/saa7146_vv.h>
 
-/* helper function */
-static void my_wait(struct saa7146_dev *dev, long ms)
-{
-	set_current_state(TASK_INTERRUPTIBLE);
-	schedule_timeout((((ms+10)/10)*HZ)/1000);
-}
-
-u32 saa7146_i2c_func(struct i2c_adapter *adapter)
+static u32 saa7146_i2c_func(struct i2c_adapter *adapter)
 {
 //fm	DEB_I2C(("'%s'.\n", adapter->name));
 
@@ -136,12 +129,12 @@ static int saa7146_i2c_reset(struct saa7146_dev *dev)
 		/* set "ABORT-OPERATION"-bit (bit 7)*/
 		saa7146_write(dev, I2C_STATUS, (dev->i2c_bitrate | MASK_07));
 		saa7146_write(dev, MC2, (MASK_00 | MASK_16));
-		my_wait(dev,SAA7146_I2C_DELAY);
+		msleep(SAA7146_I2C_DELAY);
 
 		/* clear all error-bits pending; this is needed because p.123, note 1 */
 		saa7146_write(dev, I2C_STATUS, dev->i2c_bitrate);
 		saa7146_write(dev, MC2, (MASK_00 | MASK_16));
-		my_wait(dev,SAA7146_I2C_DELAY);
+		msleep(SAA7146_I2C_DELAY);
  	}
 
 	/* check if any error is (still) present. (this can be necessary because p.123, note 1) */
@@ -155,18 +148,18 @@ static int saa7146_i2c_reset(struct saa7146_dev *dev)
 		   after serious protocol errors caused by e.g. the SAA7740 */
 		saa7146_write(dev, I2C_STATUS, (dev->i2c_bitrate | MASK_07));
 		saa7146_write(dev, MC2, (MASK_00 | MASK_16));
-		my_wait(dev,SAA7146_I2C_DELAY);
+		msleep(SAA7146_I2C_DELAY);
 
 		/* clear all error-bits pending */
 		saa7146_write(dev, I2C_STATUS, dev->i2c_bitrate);
 		saa7146_write(dev, MC2, (MASK_00 | MASK_16));
-		my_wait(dev,SAA7146_I2C_DELAY);
+		msleep(SAA7146_I2C_DELAY);
 
 		/* the data sheet says it might be necessary to clear the status
 		   twice after an abort */
 		saa7146_write(dev, I2C_STATUS, dev->i2c_bitrate);
 		saa7146_write(dev, MC2, (MASK_00 | MASK_16));
-		my_wait(dev,SAA7146_I2C_DELAY);
+		msleep(SAA7146_I2C_DELAY);
      	}
 
 	/* if any error is still present, a fatal error has occured ... */
@@ -186,7 +179,7 @@ static int saa7146_i2c_writeout(struct saa7146_dev *dev, u32* dword, int short_d
 {
 	u32 status = 0, mc2 = 0;
 	int trial = 0;
-	int timeout;
+	unsigned long timeout;
 
 	/* write out i2c-command */
 	DEB_I2C(("before: 0x%08x (status: 0x%08x), %d\n",*dword,saa7146_read(dev, I2C_STATUS), dev->i2c_op));
@@ -197,7 +190,7 @@ static int saa7146_i2c_writeout(struct saa7146_dev *dev, u32* dword, int short_d
 		saa7146_write(dev, I2C_TRANSFER, *dword);
 
 		dev->i2c_op = 1;
-		IER_ENABLE(dev, MASK_16|MASK_17);
+		SAA7146_IER_ENABLE(dev, MASK_16|MASK_17);
 		saa7146_write(dev, MC2, (MASK_00 | MASK_16));
 
 		wait_event_interruptible(dev->i2c_wq, dev->i2c_op == 0);
@@ -218,7 +211,7 @@ static int saa7146_i2c_writeout(struct saa7146_dev *dev, u32* dword, int short_d
 			if( 0 != mc2 ) {
 				break;
 			}
-			if (jiffies > timeout) {
+			if (time_after(jiffies,timeout)) {
 				printk(KERN_WARNING "saa7146_i2c_writeout: timed out waiting for MC2\n");
 				return -EIO;
 			}
@@ -233,7 +226,7 @@ static int saa7146_i2c_writeout(struct saa7146_dev *dev, u32* dword, int short_d
 			status = saa7146_i2c_status(dev);
 			if ((status & 0x3) != 1)
 				break;
-			if (jiffies > timeout) {
+			if (time_after(jiffies,timeout)) {
 				/* this is normal when probing the bus
 				 * (no answer from nonexisistant device...)
 				 */
@@ -243,7 +236,7 @@ static int saa7146_i2c_writeout(struct saa7146_dev *dev, u32* dword, int short_d
 			if ((++trial < 20) && short_delay)
 				udelay(10);
 			else
-			my_wait(dev,1);
+			msleep(1);
 		}
 	}
 
@@ -301,7 +294,8 @@ int saa7146_i2c_transfer(struct saa7146_dev *dev, const struct i2c_msg msgs[], i
 		goto out;
 	}
 
-        if (count > 3) short_delay = 1;
+	if ( count > 3 || 0 != (SAA7146_I2C_SHORT_DELAY & dev->ext->flags) )
+		short_delay = 1;
   
 	do {
 		/* reset the i2c-device if necessary */
@@ -344,7 +338,7 @@ int saa7146_i2c_transfer(struct saa7146_dev *dev, const struct i2c_msg msgs[], i
 		}
 	        
 	        /* delay a bit before retrying */
-	        my_wait(dev, 10);
+	        msleep(10);
 		
 	} while (err != num && retries--);
 
@@ -403,14 +397,19 @@ int saa7146_i2c_adapter_prepare(struct saa7146_dev *dev, struct i2c_adapter *i2c
 {
 	DEB_EE(("bitrate: 0x%08x\n",bitrate));
 	
+	/* enable i2c-port pins */
+	saa7146_write(dev, MC1, (MASK_08 | MASK_24));
+
 	dev->i2c_bitrate = bitrate;
 	saa7146_i2c_reset(dev);
 
 	if( NULL != i2c_adapter ) {
-		memset(i2c_adapter,0,sizeof(struct i2c_adapter));
-		strcpy(i2c_adapter->name, dev->name);	
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0))
+		i2c_adapter->data = dev;
+#else
+		BUG_ON(!i2c_adapter->class);
 		i2c_set_adapdata(i2c_adapter,dev);
-		i2c_adapter->class	   = I2C_ADAP_CLASS_TV_ANALOG;
+#endif
 		i2c_adapter->algo	   = &saa7146_algo;
 		i2c_adapter->algo_data     = NULL;
 		i2c_adapter->id 	   = I2C_ALGO_SAA7146;

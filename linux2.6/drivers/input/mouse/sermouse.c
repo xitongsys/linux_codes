@@ -11,18 +11,18 @@
 /*
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or 
+ * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- * 
+ *
  * Should you need to contact me, the author, you can do so either by
  * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
  * Vojtech Pavlik, Simunkova 1594, Prague 8, 182 00 Czech Republic
@@ -37,8 +37,10 @@
 #include <linux/serio.h>
 #include <linux/init.h>
 
+#define DRIVER_DESC	"Serial mouse driver"
+
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
-MODULE_DESCRIPTION("Serial mouse driver");
+MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
 static char *sermouse_protocols[] = { "None", "Mouse Systems Mouse", "Sun Mouse", "Microsoft Mouse",
@@ -71,19 +73,19 @@ static void sermouse_process_msc(struct sermouse *sermouse, signed char data, st
 
 		case 0:
 			if ((data & 0xf8) != 0x80) return;
-			input_report_key(dev, BTN_LEFT,   !(data & 4)); 
+			input_report_key(dev, BTN_LEFT,   !(data & 4));
 			input_report_key(dev, BTN_RIGHT,  !(data & 1));
 			input_report_key(dev, BTN_MIDDLE, !(data & 2));
 			break;
 
-		case 1: 
-		case 3: 
+		case 1:
+		case 3:
 			input_report_rel(dev, REL_X, data / 2);
 			input_report_rel(dev, REL_Y, -buf[1]);
 			buf[0] = data - data / 2;
 			break;
 
-		case 2: 
+		case 2:
 		case 4:
 			input_report_rel(dev, REL_X, buf[0]);
 			input_report_rel(dev, REL_Y, buf[1] - data);
@@ -143,7 +145,7 @@ static void sermouse_process_ms(struct sermouse *sermouse, signed char data, str
 		case 3:
 
 			switch (sermouse->type) {
-			
+
 				case SERIO_MS:
 					 sermouse->type = SERIO_MP;
 
@@ -162,7 +164,7 @@ static void sermouse_process_ms(struct sermouse *sermouse, signed char data, str
 					input_report_rel(dev, REL_WHEEL,  (data & 8) - (data & 7));
 					break;
 			}
-					
+
 			break;
 
 		case 4:
@@ -237,11 +239,11 @@ static void sermouse_disconnect(struct serio *serio)
  * an unhandled serio port is found.
  */
 
-static void sermouse_connect(struct serio *serio, struct serio_dev *dev)
+static void sermouse_connect(struct serio *serio, struct serio_driver *drv)
 {
 	struct sermouse *sermouse;
 	unsigned char c;
-	
+
 	if ((serio->type & SERIO_TYPE) != SERIO_RS232)
 		return;
 
@@ -278,32 +280,37 @@ static void sermouse_connect(struct serio *serio, struct serio_dev *dev)
 	sermouse->dev.id.vendor = sermouse->type;
 	sermouse->dev.id.product = c;
 	sermouse->dev.id.version = 0x0100;
+	sermouse->dev.dev = &serio->dev;
 
-	if (serio_open(serio, dev)) {
+	if (serio_open(serio, drv)) {
 		kfree(sermouse);
 		return;
 	}
 
 	input_register_device(&sermouse->dev);
-	
+
 	printk(KERN_INFO "input: %s on %s\n", sermouse_protocols[sermouse->type], serio->phys);
 }
 
-static struct serio_dev sermouse_dev = {
-	.interrupt =	sermouse_interrupt,
-	.connect =	sermouse_connect,
-	.disconnect =	sermouse_disconnect
+static struct serio_driver sermouse_drv = {
+	.driver		= {
+		.name	= "sermouse",
+	},
+	.description	= DRIVER_DESC,
+	.interrupt	= sermouse_interrupt,
+	.connect	= sermouse_connect,
+	.disconnect	= sermouse_disconnect,
 };
 
 int __init sermouse_init(void)
 {
-	serio_register_device(&sermouse_dev);
+	serio_register_driver(&sermouse_drv);
 	return 0;
 }
 
 void __exit sermouse_exit(void)
 {
-	serio_unregister_device(&sermouse_dev);
+	serio_unregister_driver(&sermouse_drv);
 }
 
 module_init(sermouse_init);

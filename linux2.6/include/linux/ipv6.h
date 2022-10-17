@@ -136,6 +136,7 @@ struct ipv6_devconf {
 	__s32		rtr_solicits;
 	__s32		rtr_solicit_interval;
 	__s32		rtr_solicit_delay;
+	__s32		force_mld_version;
 #ifdef CONFIG_IPV6_PRIVACY
 	__s32		use_tempaddr;
 	__s32		temp_valid_lft;
@@ -143,6 +144,7 @@ struct ipv6_devconf {
 	__s32		regen_max_retry;
 	__s32		max_desync_factor;
 #endif
+	__s32		max_addresses;
 	void		*sysctl;
 };
 
@@ -158,13 +160,13 @@ enum {
 	DEVCONF_RTR_SOLICITS,
 	DEVCONF_RTR_SOLICIT_INTERVAL,
 	DEVCONF_RTR_SOLICIT_DELAY,
-#ifdef CONFIG_IPV6_PRIVACY
 	DEVCONF_USE_TEMPADDR,
 	DEVCONF_TEMP_VALID_LFT,
 	DEVCONF_TEMP_PREFERED_LFT,
 	DEVCONF_REGEN_MAX_RETRY,
 	DEVCONF_MAX_DESYNC_FACTOR,
-#endif
+	DEVCONF_MAX_ADDRESSES,
+	DEVCONF_FORCE_MLD_VERSION,
 	DEVCONF_MAX
 };
 
@@ -180,17 +182,25 @@ enum {
    as offsets from skb->nh.
  */
 
-struct inet6_skb_parm
-{
+struct inet6_skb_parm {
 	int			iif;
 	__u16			ra;
 	__u16			hop;
-	__u16			auth;
 	__u16			dst0;
 	__u16			srcrt;
 	__u16			dst1;
 };
 
+#define IP6CB(skb)	((struct inet6_skb_parm*)((skb)->cb))
+
+/**
+ * struct ipv6_pinfo - ipv6 private area
+ *
+ * In the struct sock hierarchy (tcp6_sock, upd6_sock, etc)
+ * this _must_ be the last member, so that inet6_sk_generic
+ * is able to calculate its offset from the base struct sock
+ * by using the struct proto->slab_obj_size member. -acme
+ */
 struct ipv6_pinfo {
 	struct in6_addr 	saddr;
 	struct in6_addr 	rcv_saddr;
@@ -211,7 +221,6 @@ struct ipv6_pinfo {
 				rxhlim:1,
 				hopopts:1,
 				dstopts:1,
-                                authhdr:1,
                                 rxflow:1;
 		} bits;
 		__u8		all;
@@ -238,47 +247,67 @@ struct ipv6_pinfo {
 	} cork;
 };
 
-struct raw6_opt {
-	__u32			checksum;	/* perform checksum */
-	__u32			offset;		/* checksum offset  */
-
-	struct icmp6_filter	filter;
-};
-
 /* WARNING: don't change the layout of the members in {raw,udp,tcp}6_sock! */
 struct raw6_sock {
-	struct sock	  sk;
-	struct ipv6_pinfo *pinet6;
-	struct inet_opt   inet;
-	struct raw6_opt   raw6;
-	struct ipv6_pinfo inet6;
+	/* inet_sock has to be the first member of raw6_sock */
+	struct inet_sock	inet;
+	__u32			checksum;	/* perform checksum */
+	__u32			offset;		/* checksum offset  */
+	struct icmp6_filter	filter;
+	/* ipv6_pinfo has to be the last member of raw6_sock, see inet6_sk_generic */
+	struct ipv6_pinfo	inet6;
 };
 
 struct udp6_sock {
-	struct sock	  sk;
-	struct ipv6_pinfo *pinet6;
-	struct inet_opt   inet;
-	struct udp_opt	  udp;
+	struct udp_sock	  udp;
+	/* ipv6_pinfo has to be the last member of udp6_sock, see inet6_sk_generic */
 	struct ipv6_pinfo inet6;
 };
 
 struct tcp6_sock {
-	struct sock	  sk;
-	struct ipv6_pinfo *pinet6;
-	struct inet_opt   inet;
-	struct tcp_opt	  tcp;
+	struct tcp_sock	  tcp;
+	/* ipv6_pinfo has to be the last member of tcp6_sock, see inet6_sk_generic */
 	struct ipv6_pinfo inet6;
 };
 
-#define inet6_sk(__sk) ((struct raw6_sock *)__sk)->pinet6
-#define raw6_sk(__sk) (&((struct raw6_sock *)__sk)->raw6)
-
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+static inline struct ipv6_pinfo * inet6_sk(const struct sock *__sk)
+{
+	return inet_sk(__sk)->pinet6;
+}
+
+static inline struct raw6_sock *raw6_sk(const struct sock *sk)
+{
+	return (struct raw6_sock *)sk;
+}
+
+static inline void inet_sk_copy_descendant(struct sock *sk_to,
+					   const struct sock *sk_from)
+{
+	int ancestor_size = sizeof(struct inet_sock);
+
+	if (sk_from->sk_family == PF_INET6)
+		ancestor_size += sizeof(struct ipv6_pinfo);
+
+	__inet_sk_copy_descendant(sk_to, sk_from, ancestor_size);
+}
+
 #define __ipv6_only_sock(sk)	(inet6_sk(sk)->ipv6only)
 #define ipv6_only_sock(sk)	((sk)->sk_family == PF_INET6 && __ipv6_only_sock(sk))
 #else
 #define __ipv6_only_sock(sk)	0
 #define ipv6_only_sock(sk)	0
+
+static inline struct ipv6_pinfo * inet6_sk(const struct sock *__sk)
+{
+	return NULL;
+}
+
+static inline struct raw6_sock *raw6_sk(const struct sock *sk)
+{
+	return NULL;
+}
+
 #endif
 
 #endif

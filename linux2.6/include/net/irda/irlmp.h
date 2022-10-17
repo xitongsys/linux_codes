@@ -175,7 +175,8 @@ struct irlmp_cb {
 	discovery_t discovery_cmd; /* Discovery command to use by IrLAP */
 	discovery_t discovery_rsp; /* Discovery response to use by IrLAP */
 
-	int free_lsap_sel;
+	/* Last lsap picked automatically by irlmp_find_free_slsap() */
+	int	last_lsap_sel;
 
 	struct timer_list discovery_timer;
 
@@ -237,22 +238,26 @@ int  irlmp_udata_request(struct lsap_cb *, struct sk_buff *);
 void irlmp_udata_indication(struct lsap_cb *, struct sk_buff *);
 
 #ifdef CONFIG_IRDA_ULTRA
-int  irlmp_connless_data_request(struct lsap_cb *, struct sk_buff *);
+int  irlmp_connless_data_request(struct lsap_cb *, struct sk_buff *, __u8);
 void irlmp_connless_data_indication(struct lsap_cb *, struct sk_buff *);
 #endif /* CONFIG_IRDA_ULTRA */
 
-void irlmp_status_request(void);
 void irlmp_status_indication(struct lap_cb *, LINK_STATUS link, LOCK_STATUS lock);
 void irlmp_flow_indication(struct lap_cb *self, LOCAL_FLOW flow);
 
-int  irlmp_slsap_inuse(__u8 slsap);
-__u8 irlmp_find_free_slsap(void);
 LM_REASON irlmp_convert_lap_reason(LAP_REASON);
 
-__u32 irlmp_get_saddr(struct lsap_cb *self);
-__u32 irlmp_get_daddr(struct lsap_cb *self);
+static inline __u32 irlmp_get_saddr(const struct lsap_cb *self)
+{
+	return (self && self->lap) ? self->lap->saddr : 0;
+}
 
-extern char *lmp_reasons[];
+static inline __u32 irlmp_get_daddr(const struct lsap_cb *self)
+{
+	return (self && self->lap) ? self->lap->daddr : 0;
+}
+
+extern const char *irlmp_reasons[];
 extern int sysctl_discovery_timeout;
 extern int sysctl_discovery_slots;
 extern int sysctl_discovery;

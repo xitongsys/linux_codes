@@ -12,7 +12,6 @@
  * Copyright (C) 1995, 1996 Olaf Kirch <okir@monad.swb.de>
  */
 
-#define __KERNEL_SYSCALLS__
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -23,7 +22,6 @@
 #include <linux/errno.h>
 #include <linux/in.h>
 #include <linux/uio.h>
-#include <linux/unistd.h>
 #include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
@@ -40,8 +38,11 @@
 #define LOCKD_BUFSIZE		(1024 + NLMSVC_XDRSIZE)
 #define ALLOWED_SIGS		(sigmask(SIGKILL))
 
-extern struct svc_program	nlmsvc_program;
+static struct svc_program	nlmsvc_program;
+
 struct nlmsvc_binding *		nlmsvc_ops;
+EXPORT_SYMBOL(nlmsvc_ops);
+
 static DECLARE_MUTEX(nlmsvc_sema);
 static unsigned int		nlmsvc_users;
 static pid_t			nlmsvc_pid;
@@ -272,6 +273,7 @@ out:
 	up(&nlmsvc_sema);
 	return error;
 }
+EXPORT_SYMBOL(lockd_up);
 
 /*
  * Decrement the user count and bring down lockd if we're the last.
@@ -313,6 +315,7 @@ lockd_down(void)
 out:
 	up(&nlmsvc_sema);
 }
+EXPORT_SYMBOL(lockd_down);
 
 /*
  * Sysctl parameters (same as module parameters, different interface).
@@ -411,13 +414,13 @@ MODULE_DESCRIPTION("NFS file locking service version " LOCKD_VERSION ".");
 MODULE_LICENSE("GPL");
 
 module_param_call(nlm_grace_period, param_set_grace_period, param_get_ulong,
-		  &nlm_grace_period, 644);
+		  &nlm_grace_period, 0644);
 module_param_call(nlm_timeout, param_set_timeout, param_get_ulong,
-		  &nlm_timeout, 644);
+		  &nlm_timeout, 0644);
 module_param_call(nlm_udpport, param_set_port, param_get_int,
-		  &nlm_udpport, 644);
+		  &nlm_udpport, 0644);
 module_param_call(nlm_tcpport, param_set_port, param_get_int,
-		  &nlm_tcpport, 644);
+		  &nlm_tcpport, 0644);
 
 /*
  * Initialising and terminating the module.
@@ -473,11 +476,11 @@ static struct svc_version *	nlmsvc_version[] = {
 static struct svc_stat		nlmsvc_stats;
 
 #define NLM_NRVERS	(sizeof(nlmsvc_version)/sizeof(nlmsvc_version[0]))
-struct svc_program	nlmsvc_program = {
-	.pg_prog	= NLM_PROGRAM,		/* program number */
-	.pg_nvers	= NLM_NRVERS,		/* number of entries in nlmsvc_version */
-	.pg_vers	= nlmsvc_version,	/* version table */
-	.pg_name	= "lockd",		/* service name */
-	.pg_class	= "nfsd",		/* share authentication with nfsd */
-	.pg_stats	= &nlmsvc_stats,	/* stats table */
+static struct svc_program	nlmsvc_program = {
+	.pg_prog		= NLM_PROGRAM,		/* program number */
+	.pg_nvers		= NLM_NRVERS,		/* number of entries in nlmsvc_version */
+	.pg_vers		= nlmsvc_version,	/* version table */
+	.pg_name		= "lockd",		/* service name */
+	.pg_class		= "nfsd",		/* share authentication with nfsd */
+	.pg_stats		= &nlmsvc_stats,	/* stats table */
 };

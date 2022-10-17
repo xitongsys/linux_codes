@@ -12,10 +12,18 @@ config MMU
 	bool
 	default y
 
+config TIME_INTERPOLATION
+	bool
+	default y
+
 source "init/Kconfig"
 
+config SYSVIPC_COMPAT
+	bool
+	depends on COMPAT && SYSVIPC
+	default y
 
-menu "General setup"
+menu "General machine setup"
 
 config BBC_I2C
 	tristate "UltraSPARC-III bootbus i2c controller driver"
@@ -89,8 +97,8 @@ config SMP
 	bool "Symmetric multi-processing support"
 	---help---
 	  This enables support for systems with more than one CPU. If you have
-	  a system with only one CPU, like most personal computers, say N. If
-	  you have a system with more than one CPU, say Y.
+	  a system with only one CPU, say N. If you have a system with more than
+	  one CPU, say Y.
 
 	  If you say N here, the kernel will run on single and multiprocessor
 	  machines, but will use only one CPU of a multiprocessor machine. If
@@ -98,17 +106,11 @@ config SMP
 	  singleprocessor machines. On a singleprocessor machine, the kernel
 	  will run faster if you say N here.
 
-	  Note that if you say Y here and choose architecture "586" or
-	  "Pentium" under "Processor family", the kernel will not work on 486
-	  architectures. Similarly, multiprocessor kernels for the "PPro"
-	  architecture may not work on all Pentium based boards.
-
 	  People using multiprocessor machines who say Y here should also say
 	  Y to "Enhanced Real Time Clock Support", below. The "Advanced Power
 	  Management" code will be disabled if you say Y here.
 
-	  See also the <file:Documentation/smp.tex>,
-	  <file:Documentation/smp.txt>, <file:Documentation/i386/IO-APIC.txt>,
+	  See also the <file:Documentation/smp.txt>,
 	  <file:Documentation/nmi_watchdog.txt> and the SMP-HOWTO available at
 	  <http://www.tldp.org/docs.html#howto>.
 
@@ -128,19 +130,11 @@ config PREEMPT
 
 config NR_CPUS
 	int "Maximum number of CPUs (2-64)"
+	range 2 64
 	depends on SMP
-	default "64"
+	default "32"
 
-config CPU_FREQ
-	bool "CPU Frequency scaling"
-	help
-	  Clock scaling allows you to change the clock speed of CPUs on the
-	  fly.  Currently there are only sparc64 drivers for UltraSPARC-III
-	  and UltraSPARC-IIe processors.
-
-	  For details, take a look at linux/Documentation/cpufreq. 
-
-	  If in doubt, say N.
+source "drivers/cpufreq/Kconfig"
 
 config CPU_FREQ_TABLE
        tristate "CPU frequency table helpers"
@@ -158,7 +152,7 @@ config US3_FREQ
 	help
 	  This adds the CPUFreq driver for UltraSPARC-III processors.
 
-	  For details, take a look at linux/Documentation/cpufreq. 
+	  For details, take a look at <file:Documentation/cpu-freq>.
 
 	  If in doubt, say N.
 
@@ -168,11 +162,9 @@ config US2E_FREQ
 	help
 	  This adds the CPUFreq driver for UltraSPARC-IIe processors.
 
-	  For details, take a look at linux/Documentation/cpufreq. 
+	  For details, take a look at <file:Documentation/cpu-freq>.
 
 	  If in doubt, say N.
-
-source "drivers/cpufreq/Kconfig"
 
 # Identify this as a Sparc64 build
 config SPARC64
@@ -185,29 +177,15 @@ config SPARC64
 	  SPARC64 ports; its web page is available at
 	  <http://www.ultralinux.org/>.
 
-config HOTPLUG
-	bool "Support for hot-pluggable devices"
-	---help---
-	  Say Y here if you want to plug devices into your computer while
-	  the system is running, and be able to use them quickly.  In many
-	  cases, the devices can likewise be unplugged at any time too.
-
-	  One well known example of this is PCMCIA- or PC-cards, credit-card
-	  size devices such as network cards, modems or hard drives which are
-	  plugged into slots found on all modern laptop computers.  Another
-	  example, used on modern desktops as well as laptops, is USB.
-
-	  Enable HOTPLUG and KMOD, and build a modular kernel.  Get agent
-	  software (at <http://linux-hotplug.sourceforge.net/>) and install it.
-	  Then your kernel will automatically call out to a user mode "policy
-	  agent" (/sbin/hotplug) to load modules and set up software needed
-	  to use devices as you hotplug them.
-
 # Global things across all Sun machines.
 config RWSEM_GENERIC_SPINLOCK
 	bool
 
 config RWSEM_XCHGADD_ALGORITHM
+	bool
+	default y
+
+config GENERIC_CALIBRATE_DELAY
 	bool
 	default y
 
@@ -399,6 +377,7 @@ source "fs/Kconfig.binfmt"
 
 config SUNOS_EMUL
 	bool "SunOS binary emulation"
+	depends on BINFMT_AOUT32
 	help
 	  This allows you to run most SunOS binaries.  If you want to do this,
 	  say Y here and place appropriate files in /usr/gnemul/sunos. See
@@ -408,7 +387,7 @@ config SUNOS_EMUL
 
 config SOLARIS_EMUL
 	tristate "Solaris binary emulation (EXPERIMENTAL)"
-	depends on EXPERIMENTAL
+	depends on SPARC32_COMPAT && EXPERIMENTAL
 	help
 	  This is experimental code which will enable you to run (many)
 	  Solaris binaries on your SPARC Linux machine.
@@ -467,27 +446,21 @@ config DISPLAY7SEG
 	  another UltraSPARC-IIi-cEngine boardset with a 7-segment display,
 	  you should say N to this option.
 
-config WATCHDOG_CP1XXX
-	tristate "CP1XXX Hardware Watchdog support"
-	depends on PCI
-	---help---
-	  This is the driver for the hardware watchdog timers present on
-	  Sun Microsystems CompactPCI models CP1400 and CP1500.
+config CMDLINE_BOOL
+	bool "Default bootloader kernel arguments"
 
-	  To compile this driver as a module, choose M here: the
-	  module will be called cpwatchdog.
-
-	  If you do not have a CompactPCI model CP1400 or CP1500, or
-	  another UltraSPARC-IIi-cEngine boardset with hardware watchdog,
-	  you should say N to this option.
-
-config WATCHDOG_RIO
-	tristate "RIO Hardware Watchdog support"
-	depends on PCI
+config CMDLINE
+	string "Initial kernel command string"
+	depends on CMDLINE_BOOL
+	default "console=ttyS0,9600 root=/dev/sda1"
 	help
-	  Say Y here to support the hardware watchdog capability on Sun RIO
-	  machines.  The watchdog timeout period is normally one minute but
-	  can be changed with a boot-time parameter.
+	  Say Y here if you want to be able to pass default arguments to
+	  the kernel. This will be overridden by the bootloader, if you
+	  use one (such as SILO). This is most useful if you want to boot
+	  a kernel from TFTP, and want default options to be available
+	  with having them passed on the command line.
+
+	  NOTE: This option WILL override the PROM bootargs setting!
 
 endmenu
 
@@ -501,145 +474,15 @@ source "drivers/sbus/char/Kconfig"
 
 source "drivers/mtd/Kconfig"
 
-
-menu "Block devices"
-
-config BLK_DEV_FD
-	bool "Normal floppy disk support"
-	---help---
-	  If you want to use the floppy disk drive(s) of your PC under Linux,
-	  say Y. Information about this driver, especially important for IBM
-	  Thinkpad users, is contained in <file:Documentation/floppy.txt>.
-	  That file also contains the location of the Floppy driver FAQ as
-	  well as location of the fdutils package used to configure additional
-	  parameters of the driver at run time.
-
-	  To compile this driver as a module, choose M here: the
-	  module will be called floppy.
-
-config BLK_DEV_LOOP
-	tristate "Loopback device support"
-	---help---
-	  Saying Y here will allow you to use a regular file as a block
-	  device; you can then create a file system on that block device and
-	  mount it just as you would mount other block devices such as hard
-	  drive partitions, CD-ROM drives or floppy drives. The loop devices
-	  are block special device files with major number 7 and typically
-	  called /dev/loop0, /dev/loop1 etc.
-
-	  This is useful if you want to check an ISO 9660 file system before
-	  burning the CD, or if you want to use floppy images without first
-	  writing them to floppy. Furthermore, some Linux distributions avoid
-	  the need for a dedicated Linux partition by keeping their complete
-	  root file system inside a DOS FAT file using this loop device
-	  driver.
-
-	  The loop device driver can also be used to "hide" a file system in a
-	  disk partition, floppy, or regular file, either using encryption
-	  (scrambling the data) or steganography (hiding the data in the low
-	  bits of, say, a sound file). This is also safe if the file resides
-	  on a remote file server. If you want to do this, you will first have
-	  to acquire and install a kernel patch from
-	  <ftp://ftp.kerneli.org/pub/kerneli/>, and then you need to
-	  say Y to this option.
-
-	  Note that alternative ways to use encrypted file systems are
-	  provided by the cfs package, which can be gotten from
-	  <ftp://ftp.kerneli.org/pub/kerneli/net-source/>, and the newer tcfs
-	  package, available at <http://tcfs.dia.unisa.it/>. You do not need
-	  to say Y here if you want to use one of these. However, using cfs
-	  requires saying Y to "NFS file system support" below while using
-	  tcfs requires applying a kernel patch. An alternative steganography
-	  solution is provided by StegFS, also available from
-	  <ftp://ftp.kerneli.org/pub/kerneli/net-source/>.
-
-	  To use the loop device, you need the losetup utility and a recent
-	  version of the mount program, both contained in the util-linux
-	  package. The location and current version number of util-linux is
-	  contained in the file <file:Documentation/Changes>.
-
-	  Note that this loop device has nothing to do with the loopback
-	  device used for network connections from the machine to itself.
-
-	  To compile this driver as a module, choose M here: the
-	  module will be called loop.
-
-	  Most users will answer N here.
-
-config BLK_DEV_NBD
-	tristate "Network block device support"
-	depends on NET
-	---help---
-	  Saying Y here will allow your computer to be a client for network
-	  block devices, i.e. it will be able to use block devices exported by
-	  servers (mount file systems on them etc.). Communication between
-	  client and server works over TCP/IP networking, but to the client
-	  program this is hidden: it looks like a regular local file access to
-	  a block device special file such as /dev/nd0.
-
-	  Network block devices also allows you to run a block-device in
-	  userland (making server and client physically the same computer,
-	  communicating using the loopback network device).
-
-	  Read <file:Documentation/nbd.txt> for more information, especially
-	  about where to find the server code, which runs in user space and
-	  does not need special kernel support.
-
-	  Note that this has nothing to do with the network file systems NFS
-	  or Coda; you can say N here even if you intend to use NFS or Coda.
-
-	  To compile this driver as a module, choose M here: the
-	  module will be called nbd.
-
-	  If unsure, say N.
-
-source "drivers/md/Kconfig"
-
-config BLK_DEV_RAM
-	tristate "RAM disk support"
-	---help---
-	  Saying Y here will allow you to use a portion of your RAM memory as
-	  a block device, so that you can make file systems on it, read and
-	  write to it and do all the other things that you can do with normal
-	  block devices (such as hard drives). It is usually used to load and
-	  store a copy of a minimal root file system off of a floppy into RAM
-	  during the initial install of Linux.
-
-	  Note that the kernel command line option "ramdisk=XX" is now
-	  obsolete. For details, read <file:Documentation/ramdisk.txt>.
-
-	  To compile this driver as a module, choose M here: the
-	  module will be called rd.
-
-	  Most normal users won't need the RAM disk functionality, and can
-	  thus say N here.
-
-config BLK_DEV_RAM_SIZE
-	int "Default RAM disk size"
-	depends on BLK_DEV_RAM
-	default "4096"
-	help
-	  The default value is 4096. Only change this if you know what are
-	  you doing. If you are using IBM S/390, then set this to 8192.
-
-config BLK_DEV_INITRD
-	bool "Initial RAM disk (initrd) support"
-	depends on BLK_DEV_RAM=y
-	help
-	  The initial RAM disk is a RAM disk that is loaded by the boot loader
-	  (loadlin or lilo) and that is mounted as root before the normal boot
-	  procedure. It is typically used to load modules needed to mount the
-	  "real" root file system, etc. See <file:Documentation/initrd.txt>
-	  for details.
-
-endmenu
-
+source "drivers/block/Kconfig"
 
 source "drivers/ide/Kconfig"
 
 source "drivers/scsi/Kconfig"
 
 source "drivers/fc4/Kconfig"
+
+source "drivers/md/Kconfig"
 
 if PCI
 source "drivers/message/fusion/Kconfig"
@@ -655,7 +498,7 @@ source "drivers/telephony/Kconfig"
 
 # This one must be before the filesystem configs. -DaveM
 
-menu "Unix 98 PTY support"
+menu "Unix98 PTY support"
 
 config UNIX98_PTYS
 	bool "Unix98 PTY support"
@@ -701,7 +544,6 @@ config UNIX98_PTY_COUNT
 
 endmenu
 
-
 menu "XFree86 DRI support"
 
 config DRM
@@ -717,7 +559,7 @@ config DRM
 
 config DRM_FFB
 	tristate "Creator/Creator3D"
-	depends on DRM
+	depends on DRM && BROKEN
 	help
 	  Choose this option if you have one of Sun's Creator3D-based graphics
 	  and frame buffer cards.  Product page at
@@ -752,110 +594,16 @@ source "sound/Kconfig"
 
 source "drivers/usb/Kconfig"
 
+source "drivers/infiniband/Kconfig"
 
-menu "Watchdog"
-
-config SOFT_WATCHDOG
-	tristate "Software watchdog"
-	help
-	  A software monitoring watchdog. This will fail to reboot your system
-	  from some situations that the hardware watchdog will recover
-	  from. Equally it's a lot cheaper to install.
-
-	  To compile this driver as a module, choose M here: the
-	  module will be called softdog.
-
-endmenu
+source "drivers/char/watchdog/Kconfig"
 
 source "arch/sparc64/oprofile/Kconfig"
 
-menu "Kernel hacking"
-
-config DEBUG_KERNEL
-	bool "Kernel debugging"
-	help
-	  Say Y here if you are developing drivers or trying to debug and
-	  identify kernel problems.
-
-config DEBUG_SLAB
-	bool "Debug memory allocations"
-	depends on DEBUG_KERNEL
-	help
-	  Say Y here to have the kernel do limited verification on memory
-	  allocation as well as poisoning memory on free to catch use of freed
-	  memory.
-
-config MAGIC_SYSRQ
-	bool "Magic SysRq key"
-	depends on DEBUG_KERNEL
-	help
-	  If you say Y here, you will have some control over the system even
-	  if the system crashes for example during kernel debugging (e.g., you
-	  will be able to flush the buffer cache to disk, reboot the system
-	  immediately or dump some status information). This is accomplished
-	  by pressing various keys while holding SysRq (Alt+PrintScreen). It
-	  also works on a serial console (on PC hardware at least), if you
-	  send a BREAK and then within 5 seconds a command keypress. The
-	  keys are documented in <file:Documentation/sysrq.txt>. Don't say Y
-	  unless you really know what this hack does.
-
-config DEBUG_SPINLOCK
-	bool "Spinlock debugging"
-	depends on DEBUG_KERNEL
-	help
-	  Say Y here and build SMP to catch missing spinlock initialization
-	  and certain other kinds of spinlock errors commonly made.  This is
-	  best used in conjunction with the NMI watchdog so that spinlock
-	  deadlocks are also debuggable.
-
-# We have a custom atomic_dec_and_lock() implementation but it's not
-# compatible with spinlock debugging so we need to fall back on
-# the generic version in that case.
-config HAVE_DEC_LOCK
-	bool
-	depends on SMP && !DEBUG_SPINLOCK
-	default y
-
-config DEBUG_SPINLOCK_SLEEP
-	bool "Sleep-inside-spinlock checking"
-	help
-	  If you say Y here, various routines which may sleep will become very
-	  noisy if they are called with a spinlock held.	
-
-config DEBUG_BUGVERBOSE
-	bool "Verbose BUG() reporting (adds 70K)"
-	depends on DEBUG_KERNEL
-	help
-	  Say Y here to make BUG() panics output the file name and line number
-	  of the BUG call as well as the EIP and oops trace.  This aids
-	  debugging but costs about 70-100K of memory.
-
-config DEBUG_DCFLUSH
-	bool "D-cache flush debugging"
-	depends on DEBUG_KERNEL
-
-config DEBUG_INFO
-	bool "Compile the kernel with debug info"
-	depends on DEBUG_KERNEL
-	help
-          If you say Y here the resulting kernel image will include
-	  debugging info resulting in a larger kernel image.
-	  Say Y here only if you plan to use gdb to debug the kernel.
-	  If you don't debug the kernel, you can say N.
-	  
-config STACK_DEBUG
-	bool "Stack Overflow Detection Support"
-
-config MCOUNT
-	bool
-	depends on STACK_DEBUG
-	default y
-
-endmenu
+source "arch/sparc64/Kconfig.debug"
 
 source "security/Kconfig"
 
 source "crypto/Kconfig"
 
 source "lib/Kconfig"
-

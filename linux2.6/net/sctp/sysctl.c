@@ -1,5 +1,5 @@
 /* SCTP kernel reference Implementation
- * Copyright (c) 2002 International Business Machines Corp.
+ * (C) Copyright IBM Corp. 2002, 2004
  * Copyright (c) 2002 Intel Corp.
  *
  * This file is part of the SCTP kernel reference Implementation
@@ -35,6 +35,7 @@
  *    Jon Grimm             <jgrimm@us.ibm.com>
  *    Ardelle Fan           <ardelle.fan@intel.com>
  *    Ryan Layer            <rmlayer@us.ibm.com>
+ *    Sridhar Samudrala     <sri@us.ibm.com>
  *
  * Any bugs reported given to us we will try to fix... any fixes shared will
  * be incorporated into the next SCTP release.
@@ -162,6 +163,22 @@ static ctl_table sctp_table[] = {
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec
 	},
+	{
+		.ctl_name	= NET_SCTP_ADDIP_ENABLE,
+		.procname	= "addip_enable",
+		.data		= &sctp_addip_enable,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
+	},
+	{
+		.ctl_name	= NET_SCTP_PRSCTP_ENABLE,
+		.procname	= "prsctp_enable",
+		.data		= &sctp_prsctp_enable,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
+	},
 	{ .ctl_name = 0 }
 };
 
@@ -215,7 +232,7 @@ static int sctp_sysctl_jiffies_ms(ctl_table *table, int __user *name, int nlen,
 				return -EINVAL;
 		}
 		if (put_user((*(int *)(table->data) * 1000) / HZ,
-			(int *)oldval) ||
+			(int __user *)oldval) ||
 		    (oldlenp && put_user(sizeof (int), oldlenp)))
 			return -EFAULT;
 	}
@@ -225,7 +242,7 @@ static int sctp_sysctl_jiffies_ms(ctl_table *table, int __user *name, int nlen,
 		if (newlen != sizeof (int))
 			return -EINVAL;
 
-		if (get_user(new, (int *)newval))
+		if (get_user(new, (int __user *)newval))
 			return -EFAULT;
 
 		*(int *)(table->data) = (new * HZ) / 1000;

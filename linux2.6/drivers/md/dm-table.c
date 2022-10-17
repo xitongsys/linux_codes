@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2001 Sistina Software (UK) Limited.
+ * Copyright (C) 2004 Red Hat, Inc. All rights reserved.
  *
  * This file is released under the GPL.
  */
@@ -12,6 +13,7 @@
 #include <linux/namei.h>
 #include <linux/ctype.h>
 #include <linux/slab.h>
+#include <linux/interrupt.h>
 #include <asm/atomic.h>
 
 #define MAX_DEPTH 16
@@ -56,7 +58,7 @@ struct dm_table {
 /*
  * Similar to ceiling(log_size(n))
  */
-static unsigned int int_log(unsigned long n, unsigned long base)
+static unsigned int int_log(unsigned int n, unsigned int base)
 {
 	int result = 0;
 
@@ -148,7 +150,7 @@ static int setup_btree_index(unsigned int l, struct dm_table *t)
 	return 0;
 }
 
-static void *dm_vcalloc(unsigned long nmemb, unsigned long elem_size)
+void *dm_vcalloc(unsigned long nmemb, unsigned long elem_size)
 {
 	unsigned long size;
 	void *addr;
@@ -180,8 +182,8 @@ static int alloc_targets(struct dm_table *t, unsigned int num)
 	/*
 	 * Allocate both the target array and offset array at once.
 	 */
-	n_highs = (sector_t *) dm_vcalloc(sizeof(struct dm_target) +
-					  sizeof(sector_t), num);
+	n_highs = (sector_t *) dm_vcalloc(num, sizeof(struct dm_target) +
+					  sizeof(sector_t));
 	if (!n_highs)
 		return -ENOMEM;
 
@@ -202,9 +204,9 @@ static int alloc_targets(struct dm_table *t, unsigned int num)
 	return 0;
 }
 
-int dm_table_create(struct dm_table **result, int mode)
+int dm_table_create(struct dm_table **result, int mode, unsigned num_targets)
 {
-	struct dm_table *t = kmalloc(sizeof(*t), GFP_NOIO);
+	struct dm_table *t = kmalloc(sizeof(*t), GFP_KERNEL);
 
 	if (!t)
 		return -ENOMEM;
@@ -213,8 +215,12 @@ int dm_table_create(struct dm_table **result, int mode)
 	INIT_LIST_HEAD(&t->devices);
 	atomic_set(&t->holders, 1);
 
-	/* allocate a single nodes worth of targets to begin with */
-	if (alloc_targets(t, KEYS_PER_NODE)) {
+	if (!num_targets)
+		num_targets = KEYS_PER_NODE;
+
+	num_targets = dm_round_up(num_targets, KEYS_PER_NODE);
+
+	if (alloc_targets(t, num_targets)) {
 		kfree(t);
 		t = NULL;
 		return -ENOMEM;
@@ -274,6 +280,9 @@ void dm_table_get(struct dm_table *t)
 
 void dm_table_put(struct dm_table *t)
 {
+	if (!t)
+		return;
+
 	if (atomic_dec_and_test(&t->holders))
 		table_destroy(t);
 }
@@ -324,13 +333,11 @@ static int lookup_device(const char *path, dev_t *dev)
  */
 static struct dm_dev *find_device(struct list_head *l, dev_t dev)
 {
-	struct list_head *tmp;
+	struct dm_dev *dd;
 
-	list_for_each(tmp, l) {
-		struct dm_dev *dd = list_entry(tmp, struct dm_dev, list);
+	list_for_each_entry (dd, l, list)
 		if (dd->bdev->bd_dev == dev)
 			return dd;
-	}
 
 	return NULL;
 }
@@ -348,12 +355,12 @@ static int open_dev(struct dm_dev *d, dev_t dev)
 	if (d->bdev)
 		BUG();
 
-	bdev = open_by_devnum(dev, d->mode, BDEV_RAW);
+	bdev = open_by_devnum(dev, d->mode);
 	if (IS_ERR(bdev))
 		return PTR_ERR(bdev);
 	r = bd_claim(bdev, _claim_ptr);
 	if (r)
-		blkdev_put(bdev, BDEV_RAW);
+		blkdev_put(bdev);
 	else
 		d->bdev = bdev;
 	return r;
@@ -368,7 +375,7 @@ static void close_dev(struct dm_dev *d)
 		return;
 
 	bd_release(d->bdev);
-	blkdev_put(d->bdev, BDEV_RAW);
+	blkdev_put(d->bdev);
 	d->bdev = NULL;
 }
 
@@ -394,7 +401,7 @@ static int upgrade_mode(struct dm_dev *dd, int new_mode)
 	struct dm_dev dd_copy;
 	dev_t dev = dd->bdev->bd_dev;
 
-	memcpy(&dd_copy, dd, sizeof(dd_copy));
+	dd_copy = *dd;
 
 	dd->mode |= new_mode;
 	dd->bdev = NULL;
@@ -402,7 +409,7 @@ static int upgrade_mode(struct dm_dev *dd, int new_mode)
 	if (!r)
 		close_dev(&dd_copy);
 	else
-		memcpy(dd, &dd_copy, sizeof(dd_copy));
+		*dd = dd_copy;
 
 	return r;
 }
@@ -569,7 +576,7 @@ static char **realloc_argv(unsigned *array_size, char **old_argv)
 /*
  * Destructively splits up the argument list to pass to ctr.
  */
-static int split_args(int *argc, char ***argvp, char *input)
+int dm_split_args(int *argc, char ***argvp, char *input)
 {
 	char *start, *end = input, *out, **argv = NULL;
 	unsigned array_size = 0;
@@ -626,6 +633,22 @@ static int split_args(int *argc, char ***argvp, char *input)
 	return 0;
 }
 
+static void check_for_valid_limits(struct io_restrictions *rs)
+{
+	if (!rs->max_sectors)
+		rs->max_sectors = MAX_SECTORS;
+	if (!rs->max_phys_segments)
+		rs->max_phys_segments = MAX_PHYS_SEGMENTS;
+	if (!rs->max_hw_segments)
+		rs->max_hw_segments = MAX_HW_SEGMENTS;
+	if (!rs->hardsect_size)
+		rs->hardsect_size = 1 << SECTOR_SHIFT;
+	if (!rs->max_segment_size)
+		rs->max_segment_size = MAX_SEGMENT_SIZE;
+	if (!rs->seg_boundary_mask)
+		rs->seg_boundary_mask = -1;
+}
+
 int dm_table_add_target(struct dm_table *t, const char *type,
 			sector_t start, sector_t len, char *params)
 {
@@ -639,9 +662,16 @@ int dm_table_add_target(struct dm_table *t, const char *type,
 	tgt = t->targets + t->num_targets;
 	memset(tgt, 0, sizeof(*tgt));
 
+	if (!len) {
+		tgt->error = "zero-length target";
+		DMERR("%s", tgt->error);
+		return -EINVAL;
+	}
+
 	tgt->type = dm_get_target_type(type);
 	if (!tgt->type) {
 		tgt->error = "unknown target type";
+		DMERR("%s", tgt->error);
 		return -EINVAL;
 	}
 
@@ -659,7 +689,7 @@ int dm_table_add_target(struct dm_table *t, const char *type,
 		goto bad;
 	}
 
-	r = split_args(&argc, &argv, params);
+	r = dm_split_args(&argc, &argv, params);
 	if (r) {
 		tgt->error = "couldn't split parameters (insufficient memory)";
 		goto bad;
@@ -678,7 +708,7 @@ int dm_table_add_target(struct dm_table *t, const char *type,
 	return 0;
 
  bad:
-	printk(KERN_ERR DM_NAME ": %s\n", tgt->error);
+	DMERR("%s", tgt->error);
 	dm_put_target_type(tgt->type);
 	return r;
 }
@@ -717,6 +747,8 @@ int dm_table_complete(struct dm_table *t)
 	int r = 0;
 	unsigned int leaf_nodes;
 
+	check_for_valid_limits(&t->limits);
+
 	/* how many indexes will the btree have ? */
 	leaf_nodes = dm_div_up(t->num_targets, KEYS_PER_NODE);
 	t->depth = 1 + int_log(leaf_nodes, CHILDREN_PER_NODE);
@@ -731,22 +763,28 @@ int dm_table_complete(struct dm_table *t)
 	return r;
 }
 
-static spinlock_t _event_lock = SPIN_LOCK_UNLOCKED;
+static DECLARE_MUTEX(_event_lock);
 void dm_table_event_callback(struct dm_table *t,
 			     void (*fn)(void *), void *context)
 {
-	spin_lock_irq(&_event_lock);
+	down(&_event_lock);
 	t->event_fn = fn;
 	t->event_context = context;
-	spin_unlock_irq(&_event_lock);
+	up(&_event_lock);
 }
 
 void dm_table_event(struct dm_table *t)
 {
-	spin_lock(&_event_lock);
+	/*
+	 * You can no longer call dm_table_event() from interrupt
+	 * context, use a bottom half instead.
+	 */
+	BUG_ON(in_interrupt());
+
+	down(&_event_lock);
 	if (t->event_fn)
 		t->event_fn(t->event_context);
-	spin_unlock(&_event_lock);
+	up(&_event_lock);
 }
 
 sector_t dm_table_get_size(struct dm_table *t)
@@ -788,7 +826,7 @@ void dm_table_set_restrictions(struct dm_table *t, struct request_queue *q)
 	 * Make sure we obey the optimistic sub devices
 	 * restrictions.
 	 */
-	q->max_sectors = t->limits.max_sectors;
+	blk_queue_max_sectors(q, t->limits.max_sectors);
 	q->max_phys_segments = t->limits.max_phys_segments;
 	q->max_hw_segments = t->limits.max_hw_segments;
 	q->hardsect_size = t->limits.hardsect_size;
@@ -811,16 +849,30 @@ int dm_table_get_mode(struct dm_table *t)
 	return t->mode;
 }
 
-void dm_table_suspend_targets(struct dm_table *t)
+static void suspend_targets(struct dm_table *t, unsigned postsuspend)
 {
-	int i;
+	int i = t->num_targets;
+	struct dm_target *ti = t->targets;
 
-	for (i = 0; i < t->num_targets; i++) {
-		struct dm_target *ti = t->targets + i;
+	while (i--) {
+		if (postsuspend) {
+			if (ti->type->postsuspend)
+				ti->type->postsuspend(ti);
+		} else if (ti->type->presuspend)
+			ti->type->presuspend(ti);
 
-		if (ti->type->suspend)
-			ti->type->suspend(ti);
+		ti++;
 	}
+}
+
+void dm_table_presuspend_targets(struct dm_table *t)
+{
+	return suspend_targets(t, 0);
+}
+
+void dm_table_postsuspend_targets(struct dm_table *t)
+{
+	return suspend_targets(t, 1);
 }
 
 void dm_table_resume_targets(struct dm_table *t)
@@ -835,8 +887,62 @@ void dm_table_resume_targets(struct dm_table *t)
 	}
 }
 
+int dm_table_any_congested(struct dm_table *t, int bdi_bits)
+{
+	struct list_head *d, *devices;
+	int r = 0;
 
+	devices = dm_table_get_devices(t);
+	for (d = devices->next; d != devices; d = d->next) {
+		struct dm_dev *dd = list_entry(d, struct dm_dev, list);
+		request_queue_t *q = bdev_get_queue(dd->bdev);
+		r |= bdi_congested(&q->backing_dev_info, bdi_bits);
+	}
+
+	return r;
+}
+
+void dm_table_unplug_all(struct dm_table *t)
+{
+	struct list_head *d, *devices = dm_table_get_devices(t);
+
+	for (d = devices->next; d != devices; d = d->next) {
+		struct dm_dev *dd = list_entry(d, struct dm_dev, list);
+		request_queue_t *q = bdev_get_queue(dd->bdev);
+
+		if (q->unplug_fn)
+			q->unplug_fn(q);
+	}
+}
+
+int dm_table_flush_all(struct dm_table *t)
+{
+	struct list_head *d, *devices = dm_table_get_devices(t);
+	int ret = 0;
+
+	for (d = devices->next; d != devices; d = d->next) {
+		struct dm_dev *dd = list_entry(d, struct dm_dev, list);
+		request_queue_t *q = bdev_get_queue(dd->bdev);
+		int err;
+
+		if (!q->issue_flush_fn)
+			err = -EOPNOTSUPP;
+		else
+			err = q->issue_flush_fn(q, dd->bdev->bd_disk, NULL);
+
+		if (!ret)
+			ret = err;
+	}
+
+	return ret;
+}
+
+EXPORT_SYMBOL(dm_vcalloc);
 EXPORT_SYMBOL(dm_get_device);
 EXPORT_SYMBOL(dm_put_device);
 EXPORT_SYMBOL(dm_table_event);
 EXPORT_SYMBOL(dm_table_get_mode);
+EXPORT_SYMBOL(dm_table_put);
+EXPORT_SYMBOL(dm_table_get);
+EXPORT_SYMBOL(dm_table_unplug_all);
+EXPORT_SYMBOL(dm_table_flush_all);

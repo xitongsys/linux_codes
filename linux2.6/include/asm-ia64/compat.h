@@ -11,6 +11,7 @@ typedef u32		compat_size_t;
 typedef s32		compat_ssize_t;
 typedef s32		compat_time_t;
 typedef s32		compat_clock_t;
+typedef s32		compat_key_t;
 typedef s32		compat_pid_t;
 typedef u16		compat_uid_t;
 typedef u16		compat_gid_t;
@@ -116,6 +117,64 @@ typedef u32		compat_sigset_word;
 #define COMPAT_OFF_T_MAX	0x7fffffff
 #define COMPAT_LOFF_T_MAX	0x7fffffffffffffffL
 
+struct compat_ipc64_perm {
+	compat_key_t key;
+	compat_uid32_t uid;
+	compat_gid32_t gid;
+	compat_uid32_t cuid;
+	compat_gid32_t cgid;
+	unsigned short mode;
+	unsigned short __pad1;
+	unsigned short seq;
+	unsigned short __pad2;
+	compat_ulong_t unused1;
+	compat_ulong_t unused2;
+};
+
+struct compat_semid64_ds {
+	struct compat_ipc64_perm sem_perm;
+	compat_time_t  sem_otime;
+	compat_ulong_t __unused1;
+	compat_time_t  sem_ctime;
+	compat_ulong_t __unused2;
+	compat_ulong_t sem_nsems;
+	compat_ulong_t __unused3;
+	compat_ulong_t __unused4;
+};
+
+struct compat_msqid64_ds {
+	struct compat_ipc64_perm msg_perm;
+	compat_time_t  msg_stime;
+	compat_ulong_t __unused1;
+	compat_time_t  msg_rtime;
+	compat_ulong_t __unused2;
+	compat_time_t  msg_ctime;
+	compat_ulong_t __unused3;
+	compat_ulong_t msg_cbytes;
+	compat_ulong_t msg_qnum;
+	compat_ulong_t msg_qbytes;
+	compat_pid_t   msg_lspid;
+	compat_pid_t   msg_lrpid;
+	compat_ulong_t __unused4;
+	compat_ulong_t __unused5;
+};
+
+struct compat_shmid64_ds {
+	struct compat_ipc64_perm shm_perm;
+	compat_size_t  shm_segsz;
+	compat_time_t  shm_atime;
+	compat_ulong_t __unused1;
+	compat_time_t  shm_dtime;
+	compat_ulong_t __unused2;
+	compat_time_t  shm_ctime;
+	compat_ulong_t __unused3;
+	compat_pid_t   shm_cpid;
+	compat_pid_t   shm_lpid;
+	compat_ulong_t shm_nattch;
+	compat_ulong_t __unused4;
+	compat_ulong_t __unused5;
+};
+
 /*
  * A pointer passed in from user mode. This should not be used for syscall parameters,
  * just declare them as pointers because the syscall entry code will have appropriately
@@ -123,17 +182,17 @@ typedef u32		compat_sigset_word;
  */
 typedef	u32		compat_uptr_t;
 
-static inline void *
+static inline void __user *
 compat_ptr (compat_uptr_t uptr)
 {
-	return (void *) (unsigned long) uptr;
+	return (void __user *) (unsigned long) uptr;
 }
 
-static __inline__ void *
+static __inline__ void __user *
 compat_alloc_user_space (long len)
 {
 	struct pt_regs *regs = ia64_task_regs(current);
-	return (void *) (((regs->r12 & 0xffffffff) & -16) - len);
+	return (void __user *) (((regs->r12 & 0xffffffff) & -16) - len);
 }
 
 #endif /* _ASM_IA64_COMPAT_H */

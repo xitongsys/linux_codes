@@ -23,7 +23,7 @@
  * continuously, although how you keep the buffer filled in this scenario is
  * not understood as there seems to be only one input and one output buffer
  * pointer.
- * 
+ *
  * Much of this was extrapolated from what was known about the Ethernet
  * registers and subsequently confirmed using MacsBug (ie by pinging the
  * machine with easy-to-find patterns and looking for them in the DMA
@@ -43,7 +43,7 @@
  * To access a particular set of registers, add 0xn0 to the base
  * where n = 3,4,5 or 6.
  */
- 
+
 #define pIFRbase	0x100
 #define pIERbase	0x104
 
@@ -76,9 +76,9 @@
 #define PSC_SET0	0x00
 #define PSC_SET1	0x10
 
-#define PSC_SCSI_ADDR	0x1000 	/* confirmed */
-#define PSC_SCSI_LEN	0x1004 	/* confirmed */
-#define PSC_SCSI_CMD	0x1008 	/* confirmed */
+#define PSC_SCSI_ADDR	0x1000	/* confirmed */
+#define PSC_SCSI_LEN	0x1004	/* confirmed */
+#define PSC_SCSI_CMD	0x1008	/* confirmed */
 #define PSC_ENETRD_ADDR 0x1020	/* confirmed */
 #define PSC_ENETRD_LEN  0x1024	/* confirmed */
 #define PSC_ENETRD_CMD  0x1028	/* confirmed */
@@ -214,33 +214,33 @@ extern int psc_present;
 /*
  *	Access functions
  */
- 
-extern inline void psc_write_byte(int offset, __u8 data)
+
+static inline void psc_write_byte(int offset, __u8 data)
 {
 	*((volatile __u8 *)(psc + offset)) = data;
 }
 
-extern inline void psc_write_word(int offset, __u16 data)
+static inline void psc_write_word(int offset, __u16 data)
 {
 	*((volatile __u16 *)(psc + offset)) = data;
 }
 
-extern inline void psc_write_long(int offset, __u32 data)
+static inline void psc_write_long(int offset, __u32 data)
 {
 	*((volatile __u32 *)(psc + offset)) = data;
 }
 
-extern inline u8 psc_read_byte(int offset)
+static inline u8 psc_read_byte(int offset)
 {
 	return *((volatile __u8 *)(psc + offset));
 }
 
-extern inline u16 psc_read_word(int offset)
+static inline u16 psc_read_word(int offset)
 {
 	return *((volatile __u16 *)(psc + offset));
 }
 
-extern inline u32 psc_read_long(int offset)
+static inline u32 psc_read_long(int offset)
 {
 	return *((volatile __u32 *)(psc + offset));
 }

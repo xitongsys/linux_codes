@@ -23,17 +23,17 @@
 #define RLIMIT_NPROC 8			/* max number of processes */
 #define RLIMIT_MEMLOCK 9		/* max locked-in-memory address space */
 #define RLIMIT_LOCKS 10			/* maximum file locks held */
+#define RLIMIT_SIGPENDING 11		/* max number of pending signals */
+#define RLIMIT_MSGQUEUE 12		/* maximum bytes in POSIX mqueues */
 
-#define RLIM_NLIMITS 11			/* Number of limit flavors.  */
-
-#ifdef __KERNEL__
-
-#include <linux/config.h>
+#define RLIM_NLIMITS 13			/* Number of limit flavors.  */
+#define __ARCH_RLIMIT_ORDER
 
 /*
  * SuS says limits have to be unsigned.
  * Which makes a ton more sense anyway.
  */
+#include <linux/config.h>
 #ifdef CONFIG_MIPS32
 #define RLIM_INFINITY	0x7fffffffUL
 #endif
@@ -41,21 +41,6 @@
 #define RLIM_INFINITY	(~0UL)
 #endif
 
-#define INIT_RLIMITS					\
-{							\
-	{ RLIM_INFINITY, RLIM_INFINITY },		\
-	{ RLIM_INFINITY, RLIM_INFINITY },		\
-	{ RLIM_INFINITY, RLIM_INFINITY },		\
-	{ _STK_LIM,      RLIM_INFINITY },		\
-	{        0,      RLIM_INFINITY },		\
-	{ INR_OPEN,      INR_OPEN      },		\
-	{ RLIM_INFINITY, RLIM_INFINITY },		\
-	{ RLIM_INFINITY, RLIM_INFINITY },		\
-	{ 0,             0             },		\
-	{ RLIM_INFINITY, RLIM_INFINITY },		\
-	{ RLIM_INFINITY, RLIM_INFINITY },		\
-}
-
-#endif /* __KERNEL__ */
+#include <asm-generic/resource.h>
 
 #endif /* _ASM_RESOURCE_H */

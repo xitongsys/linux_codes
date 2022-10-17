@@ -17,12 +17,12 @@
 #include <net/ipv6.h>
 #include <net/ip6_route.h>
 
-extern struct dst_ops xfrm6_dst_ops;
-extern struct xfrm_policy_afinfo xfrm6_policy_afinfo;
+static struct dst_ops xfrm6_dst_ops;
+static struct xfrm_policy_afinfo xfrm6_policy_afinfo;
 
 static struct xfrm_type_map xfrm6_type_map = { .lock = RW_LOCK_UNLOCKED };
 
-int xfrm6_dst_lookup(struct xfrm_dst **dst, struct flowi *fl)
+static int xfrm6_dst_lookup(struct xfrm_dst **dst, struct flowi *fl)
 {
 	int err = 0;
 	*dst = (struct xfrm_dst*)ip6_route_output(NULL, fl);
@@ -52,16 +52,9 @@ static int __xfrm6_bundle_ok(struct xfrm_dst *xdst, struct flowi *fl)
 }
 
 static struct dst_entry *
-__xfrm6_find_bundle(struct flowi *fl, struct rtable *rt, struct xfrm_policy *policy)
+__xfrm6_find_bundle(struct flowi *fl, struct xfrm_policy *policy)
 {
 	struct dst_entry *dst;
-	u32 ndisc_bit = 0;
-
-	if (fl->proto == IPPROTO_ICMPV6 &&
-	    (fl->fl_icmp_type == NDISC_NEIGHBOUR_ADVERTISEMENT ||
-	     fl->fl_icmp_type == NDISC_NEIGHBOUR_SOLICITATION  ||
-	     fl->fl_icmp_type == NDISC_ROUTER_SOLICITATION))
-		ndisc_bit = RTF_NDISC;
 
 	/* Still not clear if we should set fl->fl6_{src,dst}... */
 	read_lock_bh(&policy->lock);
@@ -69,17 +62,14 @@ __xfrm6_find_bundle(struct flowi *fl, struct rtable *rt, struct xfrm_policy *pol
 		struct xfrm_dst *xdst = (struct xfrm_dst*)dst;
 		struct in6_addr fl_dst_prefix, fl_src_prefix;
 
-		if ((xdst->u.rt6.rt6i_flags & RTF_NDISC) != ndisc_bit)
-			continue;
-
 		ipv6_addr_prefix(&fl_dst_prefix,
 				 &fl->fl6_dst,
 				 xdst->u.rt6.rt6i_dst.plen);
 		ipv6_addr_prefix(&fl_src_prefix,
 				 &fl->fl6_src,
 				 xdst->u.rt6.rt6i_src.plen);
-		if (!ipv6_addr_cmp(&xdst->u.rt6.rt6i_dst.addr, &fl_dst_prefix) &&
-		    !ipv6_addr_cmp(&xdst->u.rt6.rt6i_src.addr, &fl_src_prefix) &&
+		if (ipv6_addr_equal(&xdst->u.rt6.rt6i_dst.addr, &fl_dst_prefix) &&
+		    ipv6_addr_equal(&xdst->u.rt6.rt6i_src.addr, &fl_src_prefix) &&
 		    __xfrm6_bundle_ok(xdst, fl)) {
 			dst_clone(dst);
 			break;
@@ -117,7 +107,6 @@ __xfrm6_bundle_create(struct xfrm_policy *policy, struct xfrm_state **xfrm, int 
 			goto error;
 		}
 
-		dst1->xfrm = xfrm[i];
 		if (!dst)
 			dst = dst1;
 		else {
@@ -134,7 +123,7 @@ __xfrm6_bundle_create(struct xfrm_policy *policy, struct xfrm_state **xfrm, int 
 		trailer_len += xfrm[i]->props.trailer_len;
 	}
 
-	if (ipv6_addr_cmp(remote, &fl->fl6_dst)) {
+	if (!ipv6_addr_equal(remote, &fl->fl6_dst)) {
 		struct flowi fl_tunnel;
 
 		memset(&fl_tunnel, 0, sizeof(fl_tunnel));
@@ -149,9 +138,11 @@ __xfrm6_bundle_create(struct xfrm_policy *policy, struct xfrm_state **xfrm, int 
 		dst_hold(&rt->u.dst);
 	}
 	dst_prev->child = &rt->u.dst;
+	i = 0;
 	for (dst_prev = dst; dst_prev != &rt->u.dst; dst_prev = dst_prev->child) {
 		struct xfrm_dst *x = (struct xfrm_dst*)dst_prev;
 
+		dst_prev->xfrm = xfrm[i++];
 		dst_prev->dev = rt->u.dst.dev;
 		if (rt->u.dst.dev)
 			dev_hold(rt->u.dst.dev);
@@ -166,10 +157,10 @@ __xfrm6_bundle_create(struct xfrm_policy *policy, struct xfrm_state **xfrm, int 
 		/* Copy neighbour for reachability confirmation */
 		dst_prev->neighbour	= neigh_clone(rt->u.dst.neighbour);
 		dst_prev->input		= rt->u.dst.input;
-		dst_prev->output	= dst_prev->xfrm->type->output;
+		dst_prev->output	= xfrm6_output;
 		/* Sheit... I remember I did this right. Apparently,
 		 * it was magically lost, so this code needs audit */
-		x->u.rt6.rt6i_flags    = rt0->rt6i_flags&(RTCF_BROADCAST|RTCF_MULTICAST|RTCF_LOCAL|RTF_NDISC);
+		x->u.rt6.rt6i_flags    = rt0->rt6i_flags&(RTCF_BROADCAST|RTCF_MULTICAST|RTCF_LOCAL);
 		x->u.rt6.rt6i_metric   = rt0->rt6i_metric;
 		x->u.rt6.rt6i_node     = rt0->rt6i_node;
 		x->u.rt6.rt6i_gateway  = rt0->rt6i_gateway;
@@ -222,6 +213,16 @@ _decode_session6(struct sk_buff *skb, struct flowi *fl)
 			fl->proto = nexthdr;
 			return;
 
+		case IPPROTO_ICMPV6:
+			if (pskb_may_pull(skb, skb->nh.raw + offset + 2 - skb->data)) {
+				u8 *icmp = (u8 *)exthdr;
+
+				fl->fl_icmp_type = icmp[0];
+				fl->fl_icmp_code = icmp[1];
+			}
+			fl->proto = nexthdr;
+			return;
+
 		/* XXX Why are there these headers? */
 		case IPPROTO_AH:
 		case IPPROTO_ESP:
@@ -246,13 +247,13 @@ static void xfrm6_update_pmtu(struct dst_entry *dst, u32 mtu)
 {
 	struct dst_entry *path = dst->path;
 
-	if (mtu >= 1280 && mtu < dst_pmtu(dst))
-		return;
-
-	path->ops->update_pmtu(path, mtu);
+	if (mtu >= IPV6_MIN_MTU && mtu < dst_pmtu(dst))
+		path->ops->update_pmtu(path, mtu);
+	
+	return;
 }
 
-struct dst_ops xfrm6_dst_ops = {
+static struct dst_ops xfrm6_dst_ops = {
 	.family =		AF_INET6,
 	.protocol =		__constant_htons(ETH_P_IPV6),
 	.gc =			xfrm6_garbage_collect,
@@ -261,7 +262,7 @@ struct dst_ops xfrm6_dst_ops = {
 	.entry_size =		sizeof(struct xfrm_dst),
 };
 
-struct xfrm_policy_afinfo xfrm6_policy_afinfo = {
+static struct xfrm_policy_afinfo xfrm6_policy_afinfo = {
 	.family =		AF_INET6,
 	.lock = 		RW_LOCK_UNLOCKED,
 	.type_map = 		&xfrm6_type_map,
@@ -272,12 +273,12 @@ struct xfrm_policy_afinfo xfrm6_policy_afinfo = {
 	.decode_session =	_decode_session6,
 };
 
-void __init xfrm6_policy_init(void)
+static void __init xfrm6_policy_init(void)
 {
 	xfrm_policy_register_afinfo(&xfrm6_policy_afinfo);
 }
 
-void __exit xfrm6_policy_fini(void)
+static void __exit xfrm6_policy_fini(void)
 {
 	xfrm_policy_unregister_afinfo(&xfrm6_policy_afinfo);
 }

@@ -25,6 +25,7 @@
 
 #include <sound/driver.h>
 #include <asm/io.h>
+#include <linux/pci.h>
 #include <linux/time.h>
 #include <sound/core.h>
 #include <sound/trident.h>
@@ -47,7 +48,7 @@
 /* fill TLB entrie(s) corresponding to page with ptr */
 #define set_tlb_bus(trident,page,ptr,addr) __set_tlb_bus(trident,page,ptr,addr)
 /* fill TLB entrie(s) corresponding to page with silence pointer */
-#define set_silent_tlb(trident,page)	__set_tlb_bus(trident, page, (unsigned long)trident->tlb.silent_page, trident->tlb.silent_page_dmaaddr)
+#define set_silent_tlb(trident,page)	__set_tlb_bus(trident, page, (unsigned long)trident->tlb.silent_page.area, trident->tlb.silent_page.addr)
 /* get aligned page from offset address */
 #define get_aligned_page(offset)	((offset) >> 12)
 /* get offset address from aligned page */
@@ -76,8 +77,8 @@ static inline void set_tlb_bus(trident_t *trident, int page, unsigned long ptr, 
 static inline void set_silent_tlb(trident_t *trident, int page)
 {
 	page <<= 1;
-	__set_tlb_bus(trident, page, (unsigned long)trident->tlb.silent_page, trident->tlb.silent_page_dmaaddr);
-	__set_tlb_bus(trident, page+1, (unsigned long)trident->tlb.silent_page, trident->tlb.silent_page_dmaaddr);
+	__set_tlb_bus(trident, page, (unsigned long)trident->tlb.silent_page.area, trident->tlb.silent_page.addr);
+	__set_tlb_bus(trident, page+1, (unsigned long)trident->tlb.silent_page.area, trident->tlb.silent_page.addr);
 }
 
 #else
@@ -111,7 +112,7 @@ static inline void set_silent_tlb(trident_t *trident, int page)
 	int i;
 	page *= UNIT_PAGES;
 	for (i = 0; i < UNIT_PAGES; i++, page++)
-		__set_tlb_bus(trident, page, (unsigned long)trident->tlb.silent_page, trident->tlb.silent_page_dmaaddr);
+		__set_tlb_bus(trident, page, (unsigned long)trident->tlb.silent_page.area, trident->tlb.silent_page.addr);
 }
 
 #endif /* PAGE_SIZE */
@@ -189,9 +190,8 @@ snd_trident_alloc_sg_pages(trident_t *trident, snd_pcm_substream_t *substream)
 	snd_util_memblk_t *blk;
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	int idx, page;
-	struct snd_sg_buf *sgbuf = runtime->dma_private;
+	struct snd_sg_buf *sgbuf = snd_pcm_substream_sgbuf(substream);
 
-	snd_assert(substream->dma_device.type == SNDRV_DMA_TYPE_PCI_SG, return NULL);
 	snd_assert(runtime->dma_bytes > 0 && runtime->dma_bytes <= SNDRV_TRIDENT_MAX_PAGES * SNDRV_TRIDENT_PAGE_SIZE, return NULL);
 	hdr = trident->tlb.memhdr;
 	snd_assert(hdr != NULL, return NULL);
@@ -240,7 +240,6 @@ snd_trident_alloc_cont_pages(trident_t *trident, snd_pcm_substream_t *substream)
 	dma_addr_t addr;
 	unsigned long ptr;
 
-	snd_assert(substream->dma_device.type == SNDRV_DMA_TYPE_PCI, return NULL);
 	snd_assert(runtime->dma_bytes> 0 && runtime->dma_bytes <= SNDRV_TRIDENT_MAX_PAGES * SNDRV_TRIDENT_PAGE_SIZE, return NULL);
 	hdr = trident->tlb.memhdr;
 	snd_assert(hdr != NULL, return NULL);
@@ -276,7 +275,7 @@ snd_trident_alloc_pages(trident_t *trident, snd_pcm_substream_t *substream)
 {
 	snd_assert(trident != NULL, return NULL);
 	snd_assert(substream != NULL, return NULL);
-	if (substream->dma_device.type == SNDRV_DMA_TYPE_PCI_SG)
+	if (substream->dma_buffer.dev.type == SNDRV_DMA_TYPE_DEV_SG)
 		return snd_trident_alloc_sg_pages(trident, substream);
 	else
 		return snd_trident_alloc_cont_pages(trident, substream);
@@ -367,8 +366,15 @@ static void clear_tlb(trident_t *trident, int page)
 	void *ptr = page_to_ptr(trident, page);
 	dma_addr_t addr = page_to_addr(trident, page);
 	set_silent_tlb(trident, page);
-	if (ptr)
-		snd_free_pci_pages(trident->pci, ALIGN_PAGE_SIZE, ptr, addr);
+	if (ptr) {
+		struct snd_dma_buffer dmab;
+		dmab.dev.type = SNDRV_DMA_TYPE_DEV;
+		dmab.dev.dev = snd_dma_pci_data(trident->pci);
+		dmab.area = ptr;
+		dmab.addr = addr;
+		dmab.bytes = ALIGN_PAGE_SIZE;
+		snd_dma_free_pages(&dmab);
+	}
 }
 
 /* check new allocation range */
@@ -399,8 +405,7 @@ static void get_single_page_range(snd_util_memhdr_t *hdr, snd_util_memblk_t *blk
 static int synth_alloc_pages(trident_t *hw, snd_util_memblk_t *blk)
 {
 	int page, first_page, last_page;
-	void *ptr;
-	dma_addr_t addr;
+	struct snd_dma_buffer dmab;
 
 	firstpg(blk) = get_aligned_page(blk->offset);
 	lastpg(blk) = get_aligned_page(blk->offset + blk->size - 1);
@@ -410,14 +415,14 @@ static int synth_alloc_pages(trident_t *hw, snd_util_memblk_t *blk)
 	 * fortunately Trident page size and kernel PAGE_SIZE is identical!
 	 */
 	for (page = first_page; page <= last_page; page++) {
-		ptr = snd_malloc_pci_pages(hw->pci, ALIGN_PAGE_SIZE, &addr);
-		if (ptr == NULL)
+		if (snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(hw->pci),
+					ALIGN_PAGE_SIZE, &dmab) < 0)
 			goto __fail;
-		if (! is_valid_page(addr)) {
-			snd_free_pci_pages(hw->pci, ALIGN_PAGE_SIZE, ptr, addr);
+		if (! is_valid_page(dmab.addr)) {
+			snd_dma_free_pages(&dmab);
 			goto __fail;
 		}
-		set_tlb_bus(hw, page, (unsigned long)ptr, addr);
+		set_tlb_bus(hw, page, (unsigned long)dmab.area, dmab.addr);
 	}
 	return 0;
 
@@ -445,32 +450,9 @@ static int synth_free_pages(trident_t *trident, snd_util_memblk_t *blk)
 }
 
 /*
- * bzero(blk + offset, size)
- */
-int snd_trident_synth_bzero(trident_t *trident, snd_util_memblk_t *blk, int offset, int size)
-{
-	int page, nextofs, end_offset, temp, temp1;
-
-	offset += blk->offset;
-	end_offset = offset + size;
-	page = get_aligned_page(offset) + 1;
-	do {
-		nextofs = aligned_page_offset(page);
-		temp = nextofs - offset;
-		temp1 = end_offset - offset;
-		if (temp1 < temp)
-			temp = temp1;
-		memset(offset_ptr(trident, offset), 0, temp);
-		offset = nextofs;
-		page++;
-	} while (offset < end_offset);
-	return 0;
-}
-
-/*
  * copy_from_user(blk + offset, data, size)
  */
-int snd_trident_synth_copy_from_user(trident_t *trident, snd_util_memblk_t *blk, int offset, const char *data, int size)
+int snd_trident_synth_copy_from_user(trident_t *trident, snd_util_memblk_t *blk, int offset, const char __user *data, int size)
 {
 	int page, nextofs, end_offset, temp, temp1;
 

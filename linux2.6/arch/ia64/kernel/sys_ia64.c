@@ -2,7 +2,7 @@
  * This file contains various system calls that have different calling
  * conventions on different platforms.
  *
- * Copyright (C) 1999-2000, 2002-2003 Hewlett-Packard Co
+ * Copyright (C) 1999-2000, 2002-2003, 2005 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 #include <linux/config.h>
@@ -15,6 +15,7 @@
 #include <linux/file.h>		/* doh, must come after sched.h... */
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
+#include <linux/syscalls.h>
 #include <linux/highuid.h>
 #include <linux/hugetlb.h>
 
@@ -74,7 +75,6 @@ arch_get_unmapped_area (struct file *filp, unsigned long addr, unsigned long len
 asmlinkage long
 ia64_getpriority (int which, int who)
 {
-	extern long sys_getpriority (int, int);
 	long prio;
 
 	prio = sys_getpriority(which, who);
@@ -93,12 +93,12 @@ sys_getpagesize (void)
 }
 
 asmlinkage unsigned long
-ia64_shmat (int shmid, void *shmaddr, int shmflg)
+ia64_shmat (int shmid, void __user *shmaddr, int shmflg)
 {
 	unsigned long raddr;
 	int retval;
 
-	retval = sys_shmat(shmid, shmaddr, shmflg, &raddr);
+	retval = do_shmat(shmid, shmaddr, shmflg, &raddr);
 	if (retval < 0)
 		return retval;
 
@@ -138,7 +138,7 @@ ia64_brk (unsigned long brk)
 		goto out;
 
 	/* Check against rlimit.. */
-	rlim = current->rlim[RLIMIT_DATA].rlim_cur;
+	rlim = current->signal->rlim[RLIMIT_DATA].rlim_cur;
 	if (rlim < RLIM_INFINITY && brk - mm->start_data > rlim)
 		goto out;
 
@@ -163,10 +163,9 @@ out:
  * and r9) as this is faster than doing a copy_to_user().
  */
 asmlinkage long
-sys_pipe (long arg0, long arg1, long arg2, long arg3,
-	  long arg4, long arg5, long arg6, long arg7, long stack)
+sys_pipe (void)
 {
-	struct pt_regs *regs = (struct pt_regs *) &stack;
+	struct pt_regs *regs = ia64_task_regs(current);
 	int fd[2];
 	int retval;
 
@@ -183,7 +182,7 @@ static inline unsigned long
 do_mmap2 (unsigned long addr, unsigned long len, int prot, int flags, int fd, unsigned long pgoff)
 {
 	unsigned long roff;
-	struct file *file = 0;
+	struct file *file = NULL;
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	if (!(flags & MAP_ANONYMOUS)) {
@@ -201,9 +200,15 @@ do_mmap2 (unsigned long addr, unsigned long len, int prot, int flags, int fd, un
 	 * A zero mmap always succeeds in Linux, independent of whether or not the
 	 * remaining arguments are valid.
 	 */
-	len = PAGE_ALIGN(len);
 	if (len == 0)
 		goto out;
+
+	/* Careful about overflows.. */
+	len = PAGE_ALIGN(len);
+	if (!len || len > TASK_SIZE) {
+		addr = -EINVAL;
+		goto out;
+	}
 
 	/*
 	 * Don't permit mappings into unmapped space, the virtual page table of a region,

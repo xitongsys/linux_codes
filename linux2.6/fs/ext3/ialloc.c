@@ -22,8 +22,8 @@
 #include <linux/quotaops.h>
 #include <linux/buffer_head.h>
 #include <linux/random.h>
+#include <linux/bitops.h>
 
-#include <asm/bitops.h>
 #include <asm/byteorder.h>
 
 #include "xattr.h"
@@ -64,8 +64,8 @@ read_inode_bitmap(struct super_block * sb, unsigned long block_group)
 	if (!bh)
 		ext3_error(sb, "read_inode_bitmap",
 			    "Cannot read inode bitmap - "
-			    "block_group = %lu, inode_bitmap = %lu",
-			    block_group, (unsigned long) desc->bg_inode_bitmap);
+			    "block_group = %lu, inode_bitmap = %u",
+			    block_group, le32_to_cpu(desc->bg_inode_bitmap));
 error_out:
 	return bh;
 }
@@ -97,7 +97,7 @@ void ext3_free_inode (handle_t *handle, struct inode * inode)
 	unsigned long bit;
 	struct ext3_group_desc * gdp;
 	struct ext3_super_block * es;
-	struct ext3_sb_info *sbi = EXT3_SB(sb);
+	struct ext3_sb_info *sbi;
 	int fatal = 0, err;
 
 	if (atomic_read(&inode->i_count) > 1) {
@@ -114,6 +114,7 @@ void ext3_free_inode (handle_t *handle, struct inode * inode)
 		printk("ext3_free_inode: inode on nonexistent device\n");
 		return;
 	}
+	sbi = EXT3_SB(sb);
 
 	ino = inode->i_ino;
 	ext3_debug ("freeing inode %lu\n", ino);
@@ -275,7 +276,7 @@ static int find_group_orlov(struct super_block *sb, struct inode *parent)
 	ndirs = percpu_counter_read_positive(&sbi->s_dirs_counter);
 
 	if ((parent == sb->s_root->d_inode) ||
-	    (parent->i_flags & EXT3_TOPDIR_FL)) {
+	    (EXT3_I(parent)->i_flags & EXT3_TOPDIR_FL)) {
 		int best_ndir = inodes_per_group;
 		int best_group = -1;
 
@@ -318,8 +319,6 @@ static int find_group_orlov(struct super_block *sb, struct inode *parent)
 		group = (parent_group + i) % ngroups;
 		desc = ext3_get_group_desc (sb, group, &bh);
 		if (!desc || !desc->bg_free_inodes_count)
-			continue;
-		if (sbi->s_debts[group] >= max_debt)
 			continue;
 		if (le16_to_cpu(desc->bg_used_dirs_count) >= max_dirs)
 			continue;
@@ -398,8 +397,8 @@ static int find_group_other(struct super_block *sb, struct inode *parent)
 	 * That failed: try linear search for a free inode, even if that group
 	 * has no free blocks.
 	 */
-	group = parent_group + 1;
-	for (i = 2; i < ngroups; i++) {
+	group = parent_group;
+	for (i = 0; i < ngroups; i++) {
 		if (++group >= ngroups)
 			group = 0;
 		desc = ext3_get_group_desc (sb, group, &bh);
@@ -446,8 +445,8 @@ struct inode *ext3_new_inode(handle_t *handle, struct inode * dir, int mode)
 		return ERR_PTR(-ENOMEM);
 	ei = EXT3_I(inode);
 
-	es = EXT3_SB(sb)->s_es;
 	sbi = EXT3_SB(sb);
+	es = sbi->s_es;
 	if (S_ISDIR(mode)) {
 		if (test_opt (sb, OLDALLOC))
 			group = find_group_dir(sb, dir);
@@ -559,7 +558,7 @@ got:
 	/* This is the optimal IO size (for stat), not the fs block size */
 	inode->i_blksize = PAGE_SIZE;
 	inode->i_blocks = 0;
-	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
+	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME_SEC;
 
 	memset(ei->i_data, 0, sizeof(ei->i_data));
 	ei->i_next_alloc_block = 0;
@@ -581,19 +580,25 @@ got:
 	ei->i_file_acl = 0;
 	ei->i_dir_acl = 0;
 	ei->i_dtime = 0;
-#ifdef EXT3_PREALLOCATE
-	ei->i_prealloc_block = 0;
-	ei->i_prealloc_count = 0;
-#endif
+	ei->i_rsv_window.rsv_start = EXT3_RESERVE_WINDOW_NOT_ALLOCATED;
+	ei->i_rsv_window.rsv_end = EXT3_RESERVE_WINDOW_NOT_ALLOCATED;
+	atomic_set(&ei->i_rsv_window.rsv_goal_size, EXT3_DEFAULT_RESERVE_BLOCKS);
+	atomic_set(&ei->i_rsv_window.rsv_alloc_hit, 0);
+	seqlock_init(&ei->i_rsv_window.rsv_seqlock);
 	ei->i_block_group = group;
 
 	ext3_set_inode_flags(inode);
 	if (IS_DIRSYNC(inode))
 		handle->h_sync = 1;
 	insert_inode_hash(inode);
-	inode->i_generation = EXT3_SB(sb)->s_next_generation++;
+	spin_lock(&sbi->s_next_gen_lock);
+	inode->i_generation = sbi->s_next_generation++;
+	spin_unlock(&sbi->s_next_gen_lock);
 
 	ei->i_state = EXT3_STATE_NEW;
+	ei->i_extra_isize =
+		(EXT3_INODE_SIZE(inode->i_sb) > EXT3_GOOD_OLD_INODE_SIZE) ?
+		sizeof(struct ext3_inode) - EXT3_GOOD_OLD_INODE_SIZE : 0;
 
 	ret = inode;
 	if(DQUOT_ALLOC_INODE(inode)) {
@@ -730,6 +735,7 @@ unsigned long ext3_count_free_inodes (struct super_block * sb)
 		if (!gdp)
 			continue;
 		desc_count += le16_to_cpu(gdp->bg_free_inodes_count);
+		cond_resched();
 	}
 	return desc_count;
 #endif

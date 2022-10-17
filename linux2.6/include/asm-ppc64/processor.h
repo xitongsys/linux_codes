@@ -12,18 +12,14 @@
 
 #include <linux/stringify.h>
 #ifndef __ASSEMBLY__
+#include <linux/config.h>
 #include <asm/atomic.h>
 #include <asm/ppcdebug.h>
 #include <asm/a.out.h>
 #endif
 #include <asm/ptrace.h>
 #include <asm/types.h>
-
-/*
- * Default implementation of macro that returns current
- * instruction pointer ("program counter").
- */
-#define current_text_addr() ({ __label__ _l; _l: &&_l;})
+#include <asm/systemcfg.h>
 
 /* Machine State Register (MSR) Fields */
 #define MSR_SF_LG	63              /* Enable 64 bit mode */
@@ -49,6 +45,7 @@
 #define MSR_DR_LG	4 		/* Data Relocate */
 #define MSR_PE_LG	3		/* Protection Enable */
 #define MSR_PX_LG	2		/* Protection Exclusive Mode */
+#define MSR_PMM_LG	2		/* Performance monitor */
 #define MSR_RI_LG	1		/* Recoverable Exception */
 #define MSR_LE_LG	0 		/* Little Endian */
 
@@ -81,6 +78,7 @@
 #define MSR_DR		__MASK(MSR_DR_LG)	/* Data Relocate */
 #define MSR_PE		__MASK(MSR_PE_LG)	/* Protection Enable */
 #define MSR_PX		__MASK(MSR_PX_LG)	/* Protection Exclusive Mode */
+#define MSR_PMM		__MASK(MSR_PMM_LG)	/* Performance monitor */
 #define MSR_RI		__MASK(MSR_RI_LG)	/* Recoverable Exception */
 #define MSR_LE		__MASK(MSR_LE_LG)	/* Little Endian */
 
@@ -215,8 +213,11 @@
 #define	  HID0_BHTE	(1<<2)		/* Branch History Table Enable */
 #define	  HID0_BTCD	(1<<1)		/* Branch target cache disable */
 #define	SPRN_MSRDORM	0x3F1	/* Hardware Implementation Register 1 */
+#define SPRN_HID1	0x3F1	/* Hardware Implementation Register 1 */
 #define	SPRN_IABR	0x3F2	/* Instruction Address Breakpoint Register */
 #define	SPRN_NIADORM	0x3F3	/* Hardware Implementation Register 2 */
+#define SPRN_HID4	0x3F4	/* 970 HID4 */
+#define SPRN_HID5	0x3F6	/* 970 HID5 */
 #define	SPRN_TSC 	0x3FD	/* Thread switch control */
 #define	SPRN_TST 	0x3FC	/* Thread switch timeout */
 #define	SPRN_IAC1	0x3F4	/* Instruction Address Compare 1 */
@@ -231,8 +232,6 @@
 #define	SPRN_IMMR	0x27E  	/* Internal Memory Map Register */
 #define	SPRN_L2CR	0x3F9	/* Level 2 Cache Control Regsiter */
 #define	SPRN_LR		0x008	/* Link Register */
-#define	SPRN_MMCR0	0x3B8	/* Monitor Mode Control Register 0 */
-#define	SPRN_MMCR1	0x3BC	/* Monitor Mode Control Register 1 */
 #define	SPRN_PBL1	0x3FC	/* Protection Bound Lower 1 */
 #define	SPRN_PBL2	0x3FE	/* Protection Bound Lower 2 */
 #define	SPRN_PBU1	0x3FD	/* Protection Bound Upper 1 */
@@ -240,10 +239,7 @@
 #define	SPRN_PID	0x3B1	/* Process ID */
 #define	SPRN_PIR	0x3FF	/* Processor Identification Register */
 #define	SPRN_PIT	0x3DB	/* Programmable Interval Timer */
-#define	SPRN_PMC1	0x3B9	/* Performance Counter Register 1 */
-#define	SPRN_PMC2	0x3BA	/* Performance Counter Register 2 */
-#define	SPRN_PMC3	0x3BD	/* Performance Counter Register 3 */
-#define	SPRN_PMC4	0x3BE	/* Performance Counter Register 4 */
+#define	SPRN_PURR	0x135	/* Processor Utilization of Resources Register */
 #define	SPRN_PVR	0x11F	/* Processor Version Register */
 #define	SPRN_RPA	0x3D6	/* Required Physical Address Register */
 #define	SPRN_SDA	0x3BF	/* Sampled Data Address Register */
@@ -262,6 +258,7 @@
 #define	SPRN_TBRU	0x10D	/* Time Base Read Upper Register (user, R/O) */
 #define	SPRN_TBWL	0x11C	/* Time Base Lower Register (super, W/O) */
 #define	SPRN_TBWU	0x11D	/* Time Base Write Upper Register (super, W/O) */
+#define SPRN_HIOR	0x137	/* 970 Hypervisor interrupt offset */
 #define	SPRN_TCR	0x3DA	/* Timer Control Register */
 #define	  TCR_WP(x)		(((x)&0x3)<<30)	/* WDT Period */
 #define	    WP_2_17		0		/* 2^17 clocks */
@@ -302,15 +299,48 @@
 #define	    WRS_SYSTEM		3		/* WDT forced system reset */
 #define	  TSR_PIS		0x08000000	/* PIT Interrupt Status */
 #define	  TSR_FIS		0x04000000	/* FIT Interrupt Status */
-#define	SPRN_UMMCR0	0x3A8	/* User Monitor Mode Control Register 0 */
-#define	SPRN_UMMCR1	0x3AC	/* User Monitor Mode Control Register 0 */
-#define	SPRN_UPMC1	0x3A9	/* User Performance Counter Register 1 */
-#define	SPRN_UPMC2	0x3AA	/* User Performance Counter Register 2 */
-#define	SPRN_UPMC3	0x3AD	/* User Performance Counter Register 3 */
-#define	SPRN_UPMC4	0x3AE	/* User Performance Counter Register 4 */
 #define	SPRN_USIA	0x3AB	/* User Sampled Instruction Address Register */
 #define	SPRN_XER	0x001	/* Fixed Point Exception Register */
 #define	SPRN_ZPR	0x3B0	/* Zone Protection Register */
+#define SPRN_VRSAVE     0x100   /* Vector save */
+
+/* Performance monitor SPRs */
+#define SPRN_SIAR	780
+#define SPRN_SDAR	781
+#define SPRN_MMCRA	786
+#define   MMCRA_SIHV	0x10000000UL /* state of MSR HV when SIAR set */
+#define   MMCRA_SIPR	0x08000000UL /* state of MSR PR when SIAR set */
+#define   MMCRA_SAMPLE_ENABLE 0x00000001UL /* enable sampling */
+#define SPRN_PMC1	787
+#define SPRN_PMC2	788
+#define SPRN_PMC3	789
+#define SPRN_PMC4	790
+#define SPRN_PMC5	791
+#define SPRN_PMC6	792
+#define SPRN_PMC7	793
+#define SPRN_PMC8	794
+#define SPRN_MMCR0	795
+#define   MMCR0_FC	0x80000000UL /* freeze counters. set to 1 on a perfmon exception */
+#define   MMCR0_FCS	0x40000000UL /* freeze in supervisor state */
+#define   MMCR0_KERNEL_DISABLE MMCR0_FCS
+#define   MMCR0_FCP	0x20000000UL /* freeze in problem state */
+#define   MMCR0_PROBLEM_DISABLE MMCR0_FCP
+#define   MMCR0_FCM1	0x10000000UL /* freeze counters while MSR mark = 1 */
+#define   MMCR0_FCM0	0x08000000UL /* freeze counters while MSR mark = 0 */
+#define   MMCR0_PMXE	0x04000000UL /* performance monitor exception enable */
+#define   MMCR0_FCECE	0x02000000UL /* freeze counters on enabled condition or event */
+/* time base exception enable */
+#define   MMCR0_TBEE	0x00400000UL /* time base exception enable */
+#define   MMCR0_PMC1CE	0x00008000UL /* PMC1 count enable*/
+#define   MMCR0_PMCjCE	0x00004000UL /* PMCj count enable*/
+#define   MMCR0_TRIGGER	0x00002000UL /* TRIGGER enable */
+#define   MMCR0_PMAO	0x00000080UL /* performance monitor alert has occurred, set to 0 after handling exception */
+#define   MMCR0_SHRFC	0x00000040UL /* SHRre freeze conditions between threads */
+#define   MMCR0_FCTI	0x00000008UL /* freeze counters in tags inactive mode */
+#define   MMCR0_FCTA	0x00000004UL /* freeze counters in tags active mode */
+#define   MMCR0_FCWAIT	0x00000002UL /* freeze counter in WAIT state */
+#define   MMCR0_FCHV	0x00000001UL /* freeze conditions in hypervisor mode */
+#define SPRN_MMCR1	798
 
 /* Short-hand versions for a number of the above SPRNs */
 
@@ -337,7 +367,8 @@
 #define	__LR	SPRN_LR
 #define	PVR	SPRN_PVR	/* Processor Version */
 #define	PIR	SPRN_PIR	/* Processor ID */
-#define	RPA	SPRN_RPA	/* Required Physical Address Register */
+#define	PURR	SPRN_PURR	/* Processor Utilization of Resource Register */
+//#define	RPA	SPRN_RPA	/* Required Physical Address Register */
 #define	SDR1	SPRN_SDR1      	/* MMU hash base register */
 #define	SPR0	SPRN_SPRG0	/* Supervisor Private Registers */
 #define	SPR1	SPRN_SPRG1
@@ -371,6 +402,10 @@
 #define	PV_ICESTAR	0x0036
 #define	PV_SSTAR	0x0037
 #define	PV_POWER4p	0x0038
+#define PV_970		0x0039
+#define	PV_POWER5	0x003A
+#define PV_POWER5p	0x003B
+#define PV_970FX	0x003C
 #define	PV_630        	0x0040
 #define	PV_630p	        0x0041
 
@@ -378,7 +413,14 @@
 #define PLATFORM_PSERIES      0x0100
 #define PLATFORM_PSERIES_LPAR 0x0101
 #define PLATFORM_ISERIES_LPAR 0x0201
-	
+#define PLATFORM_LPAR         0x0001
+#define PLATFORM_POWERMAC     0x0400
+#define PLATFORM_MAPLE        0x0500
+
+/* Compatibility with drivers coming from PPC32 world */
+#define _machine	(systemcfg->platform)
+#define _MACH_Pmac	PLATFORM_POWERMAC
+
 /*
  * List of interrupt controllers.
  */
@@ -388,6 +430,12 @@
 
 #define XGLUE(a,b) a##b
 #define GLUE(a,b) XGLUE(a,b)
+
+/* iSeries CTRL register (for runlatch) */
+
+#define CTRLT		0x098
+#define CTRLF		0x088
+#define RUNLATCH	0x0001
 
 #ifdef __ASSEMBLY__
 
@@ -417,8 +465,13 @@ name: \
 	.type GLUE(.,name),@function; \
 GLUE(.,name):
 
-#endif /* __ASSEMBLY__ */
+#else /* __ASSEMBLY__ */
 
+/*
+ * Default implementation of macro that returns current
+ * instruction pointer ("program counter").
+ */
+#define current_text_addr() ({ __label__ _l; _l: &&_l;})
 
 /* Macros for setting and retrieving special purpose registers */
 
@@ -440,46 +493,38 @@ GLUE(.,name):
 #define mttbl(v)	asm volatile("mttbl %0":: "r"(v))
 #define mttbu(v)	asm volatile("mttbu %0":: "r"(v))
 
-/* iSeries CTRL register (for runlatch) */
-
-#define CTRLT		0x098
-#define CTRLF		0x088
-#define RUNLATCH	0x0001
-
-/* Size of an exception stack frame contained in the paca. */
-#define EXC_FRAME_SIZE 64
-
 #define mfasr()		({unsigned long rval; \
 			asm volatile("mfasr %0" : "=r" (rval)); rval;})
 
-#ifndef __ASSEMBLY__
-extern unsigned long *_get_SP(void);
+static inline void set_tb(unsigned int upper, unsigned int lower)
+{
+	mttbl(0);
+	mttbu(upper);
+	mttbl(lower);
+}
+
+#define __get_SP()	({unsigned long sp; \
+			asm volatile("mr %0,1": "=r" (sp)); sp;})
+
+#ifdef __KERNEL__
 
 extern int have_of;
+extern u64 ppc64_interrupt_controller;
 
 struct task_struct;
 void start_thread(struct pt_regs *regs, unsigned long fdptr, unsigned long sp);
 void release_thread(struct task_struct *);
 
 /* Prepare to copy thread state - unlazy all lazy status */
-#define prepare_to_copy(tsk)	do { } while (0)
+extern void prepare_to_copy(struct task_struct *tsk);
 
-/*
- * Create a new kernel thread.
- */
+/* Create a new kernel thread. */
 extern long kernel_thread(int (*fn)(void *), void *arg, unsigned long flags);
-
-/*
- * Bus types
- */
-#define MCA_bus 0
-#define MCA_bus__is_a_macro /* for versions in ksyms.c */
 
 /* Lazy FPU handling on uni-processor */
 extern struct task_struct *last_task_used_math;
+extern struct task_struct *last_task_used_altivec;
 
-
-#ifdef __KERNEL__
 /* 64-bit user address space is 41-bits (2TBs user VM) */
 #define TASK_SIZE_USER64 (0x0000020000000000UL)
 
@@ -491,8 +536,10 @@ extern struct task_struct *last_task_used_math;
 
 #define TASK_SIZE (test_thread_flag(TIF_32BIT) ? \
 		TASK_SIZE_USER32 : TASK_SIZE_USER64)
-#endif /* __KERNEL__ */
 
+/* We can't actually tell the TASK_SIZE given just the mm, but default
+ * to the 64-bit case to make sure that enough gets cleaned up. */
+#define MM_VM_SIZE(mm)	TASK_SIZE_USER64
 
 /* This decides where the kernel will search for a free chunk of vm
  * space during mmap's.
@@ -509,24 +556,34 @@ typedef struct {
 
 struct thread_struct {
 	unsigned long	ksp;		/* Kernel stack pointer */
+	unsigned long	ksp_vsid;
 	struct pt_regs	*regs;		/* Pointer to saved register state */
 	mm_segment_t	fs;		/* for get_fs() validation */
 	double		fpr[32];	/* Complete floating point set */
 	unsigned long	fpscr;		/* Floating point status (plus pad) */
 	unsigned long	fpexc_mode;	/* Floating-point exception mode */
-	unsigned long	saved_msr;	/* Save MSR across signal handlers */
-	unsigned long	saved_softe;	/* Ditto for Soft Enable/Disable */
+	unsigned long	pad[3];		/* was saved_msr, saved_softe */
+#ifdef CONFIG_ALTIVEC
+	/* Complete AltiVec register set */
+	vector128	vr[32] __attribute((aligned(16)));
+	/* AltiVec status */
+	vector128	vscr __attribute((aligned(16)));
+	unsigned long	vrsave;
+	int		used_vr;	/* set if process has used altivec */
+#endif /* CONFIG_ALTIVEC */
 };
+
+#define ARCH_MIN_TASKALIGN 16
 
 #define INIT_SP		(sizeof(init_stack) + (unsigned long) &init_stack)
 
 #define INIT_THREAD  { \
-	INIT_SP, /* ksp */ \
-	(struct pt_regs *)INIT_SP - 1, /* regs */ \
-	KERNEL_DS, /*fs*/ \
-	{0}, /* fpr */ \
-	0, /* fpscr */ \
-	MSR_FE0|MSR_FE1, /* fpexc_mode */ \
+	.ksp = INIT_SP, \
+	.regs = (struct pt_regs *)INIT_SP - 1, \
+	.fs = KERNEL_DS, \
+	.fpr = {0}, \
+	.fpscr = 0, \
+	.fpexc_mode = MSR_FE0|MSR_FE1, \
 }
 
 /*
@@ -588,6 +645,16 @@ static inline void prefetchw(const void *x)
 
 #define spin_lock_prefetch(x)	prefetchw(x)
 
-#endif /* ASSEMBLY */
+#define HAVE_ARCH_PICK_MMAP_LAYOUT
+
+#endif /* __KERNEL__ */
+
+#endif /* __ASSEMBLY__ */
+
+/*
+ * Number of entries in the SLB. If this ever changes we should handle
+ * it with a use a cpu feature fixup.
+ */
+#define SLB_NUM_ENTRIES 64
 
 #endif /* __ASM_PPC64_PROCESSOR_H */

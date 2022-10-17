@@ -7,15 +7,29 @@
 #include <asm/apicdef.h>
 #include <asm/system.h>
 
-#ifdef CONFIG_X86_LOCAL_APIC
-
-#define APIC_DEBUG 0
-
-#if APIC_DEBUG
-#define Dprintk(x...) printk(x)
-#else
 #define Dprintk(x...)
-#endif
+
+/*
+ * Debugging macros
+ */
+#define APIC_QUIET   0
+#define APIC_VERBOSE 1
+#define APIC_DEBUG   2
+
+extern int apic_verbosity;
+
+/*
+ * Define the default level of output to be very little
+ * This can be turned up by using apic=verbose for more
+ * information and apic=debug for _lots_ of information.
+ * apic_verbosity is defined in apic.c
+ */
+#define apic_printk(v, s, a...) do {       \
+		if ((v) <= apic_verbosity) \
+			printk(s, ##a);    \
+	} while (0)
+
+#ifdef CONFIG_X86_LOCAL_APIC
 
 struct pt_regs;
 
@@ -75,18 +89,22 @@ extern void smp_local_timer_interrupt (struct pt_regs * regs);
 extern void setup_boot_APIC_clock (void);
 extern void setup_secondary_APIC_clock (void);
 extern void setup_apic_nmi_watchdog (void);
-extern void disable_lapic_nmi_watchdog(void);
-extern void enable_lapic_nmi_watchdog(void);
+extern int reserve_lapic_nmi(void);
+extern void release_lapic_nmi(void);
 extern void disable_timer_nmi_watchdog(void);
 extern void enable_timer_nmi_watchdog(void);
-extern inline void nmi_watchdog_tick (struct pt_regs * regs, unsigned reason);
+extern void nmi_watchdog_tick (struct pt_regs * regs, unsigned reason);
 extern int APIC_init_uniprocessor (void);
 extern void disable_APIC_timer(void);
 extern void enable_APIC_timer(void);
+extern void clustered_apic_check(void);
 
-extern int check_nmi_watchdog (void);
+extern int check_nmi_watchdog(void);
+extern void nmi_watchdog_default(void);
+extern int setup_nmi_watchdog(char *);
 
 extern unsigned int nmi_watchdog;
+#define NMI_DEFAULT	-1
 #define NMI_NONE	0
 #define NMI_IO_APIC	1
 #define NMI_LOCAL_APIC	2
@@ -94,7 +112,6 @@ extern unsigned int nmi_watchdog;
 
 #endif /* CONFIG_X86_LOCAL_APIC */
 
-#define clustered_apic_mode 0
 #define esr_disable 0
 extern unsigned boot_cpu_id;
 

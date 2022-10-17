@@ -38,7 +38,6 @@
 #include <linux/kernel.h>
 #include <linux/kdev_t.h>
 #include <linux/types.h>
-#include <linux/console.h>
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/ide.h>
@@ -109,7 +108,7 @@ static inline void do_reset(void)
 
 static void jmr3927_machine_restart(char *command)
 {
-	cli();
+	local_irq_disable();
 	puts("Rebooting...");
 	do_reset();
 }
@@ -185,26 +184,19 @@ unsigned long jmr3927_do_gettimeoffset(void)
 }
 
 
-#if defined(CONFIG_BLK_DEV_INITRD)
-extern unsigned long __rd_start, __rd_end, initrd_start, initrd_end;
-#endif
-
 //#undef DO_WRITE_THROUGH
 #define DO_WRITE_THROUGH
 #define DO_ENABLE_CACHE
 
 extern char * __init prom_getcmdline(void);
 static void jmr3927_board_init(void);
-extern void jmr3927_irq_setup(void);
 extern struct resource pci_io_resource;
 extern struct resource pci_mem_resource;
 
-void __init jmr3927_setup(void)
+static void __init jmr3927_setup(void)
 {
-	extern int panic_timeout;
 	char *argptr;
 
-	irq_setup = jmr3927_irq_setup;
 	set_io_port_base(JMR3927_PORT_BASE + JMR3927_PCIIO);
 
 	board_time_init = jmr3927_time_init;
@@ -282,6 +274,8 @@ void __init jmr3927_setup(void)
 #endif
 }
 
+early_initcall(jmr3927_setup);
+
 
 static void tx3927_setup(void);
 
@@ -293,9 +287,6 @@ unsigned long mips_pci_mem_size;
 /* for legacy I/O, PCI I/O PCI Bus address must be 0 */
 unsigned long mips_pci_io_pciaddr = 0;
 #endif
-
-extern struct rtc_ops *rtc_ops;
-extern struct rtc_ops jmr3927_rtc_ops;
 
 static void __init jmr3927_board_init(void)
 {
@@ -309,10 +300,6 @@ static void __init jmr3927_board_init(void)
 #endif
 
 	tx3927_setup();
-
-#ifdef CONFIG_VT
-	conswitchp = &dummy_con;
-#endif
 
 	if (jmr3927_have_isac()) {
 
@@ -328,11 +315,6 @@ static void __init jmr3927_board_init(void)
 		/* overrides PCI-IDE */
 #endif
 	}
-#ifdef USE_RTC_DS1742
-	if (jmr3927_have_nvram()) {
-		rtc_ops = &jmr3927_rtc_ops;
-	}
-#endif
 
 	/* SIO0 DTR on */
 	jmr3927_ioc_reg_out(0, JMR3927_IOC_DTR_ADDR);

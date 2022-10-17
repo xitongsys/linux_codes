@@ -1,3 +1,13 @@
+NOTE: This is an unmaintained driver.  It is not guaranteed to work due to
+changes made in the tty layer in 2.6.  If you wish to take over maintenance of
+this driver, contact Michael Warfield <mhw@wittsend.com>.
+
+Changelog:
+----------
+11-01-2001:	Original Document
+
+10-29-2004:	Minor misspelling & format fix, update status of driver.
+		James Nelson <james4765@gmail.com>
 
 Computone Intelliport II/Plus Multiport Serial Driver
 -----------------------------------------------------
@@ -41,11 +51,11 @@ Hardware - If you have an ISA card, find a free interrupt and io port.
 
 	Note the hardware address from the Computone ISA cards installed into
 		the system.  These are required for editing ip2.c or editing
-		/etc/modules.conf, or for specification on the modprobe
+		/etc/modprobe.conf, or for specification on the modprobe
 		command line.
 
-	Note that the /etc/modules.conf file is named /etc/conf.modules
-		with older versions of the module utilities.
+	Note that the /etc/modules.conf should be used for older (pre-2.6)
+		kernels.
 
 Software -
 
@@ -58,7 +68,7 @@ b) Run "make config" or "make menuconfig" or "make xconfig"
 c) Set address on ISA cards then:
    edit /usr/src/linux/drivers/char/ip2.c if needed 
 	or
-   edit /etc/modules.conf if needed (module).
+   edit /etc/modprobe.conf if needed (module).
 	or both to match this setting.
 d) Run "make modules"
 e) Run "make modules_install"
@@ -145,11 +155,11 @@ the irqs are not specified the driver uses the default in ip2.c (which
 selects polled mode). If no base addresses are specified the defaults in 
 ip2.c are used. If you are autoloading the driver module with kerneld or
 kmod the base addresses and interrupt number must also be set in ip2.c
-and recompile or just insert and options line in /etc/modules.conf or both. 
-The options line is equivalent to the command line and takes precidence over 
+and recompile or just insert and options line in /etc/modprobe.conf or both.
+The options line is equivalent to the command line and takes precedence over
 what is in ip2.c. 
 
-/etc/modules.conf sample:
+/etc/modprobe.conf sample:
 	options ip2 io=1,0x328 irq=1,10
 	alias char-major-71 ip2
 	alias char-major-72 ip2
@@ -166,7 +176,8 @@ The equivalent for the kernel command line (in lilo.conf):
 
 
 Note:	Both io and irq should be updated to reflect YOUR system.  An "io"
-	address of 1 or 2 indicates a PCI or EISA card in the board table.		The PCI or EISA irq will be assigned automatically.
+	address of 1 or 2 indicates a PCI or EISA card in the board table.
+	The PCI or EISA irq will be assigned automatically.
 
 Specifying an invalid or in-use irq will default the driver into
 running in polled mode for that card.  If all irq entries are 0 then
@@ -261,7 +272,7 @@ A userspace daemon, devfsd, exists to allow for automatic creation and
 management of symbolic links from the devfs name space to the conventional
 names.  More details on devfs can be found on the DEVFS home site at
 <http://www.atnf.csiro.au/~rgooch/linux/> or in the file kernel
-documentation files, .../linux/Documentation/filesystems/devfs/REAME.
+documentation files, .../linux/Documentation/filesystems/devfs/README.
 
 If you are using devfs, existing devices are automatically created within
 the devfs name space.  Normal devices will be tts/F0 - tts/F255 and callout
@@ -302,7 +313,7 @@ shar archive to make it easier to extract the script from the documentation.
 To create the ip2mkdev shell script change to a convenient directory (/tmp
 works just fine) and run the following command:
 
-	unshar /usr/src/linux/Documentation/computone.txt
+	unshar Documentation/computone.txt
 		(This file)
 
 You should now have a file ip2mkdev in your current working directory with

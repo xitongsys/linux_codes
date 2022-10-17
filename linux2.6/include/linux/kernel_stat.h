@@ -6,6 +6,7 @@
 #include <linux/smp.h>
 #include <linux/threads.h>
 #include <linux/percpu.h>
+#include <asm/cputime.h>
 
 /*
  * 'kernel_stat.h' contains the definitions needed for doing
@@ -14,13 +15,14 @@
  */
 
 struct cpu_usage_stat {
-	unsigned int user;
-	unsigned int nice;
-	unsigned int system;
-	unsigned int softirq;
-	unsigned int irq;
-	unsigned int idle;
-	unsigned int iowait;
+	cputime64_t user;
+	cputime64_t nice;
+	cputime64_t system;
+	cputime64_t softirq;
+	cputime64_t irq;
+	cputime64_t idle;
+	cputime64_t iowait;
+	cputime64_t steal;
 };
 
 struct kernel_stat {
@@ -34,7 +36,7 @@ DECLARE_PER_CPU(struct kernel_stat, kstat);
 /* Must have preemption disabled for this to be meaningful. */
 #define kstat_this_cpu	__get_cpu_var(kstat)
 
-extern unsigned long nr_context_switches(void);
+extern unsigned long long nr_context_switches(void);
 
 /*
  * Number of interrupts per specific IRQ source, since bootup
@@ -49,5 +51,9 @@ static inline int kstat_irqs(int irq)
 
 	return sum;
 }
+
+extern void account_user_time(struct task_struct *, cputime_t);
+extern void account_system_time(struct task_struct *, int, cputime_t);
+extern void account_steal_time(struct task_struct *, cputime_t);
 
 #endif /* _LINUX_KERNEL_STAT_H */

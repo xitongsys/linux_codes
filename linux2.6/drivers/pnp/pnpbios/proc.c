@@ -90,8 +90,10 @@ static int proc_read_escd(char *buf, char **start, off_t pos,
 	tmpbuf = pnpbios_kmalloc(escd.escd_size, GFP_KERNEL);
 	if (!tmpbuf) return -ENOMEM;
 
-	if (pnp_bios_read_escd(tmpbuf, escd.nv_storage_base))
+	if (pnp_bios_read_escd(tmpbuf, escd.nv_storage_base)) {
+		kfree(tmpbuf);
 		return -EIO;
+	}
 
 	escd_size = (unsigned char)(tmpbuf[0]) + (unsigned char)(tmpbuf[1])*256;
 
@@ -139,7 +141,7 @@ static int proc_read_devices(char *buf, char **start, off_t pos,
 		/* 26 = the number of characters per line sprintf'ed */
 		if ((p - buf + 26) > count)
 			break;
-		if (pnp_bios_get_dev_node(&nodenum, PNPMODE_STATIC, node))
+		if (pnp_bios_get_dev_node(&nodenum, PNPMODE_DYNAMIC, node))
 			break;
 		p += sprintf(p, "%02x\t%08x\t%02x:%02x:%02x\t%04x\n",
 			     node->handle, node->eisa_id,
@@ -168,15 +170,17 @@ static int proc_read_node(char *buf, char **start, off_t pos,
 
 	node = pnpbios_kmalloc(node_info.max_node_size, GFP_KERNEL);
 	if (!node) return -ENOMEM;
-	if (pnp_bios_get_dev_node(&nodenum, boot, node))
+	if (pnp_bios_get_dev_node(&nodenum, boot, node)) {
+		kfree(node);
 		return -EIO;
+	}
 	len = node->size - sizeof(struct pnp_bios_node);
 	memcpy(buf, node->data, len);
 	kfree(node);
 	return len;
 }
 
-static int proc_write_node(struct file *file, const char *buf,
+static int proc_write_node(struct file *file, const char __user *buf,
                            unsigned long count, void *data)
 {
 	struct pnp_bios_node *node;

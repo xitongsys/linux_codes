@@ -3,10 +3,11 @@
 
 #include <linux/compiler.h>
 #include <linux/types.h>
+#include <linux/resource.h>
 
 typedef union sigval {
 	int sival_int;
-	void *sival_ptr;
+	void __user *sival_ptr;
 } sigval_t;
 
 /*
@@ -26,8 +27,13 @@ typedef union sigval {
 #define __ARCH_SI_UID_T	uid_t
 #endif
 
+/*
+ * The default "si_band" type is "long", as specified by POSIX.
+ * However, some architectures want to override this to "int"
+ * for historical compatibility reasons, so we allow that.
+ */
 #ifndef __ARCH_SI_BAND_T
-#define __ARCH_SI_BAND_T int
+#define __ARCH_SI_BAND_T long
 #endif
 
 #ifndef HAVE_ARCH_SIGINFO_T
@@ -73,7 +79,7 @@ typedef struct siginfo {
 
 		/* SIGILL, SIGFPE, SIGSEGV, SIGBUS */
 		struct {
-			void *_addr; /* faulting insn/memory ref. */
+			void __user *_addr; /* faulting insn/memory ref. */
 #ifdef __ARCH_SI_TRAPNO
 			int _trapno;	/* TRAP # which caused the signal */
 #endif
@@ -118,6 +124,7 @@ typedef struct siginfo {
 #define __SI_FAULT	(3 << 16)
 #define __SI_CHLD	(4 << 16)
 #define __SI_RT		(5 << 16)
+#define __SI_MESGQ	(6 << 16)
 #define __SI_CODE(T,N)	((T) | ((N) & 0xffff))
 #else
 #define __SI_KILL	0
@@ -126,6 +133,7 @@ typedef struct siginfo {
 #define __SI_FAULT	0
 #define __SI_CHLD	0
 #define __SI_RT		0
+#define __SI_MESGQ	0
 #define __SI_CODE(T,N)	(N)
 #endif
 
@@ -137,7 +145,7 @@ typedef struct siginfo {
 #define SI_KERNEL	0x80		/* sent by the kernel from somewhere */
 #define SI_QUEUE	-1		/* sent by sigqueue */
 #define SI_TIMER __SI_CODE(__SI_TIMER,-2) /* sent by timer expiration */
-#define SI_MESGQ	-3		/* sent by real time mesq state change */
+#define SI_MESGQ __SI_CODE(__SI_MESGQ,-3) /* sent by real time mesq state change */
 #define SI_ASYNCIO	-4		/* sent by AIO completion */
 #define SI_SIGIO	-5		/* sent by queued SIGIO */
 #define SI_TKILL	-6		/* sent by tkill system call */
@@ -146,7 +154,6 @@ typedef struct siginfo {
 #define SI_FROMUSER(siptr)	((siptr)->si_code <= 0)
 #define SI_FROMKERNEL(siptr)	((siptr)->si_code > 0)
 
-#ifndef HAVE_ARCH_SI_CODES
 /*
  * SIGILL si_codes
  */
@@ -217,8 +224,6 @@ typedef struct siginfo {
 #define POLL_HUP	(__SI_POLL|6)	/* device disconnected */
 #define NSIGPOLL	6
 
-#endif
-
 /*
  * sigevent definitions
  * 
@@ -237,8 +242,6 @@ typedef struct siginfo {
 #define SIGEV_PAD_SIZE	((SIGEV_MAX_SIZE/sizeof(int)) - 3)
 #endif
 
-#ifndef HAVE_ARCH_SIGEVENT_T
-
 typedef struct sigevent {
 	sigval_t sigev_value;
 	int sigev_signo;
@@ -253,8 +256,6 @@ typedef struct sigevent {
 		} _sigev_thread;
 	} _sigev_un;
 } sigevent_t;
-
-#endif
 
 #define sigev_notify_function	_sigev_un._sigev_thread._function
 #define sigev_notify_attributes	_sigev_un._sigev_thread._attribute

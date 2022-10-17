@@ -49,13 +49,13 @@ static unsigned char usb_kbd_keycode[256] = {
 	  0,  0,  0,  0, 30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38,
 	 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44,  2,  3,
 	  4,  5,  6,  7,  8,  9, 10, 11, 28,  1, 14, 15, 57, 12, 13, 26,
-	 27, 43, 84, 39, 40, 41, 51, 52, 53, 58, 59, 60, 61, 62, 63, 64,
+	 27, 43, 43, 39, 40, 41, 51, 52, 53, 58, 59, 60, 61, 62, 63, 64,
 	 65, 66, 67, 68, 87, 88, 99, 70,119,110,102,104,111,107,109,106,
 	105,108,103, 69, 98, 55, 74, 78, 96, 79, 80, 81, 75, 76, 77, 71,
-	 72, 73, 82, 83, 86,127,116,117, 85, 89, 90, 91, 92, 93, 94, 95,
-	120,121,122,123,134,138,130,132,128,129,131,137,133,135,136,113,
-	115,114,  0,  0,  0,124,  0,181,182,183,184,185,186,187,188,189,
-	190,191,192,193,194,195,196,197,198,  0,  0,  0,  0,  0,  0,  0,
+	 72, 73, 82, 83, 86,127,116,117,183,184,185,186,187,188,189,190,
+	191,192,193,194,134,138,130,132,128,129,131,137,133,135,136,113,
+	115,114,  0,  0,  0,121,  0, 89, 93,124, 92, 94, 95,  0,  0,  0,
+	122,123, 90, 91, 85,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
 	  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
 	  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
 	  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
@@ -196,7 +196,7 @@ static void usb_kbd_close(struct input_dev *dev)
 	struct usb_kbd *kbd = dev->private;
 
 	if (!--kbd->open)
-		usb_unlink_urb(kbd->irq);
+		usb_kill_urb(kbd->irq);
 }
 
 static int usb_kbd_alloc_mem(struct usb_device *dev, struct usb_kbd *kbd)
@@ -240,7 +240,7 @@ static int usb_kbd_probe(struct usb_interface *iface,
 	char path[64];
 	char *buf;
 
-	interface = &iface->altsetting[iface->act_altsetting];
+	interface = iface->cur_altsetting;
 
 	if (interface->desc.bNumEndpoints != 1)
 		return -ENODEV;
@@ -296,9 +296,10 @@ static int usb_kbd_probe(struct usb_interface *iface,
 	kbd->dev.name = kbd->name;
 	kbd->dev.phys = kbd->phys;	
 	kbd->dev.id.bustype = BUS_USB;
-	kbd->dev.id.vendor = dev->descriptor.idVendor;
-	kbd->dev.id.product = dev->descriptor.idProduct;
-	kbd->dev.id.version = dev->descriptor.bcdDevice;
+	kbd->dev.id.vendor = le16_to_cpu(dev->descriptor.idVendor);
+	kbd->dev.id.product = le16_to_cpu(dev->descriptor.idProduct);
+	kbd->dev.id.version = le16_to_cpu(dev->descriptor.bcdDevice);
+	kbd->dev.dev = &iface->dev;
 
 	if (!(buf = kmalloc(63, GFP_KERNEL))) {
 		usb_free_urb(kbd->irq);
@@ -342,7 +343,7 @@ static void usb_kbd_disconnect(struct usb_interface *intf)
 	
 	usb_set_intfdata(intf, NULL);
 	if (kbd) {
-		usb_unlink_urb(kbd->irq);
+		usb_kill_urb(kbd->irq);
 		input_unregister_device(&kbd->dev);
 		usb_kbd_free_mem(interface_to_usbdev(intf), kbd);
 		kfree(kbd);

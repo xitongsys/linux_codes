@@ -52,7 +52,7 @@
 
 
 HLIST_HEAD(ax25_list);
-spinlock_t ax25_list_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(ax25_list_lock);
 
 static struct proto_ops ax25_proto_ops;
 
@@ -228,45 +228,26 @@ ax25_cb *ax25_find_cb(ax25_address *src_addr, ax25_address *dest_addr,
 	return NULL;
 }
 
-/*
- *	Look for any matching address - RAW sockets can bind to arbitrary names
- */
-struct sock *ax25_addr_match(ax25_address *addr)
+void ax25_send_to_raw(ax25_address *addr, struct sk_buff *skb, int proto)
 {
-	struct sock *sk = NULL;
 	ax25_cb *s;
+	struct sk_buff *copy;
 	struct hlist_node *node;
 
 	spin_lock_bh(&ax25_list_lock);
 	ax25_for_each(s, node, &ax25_list) {
 		if (s->sk != NULL && ax25cmp(&s->source_addr, addr) == 0 &&
-		    s->sk->sk_type == SOCK_RAW) {
-			sk = s->sk;
-			lock_sock(sk);
-			break;
-		}
-	}
-
-	spin_unlock_bh(&ax25_list_lock);
-
-	return sk;
-}
-
-void ax25_send_to_raw(struct sock *sk, struct sk_buff *skb, int proto)
-{
-	struct sk_buff *copy;
-	struct hlist_node *node;
-
-	sk_for_each_from(sk, node)
-		if (sk->sk_type == SOCK_RAW &&
-		    sk->sk_protocol == proto &&
-		    atomic_read(&sk->sk_rmem_alloc) <= sk->sk_rcvbuf) {
+		    s->sk->sk_type == SOCK_RAW &&
+		    s->sk->sk_protocol == proto &&
+		    s->ax25_dev->dev == skb->dev &&
+		    atomic_read(&s->sk->sk_rmem_alloc) <= s->sk->sk_rcvbuf) {
 			if ((copy = skb_clone(skb, GFP_ATOMIC)) == NULL)
-				return;
-
-			if (sock_queue_rcv_skb(sk, copy) != 0)
+				continue;
+			if (sock_queue_rcv_skb(s->sk, copy) != 0)
 				kfree_skb(copy);
 		}
+	}
+	spin_unlock_bh(&ax25_list_lock);
 }
 
 /*
@@ -318,7 +299,7 @@ void ax25_destroy_socket(ax25_cb *ax25)
 				ax25_cb *sax25 = ax25_sk(skb->sk);
 
 				/* Queue the unaccepted socket for death */
-				sock_set_flag(skb->sk, SOCK_DEAD);
+				sock_orphan(skb->sk);
 
 				ax25_start_heartbeat(sax25);
 				sax25->state = AX25_STATE_0;
@@ -355,7 +336,7 @@ void ax25_destroy_socket(ax25_cb *ax25)
  *		  includes a KILL command to abort any connection.
  *		  VERY useful for debugging ;-)
  */
-static int ax25_ctl_ioctl(const unsigned int cmd, void *arg)
+static int ax25_ctl_ioctl(const unsigned int cmd, void __user *arg)
 {
 	struct ax25_ctl_struct ax25_ctl;
 	ax25_digi digi;
@@ -527,7 +508,7 @@ ax25_cb *ax25_create_cb(void)
  */
 
 static int ax25_setsockopt(struct socket *sock, int level, int optname,
-	char *optval, int optlen)
+	char __user *optval, int optlen)
 {
 	struct sock *sk = sock->sk;
 	ax25_cb *ax25;
@@ -541,7 +522,7 @@ static int ax25_setsockopt(struct socket *sock, int level, int optname,
 	if (optlen < sizeof(int))
 		return -EINVAL;
 
-	if (get_user(opt, (int *)optval))
+	if (get_user(opt, (int __user *)optval))
 		return -EFAULT;
 
 	lock_sock(sk);
@@ -667,7 +648,7 @@ static int ax25_setsockopt(struct socket *sock, int level, int optname,
 }
 
 static int ax25_getsockopt(struct socket *sock, int level, int optname,
-	char *optval, int *optlen)
+	char __user *optval, int __user *optlen)
 {
 	struct sock *sk = sock->sk;
 	ax25_cb *ax25;
@@ -782,7 +763,7 @@ out:
 	return res;
 }
 
-int ax25_create(struct socket *sock, int protocol)
+static int ax25_create(struct socket *sock, int protocol)
 {
 	struct sock *sk;
 	ax25_cb *ax25;
@@ -835,7 +816,7 @@ int ax25_create(struct socket *sock, int protocol)
 	if ((sk = sk_alloc(PF_AX25, GFP_ATOMIC, 1, NULL)) == NULL)
 		return -ENOMEM;
 
-	ax25 = ax25_sk(sk) = ax25_create_cb();
+	ax25 = sk->sk_protinfo = ax25_create_cb();
 	if (!ax25) {
 		sk_free(sk);
 		return -ENOMEM;
@@ -913,13 +894,14 @@ struct sock *ax25_make_new(struct sock *osk, struct ax25_dev *ax25_dev)
 	if (oax25->digipeat != NULL) {
 		if ((ax25->digipeat = kmalloc(sizeof(ax25_digi), GFP_ATOMIC)) == NULL) {
 			sk_free(sk);
+			ax25_cb_put(ax25);
 			return NULL;
 		}
 
 		memcpy(ax25->digipeat, oax25->digipeat, sizeof(ax25_digi));
 	}
 
-	ax25_sk(sk) = ax25;
+	sk->sk_protinfo = ax25;
 	ax25->sk    = sk;
 
 	return sk;
@@ -934,20 +916,25 @@ static int ax25_release(struct socket *sock)
 		return 0;
 
 	sock_hold(sk);
+	sock_orphan(sk);
 	lock_sock(sk);
 	ax25 = ax25_sk(sk);
 
 	if (sk->sk_type == SOCK_SEQPACKET) {
 		switch (ax25->state) {
 		case AX25_STATE_0:
+			release_sock(sk);
 			ax25_disconnect(ax25, 0);
+			lock_sock(sk);
 			ax25_destroy_socket(ax25);
 			break;
 
 		case AX25_STATE_1:
 		case AX25_STATE_2:
 			ax25_send_control(ax25, AX25_DISC, AX25_POLLON, AX25_COMMAND);
+			release_sock(sk);
 			ax25_disconnect(ax25, 0);
+			lock_sock(sk);
 			ax25_destroy_socket(ax25);
 			break;
 
@@ -980,7 +967,6 @@ static int ax25_release(struct socket *sock)
 			sk->sk_state                = TCP_CLOSE;
 			sk->sk_shutdown            |= SEND_SHUTDOWN;
 			sk->sk_state_change(sk);
-			sock_set_flag(sk, SOCK_DEAD);
 			sock_set_flag(sk, SOCK_DESTROY);
 			break;
 
@@ -991,12 +977,10 @@ static int ax25_release(struct socket *sock)
 		sk->sk_state     = TCP_CLOSE;
 		sk->sk_shutdown |= SEND_SHUTDOWN;
 		sk->sk_state_change(sk);
-		sock_set_flag(sk, SOCK_DEAD);
 		ax25_destroy_socket(ax25);
 	}
 
 	sock->sk   = NULL;
-	sk->sk_socket = NULL;	/* Not used, but we should do this */
 	release_sock(sk);
 	sock_put(sk);
 
@@ -1192,13 +1176,16 @@ static int ax25_connect(struct socket *sock, struct sockaddr *uaddr,
 		/* check if we can remove this feature. It is broken. */
 		printk(KERN_WARNING "ax25_connect(): %s uses autobind, please contact jreuter@yaina.de\n",
 			current->comm);
-		if ((err = ax25_rt_autobind(ax25, &fsa->fsa_ax25.sax25_call)) < 0)
+		if ((err = ax25_rt_autobind(ax25, &fsa->fsa_ax25.sax25_call)) < 0) {
+			kfree(digi);
 			goto out;
+		}
 
 		ax25_fillin_cb(ax25, ax25->ax25_dev);
 		ax25_cb_add(ax25);
 	} else {
 		if (ax25->ax25_dev == NULL) {
+			kfree(digi);
 			err = -EHOSTUNREACH;
 			goto out;
 		}
@@ -1207,8 +1194,7 @@ static int ax25_connect(struct socket *sock, struct sockaddr *uaddr,
 	if (sk->sk_type == SOCK_SEQPACKET &&
 	    (ax25t=ax25_find_cb(&ax25->source_addr, &fsa->fsa_ax25.sax25_call, digi,
 		    	 ax25->ax25_dev->dev))) {
-		if (digi != NULL)
-			kfree(digi);
+		kfree(digi);
 		err = -EADDRINUSE;		/* Already such a connection */
 		ax25_cb_put(ax25t);
 		goto out;
@@ -1334,11 +1320,13 @@ static int ax25_accept(struct socket *sock, struct socket *newsock, int flags)
 
 		release_sock(sk);
 		current->state = TASK_INTERRUPTIBLE;
-		if (flags & O_NONBLOCK)
+		if (flags & O_NONBLOCK) {
+			current->state = TASK_RUNNING;
+			remove_wait_queue(sk->sk_sleep, &wait);
 			return -EWOULDBLOCK;
+		}
 		if (!signal_pending(tsk)) {
 			schedule();
-			current->state = TASK_RUNNING;
 			lock_sock(sk);
 			continue;
 		}
@@ -1350,7 +1338,6 @@ static int ax25_accept(struct socket *sock, struct socket *newsock, int flags)
 	remove_wait_queue(sk->sk_sleep, &wait);
 
 	newsk		 = skb->sk;
-	newsk->sk_pair	 = NULL;
 	newsk->sk_socket = newsock;
 	newsk->sk_sleep	 = &newsock->wait;
 
@@ -1415,7 +1402,7 @@ out:
 }
 
 static int ax25_sendmsg(struct kiocb *iocb, struct socket *sock,
-			struct msghdr *msg, int len)
+			struct msghdr *msg, size_t len)
 {
 	struct sockaddr_ax25 *usax = (struct sockaddr_ax25 *)msg->msg_name;
 	struct sock *sk = sock->sk;
@@ -1424,11 +1411,11 @@ static int ax25_sendmsg(struct kiocb *iocb, struct socket *sock,
 	ax25_digi dtmp, *dp;
 	unsigned char *asmptr;
 	ax25_cb *ax25;
-	int lv, size, err, addr_len = msg->msg_namelen;
+	size_t size;
+	int lv, err, addr_len = msg->msg_namelen;
 
-	if (msg->msg_flags & ~(MSG_DONTWAIT|MSG_EOR)) {
+	if (msg->msg_flags & ~(MSG_DONTWAIT|MSG_EOR|MSG_CMSG_COMPAT))
 		return -EINVAL;
-	}
 
 	lock_sock(sk);
 	ax25 = ax25_sk(sk);
@@ -1449,6 +1436,11 @@ static int ax25_sendmsg(struct kiocb *iocb, struct socket *sock,
 		goto out;
 	}
 
+	if (len > ax25->ax25_dev->dev->mtu) {
+		err = -EMSGSIZE;
+		goto out;
+	}
+		
 	if (usax != NULL) {
 		if (usax->sax25_family != AF_AX25) {
 			err = -EINVAL;
@@ -1534,7 +1526,12 @@ static int ax25_sendmsg(struct kiocb *iocb, struct socket *sock,
 	SOCK_DEBUG(sk, "AX.25: Appending user data\n");
 
 	/* User data follows immediately after the AX.25 data */
-	memcpy_fromiovec(skb_put(skb, len), msg->msg_iov, len);
+	if (memcpy_fromiovec(skb_put(skb, len), msg->msg_iov, len)) {
+		err = -EFAULT;
+		kfree_skb(skb);
+		goto out;
+	}
+
 	skb->nh.raw = skb->data;
 
 	/* Add the PID if one is not supplied by the user in the skb */
@@ -1594,7 +1591,7 @@ out:
 }
 
 static int ax25_recvmsg(struct kiocb *iocb, struct socket *sock,
-	struct msghdr *msg, int size, int flags)
+	struct msghdr *msg, size_t size, int flags)
 {
 	struct sock *sk = sock->sk;
 	struct sk_buff *skb;
@@ -1633,16 +1630,16 @@ static int ax25_recvmsg(struct kiocb *iocb, struct socket *sock,
 	if (msg->msg_namelen != 0) {
 		struct sockaddr_ax25 *sax = (struct sockaddr_ax25 *)msg->msg_name;
 		ax25_digi digi;
-		ax25_address dest;
+		ax25_address src;
 
-		ax25_addr_parse(skb->mac.raw+1, skb->data-skb->mac.raw-1, NULL, &dest, &digi, NULL, NULL);
+		ax25_addr_parse(skb->mac.raw+1, skb->data-skb->mac.raw-1, &src, NULL, &digi, NULL, NULL);
 
 		sax->sax25_family = AF_AX25;
 		/* We set this correctly, even though we may not let the
 		   application know the digi calls further down (because it
 		   did NOT ask to know them).  This could get political... **/
 		sax->sax25_ndigis = digi.ndigi;
-		sax->sax25_call   = dest;
+		sax->sax25_call   = src;
 
 		if (sax->sax25_ndigis != 0) {
 			int ct;
@@ -1672,6 +1669,7 @@ static int ax25_shutdown(struct socket *sk, int how)
 static int ax25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	struct sock *sk = sock->sk;
+	void __user *argp = (void __user *)arg;
 	int res = 0;
 
 	lock_sock(sk);
@@ -1681,7 +1679,7 @@ static int ax25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		amount = sk->sk_sndbuf - atomic_read(&sk->sk_wmem_alloc);
 		if (amount < 0)
 			amount = 0;
-		res = put_user(amount, (int *)arg);
+		res = put_user(amount, (int __user *)argp);
 		break;
 	}
 
@@ -1691,18 +1689,13 @@ static int ax25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		/* These two are safe on a single CPU system as only user tasks fiddle here */
 		if ((skb = skb_peek(&sk->sk_receive_queue)) != NULL)
 			amount = skb->len;
-		res = put_user(amount, (int *)arg);
+		res = put_user(amount, (int __user *)argp);
 		break;
 	}
 
 	case SIOCGSTAMP:
 		if (sk != NULL) {
-			if (!sk->sk_stamp.tv_sec) {
-				res = -ENOENT;
-				break;
-			}
-			res = copy_to_user((void *)arg, &sk->sk_stamp,
-					  sizeof(struct timeval)) ? -EFAULT : 0;
+			res = sock_get_timestamp(sk, argp);
 			break;
 	 	}
 		res = -EINVAL;
@@ -1712,7 +1705,7 @@ static int ax25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	case SIOCAX25DELUID:	/* Delete a uid from the uid/call map table */
 	case SIOCAX25GETUID: {
 		struct sockaddr_ax25 sax25;
-		if (copy_from_user(&sax25, (void *)arg, sizeof(sax25))) {
+		if (copy_from_user(&sax25, argp, sizeof(sax25))) {
 			res = -EFAULT;
 			break;
 		}
@@ -1726,7 +1719,7 @@ static int ax25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			res = -EPERM;
 			break;
 		}
-		if (get_user(amount, (long *)arg)) {
+		if (get_user(amount, (long __user *)argp)) {
 			res = -EFAULT;
 			break;
 		}
@@ -1746,7 +1739,7 @@ static int ax25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			res = -EPERM;
 			break;
 		}
-		res = ax25_rt_ioctl(cmd, (void *)arg);
+		res = ax25_rt_ioctl(cmd, argp);
 		break;
 
 	case SIOCAX25CTLCON:
@@ -1754,7 +1747,7 @@ static int ax25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			res = -EPERM;
 			break;
 		}
-		res = ax25_ctl_ioctl(cmd, (void *)arg);
+		res = ax25_ctl_ioctl(cmd, argp);
 		break;
 
 	case SIOCAX25GETINFO:
@@ -1791,12 +1784,12 @@ static int ax25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 				warned=1;
 			}
 
-			if (copy_to_user((void *)arg, &ax25_info, sizeof(struct ax25_info_struct_deprecated))) {
+			if (copy_to_user(argp, &ax25_info, sizeof(struct ax25_info_struct_deprecated))) {
 				res = -EFAULT;
 				break;
 			}
 		} else {
-			if (copy_to_user((void *)arg, &ax25_info, sizeof(struct ax25_info_struct))) {
+			if (copy_to_user(argp, &ax25_info, sizeof(struct ax25_info_struct))) {
 				res = -EINVAL;
 				break;
 			}
@@ -1812,7 +1805,7 @@ static int ax25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			res = -EPERM;
 			break;
 		}
-		if (copy_from_user(&ax25_fwd, (void *)arg, sizeof(ax25_fwd))) {
+		if (copy_from_user(&ax25_fwd, argp, sizeof(ax25_fwd))) {
 			res = -EFAULT;
 			break;
 		}
@@ -1834,7 +1827,7 @@ static int ax25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		break;
 
 	default:
-		res = dev_ioctl(cmd, (void *)arg);
+		res = dev_ioctl(cmd, argp);
 		break;
 	}
 	release_sock(sk);

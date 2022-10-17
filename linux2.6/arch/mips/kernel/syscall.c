@@ -3,10 +3,11 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995, 1996, 1997, 2000, 2001 by Ralf Baechle
+ * Copyright (C) 1995, 1996, 1997, 2000, 2001, 05 by Ralf Baechle
  * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
  * Copyright (C) 2001 MIPS Technologies, Inc.
  */
+#include <linux/a.out.h>
 #include <linux/errno.h>
 #include <linux/linkage.h>
 #include <linux/mm.h>
@@ -16,6 +17,7 @@
 #include <linux/ptrace.h>
 #include <linux/sched.h>
 #include <linux/string.h>
+#include <linux/syscalls.h>
 #include <linux/file.h>
 #include <linux/slab.h>
 #include <linux/utsname.h>
@@ -23,6 +25,7 @@
 #include <linux/sem.h>
 #include <linux/msg.h>
 #include <linux/shm.h>
+#include <linux/compiler.h>
 
 #include <asm/branch.h>
 #include <asm/cachectl.h>
@@ -35,7 +38,7 @@
 #include <asm/sysmips.h>
 #include <asm/uaccess.h>
 
-asmlinkage int sys_pipe(nabi_no_regargs struct pt_regs regs)
+asmlinkage int sys_pipe(nabi_no_regargs volatile struct pt_regs regs)
 {
 	int fd[2];
 	int error, res;
@@ -62,6 +65,9 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,
 {
 	struct vm_area_struct * vmm;
 	int do_color_align;
+	unsigned long task_size;
+
+	task_size = STACK_TOP;
 
 	if (flags & MAP_FIXED) {
 		/*
@@ -73,7 +79,7 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,
 		return addr;
 	}
 
-	if (len > TASK_SIZE)
+	if (len > task_size)
 		return -ENOMEM;
 	do_color_align = 0;
 	if (filp || (flags & MAP_SHARED))
@@ -84,7 +90,7 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,
 		else
 			addr = PAGE_ALIGN(addr);
 		vmm = find_vma(current->mm, addr);
-		if (TASK_SIZE - len >= addr &&
+		if (task_size - len >= addr &&
 		    (!vmm || addr + len <= vmm->vm_start))
 			return addr;
 	}
@@ -96,7 +102,7 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,
 
 	for (vmm = find_vma(current->mm, addr); ; vmm = vmm->vm_next) {
 		/* At this point:  (!vmm || addr < vmm->vm_end). */
-		if (TASK_SIZE - len < addr)
+		if (task_size - len < addr)
 			return -ENOMEM;
 		if (!vmm || addr + len <= vmm->vm_start)
 			return addr;
@@ -107,11 +113,11 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr,
 }
 
 /* common code for old and new mmaps */
-static inline long
+static inline unsigned long
 do_mmap2(unsigned long addr, unsigned long len, unsigned long prot,
         unsigned long flags, unsigned long fd, unsigned long pgoff)
 {
-	int error = -EBADF;
+	unsigned long error = -EBADF;
 	struct file * file = NULL;
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
@@ -131,10 +137,11 @@ out:
 	return error;
 }
 
-asmlinkage unsigned long old_mmap(unsigned long addr, size_t len, int prot,
-                                  int flags, int fd, off_t offset)
+asmlinkage unsigned long
+old_mmap(unsigned long addr, unsigned long len, int prot,
+	int flags, int fd, off_t offset)
 {
-	int result;
+	unsigned long result;
 
 	result = -EINVAL;
 	if (offset & ~PAGE_MASK)
@@ -146,7 +153,7 @@ out:
 	return result;
 }
 
-asmlinkage long
+asmlinkage unsigned long
 sys_mmap2(unsigned long addr, unsigned long len, unsigned long prot,
           unsigned long flags, unsigned long fd, unsigned long pgoff)
 {
@@ -154,27 +161,27 @@ sys_mmap2(unsigned long addr, unsigned long len, unsigned long prot,
 }
 
 save_static_function(sys_fork);
-static_unused int _sys_fork(nabi_no_regargs struct pt_regs regs)
+__attribute_used__ noinline static int
+_sys_fork(nabi_no_regargs struct pt_regs regs)
 {
-	save_static(&regs);
 	return do_fork(SIGCHLD, regs.regs[29], &regs, 0, NULL, NULL);
 }
 
 save_static_function(sys_clone);
-static_unused int _sys_clone(nabi_no_regargs struct pt_regs regs)
+__attribute_used__ noinline static int
+_sys_clone(nabi_no_regargs struct pt_regs regs)
 {
 	unsigned long clone_flags;
 	unsigned long newsp;
 	int *parent_tidptr, *child_tidptr;
 
-	save_static(&regs);
 	clone_flags = regs.regs[4];
 	newsp = regs.regs[5];
 	if (!newsp)
 		newsp = regs.regs[29];
 	parent_tidptr = (int *) regs.regs[6];
 	child_tidptr = (int *) regs.regs[7];
-	return do_fork(clone_flags & ~CLONE_IDLETASK, newsp, &regs, 0,
+	return do_fork(clone_flags, newsp, &regs, 0,
 	               parent_tidptr, child_tidptr);
 }
 
@@ -297,7 +304,11 @@ asmlinkage int sys_ipc (uint call, int first, int second,
 
 	switch (call) {
 	case SEMOP:
-		return sys_semop (first, (struct sembuf *)ptr, second);
+		return sys_semtimedop (first, (struct sembuf *)ptr, second,
+		                       NULL);
+	case SEMTIMEDOP:
+		return sys_semtimedop (first, (struct sembuf *)ptr, second,
+		                       (const struct timespec __user *)fifth);
 	case SEMGET:
 		return sys_semget (first, second, third);
 	case SEMCTL: {
@@ -340,7 +351,7 @@ asmlinkage int sys_ipc (uint call, int first, int second,
 		switch (version) {
 		default: {
 			ulong raddr;
-			ret = sys_shmat (first, (char *) ptr, second, &raddr);
+			ret = do_shmat (first, (char *) ptr, second, &raddr);
 			if (ret)
 				return ret;
 			return put_user (raddr, (ulong *) third);
@@ -348,7 +359,7 @@ asmlinkage int sys_ipc (uint call, int first, int second,
 		case 1:	/* iBCS2 emulator entry point */
 			if (!segment_eq(get_fs(), get_ds()))
 				return -EINVAL;
-			return sys_shmat (first, (char *) ptr, second, (ulong *) third);
+			return do_shmat (first, (char *) ptr, second, (ulong *) third);
 		}
 	case SHMDT:
 		return sys_shmdt ((char *)ptr);
@@ -360,6 +371,22 @@ asmlinkage int sys_ipc (uint call, int first, int second,
 	default:
 		return -ENOSYS;
 	}
+}
+
+/*
+ * Native ABI that is O32 or N64 version
+ */
+asmlinkage long sys_shmat(int shmid, char __user *shmaddr,
+                          int shmflg, unsigned long *addr)
+{
+	unsigned long raddr;
+	int err;
+
+	err = do_shmat(shmid, shmaddr, shmflg, &raddr);
+	if (err)
+		return err;
+
+	return put_user(raddr, addr);
 }
 
 /*

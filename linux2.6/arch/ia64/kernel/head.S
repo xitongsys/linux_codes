@@ -5,7 +5,7 @@
  * to set up the kernel's global pointer and jump to the kernel
  * entry point.
  *
- * Copyright (C) 1998-2001, 2003 Hewlett-Packard Co
+ * Copyright (C) 1998-2001, 2003, 2005 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  *	Stephane Eranian <eranian@hpl.hp.com>
  * Copyright (C) 1999 VA Linux Systems
@@ -56,8 +56,7 @@ halt_msg:
 GLOBAL_ENTRY(_start)
 start_ap:
 	.prologue
-	.save rp, r4		// terminate unwind chain with a NULL rp
-	mov r4=r0
+	.save rp, r0		// terminate unwind chain with a NULL rp
 	.body
 
 	rsm psr.i | psr.ic
@@ -66,10 +65,27 @@ start_ap:
 	;;
 	/*
 	 * Initialize kernel region registers:
+	 *	rr[0]: VHPT enabled, page size = PAGE_SHIFT
+	 *	rr[1]: VHPT enabled, page size = PAGE_SHIFT
+	 *	rr[2]: VHPT enabled, page size = PAGE_SHIFT
+	 *	rr[3]: VHPT enabled, page size = PAGE_SHIFT
+	 *	rr[4]: VHPT enabled, page size = PAGE_SHIFT
 	 *	rr[5]: VHPT enabled, page size = PAGE_SHIFT
 	 *	rr[6]: VHPT disabled, page size = IA64_GRANULE_SHIFT
-	 *	rr[5]: VHPT disabled, page size = IA64_GRANULE_SHIFT
+	 *	rr[7]: VHPT disabled, page size = IA64_GRANULE_SHIFT
+	 * We initialize all of them to prevent inadvertently assuming
+	 * something about the state of address translation early in boot.
 	 */
+	mov r6=((ia64_rid(IA64_REGION_ID_KERNEL, (0<<61)) << 8) | (PAGE_SHIFT << 2) | 1)
+	movl r7=(0<<61)
+	mov r8=((ia64_rid(IA64_REGION_ID_KERNEL, (1<<61)) << 8) | (PAGE_SHIFT << 2) | 1)
+	movl r9=(1<<61)
+	mov r10=((ia64_rid(IA64_REGION_ID_KERNEL, (2<<61)) << 8) | (PAGE_SHIFT << 2) | 1)
+	movl r11=(2<<61)
+	mov r12=((ia64_rid(IA64_REGION_ID_KERNEL, (3<<61)) << 8) | (PAGE_SHIFT << 2) | 1)
+	movl r13=(3<<61)
+	mov r14=((ia64_rid(IA64_REGION_ID_KERNEL, (4<<61)) << 8) | (PAGE_SHIFT << 2) | 1)
+	movl r15=(4<<61)
 	mov r16=((ia64_rid(IA64_REGION_ID_KERNEL, (5<<61)) << 8) | (PAGE_SHIFT << 2) | 1)
 	movl r17=(5<<61)
 	mov r18=((ia64_rid(IA64_REGION_ID_KERNEL, (6<<61)) << 8) | (IA64_GRANULE_SHIFT << 2))
@@ -77,6 +93,11 @@ start_ap:
 	mov r20=((ia64_rid(IA64_REGION_ID_KERNEL, (7<<61)) << 8) | (IA64_GRANULE_SHIFT << 2))
 	movl r21=(7<<61)
 	;;
+	mov rr[r7]=r6
+	mov rr[r9]=r8
+	mov rr[r11]=r10
+	mov rr[r13]=r12
+	mov rr[r15]=r14
 	mov rr[r17]=r16
 	mov rr[r19]=r18
 	mov rr[r21]=r20
@@ -155,6 +176,9 @@ start_ap:
 #endif
 	;;
 	tpa r3=r2		// r3 == phys addr of task struct
+	mov r16=-1
+(isBP)	br.cond.dpnt .load_current // BP stack is on region 5 --- no need to map it
+
 	// load mapping for stack (virtaddr in r2, physaddr in r3)
 	rsm psr.ic
 	movl r17=PAGE_KERNEL
@@ -181,6 +205,7 @@ start_ap:
 	srlz.d
   	;;
 
+.load_current:
 	// load the "current" pointer (r13) and ar.k6 with the current task
 	mov IA64_KR(CURRENT)=r2		// virtual address
 	mov IA64_KR(CURRENT_STACK)=r16
@@ -207,21 +232,6 @@ start_ap:
 	;;
 (isBP)	st8 [r2]=r28		// save the address of the boot param area passed by the bootloader
 
-#ifdef CONFIG_IA64_EARLY_PRINTK
-	.rodata
-alive_msg:
-	stringz "I'm alive and well\n"
-alive_msg_end:
-	.previous
-
-	alloc r2=ar.pfs,0,0,2,0
-	movl out0=alive_msg
-	movl out1=alive_msg_end-alive_msg-1
-	;;
-	br.call.sptk.many rp=early_printk
-1:	// force new bundle
-#endif /* CONFIG_IA64_EARLY_PRINTK */
-
 #ifdef CONFIG_SMP
 (isAP)	br.call.sptk.many rp=start_secondary
 .ret0:
@@ -242,7 +252,9 @@ alive_msg_end:
 	;;
 	ld8 out0=[r3]
 	br.call.sptk.many b0=console_print
-self:	br.sptk.many self		// endless loop
+
+self:	hint @pause
+	br.sptk.many self		// endless loop
 END(_start)
 
 GLOBAL_ENTRY(ia64_save_debug_regs)
@@ -703,6 +715,9 @@ END(__ia64_init_fpu)
  *
  * Inputs:
  *	r16 = new psr to establish
+ * Output:
+ *	r19 = old virtual address of ar.bsp
+ *	r20 = old virtual address of sp
  *
  * Note: RSE must already be in enforced lazy mode
  */
@@ -721,12 +736,13 @@ GLOBAL_ENTRY(ia64_switch_mode_phys)
 	mov cr.ipsr=r16			// set new PSR
 	add r3=1f-ia64_switch_mode_phys,r15
 
-	mov r17=ar.bsp
+	mov r19=ar.bsp
+	mov r20=sp
 	mov r14=rp			// get return address into a general register
 	;;
 
 	// going to physical mode, use tpa to translate virt->phys
-	tpa r17=r17
+	tpa r17=r19
 	tpa r3=r3
 	tpa sp=sp
 	tpa r14=r14
@@ -749,6 +765,8 @@ END(ia64_switch_mode_phys)
  *
  * Inputs:
  *	r16 = new psr to establish
+ *	r19 = new bspstore to establish
+ *	r20 = new sp to establish
  *
  * Note: RSE must already be in enforced lazy mode
  */
@@ -767,26 +785,23 @@ GLOBAL_ENTRY(ia64_switch_mode_virt)
 	mov cr.ipsr=r16			// set new PSR
 	add r3=1f-ia64_switch_mode_virt,r15
 
-	mov r17=ar.bsp
 	mov r14=rp			// get return address into a general register
 	;;
 
 	// going to virtual
 	//   - for code addresses, set upper bits of addr to KERNEL_START
-	//   - for stack addresses, set upper 3 bits to 0xe.... Dont change any of the
-	//     lower bits since we want it to stay identity mapped
+	//   - for stack addresses, copy from input argument
 	movl r18=KERNEL_START
 	dep r3=0,r3,KERNEL_TR_PAGE_SHIFT,64-KERNEL_TR_PAGE_SHIFT
 	dep r14=0,r14,KERNEL_TR_PAGE_SHIFT,64-KERNEL_TR_PAGE_SHIFT
-	dep r17=-1,r17,61,3
-	dep sp=-1,sp,61,3
+	mov sp=r20
 	;;
 	or r3=r3,r18
 	or r14=r14,r18
 	;;
 
 	mov r18=ar.rnat			// save ar.rnat
-	mov ar.bspstore=r17		// this steps on ar.rnat
+	mov ar.bspstore=r19		// this steps on ar.rnat
 	mov cr.iip=r3
 	mov cr.ifs=r0
 	;;
@@ -815,6 +830,55 @@ GLOBAL_ENTRY(ia64_delay_loop)
 	mov ar.lc=r2
 	br.ret.sptk.many rp
 END(ia64_delay_loop)
+
+/*
+ * Return a CPU-local timestamp in nano-seconds.  This timestamp is
+ * NOT synchronized across CPUs its return value must never be
+ * compared against the values returned on another CPU.  The usage in
+ * kernel/sched.c ensures that.
+ *
+ * The return-value of sched_clock() is NOT supposed to wrap-around.
+ * If it did, it would cause some scheduling hiccups (at the worst).
+ * Fortunately, with a 64-bit cycle-counter ticking at 100GHz, even
+ * that would happen only once every 5+ years.
+ *
+ * The code below basically calculates:
+ *
+ *   (ia64_get_itc() * local_cpu_data->nsec_per_cyc) >> IA64_NSEC_PER_CYC_SHIFT
+ *
+ * except that the multiplication and the shift are done with 128-bit
+ * intermediate precision so that we can produce a full 64-bit result.
+ */
+GLOBAL_ENTRY(sched_clock)
+	addl r8=THIS_CPU(cpu_info) + IA64_CPUINFO_NSEC_PER_CYC_OFFSET,r0
+	mov.m r9=ar.itc		// fetch cycle-counter				(35 cyc)
+	;;
+	ldf8 f8=[r8]
+	;;
+	setf.sig f9=r9		// certain to stall, so issue it _after_ ldf8...
+	;;
+	xmpy.lu f10=f9,f8	// calculate low 64 bits of 128-bit product	(4 cyc)
+	xmpy.hu f11=f9,f8	// calculate high 64 bits of 128-bit product
+	;;
+	getf.sig r8=f10		//						(5 cyc)
+	getf.sig r9=f11
+	;;
+	shrp r8=r9,r8,IA64_NSEC_PER_CYC_SHIFT
+	br.ret.sptk.many rp
+END(sched_clock)
+
+GLOBAL_ENTRY(start_kernel_thread)
+	.prologue
+	.save rp, r0				// this is the end of the call-chain
+	.body
+	alloc r2 = ar.pfs, 0, 0, 2, 0
+	mov out0 = r9
+	mov out1 = r11;;
+	br.call.sptk.many rp = kernel_thread_helper;;
+	mov out0 = r8
+	br.call.sptk.many rp = sys_exit;;
+1:	br.sptk.few 1b				// not reached
+END(start_kernel_thread)
 
 #ifdef CONFIG_IA64_BRL_EMU
 
@@ -853,18 +917,20 @@ SET_REG(b5);
 	 * Inputs:
 	 *   ar.pfs - saved CFM of caller
 	 *   ar.ccv - 0 (and available for use)
+	 *   r27    - flags from spin_lock_irqsave or 0.  Must be preserved.
 	 *   r28    - available for use.
 	 *   r29    - available for use.
 	 *   r30    - available for use.
 	 *   r31    - address of lock, available for use.
 	 *   b6     - return address
 	 *   p14    - available for use.
+	 *   p15    - used to track flag status.
 	 *
 	 * If you patch this code to use more registers, do not forget to update
 	 * the clobber lists for spin_lock() in include/asm-ia64/spinlock.h.
 	 */
 
-#if __GNUC__ < 3 || (__GNUC__ == 3 && __GNUC_MINOR__ < 4)
+#if __GNUC__ < 3 || (__GNUC__ == 3 && __GNUC_MINOR__ < 3)
 
 GLOBAL_ENTRY(ia64_spinlock_contention_pre3_4)
 	.prologue
@@ -872,22 +938,28 @@ GLOBAL_ENTRY(ia64_spinlock_contention_pre3_4)
 	.save rp, r28
 	.body
 	nop 0
-	nop 0
+	tbit.nz p15,p0=r27,IA64_PSR_I_BIT
 	.restore sp		// pop existing prologue after next insn
 	mov b6 = r28
 	.prologue
 	.save ar.pfs, r0
 	.altrp b6
 	.body
+	;;
+(p15)	ssm psr.i		// reenable interrupts if they were on
+				// DavidM says that srlz.d is slow and is not required in this case
 .wait:
 	// exponential backoff, kdb, lockmeter etc. go in here
 	hint @pause
 	ld4 r30=[r31]		// don't use ld4.bias; if it's contended, we won't write the word
 	nop 0
 	;;
-	cmp4.eq p14,p0=r30,r0
-(p14)	br.cond.sptk.few b6	// lock is now free, try to acquire
-	br.cond.sptk.few .wait
+	cmp4.ne p14,p0=r30,r0
+(p14)	br.cond.sptk.few .wait
+(p15)	rsm psr.i		// disable interrupts if we reenabled them
+	br.cond.sptk.few b6	// lock is now free, try to acquire
+	.global ia64_spinlock_contention_pre3_4_end	// for kernprof
+ia64_spinlock_contention_pre3_4_end:
 END(ia64_spinlock_contention_pre3_4)
 
 #else
@@ -896,14 +968,20 @@ GLOBAL_ENTRY(ia64_spinlock_contention)
 	.prologue
 	.altrp b6
 	.body
+	tbit.nz p15,p0=r27,IA64_PSR_I_BIT
+	;;
 .wait:
+(p15)	ssm psr.i		// reenable interrupts if they were on
+				// DavidM says that srlz.d is slow and is not required in this case
+.wait2:
 	// exponential backoff, kdb, lockmeter etc. go in here
 	hint @pause
 	ld4 r30=[r31]		// don't use ld4.bias; if it's contended, we won't write the word
 	;;
 	cmp4.ne p14,p0=r30,r0
 	mov r30 = 1
-(p14)	br.cond.sptk.few .wait
+(p14)	br.cond.sptk.few .wait2
+(p15)	rsm psr.i		// disable interrupts if we reenabled them
 	;;
 	cmpxchg4.acq r30=[r31], r30, ar.ccv
 	;;

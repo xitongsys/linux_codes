@@ -48,25 +48,17 @@ __ccw_device_sense_pgid_start(struct ccw_device *cdev)
 	ret = -ENODEV;
 	while (cdev->private->imask != 0) {
 		/* Try every path multiple times. */
-		if (cdev->private->iretry-- > 0) {
-			/* 0xe2d5c9c4 == ebcdic "SNID" */
+		if (cdev->private->iretry > 0) {
+			cdev->private->iretry--;
 			ret = cio_start (sch, cdev->private->iccws, 
-					 0xE2D5C9C4, cdev->private->imask);
+					 cdev->private->imask);
 			/* ret is 0, -EBUSY, -EACCES or -ENODEV */
-			if (ret == -EBUSY) {
-				CIO_MSG_EVENT(2, 
-					      "SNID - device %04X, start_io() "
-					      "reports rc : %d, retrying ...\n",
-					      sch->schib.pmcw.dev, ret);
-				udelay(100);
-				continue;
-			}
 			if (ret != -EACCES)
 				return ret;
-			CIO_MSG_EVENT(2, "SNID - Device %04X on Subchannel "
-				      "%04X, lpm %02X, became 'not "
+			CIO_MSG_EVENT(2, "SNID - Device %04x on Subchannel "
+				      "%04x, lpm %02X, became 'not "
 				      "operational'\n",
-				      sch->schib.pmcw.dev, sch->irq,
+				      cdev->private->devno, sch->irq,
 				      cdev->private->imask);
 
 		}
@@ -86,7 +78,7 @@ ccw_device_sense_pgid_start(struct ccw_device *cdev)
 	cdev->private->iretry = 5;
 	memset (&cdev->private->pgid, 0, sizeof (struct pgid));
 	ret = __ccw_device_sense_pgid_start(cdev);
-	if (ret)
+	if (ret && ret != -EBUSY)
 		ccw_device_sense_pgid_done(cdev, ret);
 }
 
@@ -113,10 +105,10 @@ __ccw_device_check_sense_pgid(struct ccw_device *cdev)
 		return -EOPNOTSUPP;
 	}
 	if (irb->esw.esw0.erw.cons) {
-		CIO_MSG_EVENT(2, "SNID - device %04X, unit check, "
+		CIO_MSG_EVENT(2, "SNID - device %04x, unit check, "
 			      "lpum %02X, cnt %02d, sns : "
 			      "%02X%02X%02X%02X %02X%02X%02X%02X ...\n",
-			      sch->schib.pmcw.dev,
+			      cdev->private->devno,
 			      irb->esw.esw0.sublog.lpum,
 			      irb->esw.esw0.erw.scnt,
 			      irb->ecw[0], irb->ecw[1],
@@ -126,16 +118,15 @@ __ccw_device_check_sense_pgid(struct ccw_device *cdev)
 		return -EAGAIN;
 	}
 	if (irb->scsw.cc == 3) {
-		CIO_MSG_EVENT(2, "SNID - Device %04X on Subchannel "
-			      "%04X, lpm %02X, became 'not "
-			      "operational'\n",
-			      sch->schib.pmcw.dev, sch->irq, sch->orb.lpm);
+		CIO_MSG_EVENT(2, "SNID - Device %04x on Subchannel "
+			      "%04x, lpm %02X, became 'not operational'\n",
+			      cdev->private->devno, sch->irq, sch->orb.lpm);
 		return -EACCES;
 	}
 	if (cdev->private->pgid.inf.ps.state2 == SNID_STATE2_RESVD_ELSE) {
-		CIO_MSG_EVENT(2, "SNID - Device %04X on Subchannel %04X "
+		CIO_MSG_EVENT(2, "SNID - Device %04x on Subchannel %04x "
 			      "is reserved by someone else\n",
-			      sch->schib.pmcw.dev, sch->irq);
+			      cdev->private->devno, sch->irq);
 		return -EUSERS;
 	}
 	return 0;
@@ -150,34 +141,29 @@ ccw_device_sense_pgid_irq(struct ccw_device *cdev, enum dev_event dev_event)
 	struct subchannel *sch;
 	struct irb *irb;
 	int ret;
-	int opm;
-	int i;
 
 	irb = (struct irb *) __LC_IRB;
-	/* Ignore unsolicited interrupts. */
+	/* Retry sense pgid for cc=1. */
 	if (irb->scsw.stctl ==
-	    		(SCSW_STCTL_STATUS_PEND | SCSW_STCTL_ALERT_STATUS))
+	    (SCSW_STCTL_STATUS_PEND | SCSW_STCTL_ALERT_STATUS)) {
+		if (irb->scsw.cc == 1) {
+			ret = __ccw_device_sense_pgid_start(cdev);
+			if (ret && ret != -EBUSY)
+				ccw_device_sense_pgid_done(cdev, ret);
+		}
 		return;
+	}
 	if (ccw_device_accumulate_and_sense(cdev, irb) != 0)
 		return;
 	sch = to_subchannel(cdev->dev.parent);
 	switch (__ccw_device_check_sense_pgid(cdev)) {
 	/* 0, -ETIME, -EOPNOTSUPP, -EAGAIN, -EACCES or -EUSERS */
 	case 0:			/* Sense Path Group ID successful. */
-		opm = sch->schib.pmcw.pim &
-			sch->schib.pmcw.pam &
-			sch->schib.pmcw.pom;
-		for (i=0;i<8;i++) {
-			if (opm == (0x80 << i)) {
-				/* Don't group single path devices. */
-				cdev->private->options.pgroup = 0;
-				break;
-			}
-		}
 		if (cdev->private->pgid.inf.ps.state1 == SNID_STATE1_RESET)
 			memcpy(&cdev->private->pgid, &global_pgid,
 			       sizeof(struct pgid));
-		/* fall through. */
+		ccw_device_sense_pgid_done(cdev, 0);
+		break;
 	case -EOPNOTSUPP:	/* Sense Path Group ID not supported */
 		ccw_device_sense_pgid_done(cdev, -EOPNOTSUPP);
 		break;
@@ -235,26 +221,20 @@ __ccw_device_do_pgid(struct ccw_device *cdev, __u8 func)
 
 	/* Try multiple times. */
 	ret = -ENODEV;
-	while (cdev->private->iretry-- > 0) {
-		/* 0xE2D7C9C4 == ebcdic "SPID" */
+	if (cdev->private->iretry > 0) {
+		cdev->private->iretry--;
 		ret = cio_start (sch, cdev->private->iccws,
-				 0xE2D7C9C4, cdev->private->imask);
+				 cdev->private->imask);
 		/* ret is 0, -EBUSY, -EACCES or -ENODEV */
-		if (ret == -EACCES)
-			break;
-		if (ret != -EBUSY)
+		if ((ret != -EACCES) && (ret != -ENODEV))
 			return ret;
-		udelay(100);
-		continue;
 	}
 	/* PGID command failed on this path. Switch it off. */
 	sch->lpm &= ~cdev->private->imask;
 	sch->vpm &= ~cdev->private->imask;
-	CIO_MSG_EVENT(2, "SPID - Device %04X on Subchannel "
-		      "%04X, lpm %02X, became 'not "
-		      "operational'\n",
-		      sch->schib.pmcw.dev, sch->irq,
-		      cdev->private->imask);
+	CIO_MSG_EVENT(2, "SPID - Device %04x on Subchannel "
+		      "%04x, lpm %02X, became 'not operational'\n",
+		      cdev->private->devno, sch->irq, cdev->private->imask);
 	return ret;
 }
 
@@ -276,9 +256,9 @@ __ccw_device_check_pgid(struct ccw_device *cdev)
 		if (irb->ecw[0] & SNS0_CMD_REJECT)
 			return -EOPNOTSUPP;
 		/* Hmm, whatever happened, try again. */
-		CIO_MSG_EVENT(2, "SPID - device %04X, unit check, cnt %02d, "
+		CIO_MSG_EVENT(2, "SPID - device %04x, unit check, cnt %02d, "
 			      "sns : %02X%02X%02X%02X %02X%02X%02X%02X ...\n",
-			      sch->schib.pmcw.dev, irb->esw.esw0.erw.scnt,
+			      cdev->private->devno, irb->esw.esw0.erw.scnt,
 			      irb->ecw[0], irb->ecw[1],
 			      irb->ecw[2], irb->ecw[3],
 			      irb->ecw[4], irb->ecw[5],
@@ -286,10 +266,9 @@ __ccw_device_check_pgid(struct ccw_device *cdev)
 		return -EAGAIN;
 	}
 	if (irb->scsw.cc == 3) {
-		CIO_MSG_EVENT(2, "SPID - Device %04X on Subchannel "
-			      "%04X, lpm %02X, became 'not "
-			      "operational'\n",
-			      sch->schib.pmcw.dev, sch->irq,
+		CIO_MSG_EVENT(2, "SPID - Device %04x on Subchannel "
+			      "%04x, lpm %02X, became 'not operational'\n",
+			      cdev->private->devno, sch->irq,
 			      cdev->private->imask);
 		return -EACCES;
 	}
@@ -313,7 +292,7 @@ __ccw_device_verify_start(struct ccw_device *cdev)
 		func = (sch->vpm & imask) ?
 			SPID_FUNC_RESIGN : SPID_FUNC_ESTABLISH;
 		ret = __ccw_device_do_pgid(cdev, func);
-		if (ret == 0)
+		if (ret == 0 || ret == -EBUSY)
 			return;
 		cdev->private->iretry = 5;
 	}
@@ -330,10 +309,13 @@ ccw_device_verify_irq(struct ccw_device *cdev, enum dev_event dev_event)
 	struct irb *irb;
 
 	irb = (struct irb *) __LC_IRB;
-	/* Ignore unsolicited interrupts. */
+	/* Retry set pgid for cc=1. */
 	if (irb->scsw.stctl ==
-	    		(SCSW_STCTL_STATUS_PEND | SCSW_STCTL_ALERT_STATUS))
+	    (SCSW_STCTL_STATUS_PEND | SCSW_STCTL_ALERT_STATUS)) {
+		if (irb->scsw.cc == 1)
+			__ccw_device_verify_start(cdev);
 		return;
+	}
 	if (ccw_device_accumulate_and_sense(cdev, irb) != 0)
 		return;
 	sch = to_subchannel(cdev->dev.parent);
@@ -353,6 +335,10 @@ ccw_device_verify_irq(struct ccw_device *cdev, enum dev_event dev_event)
 		 * One of those strange devices which claim to be able
 		 * to do multipathing but not for Set Path Group ID.
 		 */
+		if (cdev->private->flags.pgid_single) {
+			ccw_device_verify_done(cdev, -EOPNOTSUPP);
+			break;
+		}
 		cdev->private->flags.pgid_single = 1;
 		/* fall through. */
 	case -EAGAIN:		/* Try again. */
@@ -408,10 +394,13 @@ ccw_device_disband_irq(struct ccw_device *cdev, enum dev_event dev_event)
 	int ret;
 
 	irb = (struct irb *) __LC_IRB;
-	/* Ignore unsolicited interrupts. */
+	/* Retry set pgid for cc=1. */
 	if (irb->scsw.stctl ==
-	    		(SCSW_STCTL_STATUS_PEND | SCSW_STCTL_ALERT_STATUS))
+	    (SCSW_STCTL_STATUS_PEND | SCSW_STCTL_ALERT_STATUS)) {
+		if (irb->scsw.cc == 1)
+			__ccw_device_disband_start(cdev);
 		return;
+	}
 	if (ccw_device_accumulate_and_sense(cdev, irb) != 0)
 		return;
 	sch = to_subchannel(cdev->dev.parent);

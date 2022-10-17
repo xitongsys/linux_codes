@@ -26,7 +26,7 @@
 #include <media/saa7146_vv.h>
 
 static int debug = 0;
-MODULE_PARM(debug, "i");
+module_param(debug, int, 0);
 MODULE_PARM_DESC(debug, "debug verbosity");
 
 /* global variables */
@@ -68,8 +68,9 @@ static struct saa7146_extension_ioctls ioctls[] = {
 struct hexium
 {
 	int type;
-	struct video_device	video_dev;
+	struct video_device	*video_dev;
 	struct i2c_adapter	i2c_adapter;	
+
 	int cur_input;	/* current input */
 };
 
@@ -192,18 +193,18 @@ static struct {
 static struct saa7146_standard hexium_standards[] = {
 	{
 		.name	= "PAL", 	.id	= V4L2_STD_PAL,
-		.v_offset	= 16,	.v_field 	= 288,	.v_calc		= 576,
-		.h_offset	= 1,	.h_pixels 	= 680,	.h_calc		= 680+1,
+		.v_offset	= 16,	.v_field 	= 288,
+		.h_offset	= 1,	.h_pixels 	= 680,
 		.v_max_out	= 576,	.h_max_out	= 768,
 	}, {
 		.name	= "NTSC", 	.id	= V4L2_STD_NTSC,
-		.v_offset	= 16,	.v_field 	= 240,	.v_calc		= 480,
-		.h_offset	= 1,	.h_pixels 	= 640,	.h_calc		= 641+1,
+		.v_offset	= 16,	.v_field 	= 240,
+		.h_offset	= 1,	.h_pixels 	= 640,
 		.v_max_out	= 480,	.h_max_out	= 640,
 	}, {
 		.name	= "SECAM", 	.id	= V4L2_STD_SECAM,
-		.v_offset	= 16,	.v_field 	= 288,	.v_calc		= 576,
-		.h_offset	= 1,	.h_pixels 	= 720,	.h_calc		= 720+1,
+		.v_offset	= 16,	.v_field 	= 288,
+		.h_offset	= 1,	.h_pixels 	= 720,
 		.v_max_out	= 576,	.h_max_out	= 768,
 	}
 };		
@@ -212,7 +213,7 @@ static struct saa7146_standard hexium_standards[] = {
    without eeprom */
 static int hexium_probe(struct saa7146_dev *dev)
 {
-	struct hexium *hexium = 0;
+	struct hexium *hexium = NULL;
 	union i2c_smbus_data data;
 	int err = 0;
 
@@ -237,6 +238,10 @@ static int hexium_probe(struct saa7146_dev *dev)
 	saa7146_write(dev, DD1_STREAM_B, 0x00000000);
 	saa7146_write(dev, MC2, (MASK_09 | MASK_25 | MASK_10 | MASK_26));
 
+	hexium->i2c_adapter = (struct i2c_adapter) {
+		.class = I2C_CLASS_TV_ANALOG,
+		.name = "hexium orion",
+	};
 	saa7146_i2c_adapter_prepare(dev, &hexium->i2c_adapter, SAA7146_I2C_BUS_BIT_RATE_480);
 	if (i2c_add_adapter(&hexium->i2c_adapter) < 0) {
 		DEB_S(("cannot register i2c-device. skipping.\n"));
@@ -255,7 +260,7 @@ static int hexium_probe(struct saa7146_dev *dev)
 	if (0x17c8 == dev->pci->subsystem_vendor && 0x0101 == dev->pci->subsystem_device) {
 		printk("hexium_orion: device is a Hexium Orion w/ 1 SVHS + 3 BNC inputs.\n");
 		/* we store the pointer in our private data field */
-		(struct hexium *) dev->ext_priv = hexium;
+		dev->ext_priv = hexium;
 		hexium->type = HEXIUM_ORION_1SVHS_3BNC;
 		return 0;
 	}
@@ -263,7 +268,7 @@ static int hexium_probe(struct saa7146_dev *dev)
 	if (0x17c8 == dev->pci->subsystem_vendor && 0x2101 == dev->pci->subsystem_device) {
 		printk("hexium_orion: device is a Hexium Orion w/ 4 BNC inputs.\n");
 		/* we store the pointer in our private data field */
-		(struct hexium *) dev->ext_priv = hexium;
+		dev->ext_priv = hexium;
 		hexium->type = HEXIUM_ORION_4BNC;
 		return 0;
 	}
@@ -273,7 +278,7 @@ static int hexium_probe(struct saa7146_dev *dev)
 	if (0 == (err = i2c_smbus_xfer(&hexium->i2c_adapter, 0x4e, 0, I2C_SMBUS_READ, 0x00, I2C_SMBUS_BYTE_DATA, &data))) {
 		printk("hexium_orion: device is a Hexium HV-PCI6/Orion (old).\n");
 		/* we store the pointer in our private data field */
-		(struct hexium *) dev->ext_priv = hexium;
+		dev->ext_priv = hexium;
 		hexium->type = HEXIUM_HV_PCI6_ORION;
 		return 0;
 	}
@@ -494,7 +499,7 @@ static struct saa7146_extension extension = {
 	.irq_func = NULL,
 };
 
-int __init hexium_init_module(void)
+static int __init hexium_init_module(void)
 {
 	if (0 != saa7146_register_extension(&extension)) {
 		DEB_S(("failed to register extension.\n"));
@@ -504,7 +509,7 @@ int __init hexium_init_module(void)
 	return 0;
 }
 
-void __exit hexium_cleanup_module(void)
+static void __exit hexium_cleanup_module(void)
 {
 	saa7146_unregister_extension(&extension);
 }

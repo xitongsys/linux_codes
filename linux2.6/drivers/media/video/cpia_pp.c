@@ -71,7 +71,7 @@ MODULE_AUTHOR("B. Huisman <bhuism@cs.utwente.nl> & Peter Pregler <Peter_Pregler@
 MODULE_DESCRIPTION("Parallel port driver for Vision CPiA based cameras");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(parport, "1-" __MODULE_STRING(PARPORT_MAX) "s");
+module_param_array(parport, charp, NULL, 0);
 MODULE_PARM_DESC(parport, "'auto' or a list of parallel port numbers. Just like lp.");
 #else
 static int parport_nr[PARPORT_MAX] __initdata =
@@ -803,10 +803,9 @@ static void cpia_pp_attach (struct parport *port)
 }
 
 static struct parport_driver cpia_pp_driver = {
-	"cpia_pp",
-	cpia_pp_attach,
-	cpia_pp_detach,
-	NULL
+	.name = "cpia_pp",
+	.attach = cpia_pp_attach,
+	.detach = cpia_pp_detach,
 };
 
 int cpia_pp_init(void)
@@ -853,11 +852,6 @@ int init_module(void)
 			}
 		}
 	}
-#if defined(CONFIG_KMOD) && defined(CONFIG_PNP_PARPORT_MODULE)
-	if(parport_enumerate() && !parport_enumerate()->probe_info.model) {
-		request_module("parport_probe");
-	}
-#endif
 	return cpia_pp_init();
 }
 

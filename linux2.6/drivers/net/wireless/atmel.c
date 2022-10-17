@@ -3,7 +3,7 @@
      Driver for Atmel at76c502 at76c504 and at76c506 wireless cards.
 
         Copyright 2000-2001 ATMEL Corporation.
-        Copyright 2003 Simon Kelley.
+        Copyright 2003-2004 Simon Kelley.
 
     This code was developed from version 2.1.1 of the Atmel drivers, 
     released by Atmel corp. under the GPL in December 2002. It also 
@@ -16,9 +16,6 @@
     by him. net.russotto.AtmelMACFW is used under the GPL license version 2.
     This file contains the module in binary form and, under the terms
     of the GPL, in source form. The source is located at the end of the file.
-
-    For all queries about this code, please contact the current author, 
-    Simon Kelley <simon@thekelleys.org.uk> and not Atmel Corporation.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -34,6 +31,12 @@
     along with Atmel wireless lan drivers; if not, write to the Free Software
     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
+    For all queries about this code, please contact the current author, 
+    Simon Kelley <simon@thekelleys.org.uk> and not Atmel Corporation.
+
+    Credit is due to HP UK and Cambridge Online Systems Ltd for supplying
+    hardware used during development of this driver.
+
 ******************************************************************************/
 
 #include <linux/config.h>
@@ -44,6 +47,7 @@
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/ctype.h>
 #include <linux/timer.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -67,7 +71,7 @@
 #include "ieee802_11.h"
 
 #define DRIVER_MAJOR 0
-#define DRIVER_MINOR 8
+#define DRIVER_MINOR 96
 
 MODULE_AUTHOR("Simon Kelley");
 MODULE_DESCRIPTION("Support for Atmel at76c50x 802.11 wireless ethernet cards.");
@@ -153,12 +157,15 @@ module_param(firmware, charp, 0);
 #define C80211_MGMT_ElementID_ChallengeText     16
 #define C80211_MGMT_CAPABILITY_ShortPreamble    0x0020
 
+#define MIB_MAX_DATA_BYTES    212
+#define MIB_HEADER_SIZE       4    /* first four fields */
+
 struct get_set_mib {
         u8 type;
         u8 size;
         u8 index;
         u8 reserved;
-        u8 data[72];
+        u8 data[MIB_MAX_DATA_BYTES];
 };
 
 struct rx_desc {
@@ -195,32 +202,40 @@ struct rx_desc {
 
 
 struct tx_desc {
-   u32       NextDescriptor;
-   u16       TxStartOfFrame;
-   u16       TxLength;
-   
-   u8        TxState;
-   u8        TxStatus;
-   u8        RetryCount;
+	u32       NextDescriptor;
+	u16       TxStartOfFrame;
+	u16       TxLength;
+	
+	u8        TxState;
+	u8        TxStatus;
+	u8        RetryCount;
+	
+	u8        TxRate;
 
-   u8        TxRate;
-   u32       TxTime;
-   u8        Reserved;
-   u8        PacketType;
-   u16       HostTxLength;
+	u8        KeyIndex;
+	u8        ChiperType;
+	u8        ChipreLength;
+        u8        Reserved1;
 
+	u8        Reserved;
+	u8        PacketType;
+	u16       HostTxLength;
+	
 };
 
 
-#define TX_DESC_NEXT_OFFSET        0
-#define TX_DESC_POS_OFFSET         4
-#define TX_DESC_SIZE_OFFSET        6
-#define TX_DESC_FLAGS_OFFSET       8
-#define TX_DESC_STATUS_OFFSET      9
-#define TX_DESC_RETRY_OFFSET       10
-#define TX_DESC_RATE_OFFSET        11
-#define TX_DESC_PACKET_TYPE_OFFSET 17
-#define TX_DESC_HOST_LENGTH_OFFSET 18
+#define TX_DESC_NEXT_OFFSET          0
+#define TX_DESC_POS_OFFSET           4
+#define TX_DESC_SIZE_OFFSET          6
+#define TX_DESC_FLAGS_OFFSET         8
+#define TX_DESC_STATUS_OFFSET        9
+#define TX_DESC_RETRY_OFFSET         10
+#define TX_DESC_RATE_OFFSET          11
+#define TX_DESC_KEY_INDEX_OFFSET     12
+#define TX_DESC_CIPHER_TYPE_OFFSET   13
+#define TX_DESC_CIPHER_LENGTH_OFFSET 14
+#define TX_DESC_PACKET_TYPE_OFFSET   17
+#define TX_DESC_HOST_LENGTH_OFFSET   18
 
 
 
@@ -324,6 +339,9 @@ struct tx_desc {
 #define ACTIVE_MODE 	1
 #define PS_MODE 	2
 
+#define MAX_ENCRYPTION_KEYS 4
+#define MAX_ENCRYPTION_KEY_SIZE 40
+
 ///////////////////////////////////////////////////////////////////////////
 // 802.11 related definitions
 ///////////////////////////////////////////////////////////////////////////
@@ -370,6 +388,14 @@ struct tx_desc {
 #define IFACE_FUNC_CTRL_OFFSET		28
 #define IFACE_MAC_STAT_OFFSET		30
 #define IFACE_GENERIC_INT_TYPE_OFFSET	32
+
+#define CIPHER_SUITE_NONE     0 
+#define CIPHER_SUITE_WEP_64   1
+#define CIPHER_SUITE_TKIP     2
+#define CIPHER_SUITE_AES      3
+#define CIPHER_SUITE_CCX      4
+#define CIPHER_SUITE_WEP_128  5
+
 //
 // IFACE MACROS & definitions
 //
@@ -432,6 +458,7 @@ struct atmel_private {
 	void *card; /* Bus dependent stucture varies for PCcard */
 	int (*present_callback)(void *); /* And callback which uses it */
 	char firmware_id[32];
+	char firmware_template[32];
 	unsigned char *firmware;
 	int firmware_length;
 	struct timer_list management_timer;
@@ -446,7 +473,6 @@ struct atmel_private {
 		CARD_TYPE_SPI_FLASH,
 		CARD_TYPE_EEPROM 
 	} card_type;
-	int is3com; /* is this a 3com card? they are uniquely borken */
 	int do_rx_crc; /* If we need to CRC incoming packets */
 	int probe_crc; /* set if we don't yet know */
 	int crc_ok_cnt, crc_ko_cnt; /* counters for probing */
@@ -457,20 +483,11 @@ struct atmel_private {
 	u16 frag_seq, frag_len, frag_no;
 	u8 frag_source[6]; 
 	
-	int wep_key_len[4]; /* need to know these and not stored in Mib. */
-	struct { /* NB this is matched to the hardware, don't change. */
-		u8 wep_is_on;                 
-		u8 default_key; /* 0..3 */
-		u8 reserved;
-		u8 exclude_unencrypted;
-		
-		u32 WEPICV_error_count;
-		u32 WEP_excluded_count;
-		
-		u8 wep_keys[4][13];
-		u8 encryption_level; /* 0, 1, 2 */
-		u8 reserved2[3];
-	} wep;
+	u8 wep_is_on, default_key, exclude_unencrypted, encryption_level;
+	u8 group_cipher_suite, pairwise_cipher_suite;
+	u8 wep_keys[MAX_ENCRYPTION_KEYS][MAX_ENCRYPTION_KEY_SIZE];
+	int wep_key_len[MAX_ENCRYPTION_KEYS]; 
+	int use_wpa, radio_on_broken; /* firmware dependent stuff. */
 
 	u16 host_info_base;
 	struct host_info_struct { 
@@ -503,27 +520,23 @@ struct atmel_private {
 	} host_info;
 
 	enum { 
-		STATION_STATE_INITIALIZING,
 		STATION_STATE_SCANNING,
 		STATION_STATE_JOINNING,
 		STATION_STATE_AUTHENTICATING,
 		STATION_STATE_ASSOCIATING,
 		STATION_STATE_READY,
 		STATION_STATE_REASSOCIATING,
-		STATION_STATE_FORCED_JOINNING,
-		STATION_STATE_FORCED_JOIN_FAILURE,
 		STATION_STATE_DOWN,
-		STATION_STATE_NO_CARD,
-		STATION_STATE_MGMT_ERROR 
+		STATION_STATE_MGMT_ERROR
 	} station_state;
 	
 	int operating_mode, power_mode;
 	time_t last_qual;
 	int beacons_this_sec;
 	int channel;
-	int reg_domain;
+	int reg_domain, config_reg_domain;
 	int tx_rate;
-	int auto_tx_rate;;
+	int auto_tx_rate;
 	int rts_threshold;
 	int frag_threshold;
 	int long_retry, short_retry;
@@ -564,6 +577,20 @@ struct atmel_private {
 
 static u8 atmel_basic_rates[4] = {0x82,0x84,0x0b,0x16};
 
+static const struct {
+	int reg_domain;
+	int min, max;
+	char *name; 
+} channel_table[] = { { REG_DOMAIN_FCC, 1, 11, "USA" },
+		      { REG_DOMAIN_DOC, 1, 11, "Canada" },
+		      { REG_DOMAIN_ETSI, 1, 13, "Europe" },
+		      { REG_DOMAIN_SPAIN, 10, 11, "Spain" },
+		      { REG_DOMAIN_FRANCE, 10, 13, "France" }, 
+		      { REG_DOMAIN_MKK, 14, 14, "MKK" },
+		      { REG_DOMAIN_MKK1, 1, 14, "MKK1" },
+		      { REG_DOMAIN_ISRAEL, 3, 9, "Israel"} };
+
+static void build_wpa_mib(struct atmel_private *priv);
 static int atmel_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
 static void atmel_copy_to_card(struct net_device *dev, u16 dest, unsigned char *src, u16 len);
 static void atmel_copy_to_host(struct net_device *dev, unsigned char *dest, u16 src, u16 len);
@@ -591,8 +618,9 @@ static void atmel_join_bss(struct atmel_private *priv, int bss_index);
 static void atmel_smooth_qual(struct atmel_private *priv);
 static void atmel_writeAR(struct net_device *dev, u16 data);
 static int probe_atmel_card(struct net_device *dev);
-int reset_atmel_card(struct net_device *dev );
+static int reset_atmel_card(struct net_device *dev );
 static void atmel_enter_state(struct atmel_private *priv, int new_state);
+int atmel_open (struct net_device *dev);
 
 static inline u16 atmel_hi(struct atmel_private *priv, u16 offset)
 {
@@ -633,7 +661,6 @@ static inline void atmel_write16(struct net_device *dev, u16 offset, u16 data)
 {
 	outw(data, dev->base_addr + offset);
 }
-
 
 static inline u8 atmel_rmem8(struct atmel_private *priv, u16 pos)
 {
@@ -717,14 +744,54 @@ static u16 find_tx_buff(struct atmel_private *priv, u16 len)
 	return 0;
 }
 
-static void tx_update_descriptor(struct atmel_private *priv, u16 len, u16 buff, u8 type)
+static void tx_update_descriptor(struct atmel_private *priv, int is_bcast, u16 len, u16 buff, u8 type)
 {
 	atmel_wmem16(priv, atmel_tx(priv, TX_DESC_POS_OFFSET, priv->tx_desc_tail), buff);
 	atmel_wmem16(priv, atmel_tx(priv, TX_DESC_SIZE_OFFSET, priv->tx_desc_tail), len);
-	atmel_wmem16(priv, atmel_tx(priv, TX_DESC_HOST_LENGTH_OFFSET, priv->tx_desc_tail), len);
+	if (!priv->use_wpa)
+		atmel_wmem16(priv, atmel_tx(priv, TX_DESC_HOST_LENGTH_OFFSET, priv->tx_desc_tail), len);
 	atmel_wmem8(priv, atmel_tx(priv, TX_DESC_PACKET_TYPE_OFFSET, priv->tx_desc_tail), type);
 	atmel_wmem8(priv, atmel_tx(priv, TX_DESC_RATE_OFFSET, priv->tx_desc_tail), priv->tx_rate);
 	atmel_wmem8(priv, atmel_tx(priv, TX_DESC_RETRY_OFFSET, priv->tx_desc_tail), 0);
+	if (priv->use_wpa) {
+		int cipher_type, cipher_length;
+		if (is_bcast) {
+			cipher_type = priv->group_cipher_suite;
+			if (cipher_type == CIPHER_SUITE_WEP_64 || 
+			    cipher_type == CIPHER_SUITE_WEP_128 )
+				cipher_length = 8;
+			else if (cipher_type == CIPHER_SUITE_TKIP)
+				cipher_length = 12;
+			else if (priv->pairwise_cipher_suite == CIPHER_SUITE_WEP_64 ||
+				 priv->pairwise_cipher_suite == CIPHER_SUITE_WEP_128) {
+				cipher_type = priv->pairwise_cipher_suite;
+				cipher_length = 8;
+			} else {
+				cipher_type = CIPHER_SUITE_NONE;
+				cipher_length = 0;
+			}
+		} else {
+			cipher_type = priv->pairwise_cipher_suite;
+			if (cipher_type == CIPHER_SUITE_WEP_64 || 
+			    cipher_type == CIPHER_SUITE_WEP_128 )
+				cipher_length = 8;
+			else if (cipher_type == CIPHER_SUITE_TKIP)
+				cipher_length = 12;
+			else if (priv->group_cipher_suite == CIPHER_SUITE_WEP_64 ||
+				 priv->group_cipher_suite == CIPHER_SUITE_WEP_128) {
+				cipher_type = priv->group_cipher_suite;
+				cipher_length = 8;
+			} else {
+				cipher_type = CIPHER_SUITE_NONE;
+				cipher_length = 0;
+			}
+		}
+		
+		atmel_wmem8(priv, atmel_tx(priv, TX_DESC_CIPHER_TYPE_OFFSET, priv->tx_desc_tail),
+			    cipher_type);	
+		atmel_wmem8(priv, atmel_tx(priv, TX_DESC_CIPHER_LENGTH_OFFSET, priv->tx_desc_tail),
+			    cipher_length);
+	}
 	atmel_wmem32(priv, atmel_tx(priv, TX_DESC_NEXT_OFFSET, priv->tx_desc_tail), 0x80000000L);
 	atmel_wmem8(priv, atmel_tx(priv, TX_DESC_FLAGS_OFFSET, priv->tx_desc_tail), TX_FIRM_OWN);
 	if (priv->tx_desc_previous != priv->tx_desc_tail)
@@ -741,19 +808,22 @@ static void tx_update_descriptor(struct atmel_private *priv, u16 len, u16 buff, 
 
 static int start_tx (struct sk_buff *skb, struct net_device *dev)
 {
-	struct atmel_private *priv = (struct atmel_private *)dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	struct ieee802_11_hdr header;
 	unsigned long flags;
 	u16 buff, frame_ctl, len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
-	
-	if(priv->station_state != STATION_STATE_READY) {
-		priv->stats.tx_errors++;
-		return 0;
-	}
-	
+	u8 SNAP_RFC1024[6] = {0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00};
+ 
 	if (priv->card && priv->present_callback && 
 	    !(*priv->present_callback)(priv->card)) {
 		priv->stats.tx_errors++;
+		dev_kfree_skb(skb);
+		return 0;
+	}
+	
+	if (priv->station_state != STATION_STATE_READY) {
+		priv->stats.tx_errors++;
+		dev_kfree_skb(skb);
 		return 0;
 	}
 	
@@ -778,7 +848,7 @@ static int start_tx (struct sk_buff *skb, struct net_device *dev)
 	frame_ctl = IEEE802_11_FTYPE_DATA;
 	header.duration_id = 0;
 	header.seq_ctl = 0;
-	if (priv->wep.wep_is_on)
+	if (priv->wep_is_on)
 		frame_ctl |= IEEE802_11_FCTL_WEP;
 	if (priv->operating_mode == IW_MODE_ADHOC) {
 		memcpy(&header.addr1, skb->data, 6);
@@ -791,6 +861,9 @@ static int start_tx (struct sk_buff *skb, struct net_device *dev)
 		memcpy(&header.addr3, skb->data, 6);
 	}
 	
+	if (priv->use_wpa)
+		memcpy(&header.addr4, SNAP_RFC1024, 6);
+
 	header.frame_ctl = cpu_to_le16(frame_ctl);
 	/* Copy the wireless header into the card */
 	atmel_copy_to_card(dev, buff, (unsigned char *)&header, DATA_FRAME_WS_HEADER_SIZE);
@@ -798,7 +871,8 @@ static int start_tx (struct sk_buff *skb, struct net_device *dev)
 	atmel_copy_to_card(dev, buff + DATA_FRAME_WS_HEADER_SIZE, skb->data + 12, len - 12);
 	priv->tx_buff_tail += len - 12 + DATA_FRAME_WS_HEADER_SIZE;
 	
-	tx_update_descriptor(priv, len + 18, buff, TX_PACKET_TYPE_DATA);
+	/* low bit of first byte of destination tells us if broadcast */
+	tx_update_descriptor(priv, *(skb->data) & 0x01, len + 18, buff, TX_PACKET_TYPE_DATA);
 	dev->trans_start = jiffies;
 	priv->stats.tx_bytes += len;
 	
@@ -810,8 +884,8 @@ static int start_tx (struct sk_buff *skb, struct net_device *dev)
 }
 
 static void atmel_transmit_management_frame(struct atmel_private *priv, 
-				     struct ieee802_11_hdr *header,
-				     u8 *body, int body_len)
+					    struct ieee802_11_hdr *header,
+					    u8 *body, int body_len)
 {
 	u16 buff;
 	int len =  MGMT_FRAME_BODY_OFFSET + body_len;
@@ -822,7 +896,7 @@ static void atmel_transmit_management_frame(struct atmel_private *priv,
 	atmel_copy_to_card(priv->dev, buff, (u8 *)header, MGMT_FRAME_BODY_OFFSET);
 	atmel_copy_to_card(priv->dev, buff + MGMT_FRAME_BODY_OFFSET, body, body_len);
 	priv->tx_buff_tail += len;
-	tx_update_descriptor(priv, len, buff, TX_PACKET_TYPE_MGMT);
+	tx_update_descriptor(priv, header->addr1[0] & 0x01, len, buff, TX_PACKET_TYPE_MGMT);
 }
 	
 static void fast_rx_path(struct atmel_private *priv, struct ieee802_11_hdr *header, 
@@ -1025,7 +1099,7 @@ static void rx_done_irq(struct atmel_private *priv)
 		/* probe for CRC use here if needed  once five packets have arrived with
 		   the same crc status, we assume we know what's happening and stop probing */
 		if (priv->probe_crc) {
-			if (!priv->wep.wep_is_on || !(frame_ctl & IEEE802_11_FCTL_WEP)) {
+			if (!priv->wep_is_on || !(frame_ctl & IEEE802_11_FCTL_WEP)) {
 				priv->do_rx_crc = probe_crc(priv, rx_packet_loc, msdu_size);
 			} else {
 				priv->do_rx_crc = probe_crc(priv, rx_packet_loc + 24, msdu_size - 24);
@@ -1040,7 +1114,7 @@ static void rx_done_irq(struct atmel_private *priv)
 		}
 		    
 		/* don't CRC header when WEP in use */
-		if (priv->do_rx_crc && (!priv->wep.wep_is_on || !(frame_ctl & IEEE802_11_FCTL_WEP))) {
+		if (priv->do_rx_crc && (!priv->wep_is_on || !(frame_ctl & IEEE802_11_FCTL_WEP))) {
 			crc = crc32_le(0xffffffff, (unsigned char *)&header, 24);
 		}
 		msdu_size -= 24; /* header */
@@ -1091,91 +1165,124 @@ static void rx_done_irq(struct atmel_private *priv)
 	}
 }	
 
-static void reset_irq_status(struct atmel_private *priv, u8 mask)
-{
-	u8 isr;
-	
-	atmel_lock_mac(priv);
-	isr = atmel_rmem8(priv, atmel_hi(priv, IFACE_INT_STATUS_OFFSET));
-	isr ^= mask;
-	atmel_wmem8(priv, atmel_hi(priv, IFACE_INT_STATUS_OFFSET), isr);
-	atmel_wmem8(priv, atmel_hi(priv, IFACE_LOCKOUT_MAC_OFFSET), 0);
-}
-
 static irqreturn_t service_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = (struct net_device *) dev_id;
-	struct atmel_private *priv = (struct atmel_private *) dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	u8 isr;
-	
+	int i = -1;
+	static u8 irq_order[] = { 
+		ISR_OUT_OF_RANGE,
+		ISR_RxCOMPLETE,
+		ISR_TxCOMPLETE,
+		ISR_RxFRAMELOST,
+		ISR_FATAL_ERROR,
+		ISR_COMMAND_COMPLETE,
+		ISR_IBSS_MERGE,
+		ISR_GENERIC_IRQ
+	};
+		
+
 	if (priv->card && priv->present_callback && 
 	    !(*priv->present_callback)(priv->card))
 		return IRQ_HANDLED;
+
+	/* In this state upper-level code assumes it can mess with
+	   the card unhampered by interrupts which may change register state.
+	   Note that even though the card shouldn't generate interrupts
+	   the inturrupt line may be shared. This allows card setup 
+	   to go on without disabling interrupts for a long time. */
+	if (priv->station_state == STATION_STATE_DOWN)
+		return IRQ_NONE;
      	
 	atmel_clear_gcr(dev, GCR_ENINT); /* disable interrupts */
-	
+
 	while (1) {
 		if (!atmel_lock_mac(priv)) {
-			printk(KERN_ALERT "%s: MAC gone away in ISR.\n", dev->name);
-			/* bad things - don't re-enable interrupts */
+			/* failed to contact card */
+			printk(KERN_ALERT "%s: failed to contact MAC.\n", dev->name);
 			return IRQ_HANDLED;
 		}
-			
+		
 		isr = atmel_rmem8(priv, atmel_hi(priv, IFACE_INT_STATUS_OFFSET));
 		atmel_wmem8(priv, atmel_hi(priv, IFACE_LOCKOUT_MAC_OFFSET), 0);
-		if (isr)
-			atmel_set_gcr(dev, GCR_ACKINT); /* acknowledge interrupt */
-		else
-			break; /* no pending irqs */
-
-		if (isr & ISR_OUT_OF_RANGE) {
-			reset_irq_status(priv, ISR_OUT_OF_RANGE);
-			if(priv->operating_mode == IW_MODE_INFRA && 
-			   priv->station_state == STATION_STATE_READY) {
+		
+		if (!isr) {
+			atmel_set_gcr(dev, GCR_ENINT); /* enable interrupts */
+			return i == -1 ? IRQ_NONE : IRQ_HANDLED;
+		}
+		
+		atmel_set_gcr(dev, GCR_ACKINT); /* acknowledge interrupt */
+		
+		for (i = 0; i < sizeof(irq_order)/sizeof(u8); i++)
+			if (isr & irq_order[i])
+				break;
+		
+		if (!atmel_lock_mac(priv)) {
+			/* failed to contact card */
+			printk(KERN_ALERT "%s: failed to contact MAC.\n", dev->name);
+			return IRQ_HANDLED;
+		}
+		
+		isr = atmel_rmem8(priv, atmel_hi(priv, IFACE_INT_STATUS_OFFSET));
+		isr ^= irq_order[i];
+		atmel_wmem8(priv, atmel_hi(priv, IFACE_INT_STATUS_OFFSET), isr);
+		atmel_wmem8(priv, atmel_hi(priv, IFACE_LOCKOUT_MAC_OFFSET), 0);
+		
+		switch (irq_order[i]) {
+			
+		case ISR_OUT_OF_RANGE: 
+			if (priv->operating_mode == IW_MODE_INFRA && 
+			    priv->station_state == STATION_STATE_READY) {
 				priv->station_is_associated = 0;
 				atmel_scan(priv, 1);
 			}
-		} else if (isr & ISR_RxCOMPLETE) {
-			reset_irq_status(priv, ISR_RxCOMPLETE);
-			rx_done_irq(priv); 
-		} else if (isr & ISR_TxCOMPLETE) {
-			reset_irq_status(priv, ISR_TxCOMPLETE);
-			tx_done_irq(priv); 
-		} else if (isr & ISR_RxFRAMELOST) {
-			reset_irq_status(priv, ISR_RxFRAMELOST);
+			break;
+
+		case ISR_RxFRAMELOST:
 			priv->wstats.discard.misc++;
-			rx_done_irq(priv);
-		} else if (isr & ISR_FATAL_ERROR) {
-			reset_irq_status(priv, ISR_FATAL_ERROR);
+			/* fall through */
+		case ISR_RxCOMPLETE:
+			rx_done_irq(priv); 
+			break;
+			
+		case ISR_TxCOMPLETE:
+			tx_done_irq(priv); 
+			break;
+			
+		case ISR_FATAL_ERROR:
 			printk(KERN_ALERT "%s: *** FATAL error interrupt ***\n", dev->name);
 			atmel_enter_state(priv, STATION_STATE_MGMT_ERROR);
-		} else if (isr & ISR_COMMAND_COMPLETE) {
-			reset_irq_status(priv, ISR_COMMAND_COMPLETE);
-			atmel_command_irq(priv);	
-		} else if (isr & ISR_IBSS_MERGE) {
-			reset_irq_status(priv, ISR_IBSS_MERGE);
+			break;
+			
+		case ISR_COMMAND_COMPLETE: 
+			atmel_command_irq(priv);
+			break;
+
+		case ISR_IBSS_MERGE:
 			atmel_get_mib(priv, Mac_Mgmt_Mib_Type, MAC_MGMT_MIB_CUR_BSSID_POS, 
 				      priv->CurrentBSSID, 6);
-		} else if (isr & ISR_GENERIC_IRQ) {
-			reset_irq_status(priv, ISR_GENERIC_IRQ);
-			printk(KERN_INFO "%s: Generic_irq recieved.\n", dev->name);
+			/* The WPA stuff cares about the current AP address */
+			if (priv->use_wpa)
+				build_wpa_mib(priv);
+			break;
+		case ISR_GENERIC_IRQ:
+			printk(KERN_INFO "%s: Generic_irq received.\n", dev->name);
+			break;
 		}
 	}	
-
-	atmel_set_gcr(dev, GCR_ENINT); /* enable interrupts */
-	return IRQ_HANDLED;
 }
 
 
 static struct net_device_stats *atmel_get_stats (struct net_device *dev)
 {
-	struct atmel_private *priv = (struct atmel_private *)dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	return &priv->stats;
 }
 
 static struct iw_statistics *atmel_get_wireless_stats (struct net_device *dev)
 {
-	struct atmel_private *priv = (struct atmel_private *)dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 
 	/* update the link quality here in case we are seeing no beacons 
 	   at all to drive the process */
@@ -1191,8 +1298,8 @@ static struct iw_statistics *atmel_get_wireless_stats (struct net_device *dev)
 		priv->wstats.qual.noise = 0;
 		priv->wstats.qual.updated = 7;
 	} else {
-		// Quality levels cannot be determined in ad-hoc mode,
-		// because we can 'hear' more that one remote station.
+		/* Quality levels cannot be determined in ad-hoc mode,
+		   because we can 'hear' more that one remote station. */
 		priv->wstats.qual.qual = 0;
 		priv->wstats.qual.level	= 0;
 		priv->wstats.qual.noise	= 0;
@@ -1216,54 +1323,114 @@ static int atmel_set_mac_address(struct net_device *dev, void *p)
 	struct sockaddr *addr = p;
         
         memcpy (dev->dev_addr, addr->sa_data, dev->addr_len);
-	reset_atmel_card(dev);
-	return 0;
+	return atmel_open(dev);
 }
 
-static int atmel_open (struct net_device *dev)
+EXPORT_SYMBOL(atmel_open);
+
+int atmel_open (struct net_device *dev)
 {
-	struct atmel_private *priv = (struct atmel_private *) dev->priv;
-	priv->station_state = STATION_STATE_INITIALIZING;
-	if (!reset_atmel_card(dev)) {
-		priv->station_state = STATION_STATE_DOWN;
-		return -EAGAIN;
+	struct atmel_private *priv = netdev_priv(dev);
+	int i, channel;
+
+	/* any scheduled timer is no longer needed and might screw things up.. */
+	del_timer_sync(&priv->management_timer);
+	
+	/* Interrupts will not touch the card once in this state... */
+	priv->station_state = STATION_STATE_DOWN;
+
+	if (priv->new_SSID_size) {
+		memcpy(priv->SSID, priv->new_SSID, priv->new_SSID_size);
+		priv->SSID_size = priv->new_SSID_size;
+		priv->new_SSID_size = 0;
 	}
+	priv->BSS_list_entries = 0;
+
+	priv->AuthenticationRequestRetryCnt = 0;
+	priv->AssociationRequestRetryCnt = 0;
+	priv->ReAssociationRequestRetryCnt = 0;
+	priv->CurrentAuthentTransactionSeqNum = 0x0001;
+	priv->ExpectedAuthentTransactionSeqNum = 0x0002;
+
+	priv->site_survey_state = SITE_SURVEY_IDLE;
+	priv->station_is_associated = 0;
+
+	if (!reset_atmel_card(dev)) 
+		return -EAGAIN;
+
+	if (priv->config_reg_domain) {
+		priv->reg_domain = priv->config_reg_domain;
+		atmel_set_mib8(priv, Phy_Mib_Type, PHY_MIB_REG_DOMAIN_POS, priv->reg_domain);
+	} else {
+		priv->reg_domain = atmel_get_mib8(priv, Phy_Mib_Type, PHY_MIB_REG_DOMAIN_POS);
+		for (i = 0; i < sizeof(channel_table)/sizeof(channel_table[0]); i++)
+			if (priv->reg_domain == channel_table[i].reg_domain)
+				break;
+		if (i == sizeof(channel_table)/sizeof(channel_table[0])) {
+			priv->reg_domain = REG_DOMAIN_MKK1;
+			printk(KERN_ALERT "%s: failed to get regulatory domain: assuming MKK1.\n", dev->name);
+		} 
+	}
+	
+	if ((channel = atmel_validate_channel(priv, priv->channel)))
+		priv->channel = channel;
+
+	/* this moves station_state on.... */ 
+	atmel_scan(priv, 1);	
+
+	atmel_set_gcr(priv->dev, GCR_ENINT); /* enable interrupts */
 	return 0;
 }
 
 static int atmel_close (struct net_device *dev)
 {
-	struct atmel_private *priv = (struct atmel_private *) dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 		
-	if (netif_running(dev))
-		netif_stop_queue(dev);
+	atmel_enter_state(priv, STATION_STATE_DOWN);
 	
-	priv->station_state = STATION_STATE_DOWN;
 	if (priv->bus_type == BUS_TYPE_PCCARD) 
 		atmel_write16(dev, GCR, 0x0060);
 	atmel_write16(dev, GCR, 0x0040);
 	return 0;
 }
 
+static int atmel_validate_channel(struct atmel_private *priv, int channel)
+{
+	/* check that channel is OK, if so return zero,
+	   else return suitable default channel */
+	int i;
+
+	for (i = 0; i < sizeof(channel_table)/sizeof(channel_table[0]); i++)
+		if (priv->reg_domain == channel_table[i].reg_domain) {
+			if (channel >= channel_table[i].min &&
+			    channel <= channel_table[i].max)
+				return 0;
+			else
+				return channel_table[i].min;
+		}
+	return 0;
+}
+
 static int atmel_proc_output (char *buf, struct atmel_private *priv)
 {
+	int i;
 	char *p = buf;
 	char *s, *r, *c;
 	
 	p += sprintf(p, "Driver version:\t\t%d.%d\n", DRIVER_MAJOR, DRIVER_MINOR);
 	
 	if (priv->station_state != STATION_STATE_DOWN) {
-		p += sprintf(p, "Firmware version:\t%d.%d build %d ", 
+		p += sprintf(p, "Firmware version:\t%d.%d build %d\nFirmware location:\t", 
 			     priv->host_info.major_version,
 			     priv->host_info.minor_version,
 			     priv->host_info.build_version);
 		
 		if (priv->card_type != CARD_TYPE_EEPROM) 
-			p += sprintf(p, "[built-in]\n");
+			p += sprintf(p, "on card\n");
 		else if (priv->firmware) 
-			p += sprintf(p, "[%s loaded by host]\n", priv->firmware_id);
+			p += sprintf(p, "%s loaded by host\n", priv->firmware_id);
 		else
-			p += sprintf(p, "[%s loaded by hotplug]\n", priv->firmware_id);
+			p += sprintf(p, "%s loaded by hotplug\n", priv->firmware_id);
 		
 		switch(priv->card_type) {
 		case CARD_TYPE_PARALLEL_FLASH: c = "Parallel flash"; break;
@@ -1272,34 +1439,27 @@ static int atmel_proc_output (char *buf, struct atmel_private *priv)
 		default: c = "<unknown>";
 		}
 
-		switch (priv->reg_domain) {
-		case REG_DOMAIN_FCC: r = "USA"; break;
-		case REG_DOMAIN_DOC: r = "Canada"; break;
-		case REG_DOMAIN_ETSI: r = "Europe"; break;
-		case REG_DOMAIN_SPAIN: r = "Spain"; break;
-		case REG_DOMAIN_FRANCE: r = "France"; break;
-		case REG_DOMAIN_MKK: r = "Japan (MKK)"; break;
-		case REG_DOMAIN_MKK1: r = "Japan (MKK1)"; break;
-		case REG_DOMAIN_ISRAEL: r = "Israel"; break;
-		default: r = "<unknown>";
-		}
+		
+		r = "<unknown>";
+		for (i = 0; i < sizeof(channel_table)/sizeof(channel_table[0]); i++)
+			if (priv->reg_domain == channel_table[i].reg_domain)
+				r = channel_table[i].name;
+		
 		p += sprintf(p, "MAC memory type:\t%s\n", c);
 		p += sprintf(p, "Regulatory domain:\t%s\n", r);
 		p += sprintf(p, "Host CRC checking:\t%s\n", 
 			     priv->do_rx_crc ? "On" : "Off");
+		p += sprintf(p, "WPA-capable firmware:\t%s\n",
+			     priv->use_wpa ? "Yes" : "No");
 	}
 	
 	switch(priv->station_state) {
-	case STATION_STATE_INITIALIZING: s = "Initialising"; break;
 	case STATION_STATE_SCANNING: s = "Scanning"; break;
 	case STATION_STATE_JOINNING: s = "Joining"; break;
 	case STATION_STATE_AUTHENTICATING: s = "Authenticating"; break;
 	case STATION_STATE_ASSOCIATING: s = "Associating"; break;
 	case STATION_STATE_READY: s = "Ready"; break;
 	case STATION_STATE_REASSOCIATING: s = "Reassociating"; break;
-	case STATION_STATE_FORCED_JOINNING: s = "Forced joining"; break;
-	case STATION_STATE_FORCED_JOIN_FAILURE: s = "Forced join failure"; break;
-	case STATION_STATE_NO_CARD: s = "No card"; break;
 	case STATION_STATE_MGMT_ERROR: s = "Management error"; break;
 	case STATION_STATE_DOWN: s = "Down"; break;
 	default: s = "<unknown>";
@@ -1312,7 +1472,7 @@ static int atmel_proc_output (char *buf, struct atmel_private *priv)
 static int atmel_read_proc(char *page, char **start, off_t off,
 			   int count, int *eof, void *data)
 {
-        struct atmel_private *priv = (struct atmel_private *)data;
+        struct atmel_private *priv = data;
 	int len = atmel_proc_output (page, priv);
         if (len <= off+count) *eof = 1;
         *start = page + off;
@@ -1322,7 +1482,7 @@ static int atmel_read_proc(char *page, char **start, off_t off,
         return len;
 }
 
-struct net_device *init_atmel_card( unsigned short irq, int port, char *firmware_id, int is3com,  
+struct net_device *init_atmel_card( unsigned short irq, int port, char *firmware_id,  
 				    struct device *sys_dev, int (*card_present)(void *), void *card)
 {
 	struct net_device *dev;
@@ -1340,21 +1500,20 @@ struct net_device *init_atmel_card( unsigned short irq, int port, char *firmware
 		goto err_out_free;
 	}
 
-	priv = dev->priv;
+	priv = netdev_priv(dev);
 	priv->dev = dev;
 	priv->sys_dev = sys_dev;
 	priv->present_callback = card_present;
 	priv->card = card;
 	priv->firmware = NULL;
+	priv->firmware_id[0] = '\0';
+	priv->firmware_template[0] = '\0';
 	if (firmware) /* module parameter */
 		strcpy(priv->firmware_id, firmware);
 	else if (firmware_id) /* from PCMCIA card-matching or PCI */
-		strcpy(priv->firmware_id, firmware_id);
-	else
-		priv->firmware_id[0] = '\0';
+		strcpy(priv->firmware_template, firmware_id);
 	priv->bus_type = card_present ? BUS_TYPE_PCCARD : BUS_TYPE_PCI;
 	priv->station_state = STATION_STATE_DOWN;
-	priv->is3com = is3com;
 	priv->do_rx_crc = 0;
 	/* For PCMCIA cards, some chips need CRC, some don't
 	   so we have to probe. */
@@ -1376,6 +1535,8 @@ struct net_device *init_atmel_card( unsigned short irq, int port, char *firmware
 	priv->preamble = LONG_PREAMBLE;
 	priv->operating_mode = IW_MODE_INFRA;
 	priv->connect_to_any_BSS = 0;
+	priv->config_reg_domain = 0;
+	priv->reg_domain = 0;
 	priv->tx_rate = 3;
 	priv->auto_tx_rate = 1;
 	priv->channel = 4;
@@ -1387,9 +1548,16 @@ struct net_device *init_atmel_card( unsigned short irq, int port, char *firmware
 	priv->rts_threshold = 2347;
 	priv->short_retry = 7;
 	priv->long_retry = 4;
-	priv->wep.wep_is_on = 0;
-	priv->wep.default_key = 0;
-	priv->wep.encryption_level = 0;
+
+	priv->wep_is_on = 0;
+	priv->default_key = 0;
+	priv->encryption_level = 0;
+	priv->exclude_unencrypted = 0;
+	priv->group_cipher_suite = priv->pairwise_cipher_suite = CIPHER_SUITE_NONE;
+	priv->use_wpa = 0;
+	memset(priv->wep_keys, 0, sizeof(priv->wep_keys));
+	memset(priv->wep_key_len, 0, sizeof(priv->wep_key_len));
+
 	priv->default_beacon_period = priv->beacon_period = 100;
 	priv->listen_interval = 1;
 
@@ -1424,10 +1592,14 @@ struct net_device *init_atmel_card( unsigned short irq, int port, char *firmware
 	if (register_netdev(dev))
 		goto err_out_res;
 	
-	if (!probe_atmel_card(dev))
+	if (!probe_atmel_card(dev)){
+		unregister_netdev(dev);
 		goto err_out_res;
+	}
 	
-	create_proc_read_entry ("driver/atmel", 0, 0, atmel_read_proc, priv);	
+	netif_carrier_off(dev);
+	
+	create_proc_read_entry ("driver/atmel", 0, NULL, atmel_read_proc, priv);	
 	
 	printk(KERN_INFO "%s: Atmel at76c50x wireless. Version %d.%d simon@thekelleys.org.uk\n",
 	       dev->name, DRIVER_MAJOR, DRIVER_MINOR);
@@ -1441,7 +1613,7 @@ struct net_device *init_atmel_card( unsigned short irq, int port, char *firmware
  err_out_irq:
 	free_irq(dev->irq, dev);
  err_out_free:
-	kfree(dev);
+	free_netdev(dev);
 	return NULL;
 }
 
@@ -1449,17 +1621,16 @@ EXPORT_SYMBOL(init_atmel_card);
 
 void stop_atmel_card(struct net_device *dev, int freeres)
 {
-	struct atmel_private *priv = dev->priv;
-	unregister_netdev(dev);
-	
+	struct atmel_private *priv = netdev_priv(dev);
+		
 	/* put a brick on it... */
-
 	if (priv->bus_type == BUS_TYPE_PCCARD) 
 		atmel_write16(dev, GCR, 0x0060);
 	atmel_write16(dev, GCR, 0x0040);
-
-	remove_proc_entry("driver/atmel", NULL);
+	
 	del_timer_sync(&priv->management_timer);
+	unregister_netdev(dev);
+	remove_proc_entry("driver/atmel", NULL);
 	free_irq(dev->irq, dev);
 	if (priv->firmware)
 		kfree(priv->firmware);
@@ -1472,42 +1643,12 @@ void stop_atmel_card(struct net_device *dev, int freeres)
 
 EXPORT_SYMBOL(stop_atmel_card);
 
-static const struct {
-	int reg_domain;
-	int min, max;
-} channel_table[] = { { REG_DOMAIN_FCC, 1, 11},
-		      { REG_DOMAIN_DOC, 1, 11},
-		      { REG_DOMAIN_ETSI, 1, 13},
-		      { REG_DOMAIN_SPAIN, 10, 11},
-		      { REG_DOMAIN_FRANCE, 10, 13},
-		      { REG_DOMAIN_MKK, 14, 14},
-		      { REG_DOMAIN_MKK1, 1, 14},
-		      { REG_DOMAIN_ISRAEL, 9} };
-
-
-static int atmel_validate_channel(struct atmel_private *priv, int channel)
-{
-	/* check that channel is OK, if so return zero,
-	   else return suitable default channel */
-	int i;
-
-	for (i = 0; i < sizeof(channel_table)/sizeof(channel_table[0]); i++)
-		if (priv->reg_domain == channel_table[i].reg_domain) {
-			if (channel >= channel_table[i].min &&
-			    channel <= channel_table[i].max)
-				return 0;
-			else
-				return channel_table[i].min;
-		}
-	return 1;
-}
-
 static int atmel_set_essid(struct net_device *dev,
 			   struct iw_request_info *info,
 			   struct iw_point *dwrq,
 			   char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 
 	/* Check if we asked for `any' */
 	if(dwrq->flags == 0) {
@@ -1535,10 +1676,10 @@ static int atmel_get_essid(struct net_device *dev,
 			   struct iw_point *dwrq,
 			   char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 
 	/* Get the current SSID */
-	if (priv->SSID_size == 0) {
+	if (priv->new_SSID_size != 0) {
 		memcpy(extra, priv->new_SSID, priv->new_SSID_size);
 		extra[priv->new_SSID_size] = '\0';
 		dwrq->length = priv->new_SSID_size + 1;
@@ -1558,7 +1699,7 @@ static int atmel_get_wap(struct net_device *dev,
 			 struct sockaddr *awrq,
 			 char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	memcpy(awrq->sa_data, priv->CurrentBSSID, 6);
 	awrq->sa_family = ARPHRD_ETHER;
 
@@ -1570,7 +1711,7 @@ static int atmel_set_encode(struct net_device *dev,
 			    struct iw_point *dwrq,
 			    char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 
 	/* Basic checking: do we have a key to set ?
 	 * Note : with the new API, it's impossible to get a NULL pointer.
@@ -1580,7 +1721,7 @@ static int atmel_set_encode(struct net_device *dev,
 	 * don't do it. - Jean II */
 	if (dwrq->length > 0) {
 		int index = (dwrq->flags & IW_ENCODE_INDEX) - 1;
-		int current_index = priv->wep.default_key;
+		int current_index = priv->default_key;
 		/* Check the size of the key */
 		if (dwrq->length > 13) {
 			return -EINVAL;
@@ -1589,7 +1730,7 @@ static int atmel_set_encode(struct net_device *dev,
 		if (index < 0 || index >= 4)
 			index = current_index;
 		else
-			priv->wep.default_key = index;
+			priv->default_key = index;
 		/* Set the length */
 		if (dwrq->length > 5)
 			priv->wep_key_len[index] = 13;
@@ -1602,27 +1743,30 @@ static int atmel_set_encode(struct net_device *dev,
 		/* Check if the key is not marked as invalid */
 		if(!(dwrq->flags & IW_ENCODE_NOKEY)) {
 			/* Cleanup */
-			memset(priv->wep.wep_keys[index], 0, 13);
+			memset(priv->wep_keys[index], 0, 13);
 			/* Copy the key in the driver */
-			memcpy(priv->wep.wep_keys[index], extra, dwrq->length);
+			memcpy(priv->wep_keys[index], extra, dwrq->length);
 		}
 		/* WE specify that if a valid key is set, encryption
 		 * should be enabled (user may turn it off later)
 		 * This is also how "iwconfig ethX key on" works */
 		if (index == current_index && 
 		    priv->wep_key_len[index] > 0) {
-			priv->wep.wep_is_on = 1;
-			priv->wep.exclude_unencrypted = 1;
-			if (priv->wep_key_len[index] > 5)
-				priv->wep.encryption_level = 2;
-			else
-				priv->wep.encryption_level = 1;
+			priv->wep_is_on = 1;
+			priv->exclude_unencrypted = 1;
+			if (priv->wep_key_len[index] > 5) {
+				priv->pairwise_cipher_suite = CIPHER_SUITE_WEP_64;
+				priv->encryption_level = 2;
+			} else {
+				priv->pairwise_cipher_suite = CIPHER_SUITE_WEP_128;
+				priv->encryption_level = 1;
+			}
 		}
 	} else {
 		/* Do we want to just set the transmit key index ? */
 		int index = (dwrq->flags & IW_ENCODE_INDEX) - 1;
 		if ( index>=0 && index < 4 ) {
-			priv->wep.default_key = index;
+			priv->default_key = index;
 		} else
 			/* Don't complain if only change the mode */
 			if(!dwrq->flags & IW_ENCODE_MODE) {
@@ -1631,19 +1775,23 @@ static int atmel_set_encode(struct net_device *dev,
 	}
 	/* Read the flags */
 	if(dwrq->flags & IW_ENCODE_DISABLED) {
-		priv->wep.wep_is_on = 0;
-		priv->wep.encryption_level = 0; 
+		priv->wep_is_on = 0;
+		priv->encryption_level = 0; 	
+		priv->pairwise_cipher_suite = CIPHER_SUITE_NONE;
 	} else {
-		priv->wep.wep_is_on = 1;
-		if (priv->wep_key_len[priv->wep.default_key] > 5)
-			priv->wep.encryption_level = 2;
-		else
-			priv->wep.encryption_level = 1;
+		priv->wep_is_on = 1;
+		if (priv->wep_key_len[priv->default_key] > 5) {
+			priv->pairwise_cipher_suite = CIPHER_SUITE_WEP_128;
+			priv->encryption_level = 2;
+		} else {
+			priv->pairwise_cipher_suite = CIPHER_SUITE_WEP_64;
+			priv->encryption_level = 1;
+		}
 	}
 	if(dwrq->flags & IW_ENCODE_RESTRICTED)
-		priv->wep.exclude_unencrypted = 1;
+		priv->exclude_unencrypted = 1;
 	if(dwrq->flags & IW_ENCODE_OPEN)
-		priv->wep.exclude_unencrypted = 0;
+		priv->exclude_unencrypted = 0;
 	
 	return -EINPROGRESS;		/* Call commit handler */
 }
@@ -1654,19 +1802,19 @@ static int atmel_get_encode(struct net_device *dev,
 			    struct iw_point *dwrq,
 			    char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	int index = (dwrq->flags & IW_ENCODE_INDEX) - 1;
 	
-	if (!priv->wep.wep_is_on)
+	if (!priv->wep_is_on)
 		dwrq->flags = IW_ENCODE_DISABLED;
-	else if (priv->wep.exclude_unencrypted)
+	else if (priv->exclude_unencrypted)
 		dwrq->flags = IW_ENCODE_RESTRICTED;
 	else
 		dwrq->flags = IW_ENCODE_OPEN;
 		
 		/* Which key do we want ? -1 -> tx index */
 	if (index < 0 || index >= 4)
-		index = priv->wep.default_key;
+		index = priv->default_key;
 	dwrq->flags |= index + 1;
 	/* Copy the key to the user buffer */
 	dwrq->length = priv->wep_key_len[index];
@@ -1674,7 +1822,7 @@ static int atmel_get_encode(struct net_device *dev,
 		dwrq->length=0;
 	} else {
 		memset(extra, 0, 16);
-		memcpy(extra, priv->wep.wep_keys[index], dwrq->length);
+		memcpy(extra, priv->wep_keys[index], dwrq->length);
 	}
 	
 	return 0;
@@ -1694,7 +1842,7 @@ static int atmel_set_rate(struct net_device *dev,
 			  struct iw_param *vwrq,
 			  char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	
 	if (vwrq->fixed == 0) {
 		priv->tx_rate = 3;
@@ -1709,10 +1857,10 @@ static int atmel_set_rate(struct net_device *dev,
 		} else {
 		/* Setting by frequency value */
 			switch (vwrq->value) {
-			case (int)1e6: priv->tx_rate = 0; break;
-			case (int)2e6: priv->tx_rate = 1; break;
-			case (int)5.5e6: priv->tx_rate = 2; break;
-			case (int)11e6:  priv->tx_rate = 3; break;
+			case  1000000: priv->tx_rate = 0; break;
+			case  2000000: priv->tx_rate = 1; break;
+			case  5500000: priv->tx_rate = 2; break;
+			case 11000000: priv->tx_rate = 3; break;
 			default: return -EINVAL;
 			}
 		}
@@ -1726,7 +1874,7 @@ static int atmel_set_mode(struct net_device *dev,
 			  __u32 *uwrq,
 			  char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 
 	if (*uwrq != IW_MODE_ADHOC && *uwrq != IW_MODE_INFRA)
 		return -EINVAL;
@@ -1740,7 +1888,7 @@ static int atmel_get_mode(struct net_device *dev,
 			  __u32 *uwrq,
 			  char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	
 	*uwrq = priv->operating_mode;
 	return 0;
@@ -1751,18 +1899,18 @@ static int atmel_get_rate(struct net_device *dev,
 			 struct iw_param *vwrq,
 			 char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 
 	if (priv->auto_tx_rate) {
 		vwrq->fixed = 0;
-		vwrq->value = 11e6;
+		vwrq->value = 11000000;
 	} else {
 		vwrq->fixed = 1;
 		switch(priv->tx_rate) {
-		case 0: vwrq->value = 1e6; break;
-		case 1: vwrq->value = 2e6; break;
-		case 2: vwrq->value = 5.5e6; break;
-		case 3: vwrq->value = 11e6; break;
+		case 0: vwrq->value =  1000000; break;
+		case 1: vwrq->value =  2000000; break;
+		case 2: vwrq->value =  5500000; break;
+		case 3: vwrq->value = 11000000; break;
 		}
 	}
 	return 0;
@@ -1773,7 +1921,7 @@ static int atmel_set_power(struct net_device *dev,
 			   struct iw_param *vwrq,
 			   char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	priv->power_mode = vwrq->disabled ? 0 : 1;
 	return -EINPROGRESS;
 }
@@ -1783,7 +1931,7 @@ static int atmel_get_power(struct net_device *dev,
 			   struct iw_param *vwrq,
 			   char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	vwrq->disabled = priv->power_mode ? 0 : 1;
 	vwrq->flags = IW_POWER_ON;
 	return 0;
@@ -1794,7 +1942,7 @@ static int atmel_set_retry(struct net_device *dev,
 			   struct iw_param *vwrq,
 			   char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	
 	if(!vwrq->disabled && (vwrq->flags & IW_RETRY_LIMIT)) {
 		if(vwrq->flags & IW_RETRY_MAX)
@@ -1817,7 +1965,7 @@ static int atmel_get_retry(struct net_device *dev,
 			   struct iw_param *vwrq,
 			   char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 
 	vwrq->disabled = 0;      /* Can't be disabled */
 
@@ -1840,7 +1988,7 @@ static int atmel_set_rts(struct net_device *dev,
 			 struct iw_param *vwrq,
 			 char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	int rthr = vwrq->value;
 
 	if(vwrq->disabled)
@@ -1858,7 +2006,7 @@ static int atmel_get_rts(struct net_device *dev,
 			 struct iw_param *vwrq,
 			 char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	
 	vwrq->value = priv->rts_threshold;
 	vwrq->disabled = (vwrq->value >= 2347);
@@ -1872,7 +2020,7 @@ static int atmel_set_frag(struct net_device *dev,
 			  struct iw_param *vwrq,
 			  char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	int fthr = vwrq->value;
 
 	if(vwrq->disabled)
@@ -1891,7 +2039,7 @@ static int atmel_get_frag(struct net_device *dev,
 			  struct iw_param *vwrq,
 			  char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 
 	vwrq->value = priv->frag_threshold;
 	vwrq->disabled = (vwrq->value >= 2346);
@@ -1908,13 +2056,13 @@ static int atmel_set_freq(struct net_device *dev,
 			  struct iw_freq *fwrq,
 			  char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	int rc = -EINPROGRESS;		/* Call commit handler */
 	
 	/* If setting by frequency, convert to a channel */
 	if((fwrq->e == 1) &&
-	   (fwrq->m >= (int) 2.412e8) &&
-	   (fwrq->m <= (int) 2.487e8)) {
+	   (fwrq->m >= (int) 241200000) &&
+	   (fwrq->m <= (int) 248700000)) {
 		int f = fwrq->m / 100000;
 		int c = 0;
 		while((c < 14) && (f != frequency_list[c]))
@@ -1942,7 +2090,7 @@ static int atmel_get_freq(struct net_device *dev,
 			  struct iw_freq *fwrq,
 			  char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 
 	fwrq->m = priv->channel;
 	fwrq->e = 0;
@@ -1954,7 +2102,8 @@ static int atmel_set_scan(struct net_device *dev,
 			  struct iw_param *vwrq,
 			  char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
+	unsigned long flags;
 
 	/* Note : you may have realised that, as this is a SET operation,
 	 * this is privileged and therefore a normal user can't
@@ -1963,8 +2112,7 @@ static int atmel_set_scan(struct net_device *dev,
 	 * traffic doesn't flow, so it's a perfect DoS...
 	 * Jean II */
 	
-	if (priv->station_state == STATION_STATE_DOWN ||
-	    priv->station_state == STATION_STATE_NO_CARD)
+	if (priv->station_state == STATION_STATE_DOWN)
 		return -EAGAIN;
 
 	/* Timeout old surveys. */
@@ -1975,13 +2123,14 @@ static int atmel_set_scan(struct net_device *dev,
 	/* Initiate a scan command */
 	if (priv->site_survey_state == SITE_SURVEY_IN_PROGRESS)
 		return -EBUSY;
+		
+	del_timer_sync(&priv->management_timer);
+	spin_lock_irqsave(&priv->irqlock, flags);
 	
 	priv->site_survey_state = SITE_SURVEY_IN_PROGRESS;
-	
-	atmel_clear_gcr(dev, GCR_ENINT); /* disable interrupts */
-	del_timer_sync(&priv->management_timer);
+	priv->fast_scan = 0;
 	atmel_scan(priv, 0);
-	atmel_set_gcr(dev, GCR_ENINT); /* enable interrupts */
+	spin_unlock_irqrestore(&priv->irqlock, flags);
 	
 	return 0;
 }
@@ -1991,7 +2140,7 @@ static int atmel_get_scan(struct net_device *dev,
 			  struct iw_point *dwrq,
 			  char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	int i;
 	char *current_ev = extra;
 	struct iw_event	iwe;
@@ -2033,7 +2182,7 @@ static int atmel_get_scan(struct net_device *dev,
 
 	/* Length of data */
 	dwrq->length = (current_ev - extra);
-	dwrq->flags = 0;	/* todo */
+	dwrq->flags = 0;   
 	
 	return 0;
 }
@@ -2043,7 +2192,7 @@ static int atmel_get_range(struct net_device *dev,
 			   struct iw_point *dwrq,
 			   char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	struct iw_range *range = (struct iw_range *) extra;
 	int k,i,j;
 
@@ -2071,10 +2220,10 @@ static int atmel_get_range(struct net_device *dev,
 	range->max_qual.noise = 0;
 	range->sensitivity = 0;
 
-	range->bitrate[0] = 1e6;
-	range->bitrate[1] = 2e6;
-	range->bitrate[2] = 5.5e6;
-	range->bitrate[3] = 11e6;
+	range->bitrate[0] =  1000000;
+	range->bitrate[1] =  2000000;
+	range->bitrate[2] =  5500000;
+	range->bitrate[3] = 11000000;
 	range->num_bitrates = 4;
 
 	range->min_rts = 0;
@@ -2110,30 +2259,35 @@ static int atmel_set_wap(struct net_device *dev,
 			 struct sockaddr *awrq,
 			 char *extra)
 {
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	int i;
 	static const u8 bcast[] = { 255, 255, 255, 255, 255, 255 };
-	
+	unsigned long flags;
+
 	if (awrq->sa_family != ARPHRD_ETHER)
 		return -EINVAL;
 	
 	if (memcmp(bcast, awrq->sa_data, 6) == 0) {
-		atmel_clear_gcr(dev, GCR_ENINT); /* disable interrupts */
 		del_timer_sync(&priv->management_timer);
+		spin_lock_irqsave(&priv->irqlock, flags);
 		atmel_scan(priv, 1);
-		atmel_set_gcr(dev, GCR_ENINT); /* enable interrupts */
+		spin_unlock_irqrestore(&priv->irqlock, flags);
 		return 0;
 	}
 	
 	for(i=0; i<priv->BSS_list_entries; i++) {
 		if (memcmp(priv->BSSinfo[i].BSSID, awrq->sa_data, 6) == 0) {
-			if (!priv->wep.wep_is_on && priv->BSSinfo[i].UsingWEP) {
+			if (!priv->wep_is_on && priv->BSSinfo[i].UsingWEP) {
 				return -EINVAL;
-			} else if  (priv->wep.wep_is_on && !priv->BSSinfo[i].UsingWEP) {
+			} else if  (priv->wep_is_on && !priv->BSSinfo[i].UsingWEP) {
 				return -EINVAL;
-			} else 
-				atmel_join_bss(priv, i);  
-			return 0;
+			} else {
+				del_timer_sync(&priv->management_timer);
+				spin_lock_irqsave(&priv->irqlock, flags);
+				atmel_join_bss(priv, i);
+				spin_unlock_irqrestore(&priv->irqlock, flags);
+				return 0;
+			}
 		}
 	}
 		
@@ -2145,8 +2299,7 @@ static int atmel_config_commit(struct net_device *dev,
 			       void *zwrq,			/* NULL */
 			       char *extra)			/* NULL */
 {
-	reset_atmel_card(dev);
-	return 0;
+	return atmel_open(dev);
 }
 
 static const iw_handler		atmel_handler[] =
@@ -2207,19 +2360,22 @@ static const iw_handler		atmel_private_handler[] =
 
 typedef struct atmel_priv_ioctl {
 	char id[32];
-	unsigned char *data;		
+	unsigned char __user *data;		
 	unsigned short len;		
 } atmel_priv_ioctl;
 
 	
 #define ATMELFWL SIOCIWFIRSTPRIV
 #define ATMELIDIFC ATMELFWL + 1
+#define ATMELRD ATMELFWL + 2
 #define ATMELMAGIC 0x51807 
+#define REGDOMAINSZ 20
 
 static const struct iw_priv_args atmel_private_args[] = {
 /*{ cmd,         set_args,                            get_args, name } */
   { ATMELFWL, IW_PRIV_TYPE_BYTE | IW_PRIV_SIZE_FIXED | sizeof (atmel_priv_ioctl), IW_PRIV_TYPE_NONE, "atmelfwl" },
   { ATMELIDIFC, IW_PRIV_TYPE_NONE, IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "atmelidifc" },
+  { ATMELRD, IW_PRIV_TYPE_CHAR | REGDOMAINSZ, IW_PRIV_TYPE_NONE, "regdomain" },
 };
 
 static const struct iw_handler_def	atmel_handler_def =
@@ -2234,11 +2390,12 @@ static const struct iw_handler_def	atmel_handler_def =
 
 static int atmel_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
-	int rc = 0;
-	struct atmel_private *priv = (struct atmel_private *) dev->priv;
+	int i, rc = 0;
+	struct atmel_private *priv = netdev_priv(dev);
 	atmel_priv_ioctl com;
 	struct iwreq *wrq = (struct iwreq *) rq;
 	unsigned char *new_firmware;
+	char domain[REGDOMAINSZ+1];
 
 	switch (cmd) {
 	case SIOCGIWPRIV:
@@ -2273,12 +2430,13 @@ static int atmel_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 			rc = -ENOMEM;
 			break;
 		}
-		
+
 		if (copy_from_user(new_firmware, com.data, com.len)) {
+			kfree(new_firmware);
 			rc = -EFAULT;
 			break;
 		}
-		
+
 		if (priv->firmware)
 			kfree(priv->firmware);
 		
@@ -2288,6 +2446,39 @@ static int atmel_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		priv->firmware_id[31] = '\0';
 		break;
 
+	case ATMELRD:
+		if (copy_from_user(domain, rq->ifr_data, REGDOMAINSZ)) {
+			rc = -EFAULT;
+			break;
+		}
+		
+		if (!capable(CAP_NET_ADMIN)) {
+			rc = -EPERM;
+			break;
+		}
+
+		domain[REGDOMAINSZ] = 0;
+		rc = -EINVAL;
+		for (i = 0; i < sizeof(channel_table)/sizeof(channel_table[0]); i++) {
+			/* strcasecmp doesn't exist in the library */
+			char *a = channel_table[i].name;
+			char *b = domain;
+			while (*a) {
+				char c1 = *a++;
+				char c2 = *b++;
+				if (tolower(c1) != tolower(c2))
+					break;
+			}
+			if (!*a && !*b) {
+				priv->config_reg_domain = channel_table[i].reg_domain;
+				rc = 0;
+			}
+		}
+		
+		if (rc == 0 &&  priv->station_state != STATION_STATE_DOWN)
+			rc = atmel_open(dev);
+		break;
+		
 	default:
 		rc = -EOPNOTSUPP;
 	}
@@ -2307,20 +2498,23 @@ struct auth_body {
 static void atmel_enter_state(struct atmel_private *priv, int new_state)
 {
 	int old_state = priv->station_state;
-
+		
 	if (new_state == old_state)
 		return;
-
-	if (new_state == STATION_STATE_READY)
+	
+	priv->station_state = new_state;
+		
+	if (new_state == STATION_STATE_READY) {
 		netif_start_queue(priv->dev);
-
-	if (old_state == STATION_STATE_READY) {
-		netif_stop_queue(priv->dev);
-		priv->last_beacon_timestamp = 0;
+		netif_carrier_on(priv->dev);
 	}
 
-	priv->station_state = new_state;
-
+	if (old_state == STATION_STATE_READY) {
+		netif_carrier_off(priv->dev);
+		if (netif_running(priv->dev))
+			netif_stop_queue(priv->dev);
+		priv->last_beacon_timestamp = 0;
+	}
 }
 
 static void atmel_scan(struct atmel_private *priv, int specific_ssid)
@@ -2336,8 +2530,6 @@ static void atmel_scan(struct atmel_private *priv, int specific_ssid)
 		u8 options;
 		u8 SSID_size;
 	} cmd;
-	
-	atmel_enter_state(priv, STATION_STATE_SCANNING);
 	
 	memset(cmd.BSSID, 0xff, 6);
 
@@ -2364,6 +2556,10 @@ static void atmel_scan(struct atmel_private *priv, int specific_ssid)
 		BSS_TYPE_AD_HOC : BSS_TYPE_INFRASTRUCTURE);
 	
 	atmel_send_command(priv, CMD_Scan, &cmd, sizeof(cmd));
+
+	/* This must come after all hardware access to avoid being messed up
+	   by stuff happening in interrupt context after we leave STATE_DOWN */
+	atmel_enter_state(priv, STATION_STATE_SCANNING);
 }
 
 static void join(struct atmel_private *priv, int type)
@@ -2371,7 +2567,7 @@ static void join(struct atmel_private *priv, int type)
 	struct {
 		u8 BSSID[6];
 		u8 SSID[MAX_SSID_LENGTH];
-		u8 BSS_type; /* this is a short in a scan command - wierd */                                
+		u8 BSS_type; /* this is a short in a scan command - weird */
 		u8 channel;
 		u16 timeout;
 		u8 SSID_size;
@@ -2451,13 +2647,13 @@ static void send_authentication_request(struct atmel_private *priv, u8 *challeng
 	memcpy(header.addr2, priv->dev->dev_addr, 6);
 	memcpy(header.addr3, priv->CurrentBSSID, 6);
 	
-	if (priv->wep.wep_is_on) {
-		auth.alg = C80211_MGMT_AAN_SHAREDKEY; 
+	if (priv->wep_is_on) {
+		auth.alg = cpu_to_le16(C80211_MGMT_AAN_SHAREDKEY); 
 		/* no WEP for authentication frames with TrSeqNo 1 */
 		if (priv->CurrentAuthentTransactionSeqNum != 1)
 			header.frame_ctl |=  cpu_to_le16(IEEE802_11_FCTL_WEP); 
 	} else {
-		auth.alg = C80211_MGMT_AAN_OPENSYSTEM;
+		auth.alg = cpu_to_le16(C80211_MGMT_AAN_OPENSYSTEM);
 	}
 
 	auth.status = 0;
@@ -2502,7 +2698,7 @@ static void send_association_request(struct atmel_private *priv, int is_reassoc)
 	memcpy(header.addr3, priv->CurrentBSSID, 6); 
 
 	body.capability = cpu_to_le16(C80211_MGMT_CAPABILITY_ESS);
-	if (priv->wep.wep_is_on)
+	if (priv->wep_is_on)
 		body.capability |= cpu_to_le16(C80211_MGMT_CAPABILITY_Privacy);
 	if (priv->preamble == SHORT_PREAMBLE)
 		body.capability |= cpu_to_le16(C80211_MGMT_CAPABILITY_ShortPreamble);
@@ -2553,8 +2749,8 @@ static int retrieve_bss(struct atmel_private *priv)
 		priv->current_BSS = 0;
 		for(i=0; i<priv->BSS_list_entries; i++) { 
 			if (priv->operating_mode == priv->BSSinfo[i].BSStype &&
-			    ((!priv->wep.wep_is_on && !priv->BSSinfo[i].UsingWEP) || 
-			     (priv->wep.wep_is_on && priv->BSSinfo[i].UsingWEP)) &&
+			    ((!priv->wep_is_on && !priv->BSSinfo[i].UsingWEP) || 
+			     (priv->wep_is_on && priv->BSSinfo[i].UsingWEP)) &&
 			    !(priv->BSSinfo[i].channel & 0x80)) {
 				max_rssi = priv->BSSinfo[i].RSSI;
 				priv->current_BSS = max_index = i;
@@ -2628,7 +2824,7 @@ static void authenticate(struct atmel_private *priv, u16 frame_len)
 	u16 status = le16_to_cpu(auth->status);
 	u16 trans_seq_no = le16_to_cpu(auth->trans_seq);
 	
-	if (status == C80211_MGMT_SC_Success && !priv->wep.wep_is_on) { 
+	if (status == C80211_MGMT_SC_Success && !priv->wep_is_on) { 
 		/* no WEP */
 		if (priv->station_was_associated) {
 			atmel_enter_state(priv, STATION_STATE_REASSOCIATING);
@@ -2641,7 +2837,7 @@ static void authenticate(struct atmel_private *priv, u16 frame_len)
 		} 
 	}
 		
-	if (status == C80211_MGMT_SC_Success && priv->wep.wep_is_on) { 
+	if (status == C80211_MGMT_SC_Success && priv->wep_is_on) { 
 		/* WEP */
 		if (trans_seq_no != priv->ExpectedAuthentTransactionSeqNum)
 			return;
@@ -2763,6 +2959,10 @@ void atmel_join_bss(struct atmel_private *priv, int bss_index)
 
 	memcpy(priv->CurrentBSSID, bss->BSSID, 6);
 	memcpy(priv->SSID, bss->SSID, priv->SSID_size = bss->SSIDsize);
+
+	/* The WPA stuff cares about the current AP address */
+	if (priv->use_wpa)
+		build_wpa_mib(priv);
 	
 	/* When switching to AdHoc turn OFF Power Save if needed */
 
@@ -2784,13 +2984,13 @@ void atmel_join_bss(struct atmel_private *priv, int bss_index)
 		atmel_set_mib8(priv, Local_Mib_Type, LOCAL_MIB_PREAMBLE_TYPE, bss->preamble);
 	}
 	
-	if (!priv->wep.wep_is_on && bss->UsingWEP) {
+	if (!priv->wep_is_on && bss->UsingWEP) {
 		atmel_enter_state(priv, STATION_STATE_MGMT_ERROR);
 		priv->station_is_associated = 0;
 		return;
 	}
 		
-	if (priv->wep.wep_is_on && !bss->UsingWEP) {
+	if (priv->wep_is_on && !bss->UsingWEP) {
 		atmel_enter_state(priv, STATION_STATE_MGMT_ERROR);
 		priv->station_is_associated = 0;
 		return;
@@ -2963,23 +3163,19 @@ static void atmel_management_frame(struct atmel_private *priv, struct ieee802_11
 static void atmel_management_timer(u_long a)
 {
   struct net_device *dev = (struct net_device *) a;
-  struct atmel_private *priv = (struct atmel_private *)dev->priv;
+  struct atmel_private *priv = netdev_priv(dev);
   unsigned long flags;
   
   /* Check if the card has been yanked. */
   if (priv->card && priv->present_callback && 
       !(*priv->present_callback)(priv->card))
 	  return;
-
-  if (priv->station_state == STATION_STATE_NO_CARD)
-	  return;
-
+  
   spin_lock_irqsave(&priv->irqlock, flags);
 
   switch (priv->station_state) {
 	  
   case STATION_STATE_AUTHENTICATING:
-	  
 	  if (priv->AuthenticationRequestRetryCnt >= MAX_AUTHENTICATION_RETRIES) {
 		  atmel_enter_state(priv, STATION_STATE_MGMT_ERROR);
 		  priv->station_is_associated = 0;
@@ -2995,7 +3191,6 @@ static void atmel_management_timer(u_long a)
 	  break;
 
   case STATION_STATE_ASSOCIATING:
-
 	  if (priv->AssociationRequestRetryCnt == MAX_ASSOCIATION_RETRIES) {
 		  atmel_enter_state(priv, STATION_STATE_MGMT_ERROR);
 		  priv->station_is_associated = 0;
@@ -3010,7 +3205,6 @@ static void atmel_management_timer(u_long a)
 	  break;
 		  
   case STATION_STATE_REASSOCIATING:	
-	  
 	  if (priv->ReAssociationRequestRetryCnt == MAX_ASSOCIATION_RETRIES) {
 		  atmel_enter_state(priv, STATION_STATE_MGMT_ERROR);
 		  priv->station_is_associated = 0;
@@ -3023,7 +3217,7 @@ static void atmel_management_timer(u_long a)
 	  }
 
 	  break;
-	  
+  
   default:
 	  break;
   }
@@ -3069,6 +3263,7 @@ static void atmel_command_irq(struct atmel_private *priv)
 				priv->fast_scan = !fast_scan;
 				atmel_scan(priv, 1);
 			}
+			priv->site_survey_state = SITE_SURVEY_COMPLETED;
 		}
 		break;
 		
@@ -3102,12 +3297,8 @@ static void atmel_command_irq(struct atmel_private *priv)
 			return;
 		}
 		
-
-		if (priv->station_state == STATION_STATE_FORCED_JOINNING) {
-			atmel_enter_state(priv, STATION_STATE_FORCED_JOIN_FAILURE); 
-		} else {
-			atmel_scan(priv, 1);
-		}
+		atmel_scan(priv, 1);
+		
 	}
 }
 
@@ -3116,7 +3307,7 @@ static int atmel_wakeup_firmware(struct atmel_private *priv)
 	struct host_info_struct *iface = &priv->host_info;
 	u16 mr1, mr3;
 	int i;
-	
+
 	if (priv->card_type == CARD_TYPE_SPI_FLASH)
 		atmel_set_gcr(priv->dev, GCR_REMAP);
 	
@@ -3146,7 +3337,6 @@ static int atmel_wakeup_firmware(struct atmel_private *priv)
 		
 	if ((priv->host_info_base = atmel_read16(priv->dev, MR2)) == 0xffff) {
 		printk(KERN_ALERT "%s: card missing.\n", priv->dev->name);
-		priv->station_state = STATION_STATE_NO_CARD;
 		return 0;
 	}
 	
@@ -3184,10 +3374,10 @@ static int atmel_wakeup_firmware(struct atmel_private *priv)
 		printk(KERN_ALERT "%s: MAC failed MR1 self-test.\n", priv->dev->name);
 		return 0;
 	}
-	
+
 	atmel_copy_to_host(priv->dev, (unsigned char *)iface, 
 			   priv->host_info_base, sizeof(*iface));
-	
+        
 	iface->tx_buff_pos = le16_to_cpu(iface->tx_buff_pos);
 	iface->tx_buff_size = le16_to_cpu(iface->tx_buff_size);
 	iface->tx_desc_pos = le16_to_cpu(iface->tx_desc_pos);
@@ -3210,7 +3400,7 @@ static int atmel_wakeup_firmware(struct atmel_private *priv)
 static int probe_atmel_card(struct net_device *dev)
 {
 	int rc = 0;
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	 
 	/* reset pccard */
 	if (priv->bus_type == BUS_TYPE_PCCARD) 
@@ -3236,7 +3426,6 @@ static int probe_atmel_card(struct net_device *dev)
 			printk(KERN_ALERT "%s: MAC failed to boot MAC address reader.\n", dev->name);
 		} else {
 			atmel_copy_to_host(dev, dev->dev_addr, atmel_read16(dev, MR2), 6);
-			
 			/* got address, now squash it again until the network
 			   interface is opened */
 			if (priv->bus_type == BUS_TYPE_PCCARD) 
@@ -3273,7 +3462,7 @@ static int probe_atmel_card(struct net_device *dev)
 			printk(KERN_ALERT "%s: *** Invalid MAC address. UPGRADE Firmware ****\n", dev->name);
 			memcpy(dev->dev_addr, default_mac, 6);
 		}
-		printk(KERN_INFO "%s: MAC address %x:%x:%x:%x:%x:%x\n",
+		printk(KERN_INFO "%s: MAC address %.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n",
 		       dev->name,
 		       dev->dev_addr[0], dev->dev_addr[1], dev->dev_addr[2],
 		       dev->dev_addr[3], dev->dev_addr[4], dev->dev_addr[5] );
@@ -3283,7 +3472,106 @@ static int probe_atmel_card(struct net_device *dev)
 	return rc;
 }
 
-int reset_atmel_card(struct net_device *dev) 
+static void build_wep_mib(struct atmel_private *priv)
+/* Move the encyption information on the MIB structure.
+   This routine is for the pre-WPA firmware: later firmware has
+   a different format MIB and a different routine. */
+{
+	struct { /* NB this is matched to the hardware, don't change. */
+		u8 wep_is_on;                 
+		u8 default_key; /* 0..3 */
+		u8 reserved;
+		u8 exclude_unencrypted;
+		
+		u32 WEPICV_error_count;
+		u32 WEP_excluded_count;
+		
+		u8 wep_keys[MAX_ENCRYPTION_KEYS][13];
+ 		u8 encryption_level; /* 0, 1, 2 */
+		u8 reserved2[3]; 
+	} mib;
+	int i;
+
+	mib.wep_is_on = priv->wep_is_on;
+	if (priv->wep_is_on) {
+		if (priv->wep_key_len[priv->default_key] > 5)
+			mib.encryption_level = 2;
+		else
+			mib.encryption_level = 1;	
+	} else {
+		mib.encryption_level = 0;
+	}
+
+	mib.default_key = priv->default_key;
+	mib.exclude_unencrypted = priv->exclude_unencrypted;
+	
+	for(i = 0; i < MAX_ENCRYPTION_KEYS;  i++)
+		memcpy(mib.wep_keys[i], priv->wep_keys[i], 13);
+		
+	atmel_set_mib(priv, Mac_Wep_Mib_Type, 0, (u8 *)&mib, sizeof(mib));
+}
+
+static void build_wpa_mib(struct atmel_private *priv)
+{
+	/* This is for the later (WPA enabled) firmware. */	   
+
+	struct { /* NB this is matched to the hardware, don't change. */
+		u8 cipher_default_key_value[MAX_ENCRYPTION_KEYS][MAX_ENCRYPTION_KEY_SIZE];
+		u8 receiver_address[6];
+		u8 wep_is_on;                 
+		u8 default_key; /* 0..3 */
+		u8 group_key;
+		u8 exclude_unencrypted;
+		u8 encryption_type;
+		u8 reserved;
+		
+		u32 WEPICV_error_count;
+		u32 WEP_excluded_count;
+		
+		u8 key_RSC[4][8];
+	} mib;
+	
+	int i;
+
+	mib.wep_is_on = priv->wep_is_on;
+	mib.exclude_unencrypted = priv->exclude_unencrypted;
+	memcpy(mib.receiver_address, priv->CurrentBSSID, 6);
+	
+	/* zero all the keys before adding in valid ones. */
+	memset(mib.cipher_default_key_value, 0, sizeof(mib.cipher_default_key_value));
+	
+	if (priv->wep_is_on) {
+		/* There's a comment in the Atmel code to the effect that this is only valid
+		   when still using WEP, it may need to be set to something to use WPA */
+		memset(mib.key_RSC, 0, sizeof(mib.key_RSC));
+		
+		mib.default_key = mib.group_key = 255;
+		for (i = 0; i < MAX_ENCRYPTION_KEYS; i++) {
+			if (priv->wep_key_len[i] > 0) {
+				memcpy(mib.cipher_default_key_value[i], priv->wep_keys[i], MAX_ENCRYPTION_KEY_SIZE);
+				if (i == priv->default_key) {
+					mib.default_key = i;
+					mib.cipher_default_key_value[i][MAX_ENCRYPTION_KEY_SIZE-1] = 7;
+					mib.cipher_default_key_value[i][MAX_ENCRYPTION_KEY_SIZE-2] = priv->pairwise_cipher_suite; 
+				} else {
+					mib.group_key = i;
+					priv->group_cipher_suite = priv->pairwise_cipher_suite;
+				        mib.cipher_default_key_value[i][MAX_ENCRYPTION_KEY_SIZE-1] = 1;
+					mib.cipher_default_key_value[i][MAX_ENCRYPTION_KEY_SIZE-2] = priv->group_cipher_suite;	
+				}
+			}
+		}
+		if (mib.default_key == 255)
+			mib.default_key = mib.group_key != 255 ? mib.group_key : 0;
+		if (mib.group_key == 255)
+			mib.group_key = mib.default_key;
+		
+	}
+	
+	atmel_set_mib(priv, Mac_Wep_Mib_Type, 0, (u8 *)&mib, sizeof(mib));
+}
+					
+static int reset_atmel_card(struct net_device *dev) 
 {
 	/* do everything necessary to wake up the hardware, including
 	   waiting for the lightning strike and throwing the knife switch....
@@ -3299,66 +3587,71 @@ int reset_atmel_card(struct net_device *dev)
 	   including a copy of the firmware's hostinfo stucture
 	   which is the route into the rest of the firmare datastructures. */
 
-	int channel;
-	struct atmel_private *priv = dev->priv;
+	struct atmel_private *priv = netdev_priv(dev);
 	u8 configuration;
 	
-	if (priv->station_state == STATION_STATE_NO_CARD ||
-	    priv->station_state == STATION_STATE_DOWN)
-		return 0;
+	/* data to add to the firmware names, in priority order
+	   this implemenents firmware versioning */
 	
+	static char *firmware_modifier[] = {
+		"-wpa",
+		"",
+		NULL
+	};
+		
 	/* reset pccard */
 	if (priv->bus_type == BUS_TYPE_PCCARD) 
 		atmel_write16(priv->dev, GCR, 0x0060);
 		
 	/* stop card , disable interrupts */
 	atmel_write16(priv->dev, GCR, 0x0040);
-	
-	/* any scheduled timer is no longer needed and might screw things up.. */
-	del_timer_sync(&priv->management_timer);
-	if (priv->new_SSID_size) {
-		memcpy(priv->SSID, priv->new_SSID, priv->new_SSID_size);
-		priv->SSID_size = priv->new_SSID_size;
-		priv->new_SSID_size = 0;
-	}
-	priv->BSS_list_entries = 0;
-
-	priv->AuthenticationRequestRetryCnt = 0;
-	priv->AssociationRequestRetryCnt = 0;
-	priv->ReAssociationRequestRetryCnt = 0;
-	priv->CurrentAuthentTransactionSeqNum = 0x0001;
-	priv->ExpectedAuthentTransactionSeqNum = 0x0002;
-
-	priv->station_state = STATION_STATE_INITIALIZING;
-	priv->site_survey_state = SITE_SURVEY_IDLE;
-	priv->station_is_associated = 0;
-	
+		
 	if (priv->card_type == CARD_TYPE_EEPROM) {
 		/* copy in firmware if needed */
 		const struct firmware *fw_entry = NULL;
 		unsigned char *fw;
 		int len = priv->firmware_length;
 		if (!(fw = priv->firmware)) { 
-			if (strlen(priv->firmware_id) == 0) {
-				printk(KERN_INFO
-				       "%s: card type is unknown: assuming at76c502 firmware is OK.\n",
-				       dev->name);
-				printk(KERN_INFO
-				       "%s: if not, use the firmware= module parameter.\n", 
-				       dev->name);
-				strcpy(priv->firmware_id, "atmel_at76c502.bin");
+			if (strlen(priv->firmware_template) == 0) {	
+				if (strlen(priv->firmware_id) == 0) {
+					printk(KERN_INFO
+					       "%s: card type is unknown: assuming at76c502 firmware is OK.\n",
+					       dev->name);
+					printk(KERN_INFO
+					       "%s: if not, use the firmware= module parameter.\n", 
+					       dev->name);
+					strcpy(priv->firmware_id, "atmel_at76c502.bin");
+				}
+				if (request_firmware(&fw_entry, priv->firmware_id, priv->sys_dev) != 0) {
+					printk(KERN_ALERT 
+					       "%s: firmware %s is missing, cannot continue.\n", 
+					       dev->name, priv->firmware_id);
+					return 0;
+					
+				} 
+			} else {
+				int i;
+				
+				for (i = 0; firmware_modifier[i]; i++) {
+					sprintf(priv->firmware_id, priv->firmware_template, firmware_modifier[i]);
+					if (request_firmware(&fw_entry, priv->firmware_id, priv->sys_dev) == 0) 
+						break;
+				}
+				if (!firmware_modifier[i]) {
+					printk(KERN_ALERT 
+					       "%s: firmware %s is missing, cannot start.\n", 
+					       dev->name, priv->firmware_id);
+					priv->firmware_id[0] = '\0';
+					return 0;	
+				}
+				priv->firmware_template[0] = '\0';	
 			}
-			if (request_firmware(&fw_entry, priv->firmware_id, priv->sys_dev) != 0) {
-				printk(KERN_ALERT 
-				       "%s: firmware %s is missing, cannot start.\n", 
-				       dev->name, priv->firmware_id);
-				return 0;
-			}
+			
 			fw = fw_entry->data;
 			len = fw_entry->size;
 		}
 		
-		if (len <= 0x6000) {
+	        if (len <= 0x6000) {
 			atmel_write16(priv->dev, BSR, BSS_IRAM);
 			atmel_copy_to_card(priv->dev, 0, fw, len);
 			atmel_set_gcr(priv->dev, GCR_REMAP);
@@ -3377,6 +3670,14 @@ int reset_atmel_card(struct net_device *dev)
 
 	if (!atmel_wakeup_firmware(priv))
 		return 0;
+
+	/* Check the version and set the correct flag for wpa stuff,
+	   old and new firmware is incompatible.
+	   The pre-wpa 3com firmware reports major version 5,
+	   the wpa 3com firmware is major version 4 and doesn't need
+	   the 3com broken-ness filter. */
+	priv->use_wpa = (priv->host_info.major_version == 4);
+	priv->radio_on_broken = (priv->host_info.major_version == 5);
 	
         /* unmask all irq sources */
 	atmel_wmem8(priv, atmel_hi(priv, IFACE_INT_MASK_OFFSET), 0xff);
@@ -3405,29 +3706,14 @@ int reset_atmel_card(struct net_device *dev)
 	configuration = atmel_rmem8(priv, atmel_hi(priv, IFACE_FUNC_CTRL_OFFSET)); 
 	atmel_wmem8(priv, atmel_hi(priv, IFACE_FUNC_CTRL_OFFSET), 
 				   configuration | FUNC_CTRL_RxENABLE);
-	
-	priv->reg_domain = atmel_get_mib8(priv, Phy_Mib_Type, PHY_MIB_REG_DOMAIN_POS);
-	if (priv->reg_domain != REG_DOMAIN_FCC &&
-	    priv->reg_domain != REG_DOMAIN_DOC &&
-	    priv->reg_domain != REG_DOMAIN_ETSI &&
-	    priv->reg_domain != REG_DOMAIN_SPAIN &&
-	    priv->reg_domain != REG_DOMAIN_FRANCE &&
-	    priv->reg_domain != REG_DOMAIN_MKK &&
-	    priv->reg_domain != REG_DOMAIN_MKK1 &&
-	    priv->reg_domain != REG_DOMAIN_ISRAEL) {
-		priv->reg_domain = REG_DOMAIN_MKK1;
-		printk(KERN_ALERT "%s: failed to get regulatory domain: assuming MKK1.\n", dev->name);
-	} 
-	if ((channel = atmel_validate_channel(priv, priv->channel)))
-		priv->channel = channel;
-	
-	if (!priv->is3com) {
+			
+	if (!priv->radio_on_broken) {
 		if (atmel_send_command_wait(priv, CMD_EnableRadio, NULL, 0) == 
 		    CMD_STATUS_REJECTED_RADIO_OFF) {
 			printk(KERN_INFO 
 			       "%s: cannot turn the radio on. (Hey radio, you're beautiful!)\n",
 			       dev->name);
-			return 0;
+                        return 0;
 		}
 	}
 	
@@ -3445,17 +3731,14 @@ int reset_atmel_card(struct net_device *dev)
 	atmel_set_mib16(priv, Mac_Mgmt_Mib_Type, MAC_MGMT_MIB_LISTEN_INTERVAL_POS, 1);
 	atmel_set_mib16(priv, Mac_Mgmt_Mib_Type, MAC_MGMT_MIB_BEACON_PER_POS, priv->default_beacon_period);
 	atmel_set_mib(priv, Phy_Mib_Type, PHY_MIB_RATE_SET_POS, atmel_basic_rates, 4);
-	atmel_set_mib8(priv, Mac_Mgmt_Mib_Type, MAC_MGMT_MIB_CUR_PRIVACY_POS, priv->wep.wep_is_on);
-	atmel_set_mib(priv, Mac_Wep_Mib_Type, 0, (u8 *)&priv->wep, sizeof(priv->wep));
-		
-	atmel_scan(priv, 1);
-	
-	atmel_set_gcr(priv->dev, GCR_ENINT); /* enable interrupts */
+	atmel_set_mib8(priv, Mac_Mgmt_Mib_Type, MAC_MGMT_MIB_CUR_PRIVACY_POS, priv->wep_is_on);
+	if (priv->use_wpa)
+		build_wpa_mib(priv);
+	else
+		build_wep_mib(priv);
 	
 	return 1;
 }
-
-EXPORT_SYMBOL(reset_atmel_card); 
 
 static void atmel_send_command(struct atmel_private *priv, int command, void *cmd, int cmd_size)
 {
@@ -3472,16 +3755,17 @@ static int atmel_send_command_wait(struct atmel_private *priv, int command, void
 	int i, status;
 	
 	atmel_send_command(priv, command, cmd, cmd_size);
-
-	for (i = LOOP_RETRY_LIMIT; i; i--) {
+	
+	for (i = 5000; i; i--) {
 		status = atmel_rmem8(priv, atmel_co(priv, CMD_BLOCK_STATUS_OFFSET));
 		if (status != CMD_STATUS_IDLE && 
 		    status != CMD_STATUS_IN_PROGRESS)
 			break;
+		udelay(20);
 	}
-
+	
 	if (i == 0) {
-		printk(KERN_ALERT "%s: command %d failed to complete.\n", priv->dev->name, command);
+		printk(KERN_ALERT "%s: failed to contact MAC.\n", priv->dev->name);
 		status =  CMD_STATUS_HOST_ERROR;
 	} else { 
 		if (command != CMD_EnableRadio)
@@ -3498,8 +3782,8 @@ static u8 atmel_get_mib8(struct atmel_private *priv, u8 type, u8 index)
 	m.size = 1;
 	m.index = index;
 
-	atmel_send_command_wait(priv, CMD_Get_MIB_Vars, &m, sizeof(m));
-	return atmel_rmem8(priv, atmel_co(priv, CMD_BLOCK_PARAMETERS_OFFSET + 4));
+	atmel_send_command_wait(priv, CMD_Get_MIB_Vars, &m, MIB_HEADER_SIZE + 1);
+	return atmel_rmem8(priv, atmel_co(priv, CMD_BLOCK_PARAMETERS_OFFSET + MIB_HEADER_SIZE));
 }
 
 static void atmel_set_mib8(struct atmel_private *priv, u8 type, u8 index, u8 data)
@@ -3510,7 +3794,7 @@ static void atmel_set_mib8(struct atmel_private *priv, u8 type, u8 index, u8 dat
 	m.index = index;
 	m.data[0] = data;
 
-	atmel_send_command_wait(priv, CMD_Set_MIB_Vars, &m, sizeof(m));
+	atmel_send_command_wait(priv, CMD_Set_MIB_Vars, &m, MIB_HEADER_SIZE + 1);
 }
 
 static void atmel_set_mib16(struct atmel_private *priv, u8 type, u8 index, u16 data)
@@ -3522,7 +3806,7 @@ static void atmel_set_mib16(struct atmel_private *priv, u8 type, u8 index, u16 d
 	m.data[0] = data;
 	m.data[1] = data >> 8;
 
-	atmel_send_command_wait(priv, CMD_Set_MIB_Vars, &m, sizeof(m));
+	atmel_send_command_wait(priv, CMD_Set_MIB_Vars, &m, MIB_HEADER_SIZE + 2);
 }
 
 static void atmel_set_mib(struct atmel_private *priv, u8 type, u8 index, u8 *data, int data_len)
@@ -3532,8 +3816,11 @@ static void atmel_set_mib(struct atmel_private *priv, u8 type, u8 index, u8 *dat
 	m.size = data_len;
 	m.index = index;
 
+	if (data_len > MIB_MAX_DATA_BYTES)
+		printk(KERN_ALERT "%s: MIB buffer too small.\n", priv->dev->name);
+	
 	memcpy(m.data, data, data_len);
-	atmel_send_command_wait(priv, CMD_Set_MIB_Vars, &m, sizeof(m));
+	atmel_send_command_wait(priv, CMD_Set_MIB_Vars, &m, MIB_HEADER_SIZE + data_len);
 }
 
 static void atmel_get_mib(struct atmel_private *priv, u8 type, u8 index, u8 *data, int data_len)
@@ -3543,10 +3830,14 @@ static void atmel_get_mib(struct atmel_private *priv, u8 type, u8 index, u8 *dat
 	m.size = data_len;
 	m.index = index;
 	
-	atmel_send_command_wait(priv, CMD_Get_MIB_Vars, &m, sizeof(m));
-	atmel_copy_to_host(priv->dev, data, atmel_co(priv, CMD_BLOCK_PARAMETERS_OFFSET + 4), data_len);
-}
+	if (data_len > MIB_MAX_DATA_BYTES)
+		printk(KERN_ALERT "%s: MIB buffer too small.\n", priv->dev->name);
 	
+	atmel_send_command_wait(priv, CMD_Get_MIB_Vars, &m, MIB_HEADER_SIZE + data_len);
+	atmel_copy_to_host(priv->dev, data, 
+			   atmel_co(priv, CMD_BLOCK_PARAMETERS_OFFSET + MIB_HEADER_SIZE), data_len);
+}
+
 static void atmel_writeAR(struct net_device *dev, u16 data)
 {
 	int i;
@@ -3602,9 +3893,13 @@ static void atmel_clear_gcr(struct net_device *dev, u16 mask)
 
 static int atmel_lock_mac(struct atmel_private *priv)
 {
-	int i, j = 100;
+	int i, j = 20;
  retry:
-	for (i = LOOP_RETRY_LIMIT ; atmel_rmem8(priv, atmel_hi(priv, IFACE_LOCKOUT_HOST_OFFSET)) && i ; i--);
+	for (i = 5000; i; i--) {
+		if (!atmel_rmem8(priv, atmel_hi(priv, IFACE_LOCKOUT_HOST_OFFSET)))
+			break;
+		udelay(20);
+	}
 	
 	if (!i) return 0; /* timed out */
 	
@@ -3624,7 +3919,6 @@ static void atmel_wmem32(struct atmel_private *priv, u16 pos, u32 data)
 	atmel_write16(priv->dev, DR, data); /* card is little-endian */
 	atmel_write16(priv->dev, DR, data >> 16);
 }
-
 
 /***************************************************************************/
 /* There follows the source form of the MAC address reading firmware       */

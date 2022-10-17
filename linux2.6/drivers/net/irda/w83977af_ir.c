@@ -50,6 +50,7 @@
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/rtnetlink.h>
+#include <linux/dma-mapping.h>
 
 #include <asm/io.h>
 #include <asm/dma.h>
@@ -58,8 +59,8 @@
 #include <net/irda/irda.h>
 #include <net/irda/wrapper.h>
 #include <net/irda/irda_device.h>
-#include <net/irda/w83977af.h>
-#include <net/irda/w83977af_ir.h>
+#include "w83977af.h"
+#include "w83977af_ir.h"
 
 #ifdef  CONFIG_ARCH_NETWINDER            /* Adjust to NetWinder differences */
 #undef  CONFIG_NETWINDER_TX_DMA_PROBLEMS /* Not needed */
@@ -110,7 +111,7 @@ static struct net_device_stats *w83977af_net_get_stats(struct net_device *dev);
  *    Initialize chip. Just try to find out how many chips we are dealing with
  *    and where they are
  */
-int __init w83977af_init(void)
+static int __init w83977af_init(void)
 {
         int i;
 
@@ -129,7 +130,7 @@ int __init w83977af_init(void)
  *    Close all configured chips
  *
  */
-void __exit w83977af_cleanup(void)
+static void __exit w83977af_cleanup(void)
 {
 	int i;
 
@@ -202,15 +203,14 @@ int w83977af_open(int i, unsigned int iobase, unsigned int irq,
 	self->qos.min_turn_time.bits = qos_mtt_bits;
 	irda_qos_bits_to_value(&self->qos);
 	
-	self->flags = IFF_FIR|IFF_MIR|IFF_SIR|IFF_DMA|IFF_PIO;
-
 	/* Max DMA buffer size needed = (data_size + 6) * (window_size) + 6; */
 	self->rx_buff.truesize = 14384; 
 	self->tx_buff.truesize = 4000;
 	
 	/* Allocate memory if needed */
-	self->rx_buff.head = (__u8 *) kmalloc(self->rx_buff.truesize,
-					      GFP_KERNEL|GFP_DMA);
+	self->rx_buff.head =
+		dma_alloc_coherent(NULL, self->rx_buff.truesize,
+				   &self->rx_buff_dma, GFP_KERNEL);
 	if (self->rx_buff.head == NULL) {
 		err = -ENOMEM;
 		goto err_out1;
@@ -218,8 +218,9 @@ int w83977af_open(int i, unsigned int iobase, unsigned int irq,
 
 	memset(self->rx_buff.head, 0, self->rx_buff.truesize);
 	
-	self->tx_buff.head = (__u8 *) kmalloc(self->tx_buff.truesize, 
-					      GFP_KERNEL|GFP_DMA);
+	self->tx_buff.head =
+		dma_alloc_coherent(NULL, self->tx_buff.truesize,
+				   &self->tx_buff_dma, GFP_KERNEL);
 	if (self->tx_buff.head == NULL) {
 		err = -ENOMEM;
 		goto err_out2;
@@ -254,9 +255,11 @@ int w83977af_open(int i, unsigned int iobase, unsigned int irq,
 	
 	return 0;
 err_out3:
-	kfree(self->tx_buff.head);
+	dma_free_coherent(NULL, self->tx_buff.truesize,
+			  self->tx_buff.head, self->tx_buff_dma);
 err_out2:	
-	kfree(self->rx_buff.head);
+	dma_free_coherent(NULL, self->rx_buff.truesize,
+			  self->rx_buff.head, self->rx_buff_dma);
 err_out1:
 	free_netdev(dev);
 err_out:
@@ -299,10 +302,12 @@ static int w83977af_close(struct w83977af_ir *self)
 	release_region(self->io.fir_base, self->io.fir_ext);
 
 	if (self->tx_buff.head)
-		kfree(self->tx_buff.head);
+		dma_free_coherent(NULL, self->tx_buff.truesize,
+				  self->tx_buff.head, self->tx_buff_dma);
 	
 	if (self->rx_buff.head)
-		kfree(self->rx_buff.head);
+		dma_free_coherent(NULL, self->rx_buff.truesize,
+				  self->rx_buff.head, self->rx_buff_dma);
 
 	free_netdev(self->netdev);
 
@@ -608,11 +613,11 @@ static void w83977af_dma_write(struct w83977af_ir *self, int iobase)
 	disable_dma(self->io.dma);
 	clear_dma_ff(self->io.dma);
 	set_dma_mode(self->io.dma, DMA_MODE_READ);
-	set_dma_addr(self->io.dma, isa_virt_to_bus(self->tx_buff.data));
+	set_dma_addr(self->io.dma, self->tx_buff_dma);
 	set_dma_count(self->io.dma, self->tx_buff.len);
 #else
-	setup_dma(self->io.dma, self->tx_buff.data, self->tx_buff.len, 
-		  DMA_MODE_WRITE);	
+	irda_setup_dma(self->io.dma, self->tx_buff_dma, self->tx_buff.len,
+		       DMA_MODE_WRITE);	
 #endif
 	self->io.direction = IO_XMIT;
 	
@@ -679,7 +684,7 @@ static int w83977af_pio_write(int iobase, __u8 *buf, int len, int fifo_size)
  *
  *    
  */
-void w83977af_dma_xmit_complete(struct w83977af_ir *self)
+static void w83977af_dma_xmit_complete(struct w83977af_ir *self)
 {
 	int iobase;
 	__u8 set;
@@ -765,11 +770,11 @@ int w83977af_dma_receive(struct w83977af_ir *self)
 	disable_dma(self->io.dma);
 	clear_dma_ff(self->io.dma);
 	set_dma_mode(self->io.dma, DMA_MODE_READ);
-	set_dma_addr(self->io.dma, isa_virt_to_bus(self->rx_buff.data));
+	set_dma_addr(self->io.dma, self->rx_buff_dma);
 	set_dma_count(self->io.dma, self->rx_buff.truesize);
 #else
-	setup_dma(self->io.dma, self->rx_buff.data, self->rx_buff.truesize, 
-		  DMA_MODE_READ);
+	irda_setup_dma(self->io.dma, self->rx_buff_dma, self->rx_buff.truesize,
+		       DMA_MODE_READ);
 #endif
 	/* 
 	 * Reset Rx FIFO. This will also flush the ST_FIFO, it's very 
@@ -1143,7 +1148,7 @@ static irqreturn_t w83977af_interrupt(int irq, void *dev_id,
 
 	outb(icr, iobase+ICR);    /* Restore (new) interrupts */
 	outb(set, iobase+SSR);    /* Restore bank register */
-	return IRQ_HANDLED;
+	return IRQ_RETVAL(isr);
 }
 
 /*
@@ -1350,11 +1355,11 @@ MODULE_DESCRIPTION("Winbond W83977AF IrDA Device Driver");
 MODULE_LICENSE("GPL");
 
 
-MODULE_PARM(qos_mtt_bits, "i");
+module_param(qos_mtt_bits, int, 0);
 MODULE_PARM_DESC(qos_mtt_bits, "Mimimum Turn Time");
-MODULE_PARM(io, "1-4i");
+module_param_array(io, int, NULL, 0);
 MODULE_PARM_DESC(io, "Base I/O addresses");
-MODULE_PARM(irq, "1-4i");
+module_param_array(irq, int, NULL, 0);
 MODULE_PARM_DESC(irq, "IRQ lines");
 
 /*

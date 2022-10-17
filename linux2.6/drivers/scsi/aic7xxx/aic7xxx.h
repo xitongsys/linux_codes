@@ -37,7 +37,7 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGES.
  *
- * $Id: //depot/aic7xxx/aic7xxx/aic7xxx.h#77 $
+ * $Id: //depot/aic7xxx/aic7xxx/aic7xxx.h#79 $
  *
  * $FreeBSD$
  */
@@ -521,7 +521,7 @@ struct ahc_dma_seg {
 
 struct sg_map_node {
 	bus_dmamap_t		 sg_dmamap;
-	bus_addr_t		 sg_physaddr;
+	dma_addr_t		 sg_physaddr;
 	struct ahc_dma_seg*	 sg_vaddr;
 	SLIST_ENTRY(sg_map_node) links;
 };
@@ -584,7 +584,7 @@ struct scb {
 	struct scb_platform_data *platform_data;
 	struct sg_map_node	 *sg_map;
 	struct ahc_dma_seg 	 *sg_list;
-	bus_addr_t		  sg_list_phys;
+	dma_addr_t		  sg_list_phys;
 	u_int			  sg_count;/* How full ahc_dma_seg is */
 };
 
@@ -611,10 +611,10 @@ struct scb_data {
 	 */
 	bus_dma_tag_t	 hscb_dmat;	/* dmat for our hardware SCB array */
 	bus_dmamap_t	 hscb_dmamap;
-	bus_addr_t	 hscb_busaddr;
+	dma_addr_t	 hscb_busaddr;
 	bus_dma_tag_t	 sense_dmat;
 	bus_dmamap_t	 sense_dmamap;
-	bus_addr_t	 sense_busaddr;
+	dma_addr_t	 sense_busaddr;
 	bus_dma_tag_t	 sg_dmat;	/* dmat for our sg segments */
 	SLIST_HEAD(, sg_map_node) sg_maps;
 	uint8_t	numscbs;
@@ -1069,14 +1069,14 @@ struct ahc_softc {
 	bus_dma_tag_t		  parent_dmat;
 	bus_dma_tag_t		  shared_data_dmat;
 	bus_dmamap_t		  shared_data_dmamap;
-	bus_addr_t		  shared_data_busaddr;
+	dma_addr_t		  shared_data_busaddr;
 
 	/*
 	 * Bus address of the one byte buffer used to
 	 * work-around a DMA bug for chips <= aic7880
 	 * in target mode.
 	 */
-	bus_addr_t		  dma_bug_buf;
+	dma_addr_t		  dma_bug_buf;
 
 	/* Number of enabled target mode device on this card */
 	u_int			  enabled_luns;
@@ -1143,17 +1143,17 @@ struct ahc_pci_identity {
 	char			*name;
 	ahc_device_setup_t	*setup;
 };
-extern struct ahc_pci_identity ahc_pci_ident_table [];
+extern struct ahc_pci_identity ahc_pci_ident_table[];
 extern const u_int ahc_num_pci_devs;
 
 /***************************** VL/EISA Declarations ***************************/
 struct aic7770_identity {
 	uint32_t		 full_id;
 	uint32_t		 id_mask;
-	char			*name;
+	const char		*name;
 	ahc_device_setup_t	*setup;
 };
-extern struct aic7770_identity aic7770_ident_table [];
+extern struct aic7770_identity aic7770_ident_table[];
 extern const int ahc_num_aic7770_devs;
 
 #define AHC_EISA_SLOT_OFFSET	0xc00
@@ -1205,7 +1205,7 @@ void			 ahc_set_unit(struct ahc_softc *, int);
 void			 ahc_set_name(struct ahc_softc *, char *);
 void			 ahc_alloc_scbs(struct ahc_softc *ahc);
 void			 ahc_free(struct ahc_softc *ahc);
-int			 ahc_reset(struct ahc_softc *ahc);
+int			 ahc_reset(struct ahc_softc *ahc, int reinit);
 void			 ahc_shutdown(void *arg);
 
 /*************************** Interrupt Services *******************************/

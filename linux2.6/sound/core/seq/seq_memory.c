@@ -1,6 +1,6 @@
 /*
  *  ALSA sequencer Memory Manager
- *  Copyright (c) 1998 by Frank van de Pol <fvdpol@home.nl>
+ *  Copyright (c) 1998 by Frank van de Pol <fvdpol@coil.demon.nl>
  *                        Jaroslav Kysela <perex@suse.cz>
  *                2000 by Takashi Iwai <tiwai@suse.de>
  *
@@ -90,12 +90,12 @@ int snd_seq_dump_var_event(const snd_seq_event_t *event, snd_seq_dump_func_t fun
 
 	if (event->data.ext.len & SNDRV_SEQ_EXT_USRPTR) {
 		char buf[32];
-		char *curptr = event->data.ext.ptr;
+		char __user *curptr = event->data.ext.ptr;
 		while (len > 0) {
 			int size = sizeof(buf);
 			if (len < size)
 				size = len;
-			if (copy_from_user(buf, curptr, size) < 0)
+			if (copy_from_user(buf, curptr, size))
 				return -EFAULT;
 			err = func(private_data, buf, size);
 			if (err < 0)
@@ -158,7 +158,7 @@ int snd_seq_expand_var_event(const snd_seq_event_t *event, int count, char *buf,
 	if (event->data.ext.len & SNDRV_SEQ_EXT_USRPTR) {
 		if (! in_kernel)
 			return -EINVAL;
-		if (copy_from_user(buf, event->data.ext.ptr, len) < 0)
+		if (copy_from_user(buf, event->data.ext.ptr, len))
 			return -EFAULT;
 		return newlen;
 	}
@@ -215,17 +215,19 @@ void snd_seq_cell_free(snd_seq_event_cell_t * cell)
 /*
  * allocate an event cell.
  */
-int snd_seq_cell_alloc(pool_t *pool, snd_seq_event_cell_t **cellp, int nonblock, struct file *file)
+static int snd_seq_cell_alloc(pool_t *pool, snd_seq_event_cell_t **cellp, int nonblock, struct file *file)
 {
 	snd_seq_event_cell_t *cell;
 	unsigned long flags;
 	int err = -EAGAIN;
+	wait_queue_t wait;
 
 	if (pool == NULL)
 		return -EINVAL;
 
 	*cellp = NULL;
 
+	init_waitqueue_entry(&wait, current);
 	spin_lock_irqsave(&pool->lock, flags);
 	if (pool->ptr == NULL) {	/* not initialized */
 		snd_printd("seq: pool is not initialized\n");
@@ -234,9 +236,12 @@ int snd_seq_cell_alloc(pool_t *pool, snd_seq_event_cell_t **cellp, int nonblock,
 	}
 	while (pool->free == NULL && ! nonblock && ! pool->closing) {
 
-		spin_unlock(&pool->lock);
-		interruptible_sleep_on(&pool->output_sleep);
-		spin_lock(&pool->lock);
+		set_current_state(TASK_INTERRUPTIBLE);
+		add_wait_queue(&pool->output_sleep, &wait);
+		spin_unlock_irq(&pool->lock);
+		schedule();
+		spin_lock_irq(&pool->lock);
+		remove_wait_queue(&pool->output_sleep, &wait);
 		/* interrupted? */
 		if (signal_pending(current)) {
 			err = -ERESTARTSYS;
@@ -431,8 +436,7 @@ int snd_seq_pool_done(pool_t *pool)
 	pool->total_elements = 0;
 	spin_unlock_irqrestore(&pool->lock, flags);
 
-	if (ptr)
-		vfree(ptr);
+	vfree(ptr);
 
 	spin_lock_irqsave(&pool->lock, flags);
 	pool->closing = 0;
@@ -448,7 +452,7 @@ pool_t *snd_seq_pool_new(int poolsize)
 	pool_t *pool;
 
 	/* create pool block */
-	pool = snd_kcalloc(sizeof(pool_t), GFP_KERNEL);
+	pool = kcalloc(1, sizeof(*pool), GFP_KERNEL);
 	if (pool == NULL) {
 		snd_printd("seq: malloc failed for pool\n");
 		return NULL;

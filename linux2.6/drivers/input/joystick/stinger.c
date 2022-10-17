@@ -36,8 +36,10 @@
 #include <linux/serio.h>
 #include <linux/init.h>
 
+#define DRIVER_DESC	"Gravis Stinger gamepad driver"
+
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
-MODULE_DESCRIPTION("Gravis Stinger gamepad driver");
+MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
 /*
@@ -134,7 +136,7 @@ static void stinger_disconnect(struct serio *serio)
  * it as an input device.
  */
 
-static void stinger_connect(struct serio *serio, struct serio_dev *dev)
+static void stinger_connect(struct serio *serio, struct serio_driver *drv)
 {
 	struct stinger *stinger;
 	int i;
@@ -147,7 +149,7 @@ static void stinger_connect(struct serio *serio, struct serio_dev *dev)
 
 	memset(stinger, 0, sizeof(struct stinger));
 
-	stinger->dev.evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);	
+	stinger->dev.evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
 	stinger->dev.keybit[LONG(BTN_A)] = BIT(BTN_A) | BIT(BTN_B) | BIT(BTN_C) | BIT(BTN_X) | \
 					   BIT(BTN_Y) | BIT(BTN_Z) | BIT(BTN_TL) | BIT(BTN_TR) | \
 					   BIT(BTN_START) | BIT(BTN_SELECT);
@@ -162,17 +164,18 @@ static void stinger_connect(struct serio *serio, struct serio_dev *dev)
 	stinger->dev.id.vendor = SERIO_STINGER;
 	stinger->dev.id.product = 0x0001;
 	stinger->dev.id.version = 0x0100;
+	stinger->dev.dev = &serio->dev;
 
 	for (i = 0; i < 2; i++) {
-		stinger->dev.absmax[ABS_X+i] =  64;	
-		stinger->dev.absmin[ABS_X+i] = -64;	
+		stinger->dev.absmax[ABS_X+i] =  64;
+		stinger->dev.absmin[ABS_X+i] = -64;
 		stinger->dev.absflat[ABS_X+i] = 4;
 	}
 
 	stinger->dev.private = stinger;
 	serio->private = stinger;
 
-	if (serio_open(serio, dev)) {
+	if (serio_open(serio, drv)) {
 		kfree(stinger);
 		return;
 	}
@@ -187,10 +190,14 @@ static void stinger_connect(struct serio *serio, struct serio_dev *dev)
  * The serio device structure.
  */
 
-static struct serio_dev stinger_dev = {
-	.interrupt =	stinger_interrupt,
-	.connect =	stinger_connect,
-	.disconnect =	stinger_disconnect,
+static struct serio_driver stinger_drv = {
+	.driver		= {
+		.name	= "stinger",
+	},
+	.description	= DRIVER_DESC,
+	.interrupt	= stinger_interrupt,
+	.connect	= stinger_connect,
+	.disconnect	= stinger_disconnect,
 };
 
 /*
@@ -199,13 +206,13 @@ static struct serio_dev stinger_dev = {
 
 int __init stinger_init(void)
 {
-	serio_register_device(&stinger_dev);
+	serio_register_driver(&stinger_drv);
 	return 0;
 }
 
 void __exit stinger_exit(void)
 {
-	serio_unregister_device(&stinger_dev);
+	serio_unregister_driver(&stinger_drv);
 }
 
 module_init(stinger_init);

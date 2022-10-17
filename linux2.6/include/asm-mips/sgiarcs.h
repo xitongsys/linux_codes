@@ -236,6 +236,8 @@ struct linux_romvec {
 
 	/* Miscellaneous. */
 	LONG	cache_flush;
+	LONG	TestUnicodeCharacter;		/* ARC; not sure if ARCS too */
+	LONG	GetDisplayStatus;
 };
 
 /* The SGI ARCS parameter block is in a fixed location for standalone
@@ -369,7 +371,7 @@ struct linux_smonblock {
 
 #define __arc_clobbers							\
 	"$2","$3" /* ... */, "$8","$9","$10","$11",			\
-	"$12","$13","$14","$15","$16","$24","25","$31"
+	"$12","$13","$14","$15","$16","$24","$25","$31"
 
 #define ARC_CALL0(dest)							\
 ({	long __res;							\
@@ -462,7 +464,7 @@ struct linux_smonblock {
 	long __vec = (long) romvec->dest;				\
 	__asm__ __volatile__(						\
 	"dsubu\t$29, 32\n\t"						\
-	"sw\t%6, 16($29)\n\t"						\
+	"sw\t%7, 16($29)\n\t"						\
 	"jalr\t%1\n\t"							\
 	"daddu\t$29, 32\n\t"						\
 	"move\t%0, $2"							\

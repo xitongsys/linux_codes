@@ -3,18 +3,22 @@
  */
 
 #include <asm-generic/vmlinux.lds.h>
-	
+#include <asm/thread_info.h>
+#include <asm/page.h>
+
 OUTPUT_FORMAT("elf32-i386", "elf32-i386", "elf32-i386")
 OUTPUT_ARCH(i386)
 ENTRY(startup_32)
 jiffies = jiffies_64;
 SECTIONS
 {
-  . = 0xC0000000 + 0x100000;
+  . = __PAGE_OFFSET + 0x100000;
   /* read-only */
   _text = .;			/* Text and read-only data */
   .text : {
 	*(.text)
+	SCHED_TEXT
+	LOCK_TEXT
 	*(.fixup)
 	*(.gnu.warning)
 	} = 0x9090
@@ -48,7 +52,7 @@ SECTIONS
 
   _edata = .;			/* End of data section */
 
-  . = ALIGN(8192);		/* init_task */
+  . = ALIGN(THREAD_SIZE);	/* init_task */
   .data.init_task : { *(.data.init_task) }
 
   /* will be freed after init */
@@ -64,9 +68,6 @@ SECTIONS
   __setup_start = .;
   .init.setup : { *(.init.setup) }
   __setup_end = .;
-  __start___param = .;
-  __param : { *(__param) }
-  __stop___param = .;
   __initcall_start = .;
   .initcall.init : {
 	*(.initcall1.init) 
@@ -104,10 +105,18 @@ SECTIONS
   /* freed after init ends here */
 	
   __bss_start = .;		/* BSS */
-  .bss : { *(.bss) }
+  .bss : {
+	*(.bss.page_aligned)
+	*(.bss)
+  }
+  . = ALIGN(4);
   __bss_stop = .; 
 
   _end = . ;
+
+  /* This is where the kernel creates the early boot page tables */
+  . = ALIGN(4096);
+  pg0 = .;
 
   /* Sections to be discarded */
   /DISCARD/ : {

@@ -32,14 +32,6 @@
 #ifndef	__XFS_LOG_PRIV_H__
 #define __XFS_LOG_PRIV_H__
 
-#if defined(XFS_ALL_TRACE)
-#define	XFS_LOG_TRACE
-#endif
-
-#if !defined(DEBUG)
-#undef XFS_LOG_TRACE
-#endif
-
 struct xfs_buf;
 struct ktrace;
 struct log;
@@ -65,12 +57,9 @@ struct xfs_mount;
 #define XLOG_RECORD_BSHIFT	14		/* 16384 == 1 << 14 */
 #define XLOG_BIG_RECORD_BSHIFT	15		/* 32k == 1 << 15 */
 #define XLOG_MAX_RECORD_BSHIFT	18		/* 256k == 1 << 18 */
-#if XFS_WANT_FUNCS || (XFS_WANT_SPACE && XFSSO_XLOG_BTOLRBB)
-int xlog_btolrbb(int b);
-#define XLOG_BTOLRBB(b)		xlog_btolrbb(b)
-#else
-#define XLOG_BTOLRBB(b)		(((b)+XLOG_RECORD_BSIZE-1) >> XLOG_RECORD_BSHIFT)
-#endif
+#define XLOG_BTOLSUNIT(log, b)  (((b)+(log)->l_mp->m_sb.sb_logsunit-1) / \
+                                 (log)->l_mp->m_sb.sb_logsunit)
+#define XLOG_LSUNITTOB(log, su) ((su) * (log)->l_mp->m_sb.sb_logsunit)
 
 #define XLOG_HEADER_SIZE	512
 
@@ -109,6 +98,7 @@ int xlog_btolrbb(int b);
 
 
 #ifdef __KERNEL__
+
 /*
  * get client id from packed copy.
  *
@@ -434,13 +424,12 @@ typedef struct xlog_iclog_fields {
 	struct log		*ic_log;
 	xfs_log_callback_t	*ic_callback;
 	xfs_log_callback_t	**ic_callback_tail;
-#ifdef DEBUG
+#ifdef XFS_LOG_TRACE
 	struct ktrace		*ic_trace;
 #endif
 	int			ic_size;
 	int			ic_offset;
 	int			ic_refcnt;
-	int			ic_roundoff;
 	int			ic_bwritecnt;
 	ushort_t		ic_state;
 	char			*ic_datap;	/* pointer to iclog data */
@@ -472,7 +461,6 @@ typedef struct xlog_in_core {
 #define	ic_size		hic_fields.ic_size
 #define	ic_offset	hic_fields.ic_offset
 #define	ic_refcnt	hic_fields.ic_refcnt
-#define	ic_roundoff	hic_fields.ic_roundoff
 #define	ic_bwritecnt	hic_fields.ic_bwritecnt
 #define	ic_state	hic_fields.ic_state
 #define ic_datap	hic_fields.ic_datap
@@ -508,7 +496,6 @@ typedef struct log {
 	xfs_daddr_t		l_logBBstart;   /* start block of log */
 	int			l_logsize;      /* size of log in bytes */
 	int			l_logBBsize;    /* size of log in BB chunks */
-	int			l_roundoff;	/* round off error of iclogs */
 	int			l_curr_cycle;   /* Cycle number of log writes */
 	int			l_prev_cycle;   /* Cycle number before last
 						 * block increment */
@@ -531,14 +518,13 @@ typedef struct log {
 	int			l_grant_write_bytes;
 
 	/* The following fields don't need locking */
-#ifdef DEBUG
+#ifdef XFS_LOG_TRACE
 	struct ktrace		*l_trace;
 	struct ktrace		*l_grant_trace;
 #endif
 	uint			l_flags;
 	uint			l_quotaoffs_flag; /* XFS_DQ_*, for QUOTAOFFs */
 	struct xfs_buf_cancel	**l_buf_cancel_table;
-	int			l_stripemask;	/* log stripe mask */
 	int			l_iclog_hsize;  /* size of iclog header */
 	int			l_iclog_heads;  /* # of iclog header sectors */
 	uint			l_sectbb_log;   /* log2 of sector size in BBs */
@@ -554,10 +540,9 @@ extern int	 xlog_find_tail(xlog_t	*log,
 				xfs_daddr_t *head_blk,
 				xfs_daddr_t *tail_blk,
 				int readonly);
-extern int	 xlog_print_find_oldest(xlog_t *log, xfs_daddr_t *last_blk);
 extern int	 xlog_recover(xlog_t *log, int readonly);
 extern int	 xlog_recover_finish(xlog_t *log, int mfsi_flags);
-extern void	 xlog_pack_data(xlog_t *log, xlog_in_core_t *iclog);
+extern void	 xlog_pack_data(xlog_t *log, xlog_in_core_t *iclog, int);
 extern void	 xlog_recover_process_iunlinks(xlog_t *log);
 
 extern struct xfs_buf *xlog_get_bp(xlog_t *, int);
@@ -565,6 +550,7 @@ extern void	 xlog_put_bp(struct xfs_buf *);
 extern int	 xlog_bread(xlog_t *, xfs_daddr_t, int, struct xfs_buf *);
 extern xfs_caddr_t xlog_align(xlog_t *, xfs_daddr_t, int, struct xfs_buf *);
 
+/* iclog tracing */
 #define XLOG_TRACE_GRAB_FLUSH  1
 #define XLOG_TRACE_REL_FLUSH   2
 #define XLOG_TRACE_SLEEP_FLUSH 3

@@ -1,195 +1,149 @@
 /*
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
  *
- * Copyright (C) 2000-2003 Silicon Graphics, Inc. All rights reserved.
- * 
- * This program is free software; you can redistribute it and/or modify it 
- * under the terms of version 2 of the GNU General Public License 
- * as published by the Free Software Foundation.
- * 
- * This program is distributed in the hope that it would be useful, but 
- * WITHOUT ANY WARRANTY; without even the implied warranty of 
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. 
- * 
- * Further, this software is distributed without any warranty that it is 
- * free of the rightful claim of any third person regarding infringement 
- * or the like.  Any license provided herein, whether implied or 
- * otherwise, applies only to this software file.  Patent licenses, if 
- * any, provided herein do not apply to combinations of this program with 
- * other software, or any other product whatsoever.
- * 
- * You should have received a copy of the GNU General Public 
- * License along with this program; if not, write the Free Software 
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
- * 
- * Contact information:  Silicon Graphics, Inc., 1600 Amphitheatre Pkwy, 
- * Mountain View, CA  94043, or:
- * 
- * http://www.sgi.com 
- * 
- * For further information regarding this notice, see: 
- * 
- * http://oss.sgi.com/projects/GenInfo/NoticeExplan
+ * Copyright (C) 2000-2004 Silicon Graphics, Inc. All rights reserved.
  */
 #include <linux/config.h>
 #include <asm/uaccess.h>
 
 #ifdef CONFIG_PROC_FS
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <asm/sn/sn_sal.h>
 
-
-static int partition_id_read_proc(char *page, char **start, off_t off,
-		int count, int *eof, void *data) {
-
-	return sprintf(page, "%d\n", sn_local_partid());
-}
-
-static struct proc_dir_entry * sgi_proc_dir;
-
-void
-register_sn_partition_id(void) {
-	struct proc_dir_entry *entry;
-
-	if (!sgi_proc_dir) {
-		sgi_proc_dir = proc_mkdir("sgi_sn", 0);
-	}
-	entry = create_proc_entry("partition_id", 0444, sgi_proc_dir);
-	if (entry) {
-		entry->nlink = 1;
-		entry->data = 0;
-		entry->read_proc = partition_id_read_proc;
-		entry->write_proc = NULL;
-	}
-}
-
-static int
-system_serial_number_read_proc(char *page, char **start, off_t off,
-		int count, int *eof, void *data) {
-	return sprintf(page, "%s\n", sn_system_serial_number());
-}
-
-static int
-licenseID_read_proc(char *page, char **start, off_t off,
-		int count, int *eof, void *data) {
-	return sprintf(page, "0x%lx\n",sn_partition_serial_number_val());
-}
-
-void
-register_sn_serial_numbers(void) {
-	struct proc_dir_entry *entry;
-
-	if (!sgi_proc_dir) {
-		sgi_proc_dir = proc_mkdir("sgi_sn", 0);
-	}
-	entry = create_proc_entry("system_serial_number", 0444, sgi_proc_dir);
-	if (entry) {
-		entry->nlink = 1;
-		entry->data = 0;
-		entry->read_proc = system_serial_number_read_proc;
-		entry->write_proc = NULL;
-	}
-	entry = create_proc_entry("licenseID", 0444, sgi_proc_dir);
-	if (entry) {
-		entry->nlink = 1;
-		entry->data = 0;
-		entry->read_proc = licenseID_read_proc;
-		entry->write_proc = NULL;
-	}
-}
-
-// Disable forced interrupts, but leave the code in, just in case.
-int sn_force_interrupt_flag = 0;
-
-static int
-sn_force_interrupt_read_proc(char *page, char **start, off_t off,
-		int count, int *eof, void *data) {
-	if (sn_force_interrupt_flag) {
-		return sprintf(page, "Force interrupt is enabled\n");
-	}
-	return sprintf(page, "Force interrupt is disabled\n");
-}
-
-static int 
-sn_force_interrupt_write_proc(struct file *file, const char *buffer,
-                                        unsigned long count, void *data)
+static int partition_id_show(struct seq_file *s, void *p)
 {
-	if (*buffer == '0') {
-		sn_force_interrupt_flag = 0;
-	} else {
-		sn_force_interrupt_flag = 1;
-	}
-	return 1;
+	seq_printf(s, "%d\n", sn_local_partid());
+	return 0;
 }
 
-void
-register_sn_force_interrupt(void) {
-	struct proc_dir_entry *entry;
-
-	if (!sgi_proc_dir) {
-		sgi_proc_dir = proc_mkdir("sgi_sn", 0);
-	}
-	entry = create_proc_entry("sn_force_interrupt",0444, sgi_proc_dir);
-	if (entry) {
-		entry->nlink = 1;
-		entry->data = 0;
-		entry->read_proc = sn_force_interrupt_read_proc;
-		entry->write_proc = sn_force_interrupt_write_proc;
-	}
-}
-
-extern int sn_linkstats_get(char *);
-extern int sn_linkstats_reset(unsigned long);
-
-static int
-sn_linkstats_read_proc(char *page, char **start, off_t off,
-		int count, int *eof, void *data) {
-       
-	return sn_linkstats_get(page);
-}
-
-static int 
-sn_linkstats_write_proc(struct file *file, const char *buffer,
-                                        unsigned long count, void *data)
+static int partition_id_open(struct inode *inode, struct file *file)
 {
-	char		s[64];
-	unsigned long	msecs;
-	int		e = count;
+	return single_open(file, partition_id_show, NULL);
+}
 
-	if (copy_from_user(s, buffer, count < sizeof(s) ? count : sizeof(s)))
-		e = -EFAULT;
-	else {
-		if (sscanf(s, "%lu", &msecs) != 1 || msecs < 5)
-			/* at least 5 milliseconds between updates */
-			e = -EINVAL;
-		else
-			sn_linkstats_reset(msecs);
+static int system_serial_number_show(struct seq_file *s, void *p)
+{
+	seq_printf(s, "%s\n", sn_system_serial_number());
+	return 0;
+}
+
+static int system_serial_number_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, system_serial_number_show, NULL);
+}
+
+static int licenseID_show(struct seq_file *s, void *p)
+{
+	seq_printf(s, "0x%lx\n", sn_partition_serial_number_val());
+	return 0;
+}
+
+static int licenseID_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, licenseID_show, NULL);
+}
+
+/*
+ * Enable forced interrupt by default.
+ * When set, the sn interrupt handler writes the force interrupt register on
+ * the bridge chip.  The hardware will then send an interrupt message if the
+ * interrupt line is active.  This mimics a level sensitive interrupt.
+ */
+int sn_force_interrupt_flag = 1;
+
+static int sn_force_interrupt_show(struct seq_file *s, void *p)
+{
+	seq_printf(s, "Force interrupt is %s\n",
+		sn_force_interrupt_flag ? "enabled" : "disabled");
+	return 0;
+}
+
+static ssize_t sn_force_interrupt_write_proc(struct file *file,
+		const char __user *buffer, size_t count, loff_t *data)
+{
+	char val;
+
+	if (copy_from_user(&val, buffer, 1))
+		return -EFAULT;
+
+	sn_force_interrupt_flag = (val == '0') ? 0 : 1;
+	return count;
+}
+
+static int sn_force_interrupt_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, sn_force_interrupt_show, NULL);
+}
+
+static int coherence_id_show(struct seq_file *s, void *p)
+{
+	seq_printf(s, "%d\n", partition_coherence_id());
+
+	return 0;
+}
+
+static int coherence_id_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, coherence_id_show, NULL);
+}
+
+static struct proc_dir_entry *sn_procfs_create_entry(
+	const char *name, struct proc_dir_entry *parent,
+	int (*openfunc)(struct inode *, struct file *),
+	int (*releasefunc)(struct inode *, struct file *))
+{
+	struct proc_dir_entry *e = create_proc_entry(name, 0444, parent);
+
+	if (e) {
+		e->proc_fops = (struct file_operations *)kmalloc(
+			sizeof(struct file_operations), GFP_KERNEL);
+		if (e->proc_fops) {
+			memset(e->proc_fops, 0, sizeof(struct file_operations));
+			e->proc_fops->open = openfunc;
+			e->proc_fops->read = seq_read;
+			e->proc_fops->llseek = seq_lseek;
+			e->proc_fops->release = releasefunc;
+		}
 	}
 
 	return e;
 }
 
-void
-register_sn_linkstats(void) {
-	struct proc_dir_entry *entry;
+/* /proc/sgi_sn/sn_topology uses seq_file, see sn_hwperf.c */
+extern int sn_topology_open(struct inode *, struct file *);
+extern int sn_topology_release(struct inode *, struct file *);
 
-	if (!sgi_proc_dir) {
-		sgi_proc_dir = proc_mkdir("sgi_sn", 0);
-	}
-	entry = create_proc_entry("linkstats", 0444, sgi_proc_dir);
-	if (entry) {
-		entry->nlink = 1;
-		entry->data = 0;
-		entry->read_proc = sn_linkstats_read_proc;
-		entry->write_proc = sn_linkstats_write_proc;
-	}
-}
+void register_sn_procfs(void)
+{
+	static struct proc_dir_entry *sgi_proc_dir = NULL;
+	struct proc_dir_entry *e;
 
-void
-register_sn_procfs(void) {
-	register_sn_partition_id();
-	register_sn_serial_numbers();
-	register_sn_force_interrupt();
-	register_sn_linkstats();
+	BUG_ON(sgi_proc_dir != NULL);
+	if (!(sgi_proc_dir = proc_mkdir("sgi_sn", NULL)))
+		return;
+
+	sn_procfs_create_entry("partition_id", sgi_proc_dir,
+		partition_id_open, single_release);
+
+	sn_procfs_create_entry("system_serial_number", sgi_proc_dir,
+		system_serial_number_open, single_release);
+
+	sn_procfs_create_entry("licenseID", sgi_proc_dir, 
+		licenseID_open, single_release);
+
+	e = sn_procfs_create_entry("sn_force_interrupt", sgi_proc_dir, 
+		sn_force_interrupt_open, single_release);
+	if (e) 
+		e->proc_fops->write = sn_force_interrupt_write_proc;
+
+	sn_procfs_create_entry("coherence_id", sgi_proc_dir, 
+		coherence_id_open, single_release);
+	
+	sn_procfs_create_entry("sn_topology", sgi_proc_dir,
+		sn_topology_open, sn_topology_release);
 }
 
 #endif /* CONFIG_PROC_FS */

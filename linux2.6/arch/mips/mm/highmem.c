@@ -1,15 +1,14 @@
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/highmem.h>
 #include <asm/tlbflush.h>
 
-void *kmap(struct page *page)
+void *__kmap(struct page *page)
 {
 	void *addr;
 
-	if (in_interrupt())
-		BUG();
-
-	if (page < highmem_start_page)
+	might_sleep();
+	if (!PageHighMem(page))
 		return page_address(page);
 	addr = kmap_high(page);
 	flush_tlb_one((unsigned long)addr);
@@ -17,11 +16,11 @@ void *kmap(struct page *page)
 	return addr;
 }
 
-void kunmap(struct page *page)
+void __kunmap(struct page *page)
 {
 	if (in_interrupt())
 		BUG();
-	if (page < highmem_start_page)
+	if (!PageHighMem(page))
 		return;
 	kunmap_high(page);
 }
@@ -35,13 +34,14 @@ void kunmap(struct page *page)
  * kmaps are appropriate for short, tight code paths only.
  */
 
-void *kmap_atomic(struct page *page, enum km_type type)
+void *__kmap_atomic(struct page *page, enum km_type type)
 {
 	enum fixed_addresses idx;
 	unsigned long vaddr;
 
+	/* even !CONFIG_PREEMPT needs this, for in_atomic in do_page_fault */
 	inc_preempt_count();
-	if (page < highmem_start_page)
+	if (!PageHighMem(page))
 		return page_address(page);
 
 	idx = type + KM_TYPE_NR*smp_processor_id();
@@ -56,7 +56,7 @@ void *kmap_atomic(struct page *page, enum km_type type)
 	return (void*) vaddr;
 }
 
-void kunmap_atomic(void *kvaddr, enum km_type type)
+void __kunmap_atomic(void *kvaddr, enum km_type type)
 {
 #ifdef CONFIG_DEBUG_HIGHMEM
 	unsigned long vaddr = (unsigned long) kvaddr & PAGE_MASK;
@@ -64,6 +64,7 @@ void kunmap_atomic(void *kvaddr, enum km_type type)
 
 	if (vaddr < FIXADDR_START) { // FIXME
 		dec_preempt_count();
+		preempt_check_resched();
 		return;
 	}
 
@@ -79,9 +80,10 @@ void kunmap_atomic(void *kvaddr, enum km_type type)
 #endif
 
 	dec_preempt_count();
+	preempt_check_resched();
 }
 
-struct page *kmap_atomic_to_page(void *ptr)
+struct page *__kmap_atomic_to_page(void *ptr)
 {
 	unsigned long idx, vaddr = (unsigned long)ptr;
 	pte_t *pte;
@@ -94,8 +96,8 @@ struct page *kmap_atomic_to_page(void *ptr)
 	return pte_page(*pte);
 }
 
-EXPORT_SYMBOL(kmap);
-EXPORT_SYMBOL(kunmap);
-EXPORT_SYMBOL(kmap_atomic);
-EXPORT_SYMBOL(kunmap_atomic);
-EXPORT_SYMBOL(kmap_atomic_to_page);
+EXPORT_SYMBOL(__kmap);
+EXPORT_SYMBOL(__kunmap);
+EXPORT_SYMBOL(__kmap_atomic);
+EXPORT_SYMBOL(__kunmap_atomic);
+EXPORT_SYMBOL(__kmap_atomic_to_page);

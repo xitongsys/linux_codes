@@ -4,6 +4,7 @@
 #include <linux/config.h>
 #include <linux/compat.h>
 #include <linux/socket.h>
+#include <linux/syscalls.h>
 #include <linux/nfs_fs.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/nfsd/nfsd.h>
@@ -33,7 +34,7 @@ typedef union sigval32 {
         __u32   sival_ptr;
 } sigval_t32;
                  
-typedef struct siginfo32 {
+typedef struct compat_siginfo {
 	int	si_signo;
 	int	si_errno;
 	int	si_code;
@@ -49,9 +50,10 @@ typedef struct siginfo32 {
 
 		/* POSIX.1b timers */
 		struct {
-			unsigned int	_timer1;
-			unsigned int	_timer2;
-                
+			timer_t _tid;		/* timer id */
+			int _overrun;		/* overrun count */
+			sigval_t _sigval;	/* same as below */
+			int _sys_private;       /* not to be passed to user */
 		} _timer;
 
 		/* POSIX.1b signals */
@@ -81,7 +83,7 @@ typedef struct siginfo32 {
 			int	_fd;
 		} _sigpoll;
 	} _sifields;
-} siginfo_t32;  
+} compat_siginfo_t;
 
 /*
  * How these fields are to be accessed.
@@ -97,6 +99,8 @@ typedef struct siginfo32 {
 #define si_addr		_sifields._sigfault._addr
 #define si_band		_sifields._sigpoll._band
 #define si_fd		_sifields._sigpoll._fd    
+#define si_tid		_sifields._timer._tid
+#define si_overrun	_sifields._timer._overrun
 
 /* asm/sigcontext.h */
 typedef union
@@ -143,6 +147,11 @@ typedef struct
 			 PSW32_MASK_IO | PSW32_MASK_EXT | PSW32_MASK_MCHECK | \
 			 PSW32_MASK_PSTATE)
 
+#define PSW32_MASK_MERGE(CURRENT,NEW) \
+        (((CURRENT) & ~(PSW32_MASK_CC|PSW32_MASK_PM)) | \
+         ((NEW) & (PSW32_MASK_CC|PSW32_MASK_PM)))
+
+
 typedef struct
 {
 	_psw_t32	psw;
@@ -188,6 +197,24 @@ struct ucontext32 {
 	stack_t32		uc_stack;
 	_sigregs32		uc_mcontext;
 	compat_sigset_t		uc_sigmask;	/* mask last for extensibility */
+};
+
+#define SIGEV_PAD_SIZE32 ((SIGEV_MAX_SIZE/sizeof(int)) - 3)
+struct sigevent32 {
+	union {
+		int sival_int;
+		u32 sival_ptr;
+	} sigev_value;
+	int sigev_signo;
+	int sigev_notify;
+	union {
+		int _pad[SIGEV_PAD_SIZE32];
+		int _tid;
+		struct {
+			u32 *_function;
+			u32 *_attribute;
+		} _sigev_thread;
+	} _sigev_un;
 };
 
 #endif /* _ASM_S390X_S390_H */

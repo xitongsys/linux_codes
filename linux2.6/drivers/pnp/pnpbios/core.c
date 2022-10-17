@@ -53,15 +53,18 @@
 #include <linux/pnpbios.h>
 #include <linux/device.h>
 #include <linux/pnp.h>
-#include <asm/page.h>
-#include <asm/system.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <asm/desc.h>
 #include <linux/slab.h>
-#include <linux/kmod.h>
+#include <linux/kobject_uevent.h>
 #include <linux/completion.h>
 #include <linux/spinlock.h>
+#include <linux/dmi.h>
+#include <linux/delay.h>
+#include <linux/acpi.h>
+
+#include <asm/page.h>
+#include <asm/desc.h>
 #include <asm/system.h>
 #include <asm/byteorder.h>
 
@@ -129,7 +132,7 @@ static int pnp_dock_event(int dock, struct pnp_docking_station_info *info)
 	/* only one standardized param to hotplug command: type */
 	argv [0] = hotplug_path;
 	argv [1] = "dock";
-	argv [2] = 0;
+	argv [2] = NULL;
 
 	/* minimal command environment */
 	envp [i++] = "HOME=/";
@@ -152,7 +155,7 @@ static int pnp_dock_event(int dock, struct pnp_docking_station_info *info)
 	envp [i++] = scratch;
 	scratch += sprintf (scratch, "DOCK=%x/%x/%x",
 		info->location_id, info->serial, info->capabilities);
-	envp[i] = 0;
+	envp[i] = NULL;
 	
 	value = call_usermodehelper (argv [0], argv, envp, 0);
 	kfree (buf);
@@ -176,8 +179,7 @@ static int pnp_dock_thread(void * unused)
 		/*
 		 * Poll every 2 seconds
 		 */
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(HZ*2);
+		msleep_interruptible(2000);
 		if(signal_pending(current))
 			break;
 
@@ -251,8 +253,10 @@ static int pnpbios_set_resources(struct pnp_dev * dev, struct pnp_resource_table
 	node = pnpbios_kmalloc(node_info.max_node_size, GFP_KERNEL);
 	if (!node)
 		return -1;
-	if (pnp_bios_get_dev_node(&nodenum, (char )PNPMODE_STATIC, node))
+	if (pnp_bios_get_dev_node(&nodenum, (char )PNPMODE_DYNAMIC, node)) {
+		kfree(node);
 		return -ENODEV;
+	}
 	if(pnpbios_write_resources_to_node(res, node)<0) {
 		kfree(node);
 		return -1;
@@ -264,19 +268,49 @@ static int pnpbios_set_resources(struct pnp_dev * dev, struct pnp_resource_table
 	return ret;
 }
 
+static void pnpbios_zero_data_stream(struct pnp_bios_node * node)
+{
+	unsigned char * p = (char *)node->data;
+	unsigned char * end = (char *)(node->data + node->size);
+	unsigned int len;
+	int i;
+	while ((char *)p < (char *)end) {
+		if(p[0] & 0x80) { /* large tag */
+			len = (p[2] << 8) | p[1];
+			p += 3;
+		} else {
+			if (((p[0]>>3) & 0x0f) == 0x0f)
+				return;
+			len = p[0] & 0x07;
+			p += 1;
+		}
+		for (i = 0; i < len; i++)
+			p[i] = 0;
+		p += len;
+	}
+	printk(KERN_ERR "PnPBIOS: Resource structure did not contain an end tag.\n");
+}
+
 static int pnpbios_disable_resources(struct pnp_dev *dev)
 {
 	struct pnp_bios_node * node;
+	u8 nodenum = dev->number;
 	int ret;
 
 	/* just in case */
 	if(dev->flags & PNPBIOS_NO_DISABLE || !pnpbios_is_dynamic(dev))
 		return -EPERM;
 
-	/* the value of this will be zero */
 	node = pnpbios_kmalloc(node_info.max_node_size, GFP_KERNEL);
 	if (!node)
 		return -ENOMEM;
+
+	if (pnp_bios_get_dev_node(&nodenum, (char )PNPMODE_DYNAMIC, node)) {
+		kfree(node);
+		return -ENODEV;
+	}
+	pnpbios_zero_data_stream(node);
+
 	ret = pnp_bios_set_dev_node(dev->number, (char)PNPMODE_DYNAMIC, node);
 	kfree(node);
 	if (ret > 0)
@@ -435,7 +469,7 @@ int __init pnpbios_probe_system(void)
 	 */
 	for (check = (union pnp_bios_install_struct *) __va(0xf0000);
 	     check < (union pnp_bios_install_struct *) __va(0xffff0);
-	     ((void *) (check)) += 16) {
+	     check = (void *)check + 16) {
 		if (check->fields.signature != PNP_SIGNATURE)
 			continue;
 		printk(KERN_INFO "PnPBIOS: Found PnP BIOS installation structure at 0x%p\n", check);
@@ -468,13 +502,50 @@ int __init pnpbios_probe_system(void)
 	return 0;
 }
 
+static int __init exploding_pnp_bios(struct dmi_system_id *d)
+{
+	printk(KERN_WARNING "%s detected. Disabling PnPBIOS\n", d->ident);
+	return 0;
+}
+
+static struct dmi_system_id pnpbios_dmi_table[] = {
+	{	/* PnPBIOS GPF on boot */
+		.callback = exploding_pnp_bios,
+		.ident = "Higraded P14H",
+		.matches = {
+			DMI_MATCH(DMI_BIOS_VENDOR, "American Megatrends Inc."),
+			DMI_MATCH(DMI_BIOS_VERSION, "07.00T"),
+			DMI_MATCH(DMI_SYS_VENDOR, "Higraded"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "P14H"),
+		},
+	},
+	{	/* PnPBIOS GPF on boot */
+		.callback = exploding_pnp_bios,
+		.ident = "ASUS P4P800",
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK Computer Inc."),
+			DMI_MATCH(DMI_BOARD_NAME, "P4P800"),
+		},
+	},
+	{ }
+};
+
 int __init pnpbios_init(void)
 {
 	int ret;
-	if(pnpbios_disabled || (dmi_broken & BROKEN_PNP_BIOS)) {
+
+	if (pnpbios_disabled || dmi_check_system(pnpbios_dmi_table)) {
 		printk(KERN_INFO "PnPBIOS: Disabled\n");
 		return -ENODEV;
 	}
+
+#ifdef CONFIG_PNPACPI
+	if (!acpi_disabled && !pnpacpi_disabled) {
+		pnpbios_disabled = 1;
+		printk(KERN_INFO "PnPBIOS: Disabled by ACPI PNP\n");
+		return -ENODEV;
+	}
+#endif /* CONFIG_ACPI */
 
 	/* scan the system for pnpbios support */
 	if (!pnpbios_probe_system())
@@ -512,6 +583,8 @@ subsys_initcall(pnpbios_init);
 
 static int __init pnpbios_thread_init(void)
 {
+	if (pnpbios_disabled)
+		return 0;
 #ifdef CONFIG_HOTPLUG
 	init_completion(&unload_sem);
 	if (kernel_thread(pnp_dock_thread, NULL, CLONE_KERNEL) > 0)

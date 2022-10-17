@@ -13,11 +13,22 @@
 #include <linux/mm.h>
 #include "agp.h"
 
+/* NVIDIA registers */
+#define NVIDIA_0_APSIZE		0x80
+#define NVIDIA_1_WBC		0xf0
+#define NVIDIA_2_GARTCTRL	0xd0
+#define NVIDIA_2_APBASE		0xd8
+#define NVIDIA_2_APLIMIT	0xdc
+#define NVIDIA_2_ATTBASE(i)	(0xe0 + (i) * 4)
+#define NVIDIA_3_APBASE		0x50
+#define NVIDIA_3_APLIMIT	0x54
+
+
 static struct _nvidia_private {
 	struct pci_dev *dev_1;
 	struct pci_dev *dev_2;
 	struct pci_dev *dev_3;
-	volatile u32 *aperture;
+	volatile u32 __iomem *aperture;
 	int num_active_entries;
 	off_t pg_offset;
 	u32 wbc_mask;
@@ -46,10 +57,54 @@ static int nvidia_fetch_size(void)
 	return 0;
 }
 
+#define SYSCFG          0xC0010010
+#define IORR_BASE0      0xC0010016
+#define IORR_MASK0      0xC0010017
+#define AMD_K7_NUM_IORR 2
+
+static int nvidia_init_iorr(u32 base, u32 size)
+{
+	u32 base_hi, base_lo;
+	u32 mask_hi, mask_lo;
+	u32 sys_hi, sys_lo;
+	u32 iorr_addr, free_iorr_addr;
+
+	/* Find the iorr that is already used for the base */
+	/* If not found, determine the uppermost available iorr */
+	free_iorr_addr = AMD_K7_NUM_IORR;
+	for(iorr_addr = 0; iorr_addr < AMD_K7_NUM_IORR; iorr_addr++) {
+		rdmsr(IORR_BASE0 + 2 * iorr_addr, base_lo, base_hi);
+		rdmsr(IORR_MASK0 + 2 * iorr_addr, mask_lo, mask_hi);
+
+		if ((base_lo & 0xfffff000) == (base & 0xfffff000))
+			break;
+
+		if ((mask_lo & 0x00000800) == 0)
+			free_iorr_addr = iorr_addr;
+	}
+	
+	if (iorr_addr >= AMD_K7_NUM_IORR) {
+		iorr_addr = free_iorr_addr;
+		if (iorr_addr >= AMD_K7_NUM_IORR)
+			return -EINVAL;
+	}
+    base_hi = 0x0;
+    base_lo = (base & ~0xfff) | 0x18;
+    mask_hi = 0xf;
+    mask_lo = ((~(size - 1)) & 0xfffff000) | 0x800;
+    wrmsr(IORR_BASE0 + 2 * iorr_addr, base_lo, base_hi);
+    wrmsr(IORR_MASK0 + 2 * iorr_addr, mask_lo, mask_hi);
+
+    rdmsr(SYSCFG, sys_lo, sys_hi);
+    sys_lo |= 0x00100000;
+    wrmsr(SYSCFG, sys_lo, sys_hi);
+
+	return 0;
+}
 
 static int nvidia_configure(void)
 {
-	int i, num_dirs;
+	int i, rc, num_dirs;
 	u32 apbase, aplimit;
 	struct aper_size_info_8 *current_size;
 	u32 temp;
@@ -69,6 +124,8 @@ static int nvidia_configure(void)
 	pci_write_config_dword(nvidia_private.dev_2, NVIDIA_2_APLIMIT, aplimit);
 	pci_write_config_dword(nvidia_private.dev_3, NVIDIA_3_APBASE, apbase);
 	pci_write_config_dword(nvidia_private.dev_3, NVIDIA_3_APLIMIT, aplimit);
+	if (0 != (rc = nvidia_init_iorr(apbase, current_size->size * 1024 * 1024)))
+		return rc;
 
 	/* directory size is 64k */
 	num_dirs = current_size->size / 64;
@@ -97,7 +154,7 @@ static int nvidia_configure(void)
 
 	/* map aperture */
 	nvidia_private.aperture =
-		(volatile u32 *) ioremap(apbase, 33 * PAGE_SIZE);
+		(volatile u32 __iomem *) ioremap(apbase, 33 * PAGE_SIZE);
 
 	return 0;
 }
@@ -116,12 +173,16 @@ static void nvidia_cleanup(void)
 	pci_write_config_dword(nvidia_private.dev_2, NVIDIA_2_GARTCTRL, temp & ~(0x11));
 
 	/* unmap aperture */
-	iounmap((void *) nvidia_private.aperture);
+	iounmap((void __iomem *) nvidia_private.aperture);
 
 	/* restore previous aperture size */
 	previous_size = A_SIZE_8(agp_bridge->previous_size);
 	pci_write_config_byte(agp_bridge->dev, NVIDIA_0_APSIZE,
 		previous_size->size_value);
+
+	/* restore iorr for previous aperture size */
+	nvidia_init_iorr(agp_bridge->gart_bus_addr,
+		previous_size->size * 1024 * 1024);
 }
 
 
@@ -145,7 +206,7 @@ static int nvidia_insert_memory(struct agp_memory *mem, off_t pg_start, int type
 		return -EINVAL;
 	
 	for(j = pg_start; j < (pg_start + mem->page_count); j++) {
-		if (!PGE_EMPTY(agp_bridge, agp_bridge->gatt_table[nvidia_private.pg_offset + j]))
+		if (!PGE_EMPTY(agp_bridge, readl(agp_bridge->gatt_table+nvidia_private.pg_offset+j)))
 			return -EBUSY;
 	}
 
@@ -153,10 +214,11 @@ static int nvidia_insert_memory(struct agp_memory *mem, off_t pg_start, int type
 		global_cache_flush();
 		mem->is_flushed = TRUE;
 	}
-	for (i = 0, j = pg_start; i < mem->page_count; i++, j++)
-		agp_bridge->gatt_table[nvidia_private.pg_offset + j] =
-				agp_bridge->driver->mask_memory(mem->memory[i], mem->type);
-
+	for (i = 0, j = pg_start; i < mem->page_count; i++, j++) {
+		writel(agp_bridge->driver->mask_memory(mem->memory[i], mem->type),
+			agp_bridge->gatt_table+nvidia_private.pg_offset+j);
+		readl(agp_bridge->gatt_table+nvidia_private.pg_offset+j);	/* PCI Posting. */
+	}
 	agp_bridge->driver->tlb_flush(mem);
 	return 0;
 }
@@ -168,11 +230,9 @@ static int nvidia_remove_memory(struct agp_memory *mem, off_t pg_start, int type
 
 	if ((type != 0) || (mem->type != 0))
 		return -EINVAL;
-	
-	for (i = pg_start; i < (mem->page_count + pg_start); i++) {
-		agp_bridge->gatt_table[nvidia_private.pg_offset + i] =
-		    (unsigned long) agp_bridge->scratch_page;
-	}
+
+	for (i = pg_start; i < (mem->page_count + pg_start); i++)
+		writel(agp_bridge->scratch_page, agp_bridge->gatt_table+nvidia_private.pg_offset+i);
 
 	agp_bridge->driver->tlb_flush(mem);
 	return 0;
@@ -204,9 +264,9 @@ static void nvidia_tlbflush(struct agp_memory *mem)
 
 	/* flush TLB entries */
 	for(i = 0; i < 32 + 1; i++)
-		temp = nvidia_private.aperture[i * PAGE_SIZE / sizeof(u32)];
+		temp = readl(nvidia_private.aperture+(i * PAGE_SIZE / sizeof(u32)));
 	for(i = 0; i < 32 + 1; i++)
-		temp = nvidia_private.aperture[i * PAGE_SIZE / sizeof(u32)];
+		temp = readl(nvidia_private.aperture+(i * PAGE_SIZE / sizeof(u32)));
 }
 
 
@@ -319,7 +379,15 @@ static struct pci_device_id agp_nvidia_pci_table[] = {
 	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
 	.class_mask	= ~0,
 	.vendor		= PCI_VENDOR_ID_NVIDIA,
-	.device		= PCI_ANY_ID,
+	.device		= PCI_DEVICE_ID_NVIDIA_NFORCE,
+	.subvendor	= PCI_ANY_ID,
+	.subdevice	= PCI_ANY_ID,
+	},
+	{
+	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
+	.class_mask	= ~0,
+	.vendor		= PCI_VENDOR_ID_NVIDIA,
+	.device		= PCI_DEVICE_ID_NVIDIA_NFORCE2,
 	.subvendor	= PCI_ANY_ID,
 	.subdevice	= PCI_ANY_ID,
 	},
@@ -337,6 +405,8 @@ static struct pci_driver agp_nvidia_pci_driver = {
 
 static int __init agp_nvidia_init(void)
 {
+	if (agp_off)
+		return -EINVAL;
 	return pci_module_init(&agp_nvidia_pci_driver);
 }
 

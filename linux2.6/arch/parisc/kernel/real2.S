@@ -12,8 +12,12 @@
 
 	.section	.bss
 	.export real_stack
+	.export real32_stack
+	.export real64_stack
 	.align	64
 real_stack:
+real32_stack:
+real64_stack:
 	.block	8192
 
 #ifdef __LP64__
@@ -26,6 +30,7 @@ real_stack:
 
 save_cr_space:
 	.block	REG_SZ * N_SAVED_REGS
+save_cr_end:
 
 
 /************************ 32-bit real-mode calls ***********************/
@@ -123,7 +128,7 @@ save_control_regs:
 	nop
 
 restore_control_regs:
-	load32	PA(save_cr_space+(N_SAVED_REGS*REG_SZ)), %r26
+	load32	PA(save_cr_end), %r26
 	POP_CR(%cr15, %r26)
 	POP_CR(%cr31, %r26)
 	POP_CR(%cr30, %r26)
@@ -144,7 +149,7 @@ restore_control_regs:
 rfi_virt2real:
 	/* switch to real mode... */
 	ssm		0,0		/* See "relied upon translation" */
-	nop				/* comment in interruption.S */
+	nop				/* PA 2.0 Arch. F-5 */
 	nop
 	nop
 	nop
@@ -154,12 +159,12 @@ rfi_virt2real:
 	nop
 	
 	rsm             (PSW_SM_Q|PSW_SM_I),%r0  /* disable Q & I bits to load iia queue */
-	mtctl		0, %cr17	/* space 0 */
-	mtctl		0, %cr17
+	mtctl		%r0, %cr17	/* Clear IIASQ tail */
+	mtctl		%r0, %cr17	/* Clear IIASQ head */
 	load32		PA(rfi_v2r_1), %r1
-	mtctl		%r1, %cr18
+	mtctl		%r1, %cr18	/* IIAOQ head */
 	ldo		4(%r1), %r1
-	mtctl		%r1, %cr18
+	mtctl		%r1, %cr18	/* IIAOQ tail */
 	load32          REAL_MODE_PSW, %r1
 	mtctl		%r1, %cr22
 	rfi
@@ -181,7 +186,7 @@ rfi_v2r_1:
 	.align 128
 rfi_real2virt:
 	ssm		0,0		/* See "relied upon translation" */
-	nop				/* comment in interruption.S */
+	nop				/* PA 2.0 Arch. F-5 */
 	nop
 	nop
 	nop
@@ -191,12 +196,12 @@ rfi_real2virt:
 	nop
 	
 	rsm             PSW_SM_Q,%r0    /* disable Q bit to load iia queue */
-	mtctl		0, %cr17	/* space 0 */
-	mtctl		0, %cr17
+	mtctl		%r0, %cr17	/* Clear IIASQ tail */
+	mtctl		%r0, %cr17	/* Clear IIASQ head */
 	load32		(rfi_r2v_1), %r1
-	mtctl		%r1, %cr18
+	mtctl		%r1, %cr18	/* IIAOQ head */
 	ldo		4(%r1), %r1
-	mtctl		%r1, %cr18
+	mtctl		%r1, %cr18	/* IIAOQ tail */
 	load32		KERNEL_PSW, %r1
 	mtctl		%r1, %cr22
 	rfi

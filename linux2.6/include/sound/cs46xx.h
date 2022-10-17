@@ -24,6 +24,7 @@
  */
 
 #include "pcm.h"
+#include "pcm-indirect.h"
 #include "rawmidi.h"
 #include "ac97_codec.h"
 #include "cs46xx_dsp_spos.h"
@@ -1646,20 +1647,11 @@
 typedef struct _snd_cs46xx cs46xx_t;
 
 typedef struct _snd_cs46xx_pcm_t {
-	unsigned char *hw_area;
-	dma_addr_t hw_addr;	/* PCI bus address, not accessible */
-	unsigned long hw_size;
+	struct snd_dma_buffer hw_buf;
   
 	unsigned int ctl;
 	unsigned int shift;	/* Shift count to trasform frames in bytes */
-	unsigned int sw_bufsize;
-	unsigned int sw_data;	/* Offset to next dst (or src) in sw ring buffer */
-	unsigned int sw_io;
-	int sw_ready;		/* Bytes ready to be transferred to/from hw */
-	unsigned int hw_data;	/* Offset to next dst (or src) in hw ring buffer */
-	unsigned int hw_io;	/* Ring buffer hw pointer */
-	int hw_ready;		/* Bytes ready for play (or captured) in hw ring buffer */
-	size_t appl_ptr;	/* Last seen appl_ptr */
+	snd_pcm_indirect_t pcm_rec;
 	snd_pcm_substream_t *substream;
 
 	pcm_channel_descriptor_t * pcm_channel;
@@ -1670,7 +1662,7 @@ typedef struct _snd_cs46xx_pcm_t {
 typedef struct {
 	char name[24];
 	unsigned long base;
-	unsigned long remap_addr;
+	void __iomem *remap_addr;
 	unsigned long size;
 	struct resource *resource;
 } snd_cs46xx_region_t;
@@ -1693,25 +1685,17 @@ struct _snd_cs46xx {
 	unsigned int mode;
 	
 	struct {
-		unsigned char *hw_area;
-		dma_addr_t hw_addr;	/* PCI bus address, not accessible */
-		unsigned long hw_size;
+		struct snd_dma_buffer hw_buf;
 
 		unsigned int ctl;
 		unsigned int shift;	/* Shift count to trasform frames in bytes */
-		unsigned int sw_bufsize;
-		unsigned int sw_data;	/* Offset to next dst (or src) in sw ring buffer */
-		unsigned int sw_io;
-		int sw_ready;		/* Bytes ready to be transferred to/from hw */
-		unsigned int hw_data;	/* Offset to next dst (or src) in hw ring buffer */
-		unsigned int hw_io;	/* Ring buffer hw pointer */
-		int hw_ready;		/* Bytes ready for play (or captured) in hw ring buffer */
-		size_t appl_ptr;	/* Last seen appl_ptr */
+		snd_pcm_indirect_t pcm_rec;
 		snd_pcm_substream_t *substream;
 	} capt;
 
 
 	int nr_ac97_codecs;
+	ac97_bus_t *ac97_bus;
 	ac97_t *ac97[MAX_NR_AC97];
 
 	struct pci_dev *pci;
@@ -1738,9 +1722,6 @@ struct _snd_cs46xx {
 
 	struct snd_cs46xx_gameport *gameport;
 
-#ifdef CONFIG_PM
-	struct pm_dev *pm_dev;
-#endif
 #ifdef CONFIG_SND_CS46XX_DEBUG_GPIO
 	int current_gpio;
 #endif
@@ -1771,10 +1752,5 @@ int snd_cs46xx_mixer(cs46xx_t *chip);
 int snd_cs46xx_midi(cs46xx_t *chip, int device, snd_rawmidi_t **rmidi);
 int snd_cs46xx_start_dsp(cs46xx_t *chip);
 void snd_cs46xx_gameport(cs46xx_t *chip);
-
-#ifdef CONFIG_PM
-void snd_cs46xx_suspend(cs46xx_t *chip);
-void snd_cs46xx_resume(cs46xx_t *chip);
-#endif
 
 #endif /* __SOUND_CS46XX_H */

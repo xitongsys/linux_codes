@@ -57,8 +57,9 @@ nfsroot_mount(struct sockaddr_in *addr, char *path, struct nfs_fh *fh,
 			(unsigned)ntohl(addr->sin_addr.s_addr), path);
 
 	sprintf(hostname, "%u.%u.%u.%u", NIPQUAD(addr->sin_addr.s_addr));
-	if (!(mnt_clnt = mnt_create(hostname, addr, version, protocol)))
-		return -EACCES;
+	mnt_clnt = mnt_create(hostname, addr, version, protocol);
+	if (IS_ERR(mnt_clnt))
+		return PTR_ERR(mnt_clnt);
 
 	call = (version == NFS_MNT3_VERSION) ? MOUNTPROC3_MNT : MNTPROC_MNT;
 	status = rpc_call(mnt_clnt, call, path, &result, 0);
@@ -72,13 +73,14 @@ mnt_create(char *hostname, struct sockaddr_in *srvaddr, int version,
 	struct rpc_xprt	*xprt;
 	struct rpc_clnt	*clnt;
 
-	if (!(xprt = xprt_create_proto(protocol, srvaddr, NULL)))
-		return NULL;
+	xprt = xprt_create_proto(protocol, srvaddr, NULL);
+	if (IS_ERR(xprt))
+		return (struct rpc_clnt *)xprt;
 
 	clnt = rpc_create_client(xprt, hostname,
 				&mnt_program, version,
-				RPC_AUTH_NULL);
-	if (!clnt) {
+				RPC_AUTH_UNIX);
+	if (IS_ERR(clnt)) {
 		xprt_destroy(xprt);
 	} else {
 		clnt->cl_softrtry = 1;
@@ -106,7 +108,6 @@ xdr_decode_fhstatus(struct rpc_rqst *req, u32 *p, struct mnt_fhstatus *res)
 {
 	struct nfs_fh *fh = res->fh;
 
-	memset((void *)fh, 0, sizeof(*fh));
 	if ((res->status = ntohl(*p++)) == 0) {
 		fh->size = NFS2_FHSIZE;
 		memcpy(fh->data, p, NFS2_FHSIZE);
@@ -119,7 +120,6 @@ xdr_decode_fhstatus3(struct rpc_rqst *req, u32 *p, struct mnt_fhstatus *res)
 {
 	struct nfs_fh *fh = res->fh;
 
-	memset((void *)fh, 0, sizeof(*fh));
 	if ((res->status = ntohl(*p++)) == 0) {
 		int size = ntohl(*p++);
 		if (size <= NFS3_FHSIZE) {

@@ -1,5 +1,6 @@
 /*
  * Athlon/Hammer specific Machine Check Exception Reporting
+ * (C) Copyright 2002 Dave Jones <davej@codemonkey.org.uk>
  */
 
 #include <linux/init.h>
@@ -17,7 +18,7 @@
 #include "mce.h"
 
 /* Machine Check Handler For AMD Athlon/Duron */
-static asmlinkage void k7_machine_check(struct pt_regs * regs, long error_code)
+static fastcall void k7_machine_check(struct pt_regs * regs, long error_code)
 {
 	int recover=1;
 	u32 alow, ahigh, high, low;
@@ -53,6 +54,7 @@ static asmlinkage void k7_machine_check(struct pt_regs * regs, long error_code)
 			wrmsr (MSR_IA32_MC0_STATUS+i*4, 0UL, 0UL);
 			/* Serialize */
 			wmb();
+			add_taint(TAINT_MACHINE_CHECK);
 		}
 	}
 

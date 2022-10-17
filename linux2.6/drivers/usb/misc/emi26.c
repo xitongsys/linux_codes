@@ -194,7 +194,7 @@ static int emi26_load_firmware (struct usb_device *dev)
 
 	/* return 1 to fail the driver inialization
 	 * and give real driver change to load */
-	return 1;
+	err = 1;
 
 wraperr:
 	kfree(buf);
@@ -213,11 +213,9 @@ static int emi26_probe(struct usb_interface *intf, const struct usb_device_id *i
 	struct usb_device *dev = interface_to_usbdev(intf);
 
 	info("%s start", __FUNCTION__); 
-	
-	if((dev->descriptor.idVendor == EMI26_VENDOR_ID) && (dev->descriptor.idProduct == EMI26_PRODUCT_ID)) {
-		emi26_load_firmware(dev);
-	}
-	
+
+	emi26_load_firmware(dev);
+
 	/* do not return the driver context, let real audio driver do that */
 	return -EIO;
 }
@@ -226,7 +224,7 @@ static void emi26_disconnect(struct usb_interface *intf)
 {
 }
 
-struct usb_driver emi26_driver = {
+static struct usb_driver emi26_driver = {
 	.owner		= THIS_MODULE,
 	.name		= "emi26 - firmware loader",
 	.probe		= emi26_probe,

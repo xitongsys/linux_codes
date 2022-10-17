@@ -21,7 +21,7 @@ static const struct pnp_device_id pnp_dev_table[] = {
 	{	"",			0	}
 };
 
-static void __init reserve_ioport_range(char *pnpid, int start, int end)
+static void reserve_ioport_range(char *pnpid, int start, int end)
 {
 	struct resource *res;
 	char *regionid;
@@ -49,7 +49,7 @@ static void __init reserve_ioport_range(char *pnpid, int start, int end)
 	return;
 }
 
-static void __init reserve_resources_of_dev( struct pnp_dev *dev )
+static void reserve_resources_of_dev( struct pnp_dev *dev )
 {
 	int i;
 
@@ -104,4 +104,8 @@ static int __init pnp_system_init(void)
 	return pnp_register_driver(&system_pnp_driver);
 }
 
-subsys_initcall(pnp_system_init);
+/**
+ * Reserve motherboard resources after PCI claim BARs,
+ * but before PCI assign resources for uninitialized PCI devices
+ */
+fs_initcall(pnp_system_init);

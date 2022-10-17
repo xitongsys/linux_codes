@@ -28,17 +28,19 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/sched.h>
+#include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/spinlock.h>
+#include <linux/moduleparam.h>
 
 #include <linux/skbuff.h>
 #include <linux/string.h>
 #include <linux/serial.h>
 #include <linux/serial_reg.h>
+#include <linux/bitops.h>
 #include <asm/system.h>
-#include <asm/bitops.h>
 #include <asm/io.h>
 
 #include <pcmcia/version.h>
@@ -57,13 +59,6 @@
 /* ======================== Module parameters ======================== */
 
 
-/* Bit map of interrupts to choose from */
-static u_int irq_mask = 0xffff;
-static int irq_list[4] = { -1 };
-
-MODULE_PARM(irq_mask, "i");
-MODULE_PARM(irq_list, "1-4i");
-
 MODULE_AUTHOR("Marcel Holtmann <marcel@holtmann.org>");
 MODULE_DESCRIPTION("Bluetooth driver for Bluetooth PCMCIA cards with HCI UART interface");
 MODULE_LICENSE("GPL");
@@ -77,7 +72,7 @@ typedef struct btuart_info_t {
 	dev_link_t link;
 	dev_node_t node;
 
-	struct hci_dev hdev;
+	struct hci_dev *hdev;
 
 	spinlock_t lock;	/* For serializing operations */
 
@@ -90,14 +85,14 @@ typedef struct btuart_info_t {
 } btuart_info_t;
 
 
-void btuart_config(dev_link_t *link);
-void btuart_release(dev_link_t *link);
-int btuart_event(event_t event, int priority, event_callback_args_t *args);
+static void btuart_config(dev_link_t *link);
+static void btuart_release(dev_link_t *link);
+static int btuart_event(event_t event, int priority, event_callback_args_t *args);
 
 static dev_info_t dev_info = "btuart_cs";
 
-dev_link_t *btuart_attach(void);
-void btuart_detach(dev_link_t *);
+static dev_link_t *btuart_attach(void);
+static void btuart_detach(dev_link_t *);
 
 static dev_link_t *dev_list = NULL;
 
@@ -148,7 +143,7 @@ static int btuart_write(unsigned int iobase, int fifo_size, __u8 *buf, int len)
 static void btuart_write_wakeup(btuart_info_t *info)
 {
 	if (!info) {
-		printk(KERN_WARNING "btuart_cs: Call of write_wakeup for unknown device.\n");
+		BT_ERR("Unknown device");
 		return;
 	}
 
@@ -181,7 +176,7 @@ static void btuart_write_wakeup(btuart_info_t *info)
 			skb_queue_head(&(info->txq), skb);
 		}
 
-		info->hdev.stat.byte_tx += len;
+		info->hdev->stat.byte_tx += len;
 
 	} while (test_bit(XMIT_WAKEUP, &(info->tx_state)));
 
@@ -195,28 +190,28 @@ static void btuart_receive(btuart_info_t *info)
 	int boguscount = 0;
 
 	if (!info) {
-		printk(KERN_WARNING "btuart_cs: Call of receive for unknown device.\n");
+		BT_ERR("Unknown device");
 		return;
 	}
 
 	iobase = info->link.io.BasePort1;
 
 	do {
-		info->hdev.stat.byte_rx++;
+		info->hdev->stat.byte_rx++;
 
 		/* Allocate packet */
 		if (info->rx_skb == NULL) {
 			info->rx_state = RECV_WAIT_PACKET_TYPE;
 			info->rx_count = 0;
 			if (!(info->rx_skb = bt_skb_alloc(HCI_MAX_FRAME_SIZE, GFP_ATOMIC))) {
-				printk(KERN_WARNING "btuart_cs: Can't allocate mem for new packet.\n");
+				BT_ERR("Can't allocate mem for new packet");
 				return;
 			}
 		}
 
 		if (info->rx_state == RECV_WAIT_PACKET_TYPE) {
 
-			info->rx_skb->dev = (void *)&(info->hdev);
+			info->rx_skb->dev = (void *) info->hdev;
 			info->rx_skb->pkt_type = inb(iobase + UART_RX);
 
 			switch (info->rx_skb->pkt_type) {
@@ -238,9 +233,9 @@ static void btuart_receive(btuart_info_t *info)
 
 			default:
 				/* Unknown packet */
-				printk(KERN_WARNING "btuart_cs: Unknown HCI packet with type 0x%02x received.\n", info->rx_skb->pkt_type);
-				info->hdev.stat.err_rx++;
-				clear_bit(HCI_RUNNING, &(info->hdev.flags));
+				BT_ERR("Unknown HCI packet with type 0x%02x received", info->rx_skb->pkt_type);
+				info->hdev->stat.err_rx++;
+				clear_bit(HCI_RUNNING, &(info->hdev->flags));
 
 				kfree_skb(info->rx_skb);
 				info->rx_skb = NULL;
@@ -301,16 +296,16 @@ static void btuart_receive(btuart_info_t *info)
 }
 
 
-void btuart_interrupt(int irq, void *dev_inst, struct pt_regs *regs)
+static irqreturn_t btuart_interrupt(int irq, void *dev_inst, struct pt_regs *regs)
 {
 	btuart_info_t *info = dev_inst;
 	unsigned int iobase;
 	int boguscount = 0;
 	int iir, lsr;
 
-	if (!info) {
-		printk(KERN_WARNING "btuart_cs: Call of irq %d for unknown device.\n", irq);
-		return;
+	if (!info || !info->hdev) {
+		BT_ERR("Call of irq %d for unknown device", irq);
+		return IRQ_NONE;
 	}
 
 	iobase = info->link.io.BasePort1;
@@ -325,7 +320,7 @@ void btuart_interrupt(int irq, void *dev_inst, struct pt_regs *regs)
 
 		switch (iir) {
 		case UART_IIR_RLSI:
-			printk(KERN_NOTICE "btuart_cs: RLSI\n");
+			BT_ERR("RLSI");
 			break;
 		case UART_IIR_RDI:
 			/* Receive interrupt */
@@ -338,7 +333,7 @@ void btuart_interrupt(int irq, void *dev_inst, struct pt_regs *regs)
 			}
 			break;
 		default:
-			printk(KERN_NOTICE "btuart_cs: Unhandled IIR=%#x\n", iir);
+			BT_ERR("Unhandled IIR=%#x", iir);
 			break;
 		}
 
@@ -351,6 +346,8 @@ void btuart_interrupt(int irq, void *dev_inst, struct pt_regs *regs)
 	}
 
 	spin_unlock(&(info->lock));
+
+	return IRQ_HANDLED;
 }
 
 
@@ -363,7 +360,7 @@ static void btuart_change_speed(btuart_info_t *info, unsigned int speed)
 	int divisor;
 
 	if (!info) {
-		printk(KERN_WARNING "btuart_cs: Call of change speed for unknown device.\n");
+		BT_ERR("Unknown device");
 		return;
 	}
 
@@ -445,7 +442,7 @@ static int btuart_hci_send_frame(struct sk_buff *skb)
 	struct hci_dev *hdev = (struct hci_dev *)(skb->dev);
 
 	if (!hdev) {
-		printk(KERN_WARNING "btuart_cs: Frame for unknown HCI device (hdev=NULL).");
+		BT_ERR("Frame for unknown HCI device (hdev=NULL)");
 		return -ENODEV;
 	}
 
@@ -488,7 +485,7 @@ static int btuart_hci_ioctl(struct hci_dev *hdev, unsigned int cmd, unsigned lon
 /* ======================== Card services HCI interaction ======================== */
 
 
-int btuart_open(btuart_info_t *info)
+static int btuart_open(btuart_info_t *info)
 {
 	unsigned long flags;
 	unsigned int iobase = info->link.io.BasePort1;
@@ -501,6 +498,27 @@ int btuart_open(btuart_info_t *info)
 	info->rx_state = RECV_WAIT_PACKET_TYPE;
 	info->rx_count = 0;
 	info->rx_skb = NULL;
+
+	/* Initialize HCI device */
+	hdev = hci_alloc_dev();
+	if (!hdev) {
+		BT_ERR("Can't allocate HCI device");
+		return -ENOMEM;
+	}
+
+	info->hdev = hdev;
+
+	hdev->type = HCI_PCCARD;
+	hdev->driver_data = info;
+
+	hdev->open     = btuart_hci_open;
+	hdev->close    = btuart_hci_close;
+	hdev->flush    = btuart_hci_flush;
+	hdev->send     = btuart_hci_send_frame;
+	hdev->destruct = btuart_hci_destruct;
+	hdev->ioctl    = btuart_hci_ioctl;
+
+	hdev->owner = THIS_MODULE;
 
 	spin_lock_irqsave(&(info->lock), flags);
 
@@ -522,28 +540,13 @@ int btuart_open(btuart_info_t *info)
 	btuart_change_speed(info, DEFAULT_BAUD_RATE);
 
 	/* Timeout before it is safe to send the first HCI packet */
-	set_current_state(TASK_INTERRUPTIBLE);
-	schedule_timeout(HZ);
+	msleep(1000);
 
-
-	/* Initialize and register HCI device */
-
-	hdev = &(info->hdev);
-
-	hdev->type = HCI_PCCARD;
-	hdev->driver_data = info;
-
-	hdev->open = btuart_hci_open;
-	hdev->close = btuart_hci_close;
-	hdev->flush = btuart_hci_flush;
-	hdev->send = btuart_hci_send_frame;
-	hdev->destruct = btuart_hci_destruct;
-	hdev->ioctl = btuart_hci_ioctl;
-
-	hdev->owner = THIS_MODULE;
-	
+	/* Register HCI device */
 	if (hci_register_dev(hdev) < 0) {
-		printk(KERN_WARNING "btuart_cs: Can't register HCI device %s.\n", hdev->name);
+		BT_ERR("Can't register HCI device");
+		info->hdev = NULL;
+		hci_free_dev(hdev);
 		return -ENODEV;
 	}
 
@@ -551,11 +554,14 @@ int btuart_open(btuart_info_t *info)
 }
 
 
-int btuart_close(btuart_info_t *info)
+static int btuart_close(btuart_info_t *info)
 {
 	unsigned long flags;
 	unsigned int iobase = info->link.io.BasePort1;
-	struct hci_dev *hdev = &(info->hdev);
+	struct hci_dev *hdev = info->hdev;
+
+	if (!hdev)
+		return -ENODEV;
 
 	btuart_hci_close(hdev);
 
@@ -570,17 +576,19 @@ int btuart_close(btuart_info_t *info)
 	spin_unlock_irqrestore(&(info->lock), flags);
 
 	if (hci_unregister_dev(hdev) < 0)
-		printk(KERN_WARNING "btuart_cs: Can't unregister HCI device %s.\n", hdev->name);
+		BT_ERR("Can't unregister HCI device %s", hdev->name);
+
+	hci_free_dev(hdev);
 
 	return 0;
 }
 
-dev_link_t *btuart_attach(void)
+static dev_link_t *btuart_attach(void)
 {
 	btuart_info_t *info;
 	client_reg_t client_reg;
 	dev_link_t *link;
-	int i, ret;
+	int ret;
 
 	/* Create new info device */
 	info = kmalloc(sizeof(*info), GFP_KERNEL);
@@ -594,13 +602,7 @@ dev_link_t *btuart_attach(void)
 	link->io.Attributes1 = IO_DATA_PATH_WIDTH_8;
 	link->io.NumPorts1 = 8;
 	link->irq.Attributes = IRQ_TYPE_EXCLUSIVE | IRQ_HANDLE_PRESENT;
-	link->irq.IRQInfo1 = IRQ_INFO2_VALID | IRQ_LEVEL_ID;
-
-	if (irq_list[0] == -1)
-		link->irq.IRQInfo2 = irq_mask;
-	else
-		for (i = 0; i < 4; i++)
-			link->irq.IRQInfo2 |= 1 << irq_list[i];
+	link->irq.IRQInfo1 = IRQ_LEVEL_ID;
 
 	link->irq.Handler = btuart_interrupt;
 	link->irq.Instance = info;
@@ -613,7 +615,6 @@ dev_link_t *btuart_attach(void)
 	link->next = dev_list;
 	dev_list = link;
 	client_reg.dev_info = &dev_info;
-	client_reg.Attributes = INFO_IO_CLIENT | INFO_CARD_SHARE;
 	client_reg.EventMask =
 		CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL |
 		CS_EVENT_RESET_PHYSICAL | CS_EVENT_CARD_RESET |
@@ -622,7 +623,7 @@ dev_link_t *btuart_attach(void)
 	client_reg.Version = 0x0210;
 	client_reg.event_callback_args.client_data = link;
 
-	ret = CardServices(RegisterClient, &link->handle, &client_reg);
+	ret = pcmcia_register_client(&link->handle, &client_reg);
 	if (ret != CS_SUCCESS) {
 		cs_error(link->handle, RegisterClient, ret);
 		btuart_detach(link);
@@ -633,7 +634,7 @@ dev_link_t *btuart_attach(void)
 }
 
 
-void btuart_detach(dev_link_t *link)
+static void btuart_detach(dev_link_t *link)
 {
 	btuart_info_t *info = link->priv;
 	dev_link_t **linkp;
@@ -651,7 +652,7 @@ void btuart_detach(dev_link_t *link)
 		btuart_release(link);
 
 	if (link->handle) {
-		ret = CardServices(DeregisterClient, link->handle);
+		ret = pcmcia_deregister_client(link->handle);
 		if (ret != CS_SUCCESS)
 			cs_error(link->handle, DeregisterClient, ret);
 	}
@@ -662,29 +663,34 @@ void btuart_detach(dev_link_t *link)
 	kfree(info);
 }
 
-
-static int get_tuple(int fn, client_handle_t handle, tuple_t *tuple, cisparse_t *parse)
+static int get_tuple(client_handle_t handle, tuple_t *tuple, cisparse_t *parse)
 {
 	int i;
 
-	i = CardServices(fn, handle, tuple);
-	if (i != CS_SUCCESS)
-		return CS_NO_MORE_ITEMS;
-
-	i = CardServices(GetTupleData, handle, tuple);
+	i = pcmcia_get_tuple_data(handle, tuple);
 	if (i != CS_SUCCESS)
 		return i;
 
-	return CardServices(ParseTuple, handle, tuple, parse);
+	return pcmcia_parse_tuple(handle, tuple, parse);
 }
 
-
-#define first_tuple(a, b, c) get_tuple(GetFirstTuple, a, b, c)
-#define next_tuple(a, b, c) get_tuple(GetNextTuple, a, b, c)
-
-void btuart_config(dev_link_t *link)
+static int first_tuple(client_handle_t handle, tuple_t *tuple, cisparse_t *parse)
 {
-	static ioaddr_t base[5] = { 0x3f8, 0x2f8, 0x3e8, 0x2e8, 0x0 };
+	if (pcmcia_get_first_tuple(handle, tuple) != CS_SUCCESS)
+		return CS_NO_MORE_ITEMS;
+	return get_tuple(handle, tuple, parse);
+}
+
+static int next_tuple(client_handle_t handle, tuple_t *tuple, cisparse_t *parse)
+{
+	if (pcmcia_get_next_tuple(handle, tuple) != CS_SUCCESS)
+		return CS_NO_MORE_ITEMS;
+	return get_tuple(handle, tuple, parse);
+}
+
+static void btuart_config(dev_link_t *link)
+{
+	static kio_addr_t base[5] = { 0x3f8, 0x2f8, 0x3e8, 0x2e8, 0x0 };
 	client_handle_t handle = link->handle;
 	btuart_info_t *info = link->priv;
 	tuple_t tuple;
@@ -711,7 +717,7 @@ void btuart_config(dev_link_t *link)
 
 	/* Configure card */
 	link->state |= DEV_CONFIG;
-	i = CardServices(GetConfigurationInfo, handle, &config);
+	i = pcmcia_get_configuration_info(handle, &config);
 	link->conf.Vcc = config.Vcc;
 
 	/* First pass: look for a config entry that looks normal. */
@@ -732,7 +738,7 @@ void btuart_config(dev_link_t *link)
 				link->conf.ConfigIndex = cf->index;
 				link->io.BasePort1 = cf->io.win[0].base;
 				link->io.IOAddrLines = (try == 0) ? 16 : cf->io.flags & CISTPL_IO_LINES_MASK;
-				i = CardServices(RequestIO, link->handle, &link->io);
+				i = pcmcia_request_io(link->handle, &link->io);
 				if (i == CS_SUCCESS)
 					goto found_port;
 			}
@@ -752,7 +758,7 @@ next_entry:
 			for (j = 0; j < 5; j++) {
 				link->io.BasePort1 = base[j];
 				link->io.IOAddrLines = base[j] ? 16 : 3;
-				i = CardServices(RequestIO, link->handle, &link->io);
+				i = pcmcia_request_io(link->handle, &link->io);
 				if (i == CS_SUCCESS)
 					goto found_port;
 			}
@@ -762,18 +768,18 @@ next_entry:
 
 found_port:
 	if (i != CS_SUCCESS) {
-		printk(KERN_NOTICE "btuart_cs: No usable port range found. Giving up.\n");
+		BT_ERR("No usable port range found");
 		cs_error(link->handle, RequestIO, i);
 		goto failed;
 	}
 
-	i = CardServices(RequestIRQ, link->handle, &link->irq);
+	i = pcmcia_request_irq(link->handle, &link->irq);
 	if (i != CS_SUCCESS) {
 		cs_error(link->handle, RequestIRQ, i);
 		link->irq.AssignedIRQ = 0;
 	}
 
-	i = CardServices(RequestConfiguration, link->handle, &link->conf);
+	i = pcmcia_request_configuration(link->handle, &link->conf);
 	if (i != CS_SUCCESS) {
 		cs_error(link->handle, RequestConfiguration, i);
 		goto failed;
@@ -782,7 +788,7 @@ found_port:
 	if (btuart_open(info) != 0)
 		goto failed;
 
-	strcpy(info->node.dev_name, info->hdev.name);
+	strcpy(info->node.dev_name, info->hdev->name);
 	link->dev = &info->node;
 	link->state &= ~DEV_CONFIG_PENDING;
 
@@ -796,7 +802,7 @@ failed:
 }
 
 
-void btuart_release(dev_link_t *link)
+static void btuart_release(dev_link_t *link)
 {
 	btuart_info_t *info = link->priv;
 
@@ -805,15 +811,15 @@ void btuart_release(dev_link_t *link)
 
 	link->dev = NULL;
 
-	CardServices(ReleaseConfiguration, link->handle);
-	CardServices(ReleaseIO, link->handle, &link->io);
-	CardServices(ReleaseIRQ, link->handle, &link->irq);
+	pcmcia_release_configuration(link->handle);
+	pcmcia_release_io(link->handle, &link->io);
+	pcmcia_release_irq(link->handle, &link->irq);
 
 	link->state &= ~DEV_CONFIG;
 }
 
 
-int btuart_event(event_t event, int priority, event_callback_args_t *args)
+static int btuart_event(event_t event, int priority, event_callback_args_t *args)
 {
 	dev_link_t *link = args->client_data;
 	btuart_info_t *info = link->priv;
@@ -835,14 +841,14 @@ int btuart_event(event_t event, int priority, event_callback_args_t *args)
 		/* Fall through... */
 	case CS_EVENT_RESET_PHYSICAL:
 		if (link->state & DEV_CONFIG)
-			CardServices(ReleaseConfiguration, link->handle);
+			pcmcia_release_configuration(link->handle);
 		break;
 	case CS_EVENT_PM_RESUME:
 		link->state &= ~DEV_SUSPEND;
 		/* Fall through... */
 	case CS_EVENT_CARD_RESET:
 		if (DEV_OK(link))
-			CardServices(RequestConfiguration, link->handle, &link->conf);
+			pcmcia_request_configuration(link->handle, &link->conf);
 		break;
 	}
 
@@ -867,10 +873,7 @@ static int __init init_btuart_cs(void)
 static void __exit exit_btuart_cs(void)
 {
 	pcmcia_unregister_driver(&btuart_driver);
-
-	/* XXX: this really needs to move into generic code.. */
-	while (dev_list != NULL)
-		btuart_detach(dev_list);
+	BUG_ON(dev_list != NULL);
 }
 
 module_init(init_btuart_cs);

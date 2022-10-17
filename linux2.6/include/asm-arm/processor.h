@@ -19,13 +19,8 @@
 
 #ifdef __KERNEL__
 
-#define MCA_bus 0
-#define MCA_bus__is_a_macro
-
-#include <asm/atomic.h>
 #include <asm/ptrace.h>
 #include <asm/procinfo.h>
-#include <asm/arch/memory.h>
 #include <asm/types.h>
 
 #define KERNEL_STACK_SIZE	PAGE_SIZE

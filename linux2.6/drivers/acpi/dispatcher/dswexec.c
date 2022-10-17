@@ -6,7 +6,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -60,17 +60,18 @@
  * Dispatch table for opcode classes
  */
 static ACPI_EXECUTE_OP      acpi_gbl_op_type_dispatch [] = {
-			 acpi_ex_opcode_1A_0T_0R,
-			 acpi_ex_opcode_1A_0T_1R,
-			 acpi_ex_opcode_1A_1T_0R,
-			 acpi_ex_opcode_1A_1T_1R,
-			 acpi_ex_opcode_2A_0T_0R,
-			 acpi_ex_opcode_2A_0T_1R,
-			 acpi_ex_opcode_2A_1T_1R,
-			 acpi_ex_opcode_2A_2T_1R,
-			 acpi_ex_opcode_3A_0T_0R,
-			 acpi_ex_opcode_3A_1T_1R,
-			 acpi_ex_opcode_6A_0T_1R};
+			  acpi_ex_opcode_0A_0T_1R,
+			  acpi_ex_opcode_1A_0T_0R,
+			  acpi_ex_opcode_1A_0T_1R,
+			  acpi_ex_opcode_1A_1T_0R,
+			  acpi_ex_opcode_1A_1T_1R,
+			  acpi_ex_opcode_2A_0T_0R,
+			  acpi_ex_opcode_2A_0T_1R,
+			  acpi_ex_opcode_2A_1T_1R,
+			  acpi_ex_opcode_2A_2T_1R,
+			  acpi_ex_opcode_3A_0T_0R,
+			  acpi_ex_opcode_3A_1T_1R,
+			  acpi_ex_opcode_6A_0T_1R};
 
 /*****************************************************************************
  *
@@ -398,28 +399,52 @@ acpi_ds_exec_end_op (
 			goto cleanup;
 		}
 
-		/* Resolve all operands */
+		/*
+		 * All opcodes require operand resolution, with the only exceptions
+		 * being the object_type and size_of operators.
+		 */
+		if (!(walk_state->op_info->flags & AML_NO_OPERAND_RESOLVE)) {
+			/* Resolve all operands */
 
-		status = acpi_ex_resolve_operands (walk_state->opcode,
-				  &(walk_state->operands [walk_state->num_operands -1]),
-				  walk_state);
+			status = acpi_ex_resolve_operands (walk_state->opcode,
+					  &(walk_state->operands [walk_state->num_operands -1]),
+					  walk_state);
+			if (ACPI_SUCCESS (status)) {
+				ACPI_DUMP_OPERANDS (ACPI_WALK_OPERANDS, ACPI_IMODE_EXECUTE,
+						  acpi_ps_get_opcode_name (walk_state->opcode),
+						  walk_state->num_operands, "after ex_resolve_operands");
+			}
+		}
+
 		if (ACPI_SUCCESS (status)) {
-			ACPI_DUMP_OPERANDS (ACPI_WALK_OPERANDS, ACPI_IMODE_EXECUTE,
-					  acpi_ps_get_opcode_name (walk_state->opcode),
-					  walk_state->num_operands, "after ex_resolve_operands");
-
 			/*
 			 * Dispatch the request to the appropriate interpreter handler
 			 * routine.  There is one routine per opcode "type" based upon the
 			 * number of opcode arguments and return type.
 			 */
-			status = acpi_gbl_op_type_dispatch [op_type] (walk_state);
+			status = acpi_gbl_op_type_dispatch[op_type] (walk_state);
 		}
 		else {
-			ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
-				"[%s]: Could not resolve operands, %s\n",
-				acpi_ps_get_opcode_name (walk_state->opcode),
-				acpi_format_exception (status)));
+			/*
+			 * Treat constructs of the form "Store(local_x,local_x)" as noops when the
+			 * Local is uninitialized.
+			 */
+			if  ((status == AE_AML_UNINITIALIZED_LOCAL) &&
+				(walk_state->opcode == AML_STORE_OP) &&
+				(walk_state->operands[0]->common.type == ACPI_TYPE_LOCAL_REFERENCE) &&
+				(walk_state->operands[1]->common.type == ACPI_TYPE_LOCAL_REFERENCE) &&
+				(walk_state->operands[0]->reference.opcode ==
+				 walk_state->operands[1]->reference.opcode) &&
+				(walk_state->operands[0]->reference.offset ==
+				 walk_state->operands[1]->reference.offset)) {
+				status = AE_OK;
+			}
+			else {
+				ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
+					"[%s]: Could not resolve operands, %s\n",
+					acpi_ps_get_opcode_name (walk_state->opcode),
+					acpi_format_exception (status)));
+			}
 		}
 
 		/* Always delete the argument objects and clear the operand stack */
@@ -553,6 +578,13 @@ acpi_ds_exec_end_op (
 				break;
 			}
 
+			/* Done with this result state (Now that operand stack is built) */
+
+			status = acpi_ds_result_stack_pop (walk_state);
+			if (ACPI_FAILURE (status)) {
+				goto cleanup;
+			}
+
 			/*
 			 * If a result object was returned from above, push it on the
 			 * current result stack
@@ -625,7 +657,8 @@ acpi_ds_exec_end_op (
 	 * conditional predicate
 	 */
 
-	if ((walk_state->control_state) &&
+	if ((ACPI_SUCCESS (status)) &&
+		(walk_state->control_state) &&
 		(walk_state->control_state->common.state ==
 			ACPI_CONTROL_PREDICATE_EXECUTING) &&
 		(walk_state->control_state->control.predicate_op == op)) {
@@ -635,6 +668,19 @@ acpi_ds_exec_end_op (
 
 
 cleanup:
+
+	/* Invoke exception handler on error */
+
+	if (ACPI_FAILURE (status) &&
+		acpi_gbl_exception_handler &&
+		!(status & AE_CODE_CONTROL)) {
+		acpi_ex_exit_interpreter ();
+		status = acpi_gbl_exception_handler (status,
+				 walk_state->method_node->name.integer, walk_state->opcode,
+				 walk_state->aml_offset, NULL);
+		acpi_ex_enter_interpreter ();
+	}
+
 	if (walk_state->result_obj) {
 		/* Break to debugger to display result */
 

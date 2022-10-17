@@ -23,12 +23,15 @@ typedef struct {
 	struct task_struct * task;
 	const char *base_file;
 #endif
+#ifdef CONFIG_PREEMPT
+	unsigned int break_lock;
+#endif
 } spinlock_t;
 
 #ifdef CONFIG_DEBUG_SPINLOCK
-#define SPIN_LOCK_UNLOCKED (spinlock_t) {0, -1, 0, 0, 0, 0}
+#define SPIN_LOCK_UNLOCKED (spinlock_t) {0, -1, 0, NULL, NULL, NULL}
 #define spin_lock_init(x)						\
-	((x)->lock = 0, (x)->on_cpu = -1, (x)->previous = 0, (x)->task = 0)
+	((x)->lock = 0, (x)->on_cpu = -1, (x)->previous = NULL, (x)->task = NULL)
 #else
 #define SPIN_LOCK_UNLOCKED	(spinlock_t) { 0 }
 #define spin_lock_init(x)	((x)->lock = 0)
@@ -36,6 +39,7 @@ typedef struct {
 
 #define spin_is_locked(x)	((x)->lock != 0)
 #define spin_unlock_wait(x)	({ do { barrier(); } while ((x)->lock); })
+#define _raw_spin_lock_flags(lock, flags) _raw_spin_lock(lock)
 
 #ifdef CONFIG_DEBUG_SPINLOCK
 extern void _raw_spin_unlock(spinlock_t * lock);
@@ -94,13 +98,15 @@ static inline int _raw_spin_trylock(spinlock_t *lock)
 /***********************************************************/
 
 typedef struct {
-	volatile int write_lock:1, read_counter:31;
+	volatile unsigned int write_lock:1, read_counter:31;
+#ifdef CONFIG_PREEMPT
+	unsigned int break_lock;
+#endif
 } /*__attribute__((aligned(32)))*/ rwlock_t;
 
 #define RW_LOCK_UNLOCKED (rwlock_t) { 0, 0 }
 
 #define rwlock_init(x)	do { *(x) = RW_LOCK_UNLOCKED; } while(0)
-#define rwlock_is_locked(x)	(*(volatile int *)(x) != 0)
 
 #ifdef CONFIG_DEBUG_RWLOCK
 extern void _raw_write_lock(rwlock_t * lock);
@@ -123,7 +129,7 @@ static inline void _raw_write_lock(rwlock_t * lock)
 	"	br	1b\n"
 	".previous"
 	: "=m" (*lock), "=&r" (regx)
-	: "0" (*lock) : "memory");
+	: "m" (*lock) : "memory");
 }
 
 static inline void _raw_read_lock(rwlock_t * lock)
@@ -146,6 +152,29 @@ static inline void _raw_read_lock(rwlock_t * lock)
 	: "m" (*lock) : "memory");
 }
 #endif /* CONFIG_DEBUG_RWLOCK */
+
+static inline int _raw_write_trylock(rwlock_t * lock)
+{
+	long regx;
+	int success;
+
+	__asm__ __volatile__(
+	"1:	ldl_l	%1,%0\n"
+	"	lda	%2,0\n"
+	"	bne	%1,2f\n"
+	"	or	$31,1,%1\n"
+	"	stl_c	%1,%0\n"
+	"	beq	%1,6f\n"
+	"	lda	%2,1\n"
+	"2:	mb\n"
+	".subsection 2\n"
+	"6:	br	1b\n"
+	".previous"
+	: "=m" (*lock), "=&r" (regx), "=&r" (success)
+	: "m" (*lock) : "memory");
+
+	return success;
+}
 
 static inline void _raw_write_unlock(rwlock_t * lock)
 {

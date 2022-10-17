@@ -27,6 +27,7 @@
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/gameport.h>
+#include <linux/moduleparam.h>
 #include <sound/core.h>
 #include <sound/control.h>
 #include <sound/pcm.h>
@@ -36,11 +37,8 @@
 #else
 #include <sound/ak4531_codec.h>
 #endif
-#define SNDRV_GET_ID
 #include <sound/initval.h>
 #include <sound/asoundef.h>
-
-#define chip_t ensoniq_t
 
 #ifndef CHIP1371
 #undef CHIP1370
@@ -56,15 +54,14 @@
 
 MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>, Thomas Sailer <sailer@ife.ee.ethz.ch>");
 MODULE_LICENSE("GPL");
-MODULE_CLASSES("{sound}");
 #ifdef CHIP1370
 MODULE_DESCRIPTION("Ensoniq AudioPCI ES1370");
-MODULE_DEVICES("{{Ensoniq,AudioPCI-97 ES1370},"
+MODULE_SUPPORTED_DEVICE("{{Ensoniq,AudioPCI-97 ES1370},"
 	        "{Creative Labs,SB PCI64/128 (ES1370)}}");
 #endif
 #ifdef CHIP1371
 MODULE_DESCRIPTION("Ensoniq/Creative AudioPCI ES1371+");
-MODULE_DEVICES("{{Ensoniq,AudioPCI ES1371/73},"
+MODULE_SUPPORTED_DEVICE("{{Ensoniq,AudioPCI ES1371/73},"
 		"{Ensoniq,AudioPCI ES1373},"
 		"{Creative Labs,Ectiva EV1938},"
 		"{Creative Labs,SB PCI64/128 (ES1371/73)},"
@@ -72,19 +69,36 @@ MODULE_DEVICES("{{Ensoniq,AudioPCI ES1371/73},"
 		"{Ectiva,EV1938}}");
 #endif
 
+#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
+#define SUPPORT_JOYSTICK
+#endif
+
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
 static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP;	/* Enable switches */
+#ifdef SUPPORT_JOYSTICK
+#ifdef CHIP1371
+static int joystick_port[SNDRV_CARDS];
+#else
+static int joystick[SNDRV_CARDS];
+#endif
+#endif
 
-MODULE_PARM(index, "1-" __MODULE_STRING(SNDRV_CARDS) "i");
+module_param_array(index, int, NULL, 0444);
 MODULE_PARM_DESC(index, "Index value for Ensoniq AudioPCI soundcard.");
-MODULE_PARM_SYNTAX(index, SNDRV_INDEX_DESC);
-MODULE_PARM(id, "1-" __MODULE_STRING(SNDRV_CARDS) "s");
+module_param_array(id, charp, NULL, 0444);
 MODULE_PARM_DESC(id, "ID string for Ensoniq AudioPCI soundcard.");
-MODULE_PARM_SYNTAX(id, SNDRV_ID_DESC);
-MODULE_PARM(enable, "1-" __MODULE_STRING(SNDRV_CARDS) "i");
+module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable Ensoniq AudioPCI soundcard.");
-MODULE_PARM_SYNTAX(enable, SNDRV_ENABLE_DESC);
+#ifdef SUPPORT_JOYSTICK
+#ifdef CHIP1371
+module_param_array(joystick_port, int, NULL, 0444);
+MODULE_PARM_DESC(joystick_port, "Joystick port address.");
+#else
+module_param_array(joystick, bool, NULL, 0444);
+MODULE_PARM_DESC(joystick, "Enable joystick.");
+#endif
+#endif /* SUPPORT_JOYSTICK */
 
 #ifndef PCI_DEVICE_ID_ENSONIQ_CT5880
 #define PCI_DEVICE_ID_ENSONIQ_CT5880    0x5880
@@ -357,6 +371,7 @@ typedef struct _snd_ensoniq ensoniq_t;
 
 struct _snd_ensoniq {
 	spinlock_t reg_lock;
+	struct semaphore src_mutex;
 
 	int irq;
 
@@ -365,7 +380,6 @@ struct _snd_ensoniq {
 	unsigned long capture3size;
 
 	unsigned long port;
-	struct resource *res_port;
 	unsigned int mode;
 	unsigned int uartm;	/* UART mode */
 
@@ -412,13 +426,11 @@ struct _snd_ensoniq {
 	unsigned int spdif_stream;
 
 #ifdef CHIP1370
-	unsigned char *bugbuf;
-	dma_addr_t bugbuf_addr;
+	struct snd_dma_buffer dma_bug;
 #endif
 
-#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
+#ifdef SUPPORT_JOYSTICK
 	struct gameport gameport;
-	struct semaphore joy_sem;	// gameport configuration semaphore
 #endif
 };
 
@@ -501,6 +513,7 @@ static unsigned int snd_es1371_wait_src_ready(ensoniq_t * ensoniq)
 		r = inl(ES_REG(ensoniq, 1371_SMPRATE));
 		if ((r & ES_1371_SRC_RAM_BUSY) == 0)
 			return r;
+		cond_resched();
 	}
 	snd_printk("wait source ready timeout 0x%lx [0x%x]\n", ES_REG(ensoniq, 1371_SMPRATE), r);
 	return 0;
@@ -559,25 +572,19 @@ static void snd_es1371_src_write(ensoniq_t * ensoniq,
 static void snd_es1370_codec_write(ak4531_t *ak4531,
 				   unsigned short reg, unsigned short val)
 {
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, ak4531->private_data, return);
-	unsigned long flags;
+	ensoniq_t *ensoniq = ak4531->private_data;
 	unsigned long end_time = jiffies + HZ / 10;
 
 #if 0
 	printk("CODEC WRITE: reg = 0x%x, val = 0x%x (0x%x), creg = 0x%x\n", reg, val, ES_1370_CODEC_WRITE(reg, val), ES_REG(ensoniq, 1370_CODEC));
 #endif
 	do {
-		spin_lock_irqsave(&ensoniq->reg_lock, flags);
 		if (!(inl(ES_REG(ensoniq, STATUS)) & ES_1370_CSTAT)) {
 			outw(ES_1370_CODEC_WRITE(reg, val), ES_REG(ensoniq, 1370_CODEC));
-			spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
 			return;
 		}
-		spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
-#if 0
 		set_current_state(TASK_UNINTERRUPTIBLE);
 		schedule_timeout(1);
-#endif
 	} while (time_after(end_time, jiffies));
 	snd_printk("codec write timeout, status = 0x%x\n", inl(ES_REG(ensoniq, STATUS)));
 }
@@ -589,12 +596,11 @@ static void snd_es1370_codec_write(ak4531_t *ak4531,
 static void snd_es1371_codec_write(ac97_t *ac97,
 				   unsigned short reg, unsigned short val)
 {
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, ac97->private_data, return);
-	unsigned long flags;
+	ensoniq_t *ensoniq = ac97->private_data;
 	unsigned int t, x;
 
+	down(&ensoniq->src_mutex);
 	for (t = 0; t < POLL_COUNT; t++) {
-		spin_lock_irqsave(&ensoniq->reg_lock, flags);
 		if (!(inl(ES_REG(ensoniq, 1371_CODEC)) & ES_1371_CODEC_WIP)) {
 			/* save the current state for latter */
 			x = snd_es1371_wait_src_ready(ensoniq);
@@ -616,24 +622,23 @@ static void snd_es1371_codec_write(ac97_t *ac97,
 			/* restore SRC reg */
 			snd_es1371_wait_src_ready(ensoniq);
 			outl(x, ES_REG(ensoniq, 1371_SMPRATE));
-			spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+			up(&ensoniq->src_mutex);
 			return;
 		}
-		spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
 	}
+	up(&ensoniq->src_mutex);
 	snd_printk("codec write timeout at 0x%lx [0x%x]\n", ES_REG(ensoniq, 1371_CODEC), inl(ES_REG(ensoniq, 1371_CODEC)));
 }
 
 static unsigned short snd_es1371_codec_read(ac97_t *ac97,
 					    unsigned short reg)
 {
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, ac97->private_data, return -ENXIO);
-	unsigned long flags;
+	ensoniq_t *ensoniq = ac97->private_data;
 	unsigned int t, x, fail = 0;
 
       __again:
+	down(&ensoniq->src_mutex);
 	for (t = 0; t < POLL_COUNT; t++) {
-		spin_lock_irqsave(&ensoniq->reg_lock, flags);
 		if (!(inl(ES_REG(ensoniq, 1371_CODEC)) & ES_1371_CODEC_WIP)) {
 			/* save the current state for latter */
 			x = snd_es1371_wait_src_ready(ensoniq);
@@ -663,19 +668,19 @@ static unsigned short snd_es1371_codec_read(ac97_t *ac97,
 			/* now wait for the stinkin' data (RDY) */
 			for (t = 0; t < POLL_COUNT; t++) {
 				if ((x = inl(ES_REG(ensoniq, 1371_CODEC))) & ES_1371_CODEC_RDY) {
-					spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+					up(&ensoniq->src_mutex);
 					return ES_1371_CODEC_READ(x);
 				}
 			}
-			spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+			up(&ensoniq->src_mutex);
 			if (++fail > 10) {
 				snd_printk("codec read timeout (final) at 0x%lx, reg = 0x%x [0x%x]\n", ES_REG(ensoniq, 1371_CODEC), reg, inl(ES_REG(ensoniq, 1371_CODEC)));
 				return 0;
 			}
 			goto __again;
 		}
-		spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
 	}
+	up(&ensoniq->src_mutex);
 	snd_printk("es1371: codec read timeout at 0x%lx [0x%x]\n", ES_REG(ensoniq, 1371_CODEC), inl(ES_REG(ensoniq, 1371_CODEC)));
 	return 0;
 }
@@ -684,6 +689,7 @@ static void snd_es1371_adc_rate(ensoniq_t * ensoniq, unsigned int rate)
 {
 	unsigned int n, truncm, freq, result;
 
+	down(&ensoniq->src_mutex);
 	n = rate / 3000;
 	if ((1 << n) & ((1 << 15) | (1 << 13) | (1 << 11) | (1 << 9)))
 		n--;
@@ -707,12 +713,14 @@ static void snd_es1371_adc_rate(ensoniq_t * ensoniq, unsigned int rate)
 	snd_es1371_src_write(ensoniq, ES_SMPREG_ADC + ES_SMPREG_VFREQ_FRAC, freq & 0x7fff);
 	snd_es1371_src_write(ensoniq, ES_SMPREG_VOL_ADC, n << 8);
 	snd_es1371_src_write(ensoniq, ES_SMPREG_VOL_ADC + 1, n << 8);
+	up(&ensoniq->src_mutex);
 }
 
 static void snd_es1371_dac1_rate(ensoniq_t * ensoniq, unsigned int rate)
 {
 	unsigned int freq, r;
 
+	down(&ensoniq->src_mutex);
 	freq = ((rate << 15) + 1500) / 3000;
 	r = (snd_es1371_wait_src_ready(ensoniq) & (ES_1371_SRC_DISABLE | ES_1371_DIS_P2 | ES_1371_DIS_R1)) | ES_1371_DIS_P1;
 	outl(r, ES_REG(ensoniq, 1371_SMPRATE));
@@ -722,12 +730,14 @@ static void snd_es1371_dac1_rate(ensoniq_t * ensoniq, unsigned int rate)
 	snd_es1371_src_write(ensoniq, ES_SMPREG_DAC1 + ES_SMPREG_VFREQ_FRAC, freq & 0x7fff);
 	r = (snd_es1371_wait_src_ready(ensoniq) & (ES_1371_SRC_DISABLE | ES_1371_DIS_P2 | ES_1371_DIS_R1));
 	outl(r, ES_REG(ensoniq, 1371_SMPRATE));
+	up(&ensoniq->src_mutex);
 }
 
 static void snd_es1371_dac2_rate(ensoniq_t * ensoniq, unsigned int rate)
 {
 	unsigned int freq, r;
 
+	down(&ensoniq->src_mutex);
 	freq = ((rate << 15) + 1500) / 3000;
 	r = (snd_es1371_wait_src_ready(ensoniq) & (ES_1371_SRC_DISABLE | ES_1371_DIS_P1 | ES_1371_DIS_R1)) | ES_1371_DIS_P2;
 	outl(r, ES_REG(ensoniq, 1371_SMPRATE));
@@ -737,6 +747,7 @@ static void snd_es1371_dac2_rate(ensoniq_t * ensoniq, unsigned int rate)
 	snd_es1371_src_write(ensoniq, ES_SMPREG_DAC2 + ES_SMPREG_VFREQ_FRAC, freq & 0x7fff);
 	r = (snd_es1371_wait_src_ready(ensoniq) & (ES_1371_SRC_DISABLE | ES_1371_DIS_P1 | ES_1371_DIS_R1));
 	outl(r, ES_REG(ensoniq, 1371_SMPRATE));
+	up(&ensoniq->src_mutex);
 }
 
 #endif /* CHIP1371 */
@@ -822,7 +833,6 @@ static int snd_ensoniq_hw_free(snd_pcm_substream_t * substream)
 
 static int snd_ensoniq_playback1_prepare(snd_pcm_substream_t * substream)
 {
-	unsigned long flags;
 	ensoniq_t *ensoniq = snd_pcm_substream_chip(substream);
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	unsigned int mode = 0;
@@ -833,8 +843,15 @@ static int snd_ensoniq_playback1_prepare(snd_pcm_substream_t * substream)
 		mode |= 0x02;
 	if (runtime->channels > 1)
 		mode |= 0x01;
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
+	spin_lock_irq(&ensoniq->reg_lock);
 	ensoniq->ctrl &= ~ES_DAC1_EN;
+#ifdef CHIP1371
+	/* 48k doesn't need SRC (it breaks AC3-passthru) */
+	if (runtime->rate == 48000)
+		ensoniq->ctrl |= ES_1373_BYPASS_P1;
+	else
+		ensoniq->ctrl &= ~ES_1373_BYPASS_P1;
+#endif
 	outl(ensoniq->ctrl, ES_REG(ensoniq, CONTROL));
 	outl(ES_MEM_PAGEO(ES_PAGE_DAC), ES_REG(ensoniq, MEM_PAGE));
 	outl(runtime->dma_addr, ES_REG(ensoniq, DAC1_FRAME));
@@ -852,17 +869,17 @@ static int snd_ensoniq_playback1_prepare(snd_pcm_substream_t * substream)
 	case 44100: ensoniq->ctrl |= ES_1370_WTSRSEL(3); break;
 	default: snd_BUG();
 	}
-#else
-	snd_es1371_dac1_rate(ensoniq, runtime->rate);
 #endif
 	outl(ensoniq->ctrl, ES_REG(ensoniq, CONTROL));
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+	spin_unlock_irq(&ensoniq->reg_lock);
+#ifndef CHIP1370
+	snd_es1371_dac1_rate(ensoniq, runtime->rate);
+#endif
 	return 0;
 }
 
 static int snd_ensoniq_playback2_prepare(snd_pcm_substream_t * substream)
 {
-	unsigned long flags;
 	ensoniq_t *ensoniq = snd_pcm_substream_chip(substream);
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	unsigned int mode = 0;
@@ -873,7 +890,7 @@ static int snd_ensoniq_playback2_prepare(snd_pcm_substream_t * substream)
 		mode |= 0x02;
 	if (runtime->channels > 1)
 		mode |= 0x01;
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
+	spin_lock_irq(&ensoniq->reg_lock);
 	ensoniq->ctrl &= ~ES_DAC2_EN;
 	outl(ensoniq->ctrl, ES_REG(ensoniq, CONTROL));
 	outl(ES_MEM_PAGEO(ES_PAGE_DAC), ES_REG(ensoniq, MEM_PAGE));
@@ -891,17 +908,17 @@ static int snd_ensoniq_playback2_prepare(snd_pcm_substream_t * substream)
 		ensoniq->ctrl |= ES_1370_PCLKDIVO(ES_1370_SRTODIV(runtime->rate));
 		ensoniq->u.es1370.pclkdiv_lock |= ES_MODE_PLAY2;
 	}
-#else
-	snd_es1371_dac2_rate(ensoniq, runtime->rate);
 #endif
 	outl(ensoniq->ctrl, ES_REG(ensoniq, CONTROL));
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+	spin_unlock_irq(&ensoniq->reg_lock);
+#ifndef CHIP1370
+	snd_es1371_dac2_rate(ensoniq, runtime->rate);
+#endif
 	return 0;
 }
 
 static int snd_ensoniq_capture_prepare(snd_pcm_substream_t * substream)
 {
-	unsigned long flags;
 	ensoniq_t *ensoniq = snd_pcm_substream_chip(substream);
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	unsigned int mode = 0;
@@ -912,7 +929,7 @@ static int snd_ensoniq_capture_prepare(snd_pcm_substream_t * substream)
 		mode |= 0x02;
 	if (runtime->channels > 1)
 		mode |= 0x01;
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
+	spin_lock_irq(&ensoniq->reg_lock);
 	ensoniq->ctrl &= ~ES_ADC_EN;
 	outl(ensoniq->ctrl, ES_REG(ensoniq, CONTROL));
 	outl(ES_MEM_PAGEO(ES_PAGE_ADC), ES_REG(ensoniq, MEM_PAGE));
@@ -928,11 +945,12 @@ static int snd_ensoniq_capture_prepare(snd_pcm_substream_t * substream)
 		ensoniq->ctrl |= ES_1370_PCLKDIVO(ES_1370_SRTODIV(runtime->rate));
 		ensoniq->u.es1370.pclkdiv_lock |= ES_MODE_CAPTURE;
 	}
-#else
-	snd_es1371_adc_rate(ensoniq, runtime->rate);
 #endif
 	outl(ensoniq->ctrl, ES_REG(ensoniq, CONTROL));
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+	spin_unlock_irq(&ensoniq->reg_lock);
+#ifndef CHIP1370
+	snd_es1371_adc_rate(ensoniq, runtime->rate);
+#endif
 	return 0;
 }
 
@@ -1129,31 +1147,29 @@ static int snd_ensoniq_playback1_close(snd_pcm_substream_t * substream)
 
 static int snd_ensoniq_playback2_close(snd_pcm_substream_t * substream)
 {
-	unsigned long flags;
 	ensoniq_t *ensoniq = snd_pcm_substream_chip(substream);
 
 	ensoniq->playback2_substream = NULL;
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
+	spin_lock_irq(&ensoniq->reg_lock);
 #ifdef CHIP1370
 	ensoniq->u.es1370.pclkdiv_lock &= ~ES_MODE_PLAY2;
 #endif
 	ensoniq->mode &= ~ES_MODE_PLAY2;
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+	spin_unlock_irq(&ensoniq->reg_lock);
 	return 0;
 }
 
 static int snd_ensoniq_capture_close(snd_pcm_substream_t * substream)
 {
-	unsigned long flags;
 	ensoniq_t *ensoniq = snd_pcm_substream_chip(substream);
 
 	ensoniq->capture_substream = NULL;
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
+	spin_lock_irq(&ensoniq->reg_lock);
 #ifdef CHIP1370
 	ensoniq->u.es1370.pclkdiv_lock &= ~ES_MODE_CAPTURE;
 #endif
 	ensoniq->mode &= ~ES_MODE_CAPTURE;
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+	spin_unlock_irq(&ensoniq->reg_lock);
 	return 0;
 }
 
@@ -1192,7 +1208,7 @@ static snd_pcm_ops_t snd_ensoniq_capture_ops = {
 
 static void snd_ensoniq_pcm_free(snd_pcm_t *pcm)
 {
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, pcm->private_data, return);
+	ensoniq_t *ensoniq = pcm->private_data;
 	ensoniq->pcm1 = NULL;
 	snd_pcm_lib_preallocate_free_for_all(pcm);
 }
@@ -1229,7 +1245,8 @@ static int __devinit snd_ensoniq_pcm(ensoniq_t * ensoniq, int device, snd_pcm_t 
 #endif
 	ensoniq->pcm1 = pcm;
 
-	snd_pcm_lib_preallocate_pci_pages_for_all(ensoniq->pci, pcm, 64*1024, 128*1024);
+	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
+					      snd_dma_pci_data(ensoniq->pci), 64*1024, 128*1024);
 
 	if (rpcm)
 		*rpcm = pcm;
@@ -1238,7 +1255,7 @@ static int __devinit snd_ensoniq_pcm(ensoniq_t * ensoniq, int device, snd_pcm_t 
 
 static void snd_ensoniq_pcm_free2(snd_pcm_t *pcm)
 {
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, pcm->private_data, return);
+	ensoniq_t *ensoniq = pcm->private_data;
 	ensoniq->pcm2 = NULL;
 	snd_pcm_lib_preallocate_free_for_all(pcm);
 }
@@ -1273,7 +1290,8 @@ static int __devinit snd_ensoniq_pcm2(ensoniq_t * ensoniq, int device, snd_pcm_t
 #endif
 	ensoniq->pcm2 = pcm;
 
-	snd_pcm_lib_preallocate_pci_pages_for_all(ensoniq->pci, pcm, 64*1024, 128*1024);
+	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
+					      snd_dma_pci_data(ensoniq->pci), 64*1024, 128*1024);
 
 	if (rpcm)
 		*rpcm = pcm;
@@ -1371,33 +1389,6 @@ static int snd_ens1373_spdif_stream_put(snd_kcontrol_t * kcontrol,
 	return change;
 }
 
-static snd_kcontrol_new_t snd_ens1373_spdif_default __devinitdata =
-{
-	.iface =	SNDRV_CTL_ELEM_IFACE_PCM,
-	.name =		SNDRV_CTL_NAME_IEC958("",PLAYBACK,DEFAULT),
-	.info =		snd_ens1373_spdif_info,
-	.get =		snd_ens1373_spdif_default_get,
-	.put =		snd_ens1373_spdif_default_put,
-};
-
-static snd_kcontrol_new_t snd_ens1373_spdif_mask __devinitdata =
-{
-	.access =	SNDRV_CTL_ELEM_ACCESS_READ,
-	.iface =	SNDRV_CTL_ELEM_IFACE_PCM,
-	.name =		SNDRV_CTL_NAME_IEC958("",PLAYBACK,MASK),
-	.info =		snd_ens1373_spdif_info,
-	.get =		snd_ens1373_spdif_mask_get
-};
-
-static snd_kcontrol_new_t snd_ens1373_spdif_stream __devinitdata =
-{
-	.iface =	SNDRV_CTL_ELEM_IFACE_PCM,
-	.name =		SNDRV_CTL_NAME_IEC958("",PLAYBACK,PCM_STREAM),
-	.info =		snd_ens1373_spdif_info,
-	.get =		snd_ens1373_spdif_stream_get,
-	.put =		snd_ens1373_spdif_stream_put
-};
-
 #define ES1371_SPDIF(xname) \
 { .iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, .info = snd_es1371_spdif_info, \
   .get = snd_es1371_spdif_get, .put = snd_es1371_spdif_put }
@@ -1441,8 +1432,33 @@ static int snd_es1371_spdif_put(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t 
 	return change;
 }
 
-static snd_kcontrol_new_t snd_es1371_mixer_spdif __devinitdata =
-ES1371_SPDIF("IEC958 Playback Switch");
+
+/* spdif controls */
+static snd_kcontrol_new_t snd_es1371_mixer_spdif[] __devinitdata = {
+	ES1371_SPDIF("IEC958 Playback Switch"),
+	{
+		.iface =	SNDRV_CTL_ELEM_IFACE_PCM,
+		.name =		SNDRV_CTL_NAME_IEC958("",PLAYBACK,DEFAULT),
+		.info =		snd_ens1373_spdif_info,
+		.get =		snd_ens1373_spdif_default_get,
+		.put =		snd_ens1373_spdif_default_put,
+	},
+	{
+		.access =	SNDRV_CTL_ELEM_ACCESS_READ,
+		.iface =	SNDRV_CTL_ELEM_IFACE_PCM,
+		.name =		SNDRV_CTL_NAME_IEC958("",PLAYBACK,MASK),
+		.info =		snd_ens1373_spdif_info,
+		.get =		snd_ens1373_spdif_mask_get
+	},
+	{
+		.iface =	SNDRV_CTL_ELEM_IFACE_PCM,
+		.name =		SNDRV_CTL_NAME_IEC958("",PLAYBACK,PCM_STREAM),
+		.info =		snd_ens1373_spdif_info,
+		.get =		snd_ens1373_spdif_stream_get,
+		.put =		snd_ens1373_spdif_stream_put
+	},
+};
+
 
 static int snd_es1373_rear_info(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t *uinfo)
 {
@@ -1491,9 +1507,59 @@ static snd_kcontrol_new_t snd_ens1373_rear __devinitdata =
 	.put =		snd_es1373_rear_put,
 };
 
+static int snd_es1373_line_info(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_BOOLEAN;
+	uinfo->count = 1;
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = 1;
+	return 0;
+}
+
+static int snd_es1373_line_get(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
+{
+	ensoniq_t *ensoniq = snd_kcontrol_chip(kcontrol);
+	int val = 0;
+	
+	spin_lock_irq(&ensoniq->reg_lock);
+	if ((ensoniq->ctrl & ES_1371_GPIO_OUTM) >= 4)
+	    	val = 1;
+	ucontrol->value.integer.value[0] = val;
+	spin_unlock_irq(&ensoniq->reg_lock);
+	return 0;
+}
+
+static int snd_es1373_line_put(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
+{
+	ensoniq_t *ensoniq = snd_kcontrol_chip(kcontrol);
+	int changed;
+	unsigned int ctrl;
+	
+	spin_lock_irq(&ensoniq->reg_lock);
+	ctrl = ensoniq->ctrl;
+	if (ucontrol->value.integer.value[0])
+		ensoniq->ctrl |= ES_1371_GPIO_OUT(4);	/* switch line-in -> rear out */
+	else
+		ensoniq->ctrl &= ~ES_1371_GPIO_OUT(4);
+	changed = (ctrl != ensoniq->ctrl);
+	if (changed)
+		outl(ensoniq->ctrl, ES_REG(ensoniq, CONTROL));
+	spin_unlock_irq(&ensoniq->reg_lock);
+	return changed;
+}
+
+static snd_kcontrol_new_t snd_ens1373_line __devinitdata =
+{
+	.iface =	SNDRV_CTL_ELEM_IFACE_MIXER,
+	.name =		"Line In->Rear Out Switch",
+	.info =		snd_es1373_line_info,
+	.get =		snd_es1373_line_get,
+	.put =		snd_es1373_line_put,
+};
+
 static void snd_ensoniq_mixer_free_ac97(ac97_t *ac97)
 {
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, ac97->private_data, return);
+	ensoniq_t *ensoniq = ac97->private_data;
 	ensoniq->u.es1371.ac97 = NULL;
 }
 
@@ -1513,23 +1579,29 @@ static struct {
 static int snd_ensoniq_1371_mixer(ensoniq_t * ensoniq)
 {
 	snd_card_t *card = ensoniq->card;
-	ac97_t ac97;
+	ac97_bus_t *pbus;
+	ac97_template_t ac97;
 	int err, idx;
+	static ac97_bus_ops_t ops = {
+		.write = snd_es1371_codec_write,
+		.read = snd_es1371_codec_read,
+	};
+
+	if ((err = snd_ac97_bus(card, 0, &ops, NULL, &pbus)) < 0)
+		return err;
 
 	memset(&ac97, 0, sizeof(ac97));
-	ac97.write = snd_es1371_codec_write;
-	ac97.read = snd_es1371_codec_read;
 	ac97.private_data = ensoniq;
 	ac97.private_free = snd_ensoniq_mixer_free_ac97;
 	ac97.scaps = AC97_SCAP_AUDIO;
-	if ((err = snd_ac97_mixer(card, &ac97, &ensoniq->u.es1371.ac97)) < 0)
+	if ((err = snd_ac97_mixer(pbus, &ac97, &ensoniq->u.es1371.ac97)) < 0)
 		return err;
 	for (idx = 0; es1371_spdif_present[idx].vid != (unsigned short)PCI_ANY_ID; idx++)
 		if (ensoniq->pci->vendor == es1371_spdif_present[idx].vid &&
 		    ensoniq->pci->device == es1371_spdif_present[idx].did &&
 		    ensoniq->rev == es1371_spdif_present[idx].rev) {
 		    	snd_kcontrol_t *kctl;
-			int index = 0; 
+			int i, index = 0; 
 
 			ensoniq->spdif_default = ensoniq->spdif_stream = SNDRV_PCM_DEFAULT_CON_SPDIF;
 			outl(ensoniq->spdif_default, ES_REG(ensoniq, CHANNEL_STATUS));
@@ -1537,36 +1609,40 @@ static int snd_ensoniq_1371_mixer(ensoniq_t * ensoniq)
 		    	if (ensoniq->u.es1371.ac97->ext_id & AC97_EI_SPDIF)
 			    	index++;
 
-		    	kctl = snd_ctl_new1(&snd_es1371_mixer_spdif, ensoniq);
-			kctl->id.index = index;
-			snd_ctl_add(card, kctl);
-
-			kctl = snd_ctl_new1(&snd_ens1373_spdif_default, ensoniq);
-			kctl->id.index = index;
-			snd_ctl_add(card, kctl);
-
-			kctl = snd_ctl_new1(&snd_ens1373_spdif_mask, ensoniq);
-			kctl->id.index = index;
-			snd_ctl_add(card, kctl);
-
-			kctl = snd_ctl_new1(&snd_ens1373_spdif_stream, ensoniq);
-			kctl->id.index = index;
-			snd_ctl_add(card, kctl);
+			for (i = 0; i < (int)ARRAY_SIZE(snd_es1371_mixer_spdif); i++) {
+				kctl = snd_ctl_new1(&snd_es1371_mixer_spdif[i], ensoniq);
+				if (! kctl)
+					return -ENOMEM;
+				kctl->id.index = index;
+				if ((err = snd_ctl_add(card, kctl)) < 0)
+					return err;
+			}
 			break;
 		}
 	if (ensoniq->u.es1371.ac97->ext_id & AC97_EI_SDAC) {
 		/* mirror rear to front speakers */
 		ensoniq->cssr &= ~(ES_1373_REAR_BIT27|ES_1373_REAR_BIT24);
 		ensoniq->cssr |= ES_1373_REAR_BIT26;
-		snd_ctl_add(card, snd_ctl_new1(&snd_ens1373_rear, ensoniq));
+		err = snd_ctl_add(card, snd_ctl_new1(&snd_ens1373_rear, ensoniq));
+		if (err < 0)
+			return err;
 	}
+	if (((ensoniq->subsystem_vendor_id == 0x1274) &&
+	    (ensoniq->subsystem_device_id == 0x2000)) || /* GA-7DXR */
+	    ((ensoniq->subsystem_vendor_id == 0x1458) &&
+	    (ensoniq->subsystem_device_id == 0xa000))) { /* GA-8IEXP */
+		 err = snd_ctl_add(card, snd_ctl_new1(&snd_ens1373_line, ensoniq));
+		 if (err < 0)
+			 return err;
+	}
+
 	return 0;
 }
 
 #endif /* CHIP1371 */
 
-/* generic control callbacks for ens1370 and for joystick */
-#if defined(CHIP1370) || defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
+/* generic control callbacks for ens1370 */
+#ifdef CHIP1370
 #define ENSONIQ_CONTROL(xname, mask) \
 { .iface = SNDRV_CTL_ELEM_IFACE_CARD, .name = xname, .info = snd_ensoniq_control_info, \
   .get = snd_ensoniq_control_get, .put = snd_ensoniq_control_put, \
@@ -1584,41 +1660,35 @@ static int snd_ensoniq_control_info(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_
 static int snd_ensoniq_control_get(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
 {
 	ensoniq_t *ensoniq = snd_kcontrol_chip(kcontrol);
-	unsigned long flags;
 	int mask = kcontrol->private_value;
 	
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
+	spin_lock_irq(&ensoniq->reg_lock);
 	ucontrol->value.integer.value[0] = ensoniq->ctrl & mask ? 1 : 0;
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+	spin_unlock_irq(&ensoniq->reg_lock);
 	return 0;
 }
 
-#ifdef CHIP1370
 static int snd_ensoniq_control_put(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
 {
 	ensoniq_t *ensoniq = snd_kcontrol_chip(kcontrol);
-	unsigned long flags;
 	int mask = kcontrol->private_value;
 	unsigned int nval;
 	int change;
 	
 	nval = ucontrol->value.integer.value[0] ? mask : 0;
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
+	spin_lock_irq(&ensoniq->reg_lock);
 	change = (ensoniq->ctrl & mask) != nval;
 	ensoniq->ctrl &= ~mask;
 	ensoniq->ctrl |= nval;
 	outl(ensoniq->ctrl, ES_REG(ensoniq, CONTROL));
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+	spin_unlock_irq(&ensoniq->reg_lock);
 	return change;
 }
-#endif /* CHIP1370 */
-#endif /* CHIP1370 || GAMEPORT */
 
 /*
  * ENS1370 mixer
  */
 
-#ifdef CHIP1370
 static snd_kcontrol_new_t snd_es1370_controls[2] __devinitdata = {
 ENSONIQ_CONTROL("PCM 0 Output also on Line-In Jack", ES_1370_XCTL0),
 ENSONIQ_CONTROL("Mic +5V bias", ES_1370_XCTL1)
@@ -1628,7 +1698,7 @@ ENSONIQ_CONTROL("Mic +5V bias", ES_1370_XCTL1)
 
 static void snd_ensoniq_mixer_free_ak4531(ak4531_t *ak4531)
 {
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, ak4531->private_data, return);
+	ensoniq_t *ensoniq = ak4531->private_data;
 	ensoniq->u.es1370.ak4531 = NULL;
 }
 
@@ -1653,136 +1723,55 @@ static int __devinit snd_ensoniq_1370_mixer(ensoniq_t * ensoniq)
 	ak4531.private_free = snd_ensoniq_mixer_free_ak4531;
 	if ((err = snd_ak4531_mixer(card, &ak4531, &ensoniq->u.es1370.ak4531)) < 0)
 		return err;
-	for (idx = 0; idx < ES1370_CONTROLS; idx++)
-		snd_ctl_add(card, snd_ctl_new1(&snd_es1370_controls[idx], ensoniq));
+	for (idx = 0; idx < ES1370_CONTROLS; idx++) {
+		err = snd_ctl_add(card, snd_ctl_new1(&snd_es1370_controls[idx], ensoniq));
+		if (err < 0)
+			return err;
+	}
 	return 0;
 }
 
 #endif /* CHIP1370 */
 
-/*
- *  General Switches...
- */
-
-#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
-/* MQ: gameport driver connectivity */
-#define ENSONIQ_JOY_CONTROL(xname, mask) \
-{ .iface = SNDRV_CTL_ELEM_IFACE_CARD, .name = xname, .info = snd_ensoniq_control_info, \
-  .get = snd_ensoniq_control_get, .put = snd_ensoniq_joy_control_put, \
-  .private_value = mask }
-
-static int snd_ensoniq_joy_enable(ensoniq_t *ensoniq)
+#ifdef SUPPORT_JOYSTICK
+static int snd_ensoniq_joystick(ensoniq_t *ensoniq, long port)
 {
-	static unsigned long last_jiffies = 0;
-	unsigned long flags;
-
-	if (!request_region(ensoniq->gameport.io, 8, "ens137x: gameport")) {
-#define ES___GAMEPORT_LOG_DELAY (30*HZ)
-		// avoid log pollution: limit to 2 infos per minute
-		if (time_after(jiffies, last_jiffies + ES___GAMEPORT_LOG_DELAY)) {
-			last_jiffies = jiffies;
-			snd_printk("gameport io port 0x%03x in use", ensoniq->gameport.io);
-		}
-		return 0;
-	}
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
-	ensoniq->ctrl |= ES_JYSTK_EN;
-	outl(ensoniq->ctrl, ES_REG(ensoniq, CONTROL));
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
-	gameport_register_port(&ensoniq->gameport);
-	return 1;
-}
-
-static int snd_ensoniq_joy_disable(ensoniq_t *ensoniq)
-{
-	unsigned long flags;
-
-	gameport_unregister_port(&ensoniq->gameport);
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
-	ensoniq->ctrl &= ~ES_JYSTK_EN;
-	outl(ensoniq->ctrl, ES_REG(ensoniq, CONTROL));
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
-	release_region(ensoniq->gameport.io, 8);
-	return 1;
-}
-
-static int snd_ensoniq_joy_control_put(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
-{
-	ensoniq_t *ensoniq = snd_kcontrol_chip(kcontrol);
-	unsigned int nval;
-	int change;
-
-	down(&ensoniq->joy_sem);
-	nval = ucontrol->value.integer.value[0] ? ES_JYSTK_EN : 0;
-	change = (ensoniq->ctrl & ES_JYSTK_EN) != nval;	// spinlock shouldn't be needed because of joy_sem
-	if (change) {
-		if (nval)	// enable
-			change = snd_ensoniq_joy_enable(ensoniq);
-		else	change = snd_ensoniq_joy_disable(ensoniq);
-	}
-	up(&ensoniq->joy_sem);
-	return change;
-}
-
-static snd_kcontrol_new_t snd_ensoniq_control_joystick __devinitdata =
-ENSONIQ_JOY_CONTROL("Joystick Enable", ES_JYSTK_EN);
-
 #ifdef CHIP1371
-
-#define ES1371_JOYSTICK_ADDR(xname) \
-{ .iface = SNDRV_CTL_ELEM_IFACE_CARD, .name = xname, .info = snd_es1371_joystick_addr_info, \
-  .get = snd_es1371_joystick_addr_get, .put = snd_es1371_joystick_addr_put }
-
-static int snd_es1371_joystick_addr_info(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t *uinfo)
-{
-        uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
-        uinfo->count = 1;
-        uinfo->value.enumerated.items = 4;
-	if (uinfo->value.enumerated.item >= 4)
-		uinfo->value.enumerated.item = 3;
-	sprintf(uinfo->value.enumerated.name, "port 0x%x", (uinfo->value.enumerated.item * 8) + 0x200);
-        return 0;
-}
-
-static int snd_es1371_joystick_addr_get(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
-{
-	ensoniq_t *ensoniq = snd_kcontrol_chip(kcontrol);
-	unsigned long flags;
-	
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
-	ucontrol->value.enumerated.item[0] = ES_1371_JOY_ASELI(ensoniq->ctrl);
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+	if (port == 1) { /* auto-detect */
+		for (port = 0x200; port <= 0x218; port += 8)
+			if (request_region(port, 8, "ens137x: gameport"))
+				break;
+		if (port > 0x218) {
+			snd_printk("no gameport available\n");
+			return -EBUSY;
+		}
+	} else
+#endif
+	{
+		if (!request_region(port, 8, "ens137x: gameport")) {
+			snd_printk("gameport io port 0x%03x in use", ensoniq->gameport.io);
+			return -EBUSY;
+		}
+	}
+	ensoniq->gameport.io = port;
+	ensoniq->ctrl |= ES_JYSTK_EN;
+#ifdef CHIP1371
+	ensoniq->ctrl &= ~ES_1371_JOY_ASELM;
+	ensoniq->ctrl |= ES_1371_JOY_ASEL((ensoniq->gameport.io - 0x200) / 8);
+#endif
+	outl(ensoniq->ctrl, ES_REG(ensoniq, CONTROL));
+	gameport_register_port(&ensoniq->gameport);
 	return 0;
 }
 
-static int snd_es1371_joystick_addr_put(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
+static void snd_ensoniq_joystick_free(ensoniq_t *ensoniq)
 {
-	ensoniq_t *ensoniq = snd_kcontrol_chip(kcontrol);
-	unsigned long flags;
-	unsigned int nval;
-	int change;
-
-	down(&ensoniq->joy_sem);
-	nval = ES_1371_JOY_ASEL(ucontrol->value.integer.value[0]);
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
-	if (!(change = !(ensoniq->ctrl & ES_JYSTK_EN)))
-		goto no_change;	// FIXME: now we allow change only when joystick is disabled
-	change = (ensoniq->ctrl & ES_1371_JOY_ASELM) != nval;
-	ensoniq->ctrl &= ~ES_1371_JOY_ASELM;
-	ensoniq->ctrl |= nval;
+	gameport_unregister_port(&ensoniq->gameport);
+	ensoniq->ctrl &= ~ES_JYSTK_EN;
 	outl(ensoniq->ctrl, ES_REG(ensoniq, CONTROL));
-	ensoniq->gameport.io = 0x200 + ES_1371_JOY_ASELI(nval) * 8;
-no_change:
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
-	up(&ensoniq->joy_sem);
-	return change;
+	release_region(ensoniq->gameport.io, 8);
 }
-
-static snd_kcontrol_new_t snd_es1371_joystick_addr __devinitdata =
-ES1371_JOYSTICK_ADDR("Joystick Address");
-
-#endif /* CHIP1371 */
-#endif /* CONFIG_GAMEPORT */
+#endif /* SUPPORT_JOYSTICK */
 
 /*
 
@@ -1791,7 +1780,7 @@ ES1371_JOYSTICK_ADDR("Joystick Address");
 static void snd_ensoniq_proc_read(snd_info_entry_t *entry, 
 				  snd_info_buffer_t * buffer)
 {
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, entry->private_data, return);
+	ensoniq_t *ensoniq = entry->private_data;
 
 #ifdef CHIP1370
 	snd_iprintf(buffer, "Ensoniq AudioPCI ES1370\n\n");
@@ -1812,7 +1801,7 @@ static void __devinit snd_ensoniq_proc_init(ensoniq_t * ensoniq)
 	snd_info_entry_t *entry;
 
 	if (! snd_card_proc_new(ensoniq->card, "audiopci", &entry))
-		snd_info_set_text_ops(entry, ensoniq, snd_ensoniq_proc_read);
+		snd_info_set_text_ops(entry, ensoniq, 1024, snd_ensoniq_proc_read);
 }
 
 /*
@@ -1821,9 +1810,9 @@ static void __devinit snd_ensoniq_proc_init(ensoniq_t * ensoniq)
 
 static int snd_ensoniq_free(ensoniq_t *ensoniq)
 {
-#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
+#ifdef SUPPORT_JOYSTICK
 	if (ensoniq->ctrl & ES_JYSTK_EN)
-		snd_ensoniq_joy_disable(ensoniq);
+		snd_ensoniq_joystick_free(ensoniq);
 #endif
 	if (ensoniq->irq < 0)
 		goto __hw_end;
@@ -1838,22 +1827,20 @@ static int snd_ensoniq_free(ensoniq_t *ensoniq)
 	pci_set_power_state(ensoniq->pci, 3);
       __hw_end:
 #ifdef CHIP1370
-	if (ensoniq->bugbuf)
-		snd_free_pci_pages(ensoniq->pci, 16, ensoniq->bugbuf, ensoniq->bugbuf_addr);
+	if (ensoniq->dma_bug.area)
+		snd_dma_free_pages(&ensoniq->dma_bug);
 #endif
-	if (ensoniq->res_port) {
-		release_resource(ensoniq->res_port);
-		kfree_nocheck(ensoniq->res_port);
-	}
 	if (ensoniq->irq >= 0)
 		free_irq(ensoniq->irq, (void *)ensoniq);
-	snd_magic_kfree(ensoniq);
+	pci_release_regions(ensoniq->pci);
+	pci_disable_device(ensoniq->pci);
+	kfree(ensoniq);
 	return 0;
 }
 
 static int snd_ensoniq_dev_free(snd_device_t *device)
 {
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, device->device_data, return -ENXIO);
+	ensoniq_t *ensoniq = device->device_data;
 	return snd_ensoniq_free(ensoniq);
 }
 
@@ -1900,19 +1887,22 @@ static int __devinit snd_ensoniq_create(snd_card_t * card,
 	*rensoniq = NULL;
 	if ((err = pci_enable_device(pci)) < 0)
 		return err;
-	ensoniq = snd_magic_kcalloc(ensoniq_t, 0, GFP_KERNEL);
-	if (ensoniq == NULL)
+	ensoniq = kcalloc(1, sizeof(*ensoniq), GFP_KERNEL);
+	if (ensoniq == NULL) {
+		pci_disable_device(pci);
 		return -ENOMEM;
+	}
 	spin_lock_init(&ensoniq->reg_lock);
+	init_MUTEX(&ensoniq->src_mutex);
 	ensoniq->card = card;
 	ensoniq->pci = pci;
 	ensoniq->irq = -1;
-	ensoniq->port = pci_resource_start(pci, 0);
-	if ((ensoniq->res_port = request_region(ensoniq->port, 0x40, "Ensoniq AudioPCI")) == NULL) {
-		snd_printk("unable to grab ports 0x%lx-0x%lx\n", ensoniq->port, ensoniq->port + 0x40 - 1);
-		snd_ensoniq_free(ensoniq);
-		return -EBUSY;
+	if ((err = pci_request_regions(pci, "Ensoniq AudioPCI")) < 0) {
+		kfree(ensoniq);
+		pci_disable_device(pci);
+		return err;
 	}
+	ensoniq->port = pci_resource_start(pci, 0);
 	if (request_irq(pci->irq, snd_audiopci_interrupt, SA_INTERRUPT|SA_SHIRQ, "Ensoniq AudioPCI", (void *)ensoniq)) {
 		snd_printk("unable to grab IRQ %d\n", pci->irq);
 		snd_ensoniq_free(ensoniq);
@@ -1920,8 +1910,9 @@ static int __devinit snd_ensoniq_create(snd_card_t * card,
 	}
 	ensoniq->irq = pci->irq;
 #ifdef CHIP1370
-	if ((ensoniq->bugbuf = snd_malloc_pci_pages(pci, 16, &ensoniq->bugbuf_addr)) == NULL) {
-		snd_printk("unable to allocate space for phantom area - bugbuf\n");
+	if (snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(pci),
+				16, &ensoniq->dma_bug) < 0) {
+		snd_printk("unable to allocate space for phantom area - dma_bug\n");
 		snd_ensoniq_free(ensoniq);
 		return -EBUSY;
 	}
@@ -1933,7 +1924,6 @@ static int __devinit snd_ensoniq_create(snd_card_t * card,
 	ensoniq->subsystem_vendor_id = cmdw;
 	pci_read_config_word(pci, PCI_SUBSYSTEM_ID, &cmdw);
 	ensoniq->subsystem_device_id = cmdw;
-	snd_ensoniq_proc_init(ensoniq);
 #ifdef CHIP1370
 #if 0
 	ensoniq->ctrl = ES_1370_CDC_EN | ES_1370_SERR_DISABLE | ES_1370_PCLKDIVO(ES_1370_SRTODIV(8000));
@@ -1945,7 +1935,7 @@ static int __devinit snd_ensoniq_create(snd_card_t * card,
 	outl(ensoniq->ctrl, ES_REG(ensoniq, CONTROL));
 	outl(ensoniq->sctrl, ES_REG(ensoniq, SERIAL));
 	outl(ES_MEM_PAGEO(ES_PAGE_ADC), ES_REG(ensoniq, MEM_PAGE));
-	outl(ensoniq->bugbuf_addr, ES_REG(ensoniq, PHANTOM_FRAME));
+	outl(ensoniq->dma_bug.addr, ES_REG(ensoniq, PHANTOM_FRAME));
 	outl(0, ES_REG(ensoniq, PHANTOM_COUNT));
 #else
 	ensoniq->ctrl = 0;
@@ -2019,20 +2009,16 @@ static int __devinit snd_ensoniq_create(snd_card_t * card,
 	outb(ensoniq->uartc = 0x00, ES_REG(ensoniq, UART_CONTROL));
 	outb(0x00, ES_REG(ensoniq, UART_RES));
 	outl(ensoniq->cssr, ES_REG(ensoniq, STATUS));
-#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
-	init_MUTEX(&ensoniq->joy_sem);
-#ifdef CHIP1371
-	snd_ctl_add(card, snd_ctl_new1(&snd_es1371_joystick_addr, ensoniq));
-#endif
-	snd_ctl_add(card, snd_ctl_new1(&snd_ensoniq_control_joystick, ensoniq));
-	ensoniq->gameport.io = 0x200;	// FIXME: is ES1371 configured like this above ?
-#endif
 	synchronize_irq(ensoniq->irq);
 
 	if ((err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, ensoniq, &ops)) < 0) {
 		snd_ensoniq_free(ensoniq);
 		return err;
 	}
+
+	snd_ensoniq_proc_init(ensoniq);
+
+	snd_card_set_dev(card, &pci->dev);
 
 	*rensoniq = ensoniq;
 	return 0;
@@ -2083,10 +2069,9 @@ static void snd_ensoniq_midi_interrupt(ensoniq_t * ensoniq)
 
 static int snd_ensoniq_midi_input_open(snd_rawmidi_substream_t * substream)
 {
-	unsigned long flags;
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, substream->rmidi->private_data, return -ENXIO);
+	ensoniq_t *ensoniq = substream->rmidi->private_data;
 
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
+	spin_lock_irq(&ensoniq->reg_lock);
 	ensoniq->uartm |= ES_MODE_INPUT;
 	ensoniq->midi_input = substream;
 	if (!(ensoniq->uartm & ES_MODE_OUTPUT)) {
@@ -2094,16 +2079,15 @@ static int snd_ensoniq_midi_input_open(snd_rawmidi_substream_t * substream)
 		outb(ensoniq->uartc = 0, ES_REG(ensoniq, UART_CONTROL));
 		outl(ensoniq->ctrl |= ES_UART_EN, ES_REG(ensoniq, CONTROL));
 	}
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+	spin_unlock_irq(&ensoniq->reg_lock);
 	return 0;
 }
 
 static int snd_ensoniq_midi_input_close(snd_rawmidi_substream_t * substream)
 {
-	unsigned long flags;
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, substream->rmidi->private_data, return -ENXIO);
+	ensoniq_t *ensoniq = substream->rmidi->private_data;
 
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
+	spin_lock_irq(&ensoniq->reg_lock);
 	if (!(ensoniq->uartm & ES_MODE_OUTPUT)) {
 		outb(ensoniq->uartc = 0, ES_REG(ensoniq, UART_CONTROL));
 		outl(ensoniq->ctrl &= ~ES_UART_EN, ES_REG(ensoniq, CONTROL));
@@ -2112,16 +2096,15 @@ static int snd_ensoniq_midi_input_close(snd_rawmidi_substream_t * substream)
 	}
 	ensoniq->midi_input = NULL;
 	ensoniq->uartm &= ~ES_MODE_INPUT;
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+	spin_unlock_irq(&ensoniq->reg_lock);
 	return 0;
 }
 
 static int snd_ensoniq_midi_output_open(snd_rawmidi_substream_t * substream)
 {
-	unsigned long flags;
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, substream->rmidi->private_data, return -ENXIO);
+	ensoniq_t *ensoniq = substream->rmidi->private_data;
 
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
+	spin_lock_irq(&ensoniq->reg_lock);
 	ensoniq->uartm |= ES_MODE_OUTPUT;
 	ensoniq->midi_output = substream;
 	if (!(ensoniq->uartm & ES_MODE_INPUT)) {
@@ -2129,16 +2112,15 @@ static int snd_ensoniq_midi_output_open(snd_rawmidi_substream_t * substream)
 		outb(ensoniq->uartc = 0, ES_REG(ensoniq, UART_CONTROL));
 		outl(ensoniq->ctrl |= ES_UART_EN, ES_REG(ensoniq, CONTROL));
 	}
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+	spin_unlock_irq(&ensoniq->reg_lock);
 	return 0;
 }
 
 static int snd_ensoniq_midi_output_close(snd_rawmidi_substream_t * substream)
 {
-	unsigned long flags;
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, substream->rmidi->private_data, return -ENXIO);
+	ensoniq_t *ensoniq = substream->rmidi->private_data;
 
-	spin_lock_irqsave(&ensoniq->reg_lock, flags);
+	spin_lock_irq(&ensoniq->reg_lock);
 	if (!(ensoniq->uartm & ES_MODE_INPUT)) {
 		outb(ensoniq->uartc = 0, ES_REG(ensoniq, UART_CONTROL));
 		outl(ensoniq->ctrl &= ~ES_UART_EN, ES_REG(ensoniq, CONTROL));
@@ -2147,14 +2129,14 @@ static int snd_ensoniq_midi_output_close(snd_rawmidi_substream_t * substream)
 	}
 	ensoniq->midi_output = NULL;
 	ensoniq->uartm &= ~ES_MODE_OUTPUT;
-	spin_unlock_irqrestore(&ensoniq->reg_lock, flags);
+	spin_unlock_irq(&ensoniq->reg_lock);
 	return 0;
 }
 
 static void snd_ensoniq_midi_input_trigger(snd_rawmidi_substream_t * substream, int up)
 {
 	unsigned long flags;
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, substream->rmidi->private_data, return);
+	ensoniq_t *ensoniq = substream->rmidi->private_data;
 	int idx;
 
 	spin_lock_irqsave(&ensoniq->reg_lock, flags);
@@ -2178,7 +2160,7 @@ static void snd_ensoniq_midi_input_trigger(snd_rawmidi_substream_t * substream, 
 static void snd_ensoniq_midi_output_trigger(snd_rawmidi_substream_t * substream, int up)
 {
 	unsigned long flags;
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, substream->rmidi->private_data, return);
+	ensoniq_t *ensoniq = substream->rmidi->private_data;
 	unsigned char byte;
 
 	spin_lock_irqsave(&ensoniq->reg_lock, flags);
@@ -2249,7 +2231,7 @@ static int __devinit snd_ensoniq_midi(ensoniq_t * ensoniq, int device, snd_rawmi
 
 static irqreturn_t snd_audiopci_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-	ensoniq_t *ensoniq = snd_magic_cast(ensoniq_t, dev_id, return IRQ_NONE);
+	ensoniq_t *ensoniq = dev_id;
 	unsigned int status, sctrl;
 
 	if (ensoniq == NULL)
@@ -2331,6 +2313,22 @@ static int __devinit snd_audiopci_probe(struct pci_dev *pci,
 		snd_card_free(card);
 		return err;
 	}
+#ifdef SUPPORT_JOYSTICK
+#ifdef CHIP1371
+	switch (joystick_port[dev]) {
+	case 1: /* auto-detect */
+	case 0x200:
+	case 0x208:
+	case 0x210:
+	case 0x218:
+		snd_ensoniq_joystick(ensoniq, joystick_port[dev]);
+		break;
+	}
+#else
+	if (joystick[dev])
+		snd_ensoniq_joystick(ensoniq, 0x200);
+#endif
+#endif /* SUPPORT_JOYSTICK */
 	strcpy(card->driver, DRIVER_NAME);
 
 	strcpy(card->shortname, "Ensoniq AudioPCI");
@@ -2365,15 +2363,7 @@ static struct pci_driver driver = {
 	
 static int __init alsa_card_ens137x_init(void)
 {
-	int err;
-
-	if ((err = pci_module_init(&driver)) < 0) {
-#ifdef MODULE
-		printk(KERN_ERR "Ensoniq AudioPCI soundcard not found or device busy\n");
-#endif
-		return err;
-	}
-	return 0;
+	return pci_module_init(&driver);
 }
 
 static void __exit alsa_card_ens137x_exit(void)
@@ -2383,28 +2373,3 @@ static void __exit alsa_card_ens137x_exit(void)
 
 module_init(alsa_card_ens137x_init)
 module_exit(alsa_card_ens137x_exit)
-
-#ifndef MODULE
-
-/* format is: snd-ens1370=enable,index,id */
-
-static int __init alsa_card_ens137x_setup(char *str)
-{
-	static unsigned __initdata nr_dev = 0;
-
-	if (nr_dev >= SNDRV_CARDS)
-		return 0;
-	(void)(get_option(&str,&enable[nr_dev]) == 2 &&
-	       get_option(&str,&index[nr_dev]) == 2 &&
-	       get_id(&str,&id[nr_dev]) == 2);
-	nr_dev++;
-	return 1;
-}
-
-#if defined(CHIP1370)
-__setup("snd-ens1370=", alsa_card_ens137x_setup);
-#elif defined(CHIP1371)
-__setup("snd-ens1371=", alsa_card_ens137x_setup);
-#endif
-
-#endif /* ifndef MODULE */

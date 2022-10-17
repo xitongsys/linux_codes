@@ -248,7 +248,19 @@ struct tvnorm {
 	u16 Wt, Wa, HStart, HSyncStart, Ht, Ha, VStart;
 };
 
+struct jpeg_com_marker {
+	int len; /* number of usable bytes in data */
+	char data[60];
+};
+
+struct jpeg_app_marker {
+	int appn; /* number app segment */
+	int len; /* number of usable bytes in data */
+	char data[60];
+};
+
 struct videocodec {
+	struct module *owner;
 	/* -- filled in by slave device during register -- */
 	char name[32];
 	unsigned long magic;	/* may be used for client<->master attaching */

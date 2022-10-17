@@ -44,6 +44,8 @@
 #include <linux/module.h>
 #include <linux/sysdev.h>
 #include <linux/bcd.h>
+#include <linux/efi.h>
+#include <linux/mca.h>
 
 #include <asm/io.h>
 #include <asm/smp.h>
@@ -79,9 +81,9 @@ unsigned long cpu_khz;	/* Detected as we calibrate the TSC */
 
 extern unsigned long wall_jiffies;
 
-spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(rtc_lock);
 
-spinlock_t i8253_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(i8253_lock);
 EXPORT_SYMBOL(i8253_lock);
 
 struct timer_opts *cur_timer = &timer_none;
@@ -94,7 +96,7 @@ void do_gettimeofday(struct timeval *tv)
 {
 	unsigned long seq;
 	unsigned long usec, sec;
-	unsigned long max_ntp_tick = tick_usec - tickadj;
+	unsigned long max_ntp_tick;
 
 	do {
 		unsigned long lost;
@@ -110,13 +112,14 @@ void do_gettimeofday(struct timeval *tv)
 		 * Better to lose some accuracy than have time go backwards..
 		 */
 		if (unlikely(time_adjust < 0)) {
+			max_ntp_tick = (USEC_PER_SEC / HZ) - tickadj;
 			usec = min(usec, max_ntp_tick);
 
 			if (lost)
 				usec += lost * max_ntp_tick;
 		}
 		else if (unlikely(lost))
-			usec += lost * tick_usec;
+			usec += lost * (USEC_PER_SEC / HZ);
 
 		sec = xtime.tv_sec;
 		usec += (xtime.tv_nsec / 1000);
@@ -174,7 +177,10 @@ static int set_rtc_mmss(unsigned long nowtime)
 
 	/* gets recalled with irq locally disabled */
 	spin_lock(&rtc_lock);
-	retval = mach_set_rtc_mmss(nowtime);
+	if (efi_enabled)
+		retval = efi_set_rtc_mmss(nowtime);
+	else
+		retval = mach_set_rtc_mmss(nowtime);
 	spin_unlock(&rtc_lock);
 
 	return retval;
@@ -195,6 +201,18 @@ unsigned long long monotonic_clock(void)
 }
 EXPORT_SYMBOL(monotonic_clock);
 
+#if defined(CONFIG_SMP) && defined(CONFIG_FRAME_POINTER)
+unsigned long profile_pc(struct pt_regs *regs)
+{
+	unsigned long pc = instruction_pointer(regs);
+
+	if (in_lock_functions(pc))
+		return *(unsigned long *)(regs->ebp + 4);
+
+	return pc;
+}
+EXPORT_SYMBOL(profile_pc);
+#endif
 
 /*
  * timer_interrupt() needs to keep up the real-time clock,
@@ -232,14 +250,19 @@ static inline void do_timer_interrupt(int irq, void *dev_id,
 			>= USEC_AFTER - ((unsigned) TICK_SIZE) / 2 &&
 	    (xtime.tv_nsec / 1000)
 			<= USEC_BEFORE + ((unsigned) TICK_SIZE) / 2) {
-		if (set_rtc_mmss(xtime.tv_sec) == 0)
+		/* horrible...FIXME */
+		if (efi_enabled) {
+	 		if (efi_set_rtc_mmss(xtime.tv_sec) == 0)
+				last_rtc_update = xtime.tv_sec;
+			else
+				last_rtc_update = xtime.tv_sec - 600;
+		} else if (set_rtc_mmss(xtime.tv_sec) == 0)
 			last_rtc_update = xtime.tv_sec;
 		else
 			last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
 	}
 
-#ifdef CONFIG_MCA
-	if( MCA_bus ) {
+	if (MCA_bus) {
 		/* The PS/2 uses level-triggered interrupts.  You can't
 		turn them off, nor would you want to (any attempt to
 		enable edge-triggered interrupts usually gets intercepted by a
@@ -252,7 +275,6 @@ static inline void do_timer_interrupt(int irq, void *dev_id,
 		irq = inb_p( 0x61 );	/* read the current state */
 		outb_p( irq|0x80, 0x61 );	/* reset the IRQ */
 	}
-#endif
 }
 
 /*
@@ -286,28 +308,68 @@ unsigned long get_cmos_time(void)
 
 	spin_lock(&rtc_lock);
 
-	retval = mach_get_cmos_time();
+	if (efi_enabled)
+		retval = efi_get_time();
+	else
+		retval = mach_get_cmos_time();
 
 	spin_unlock(&rtc_lock);
 
 	return retval;
 }
 
-static struct sysdev_class pit_sysclass = {
-	set_kset_name("pit"),
+static long clock_cmos_diff, sleep_start;
+
+static int timer_suspend(struct sys_device *dev, u32 state)
+{
+	/*
+	 * Estimate time zone so that set_time can update the clock
+	 */
+	clock_cmos_diff = -get_cmos_time();
+	clock_cmos_diff += get_seconds();
+	sleep_start = get_cmos_time();
+	return 0;
+}
+
+static int timer_resume(struct sys_device *dev)
+{
+	unsigned long flags;
+	unsigned long sec;
+	unsigned long sleep_length;
+
+#ifdef CONFIG_HPET_TIMER
+	if (is_hpet_enabled())
+		hpet_reenable();
+#endif
+	sec = get_cmos_time() + clock_cmos_diff;
+	sleep_length = (get_cmos_time() - sleep_start) * HZ;
+	write_seqlock_irqsave(&xtime_lock, flags);
+	xtime.tv_sec = sec;
+	xtime.tv_nsec = 0;
+	write_sequnlock_irqrestore(&xtime_lock, flags);
+	jiffies += sleep_length;
+	wall_jiffies += sleep_length;
+	return 0;
+}
+
+static struct sysdev_class timer_sysclass = {
+	.resume = timer_resume,
+	.suspend = timer_suspend,
+	set_kset_name("timer"),
 };
 
+
 /* XXX this driverfs stuff should probably go elsewhere later -john */
-static struct sys_device device_i8253 = {
+static struct sys_device device_timer = {
 	.id	= 0,
-	.cls	= &pit_sysclass,
+	.cls	= &timer_sysclass,
 };
 
 static int time_init_device(void)
 {
-	int error = sysdev_class_register(&pit_sysclass);
+	int error = sysdev_class_register(&timer_sysclass);
 	if (!error)
-		error = sys_device_register(&device_i8253);
+		error = sysdev_register(&device_timer);
 	return error;
 }
 
@@ -319,15 +381,17 @@ extern void (*late_time_init)(void);
 void __init hpet_time_init(void)
 {
 	xtime.tv_sec = get_cmos_time();
-	wall_to_monotonic.tv_sec = -xtime.tv_sec;
 	xtime.tv_nsec = (INITIAL_JIFFIES % HZ) * (NSEC_PER_SEC / HZ);
-	wall_to_monotonic.tv_nsec = -xtime.tv_nsec;
+	set_normalized_timespec(&wall_to_monotonic,
+		-xtime.tv_sec, -xtime.tv_nsec);
 
 	if (hpet_enable() >= 0) {
 		printk("Using HPET for base-timer\n");
 	}
 
 	cur_timer = select_timer();
+	printk(KERN_INFO "Using %s for high-res timesource\n",cur_timer->name);
+
 	time_init_hook();
 }
 #endif
@@ -344,12 +408,13 @@ void __init time_init(void)
 		return;
 	}
 #endif
-
 	xtime.tv_sec = get_cmos_time();
-	wall_to_monotonic.tv_sec = -xtime.tv_sec;
 	xtime.tv_nsec = (INITIAL_JIFFIES % HZ) * (NSEC_PER_SEC / HZ);
-	wall_to_monotonic.tv_nsec = -xtime.tv_nsec;
+	set_normalized_timespec(&wall_to_monotonic,
+		-xtime.tv_sec, -xtime.tv_nsec);
 
 	cur_timer = select_timer();
+	printk(KERN_INFO "Using %s for high-res timesource\n",cur_timer->name);
+
 	time_init_hook();
 }

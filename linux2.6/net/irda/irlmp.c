@@ -25,6 +25,7 @@
  ********************************************************************/
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/skbuff.h>
@@ -43,17 +44,21 @@
 #include <net/irda/irlmp.h>
 #include <net/irda/irlmp_frame.h>
 
+static __u8 irlmp_find_free_slsap(void);
+static int irlmp_slsap_inuse(__u8 slsap_sel);
+
 /* Master structure */
 struct irlmp_cb *irlmp = NULL;
 
 /* These can be altered by the sysctl interface */
 int  sysctl_discovery         = 0;
 int  sysctl_discovery_timeout = 3; /* 3 seconds by default */
+EXPORT_SYMBOL(sysctl_discovery_timeout);
 int  sysctl_discovery_slots   = 6; /* 6 slots by default */
 int  sysctl_lap_keepalive_time = LM_IDLE_TIMEOUT * 1000 / HZ;
 char sysctl_devname[65];
 
-char *lmp_reasons[] = {
+const char *irlmp_reasons[] = {
 	"ERROR, NOT USED",
 	"LM_USER_REQUEST",
 	"LM_LAP_DISCONNECT",
@@ -62,8 +67,7 @@ char *lmp_reasons[] = {
 	"LM_INIT_DISCONNECT",
 	"ERROR, NOT USED",
 };
-
-__u8 *irlmp_hint_to_service(__u8 *hint);
+EXPORT_SYMBOL(irlmp_reasons);
 
 /*
  * Function irlmp_init (void)
@@ -98,7 +102,7 @@ int __init irlmp_init(void)
 
 	spin_lock_init(&irlmp->cachelog->hb_spinlock);
 
-	irlmp->free_lsap_sel = 0x10; /* Reserved 0x00-0x0f */
+	irlmp->last_lsap_sel = 0x0f; /* Reserved 0x00-0x0f */
 	strcpy(sysctl_devname, "Linux");
 
 	/* Do discovery every 3 seconds */
@@ -159,7 +163,7 @@ struct lsap_cb *irlmp_open_lsap(__u8 slsap_sel, notify_t *notify, __u8 pid)
 	/* Allocate new instance of a LSAP connection */
 	self = kmalloc(sizeof(struct lsap_cb), GFP_ATOMIC);
 	if (self == NULL) {
-		ERROR("%s: can't allocate memory", __FUNCTION__);
+		ERROR("%s: can't allocate memory\n", __FUNCTION__);
 		return NULL;
 	}
 	memset(self, 0, sizeof(struct lsap_cb));
@@ -189,6 +193,7 @@ struct lsap_cb *irlmp_open_lsap(__u8 slsap_sel, notify_t *notify, __u8 pid)
 
 	return self;
 }
+EXPORT_SYMBOL(irlmp_open_lsap);
 
 /*
  * Function __irlmp_close_lsap (self)
@@ -264,6 +269,7 @@ void irlmp_close_lsap(struct lsap_cb *self)
 	}
 	__irlmp_close_lsap(self);
 }
+EXPORT_SYMBOL(irlmp_close_lsap);
 
 /*
  * Function irlmp_register_irlap (saddr, notify)
@@ -496,6 +502,7 @@ err:
 		dev_kfree_skb(tx_skb);
 	return ret;
 }
+EXPORT_SYMBOL(irlmp_connect_request);
 
 /*
  * Function irlmp_connect_indication (self)
@@ -569,6 +576,7 @@ int irlmp_connect_response(struct lsap_cb *self, struct sk_buff *userdata)
 
 	return 0;
 }
+EXPORT_SYMBOL(irlmp_connect_response);
 
 /*
  * Function irlmp_connect_confirm (handle, skb)
@@ -667,6 +675,7 @@ struct lsap_cb *irlmp_dup(struct lsap_cb *orig, void *instance)
 
 	return new;
 }
+EXPORT_SYMBOL(irlmp_dup);
 
 /*
  * Function irlmp_disconnect_request (handle, userdata)
@@ -729,6 +738,7 @@ int irlmp_disconnect_request(struct lsap_cb *self, struct sk_buff *userdata)
 
 	return 0;
 }
+EXPORT_SYMBOL(irlmp_disconnect_request);
 
 /*
  * Function irlmp_disconnect_indication (reason, userdata)
@@ -740,7 +750,7 @@ void irlmp_disconnect_indication(struct lsap_cb *self, LM_REASON reason,
 {
 	struct lsap_cb *lsap;
 
-	IRDA_DEBUG(1, "%s(), reason=%s\n", __FUNCTION__, lmp_reasons[reason]);
+	IRDA_DEBUG(1, "%s(), reason=%s\n", __FUNCTION__, irlmp_reasons[reason]);
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == LMP_LSAP_MAGIC, return;);
 
@@ -797,7 +807,7 @@ void irlmp_disconnect_indication(struct lsap_cb *self, LM_REASON reason,
  * Note : separate from irlmp_do_discovery() so that we can handle
  * passive discovery properly.
  */
-void irlmp_do_expiry()
+void irlmp_do_expiry(void)
 {
 	struct lap_cb *lap;
 
@@ -900,6 +910,7 @@ void irlmp_discovery_request(int nslots)
 		 * Jean II */
 	}
 }
+EXPORT_SYMBOL(irlmp_discovery_request);
 
 /*
  * Function irlmp_get_discoveries (pn, mask, slots)
@@ -931,6 +942,7 @@ struct irda_device_info *irlmp_get_discoveries(int *pn, __u16 mask, int nslots)
 	/* Return current cached discovery log */
 	return(irlmp_copy_discoveries(irlmp->cachelog, pn, mask, TRUE));
 }
+EXPORT_SYMBOL(irlmp_get_discoveries);
 
 /*
  * Function irlmp_notify_client (log)
@@ -1069,7 +1081,7 @@ void irlmp_discovery_expiry(discinfo_t *expiries, int number)
  *    Used by IrLAP to get the discovery info it needs when answering
  *    discovery requests by other devices.
  */
-discovery_t *irlmp_get_discovery_response()
+discovery_t *irlmp_get_discovery_response(void)
 {
 	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
 
@@ -1122,6 +1134,7 @@ int irlmp_data_request(struct lsap_cb *self, struct sk_buff *userdata)
 
 	return ret;
 }
+EXPORT_SYMBOL(irlmp_data_request);
 
 /*
  * Function irlmp_data_indication (handle, skb)
@@ -1193,7 +1206,8 @@ void irlmp_udata_indication(struct lsap_cb *self, struct sk_buff *skb)
  * Function irlmp_connless_data_request (self, skb)
  */
 #ifdef CONFIG_IRDA_ULTRA
-int irlmp_connless_data_request(struct lsap_cb *self, struct sk_buff *userdata)
+int irlmp_connless_data_request(struct lsap_cb *self, struct sk_buff *userdata,
+				__u8 pid)
 {
 	struct sk_buff *clone_skb;
 	struct lap_cb *lap;
@@ -1208,7 +1222,10 @@ int irlmp_connless_data_request(struct lsap_cb *self, struct sk_buff *userdata)
 
 	/* Insert protocol identifier */
 	skb_push(userdata, LMP_PID_HEADER);
-	userdata->data[0] = self->pid;
+	if(self != NULL)
+	  userdata->data[0] = self->pid;
+	else
+	  userdata->data[0] = pid;
 
 	/* Connectionless sockets must use 0x70 */
 	skb_push(userdata, LMP_HEADER);
@@ -1263,11 +1280,6 @@ void irlmp_connless_data_indication(struct lsap_cb *self, struct sk_buff *skb)
 	}
 }
 #endif /* CONFIG_IRDA_ULTRA */
-
-void irlmp_status_request(void)
-{
-	IRDA_DEBUG(0, "%s(), Not implemented\n", __FUNCTION__);
-}
 
 /*
  * Propagate status indication from LAP to LSAPs (via LMP)
@@ -1429,7 +1441,7 @@ __u8 *irlmp_hint_to_service(__u8 *hint)
 }
 #endif
 
-const __u16 service_hint_mapping[S_END][2] = {
+static const __u16 service_hint_mapping[S_END][2] = {
 	{ HINT_PNP,		0 },			/* S_PNP */
 	{ HINT_PDA,		0 },			/* S_PDA */
 	{ HINT_COMPUTER,	0 },			/* S_COMPUTER */
@@ -1459,6 +1471,7 @@ __u16 irlmp_service_to_hint(int service)
 
 	return hint.word;
 }
+EXPORT_SYMBOL(irlmp_service_to_hint);
 
 /*
  * Function irlmp_register_service (service)
@@ -1476,7 +1489,7 @@ void *irlmp_register_service(__u16 hints)
 	service = kmalloc(sizeof(irlmp_service_t), GFP_ATOMIC);
 	if (!service) {
 		IRDA_DEBUG(1, "%s(), Unable to kmalloc!\n", __FUNCTION__);
-		return 0;
+		return NULL;
 	}
 	service->hints.word = hints;
 	hashbin_insert(irlmp->services, (irda_queue_t *) service,
@@ -1486,6 +1499,7 @@ void *irlmp_register_service(__u16 hints)
 
 	return (void *)service;
 }
+EXPORT_SYMBOL(irlmp_register_service);
 
 /*
  * Function irlmp_unregister_service (handle)
@@ -1528,6 +1542,7 @@ int irlmp_unregister_service(void *handle)
 	spin_unlock_irqrestore(&irlmp->services->hb_spinlock, flags);
 	return 0;
 }
+EXPORT_SYMBOL(irlmp_unregister_service);
 
 /*
  * Function irlmp_register_client (hint_mask, callback1, callback2)
@@ -1544,13 +1559,13 @@ void *irlmp_register_client(__u16 hint_mask, DISCOVERY_CALLBACK1 disco_clb,
 	irlmp_client_t *client;
 
 	IRDA_DEBUG(1, "%s()\n", __FUNCTION__);
-	ASSERT(irlmp != NULL, return 0;);
+	ASSERT(irlmp != NULL, return NULL;);
 
 	/* Make a new registration */
 	client = kmalloc(sizeof(irlmp_client_t), GFP_ATOMIC);
 	if (!client) {
 		IRDA_DEBUG( 1, "%s(), Unable to kmalloc!\n", __FUNCTION__);
-		return 0;
+		return NULL;
 	}
 
 	/* Register the details */
@@ -1564,6 +1579,7 @@ void *irlmp_register_client(__u16 hint_mask, DISCOVERY_CALLBACK1 disco_clb,
 
 	return (void *) client;
 }
+EXPORT_SYMBOL(irlmp_register_client);
 
 /*
  * Function irlmp_update_client (handle, hint_mask, callback1, callback2)
@@ -1595,6 +1611,7 @@ int irlmp_update_client(void *handle, __u16 hint_mask,
 
 	return 0;
 }
+EXPORT_SYMBOL(irlmp_update_client);
 
 /*
  * Function irlmp_unregister_client (handle)
@@ -1624,13 +1641,20 @@ int irlmp_unregister_client(void *handle)
 
 	return 0;
 }
+EXPORT_SYMBOL(irlmp_unregister_client);
 
 /*
  * Function irlmp_slsap_inuse (slsap)
  *
  *    Check if the given source LSAP selector is in use
+ *
+ * This function is clearly not very efficient. On the mitigating side, the
+ * stack make sure that in 99% of the cases, we are called only once
+ * for each socket allocation. We could probably keep a bitmap
+ * of the allocated LSAP, but I'm not sure the complexity is worth it.
+ * Jean II
  */
-int irlmp_slsap_inuse(__u8 slsap_sel)
+static int irlmp_slsap_inuse(__u8 slsap_sel)
 {
 	struct lsap_cb *self;
 	struct lap_cb *lap;
@@ -1648,7 +1672,7 @@ int irlmp_slsap_inuse(__u8 slsap_sel)
 		return FALSE;
 #endif /* CONFIG_IRDA_ULTRA */
 
-	/* Valid values are between 0 and 127 */
+	/* Valid values are between 0 and 127 (0x0-0x6F) */
 	if (slsap_sel > LSAP_MAX)
 		return TRUE;
 
@@ -1660,30 +1684,68 @@ int irlmp_slsap_inuse(__u8 slsap_sel)
 	spin_lock_irqsave(&irlmp->links->hb_spinlock, flags);
 	lap = (struct lap_cb *) hashbin_get_first(irlmp->links);
 	while (lap != NULL) {
-		ASSERT(lap->magic == LMP_LAP_MAGIC, return TRUE;);
+		ASSERT(lap->magic == LMP_LAP_MAGIC, goto errlap;);
 
 		/* Careful for priority inversions here !
-		 * All other uses of attrib spinlock are independent of
-		 * the object spinlock, so we are safe. Jean II */
+		 * irlmp->links is never taken while another IrDA
+		 * spinlock is held, so we are safe. Jean II */
 		spin_lock(&lap->lsaps->hb_spinlock);
 
+		/* For this IrLAP, check all the LSAPs */
 		self = (struct lsap_cb *) hashbin_get_first(lap->lsaps);
 		while (self != NULL) {
-			ASSERT(self->magic == LMP_LSAP_MAGIC, return TRUE;);
+			ASSERT(self->magic == LMP_LSAP_MAGIC, goto errlsap;);
 
 			if ((self->slsap_sel == slsap_sel)) {
 				IRDA_DEBUG(4, "Source LSAP selector=%02x in use\n",
-				      self->slsap_sel);
-				return TRUE;
+					   self->slsap_sel);
+				goto errlsap;
 			}
 			self = (struct lsap_cb*) hashbin_get_next(lap->lsaps);
 		}
 		spin_unlock(&lap->lsaps->hb_spinlock);
+
 		/* Next LAP */
 		lap = (struct lap_cb *) hashbin_get_next(irlmp->links);
 	}
 	spin_unlock_irqrestore(&irlmp->links->hb_spinlock, flags);
+
+	/*
+	 * Server sockets are typically waiting for connections and
+	 * therefore reside in the unconnected list. We don't want
+	 * to give out their LSAPs for obvious reasons...
+	 * Jean II
+	 */
+	spin_lock_irqsave(&irlmp->unconnected_lsaps->hb_spinlock, flags);
+
+	self = (struct lsap_cb *) hashbin_get_first(irlmp->unconnected_lsaps);
+	while (self != NULL) {
+		ASSERT(self->magic == LMP_LSAP_MAGIC, goto erruncon;);
+		if ((self->slsap_sel == slsap_sel)) {
+			IRDA_DEBUG(4, "Source LSAP selector=%02x in use (unconnected)\n",
+				   self->slsap_sel);
+			goto erruncon;
+		}
+		self = (struct lsap_cb*) hashbin_get_next(irlmp->unconnected_lsaps);
+	}
+	spin_unlock_irqrestore(&irlmp->unconnected_lsaps->hb_spinlock, flags);
+
 	return FALSE;
+
+	/* Error exit from within one of the two nested loops.
+	 * Make sure we release the right spinlock in the righ order.
+	 * Jean II */
+errlsap:
+	spin_unlock(&lap->lsaps->hb_spinlock);
+errlap:
+	spin_unlock_irqrestore(&irlmp->links->hb_spinlock, flags);
+	return TRUE;
+
+	/* Error exit from within the unconnected loop.
+	 * Just one spinlock to release... Jean II */
+erruncon:
+	spin_unlock_irqrestore(&irlmp->unconnected_lsaps->hb_spinlock, flags);
+	return TRUE;
 }
 
 /*
@@ -1692,7 +1754,7 @@ int irlmp_slsap_inuse(__u8 slsap_sel)
  *    Find a free source LSAP to use. This function is called if the service
  *    user has requested a source LSAP equal to LM_ANY
  */
-__u8 irlmp_find_free_slsap(void)
+static __u8 irlmp_find_free_slsap(void)
 {
 	__u8 lsap_sel;
 	int wrapped = 0;
@@ -1700,22 +1762,48 @@ __u8 irlmp_find_free_slsap(void)
 	ASSERT(irlmp != NULL, return -1;);
 	ASSERT(irlmp->magic == LMP_MAGIC, return -1;);
 
-	lsap_sel = irlmp->free_lsap_sel++;
+	/* Most users don't really care which LSAPs they are given,
+	 * and therefore we automatically give them a free LSAP.
+	 * This function try to find a suitable LSAP, i.e. which is
+	 * not in use and is within the acceptable range. Jean II */
 
-	/* Check if the new free lsap is really free */
-	while (irlmp_slsap_inuse(irlmp->free_lsap_sel)) {
-		irlmp->free_lsap_sel++;
+	do {
+		/* Always increment to LSAP number before using it.
+		 * In theory, we could reuse the last LSAP number, as long
+		 * as it is no longer in use. Some IrDA stack do that.
+		 * However, the previous socket may be half closed, i.e.
+		 * we closed it, we think it's no longer in use, but the
+		 * other side did not receive our close and think it's
+		 * active and still send data on it.
+		 * This is similar to what is done with PIDs and TCP ports.
+		 * Also, this reduce the number of calls to irlmp_slsap_inuse()
+		 * which is an expensive function to call.
+		 * Jean II */
+		irlmp->last_lsap_sel++;
 
 		/* Check if we need to wraparound (0x70-0x7f are reserved) */
-		if (irlmp->free_lsap_sel > LSAP_MAX) {
-			irlmp->free_lsap_sel = 10;
+		if (irlmp->last_lsap_sel > LSAP_MAX) {
+			/* 0x00-0x10 are also reserved for well know ports */
+			irlmp->last_lsap_sel = 0x10;
 
 			/* Make sure we terminate the loop */
-			if (wrapped++)
+			if (wrapped++) {
+				ERROR("%s: no more free LSAPs !\n",
+				      __FUNCTION__);
 				return 0;
+			}
 		}
-	}
-	IRDA_DEBUG(4, "%s(), next free lsap_sel=%02x\n",
+
+		/* If the LSAP is in use, try the next one.
+		 * Despite the autoincrement, we need to check if the lsap
+		 * is really in use or not, first because LSAP may be
+		 * directly allocated in irlmp_open_lsap(), and also because
+		 * we may wraparound on old sockets. Jean II */
+	} while (irlmp_slsap_inuse(irlmp->last_lsap_sel));
+
+	/* Got it ! */
+	lsap_sel = irlmp->last_lsap_sel;
+	IRDA_DEBUG(4, "%s(), found free lsap_sel=%02x\n",
 		   __FUNCTION__, lsap_sel);
 
 	return lsap_sel;
@@ -1759,22 +1847,6 @@ LM_REASON irlmp_convert_lap_reason( LAP_REASON lap_reason)
 	}
 
 	return reason;
-}
-
-__u32 irlmp_get_saddr(struct lsap_cb *self)
-{
-	ASSERT(self != NULL, return 0;);
-	ASSERT(self->lap != NULL, return 0;);
-
-	return self->lap->saddr;
-}
-
-__u32 irlmp_get_daddr(struct lsap_cb *self)
-{
-	ASSERT(self != NULL, return 0;);
-	ASSERT(self->lap != NULL, return 0;);
-
-	return self->lap->daddr;
 }
 
 #ifdef CONFIG_PROC_FS

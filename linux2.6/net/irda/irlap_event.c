@@ -181,7 +181,7 @@ static void irlap_poll_timer_expired(void *data)
  * Make sure that state is XMIT_P/XMIT_S when calling this function
  * (and that nobody messed up with the state). - Jean II
  */
-void irlap_start_poll_timer(struct irlap_cb *self, int timeout)
+static void irlap_start_poll_timer(struct irlap_cb *self, int timeout)
 {
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == LAP_MAGIC, return;);
@@ -433,10 +433,11 @@ static int irlap_state_ndm(struct irlap_cb *self, IRLAP_EVENT event,
 				self->frame_sent = FALSE;
 
 			/*
-			 * Remember to multiply the query timeout value with
-			 * the number of slots used
+			 * Go to reply state until end of discovery to
+			 * inhibit our own transmissions. Set the timer
+			 * to not stay forever there... Jean II
 			 */
-			irlap_start_query_timer(self, QUERY_TIMEOUT*info->S);
+			irlap_start_query_timer(self, info->S, info->s);
 			irlap_next_state(self, LAP_REPLY);
 		} else {
 		/* This is the final slot. How is it possible ?
@@ -452,6 +453,9 @@ static int irlap_state_ndm(struct irlap_cb *self, IRLAP_EVENT event,
 		 * Not much. It's too late to answer those discovery frames,
 		 * so we just pass the info to IrLMP who will put it in the
 		 * log (and post an event).
+		 * Another cause would be devices that do discovery much
+		 * slower than us, however the latest fixes should minimise
+		 * those cases...
 		 * Jean II
 		 */
 			IRDA_DEBUG(1, "%s(), Receiving final discovery request, missed the discovery slots :-(\n", __FUNCTION__);
@@ -627,7 +631,7 @@ static int irlap_state_query(struct irlap_cb *self, IRLAP_EVENT event,
 		if (irda_device_is_receiving(self->netdev) && !self->add_wait) {
 			IRDA_DEBUG(2, "%s(), device is slow to answer, "
 				   "waiting some more!\n", __FUNCTION__);
-			irlap_start_slot_timer(self, MSECS_TO_JIFFIES(10));
+			irlap_start_slot_timer(self, msecs_to_jiffies(10));
 			self->add_wait = TRUE;
 			return ret;
 		}
@@ -691,7 +695,7 @@ static int irlap_state_reply(struct irlap_cb *self, IRLAP_EVENT event,
 
 	switch (event) {
 	case QUERY_TIMER_EXPIRED:
-		IRDA_DEBUG(2, "%s(), QUERY_TIMER_EXPIRED <%ld>\n",
+		IRDA_DEBUG(0, "%s(), QUERY_TIMER_EXPIRED <%ld>\n",
 			   __FUNCTION__, jiffies);
 		irlap_next_state(self, LAP_NDM);
 		break;
@@ -707,16 +711,26 @@ static int irlap_state_reply(struct irlap_cb *self, IRLAP_EVENT event,
 			irlap_next_state(self, LAP_NDM);
 
 			irlap_discovery_indication(self, info->discovery);
-		} else if ((info->s >= self->slot) && (!self->frame_sent)) {
-			discovery_rsp = irlmp_get_discovery_response();
-			discovery_rsp->data.daddr = info->daddr;
+		} else {
+			/* If it's our slot, send our reply */
+			if ((info->s >= self->slot) && (!self->frame_sent)) {
+				discovery_rsp = irlmp_get_discovery_response();
+				discovery_rsp->data.daddr = info->daddr;
 
-			irlap_send_discovery_xid_frame(self, info->S,
-						       self->slot, FALSE,
-						       discovery_rsp);
+				irlap_send_discovery_xid_frame(self, info->S,
+							       self->slot,
+							       FALSE,
+							       discovery_rsp);
 
-			self->frame_sent = TRUE;
-			irlap_next_state(self, LAP_REPLY);
+				self->frame_sent = TRUE;
+			}
+			/* Readjust our timer to accomodate devices
+			 * doing faster or slower discovery than us...
+			 * Jean II */
+			irlap_start_query_timer(self, info->S, info->s);
+
+			/* Keep state */
+			//irlap_next_state(self, LAP_REPLY);
 		}
 		break;
 	default:
@@ -849,7 +863,7 @@ static int irlap_state_setup(struct irlap_cb *self, IRLAP_EVENT event,
  *  1.5 times the time taken to transmit a SNRM frame. So this time should
  *  between 15 msecs and 45 msecs.
  */
-			irlap_start_backoff_timer(self, MSECS_TO_JIFFIES(20 +
+			irlap_start_backoff_timer(self, msecs_to_jiffies(20 +
 						        (jiffies % 30)));
 		} else {
 			/* Always switch state before calling upper layers */
@@ -932,6 +946,12 @@ static int irlap_state_setup(struct irlap_cb *self, IRLAP_EVENT event,
 		/* This frame will actually be sent at the new speed */
 		irlap_send_rr_frame(self, CMD_FRAME);
 
+		/* The timer is set to half the normal timer to quickly
+		 * detect a failure to negociate the new connection
+		 * parameters. IrLAP 6.11.3.2, note 3.
+		 * Note that currently we don't process this failure
+		 * properly, as we should do a quick disconnect.
+		 * Jean II */
 		irlap_start_final_timer(self, self->final_timeout/2);
 		irlap_next_state(self, LAP_NRM_P);
 
@@ -1312,7 +1332,12 @@ static int irlap_state_nrm_p(struct irlap_cb *self, IRLAP_EVENT event,
 				irlap_resend_rejected_frames(self, CMD_FRAME);
 
 				self->ack_required = FALSE;
-				irlap_start_final_timer(self, self->final_timeout);
+
+				/* Make sure we account for the time
+				 * to transmit our frames. See comemnts
+				 * in irlap_send_data_primary_poll().
+				 * Jean II */
+				irlap_start_final_timer(self, 2 * self->final_timeout);
 
 				/* Keep state, do not move this line */
 				irlap_next_state(self, LAP_NRM_P);
@@ -1352,8 +1377,9 @@ static int irlap_state_nrm_p(struct irlap_cb *self, IRLAP_EVENT event,
 				/* Resend rejected frames */
 				irlap_resend_rejected_frames(self, CMD_FRAME);
 
-				/* Give peer some time to retransmit! */
-				irlap_start_final_timer(self, self->final_timeout);
+				/* Give peer some time to retransmit! 
+				 * But account for our own Tx. */
+				irlap_start_final_timer(self, 2 * self->final_timeout);
 
 				/* Keep state, do not move this line */
 				irlap_next_state(self, LAP_NRM_P);
@@ -1450,6 +1476,8 @@ static int irlap_state_nrm_p(struct irlap_cb *self, IRLAP_EVENT event,
 			/* Resend rejected frames */
 			irlap_resend_rejected_frames(self, CMD_FRAME);
 
+			/* Final timer ??? Jean II */
+
 			irlap_next_state(self, LAP_NRM_P);
 		} else if (ret == NR_INVALID) {
 			IRDA_DEBUG(1, "%s(), Received RR with "
@@ -1492,7 +1520,7 @@ static int irlap_state_nrm_p(struct irlap_cb *self, IRLAP_EVENT event,
 		if (irda_device_is_receiving(self->netdev) && !self->add_wait) {
 			IRDA_DEBUG(1, "FINAL_TIMER_EXPIRED when receiving a "
 			      "frame! Waiting a little bit more!\n");
-			irlap_start_final_timer(self, MSECS_TO_JIFFIES(300));
+			irlap_start_final_timer(self, msecs_to_jiffies(300));
 
 			/*
 			 *  Don't allow this to happen one more time in a row,
@@ -1541,7 +1569,7 @@ static int irlap_state_nrm_p(struct irlap_cb *self, IRLAP_EVENT event,
 			irlap_send_rr_frame(self, CMD_FRAME);
 		} else
 			irlap_resend_rejected_frames(self, CMD_FRAME);
-		irlap_start_final_timer(self, self->final_timeout);
+		irlap_start_final_timer(self, 2 * self->final_timeout);
 		break;
 	case RECV_SREJ_RSP:
 		irlap_update_nr_received(self, info->nr);
@@ -1550,7 +1578,7 @@ static int irlap_state_nrm_p(struct irlap_cb *self, IRLAP_EVENT event,
 			irlap_send_rr_frame(self, CMD_FRAME);
 		} else
 			irlap_resend_rejected_frame(self, CMD_FRAME);
-		irlap_start_final_timer(self, self->final_timeout);
+		irlap_start_final_timer(self, 2 * self->final_timeout);
 		break;
 	case RECV_RD_RSP:
 		IRDA_DEBUG(1, "%s(), RECV_RD_RSP\n", __FUNCTION__);
@@ -2222,6 +2250,14 @@ static int irlap_state_sclose(struct irlap_cb *self, IRLAP_EVENT event,
 		irlap_disconnect_indication(self, LAP_DISC_INDICATION);
 		break;
 	case RECV_DM_RSP:
+		/* IrLAP-1.1 p.82: in SCLOSE, S and I type RSP frames
+		 * shall take us down into default NDM state, like DM_RSP
+		 */
+	case RECV_RR_RSP:
+	case RECV_RNR_RSP:
+	case RECV_REJ_RSP:
+	case RECV_SREJ_RSP:
+	case RECV_I_RSP:
 		/* Always switch state before calling upper layers */
 		irlap_next_state(self, LAP_NDM);
 
@@ -2239,6 +2275,17 @@ static int irlap_state_sclose(struct irlap_cb *self, IRLAP_EVENT event,
 		irlap_disconnect_indication(self, LAP_DISC_INDICATION);
 		break;
 	default:
+		/* IrLAP-1.1 p.82: in SCLOSE, basically any received frame
+		 * with pf=1 shall restart the wd-timer and resend the rd:rsp
+		 */
+		if (info != NULL  &&  info->pf) {
+			del_timer(&self->wd_timer);
+			irlap_wait_min_turn_around(self, &self->qos_tx);
+			irlap_send_rd_frame(self);
+			irlap_start_wd_timer(self, self->wd_timeout);
+			break;		/* stay in SCLOSE */
+		}
+
 		IRDA_DEBUG(1, "%s(), Unknown event %d, (%s)\n", __FUNCTION__,
 			   event, irlap_event[event]);
 

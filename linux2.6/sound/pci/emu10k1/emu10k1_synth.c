@@ -28,7 +28,7 @@ MODULE_LICENSE("GPL");
 /*
  * create a new hardware dependent device for Emu10k1
  */
-int snd_emu10k1_synth_new_device(snd_seq_device_t *dev)
+static int snd_emu10k1_synth_new_device(snd_seq_device_t *dev)
 {
 	snd_emux_t *emu;
 	emu10k1_t *hw;
@@ -58,6 +58,7 @@ int snd_emu10k1_synth_new_device(snd_seq_device_t *dev)
 	emu->midi_ports = arg->seq_ports < 2 ? arg->seq_ports : 2; /* maximum two ports */
 	emu->midi_devidx = hw->audigy ? 2 : 1; /* audigy has two external midis */
 	emu->linear_panning = 0;
+	emu->hwdep_idx = 2; /* FIXED */
 
 	if (snd_emux_register(emu, dev->card, arg->index, "Emu10k1") < 0) {
 		snd_emux_free(emu);
@@ -75,7 +76,7 @@ int snd_emu10k1_synth_new_device(snd_seq_device_t *dev)
 	return 0;
 }
 
-int snd_emu10k1_synth_delete_device(snd_seq_device_t *dev)
+static int snd_emu10k1_synth_delete_device(snd_seq_device_t *dev)
 {
 	snd_emux_t *emu;
 	emu10k1_t *hw;
@@ -84,9 +85,9 @@ int snd_emu10k1_synth_delete_device(snd_seq_device_t *dev)
 	if (dev->driver_data == NULL)
 		return 0; /* not registered actually */
 
-	emu = snd_magic_cast(snd_emux_t, dev->driver_data, return -EINVAL);
+	emu = dev->driver_data;
 
-	hw = snd_magic_cast(emu10k1_t, emu->hw, return -EINVAL);
+	hw = emu->hw;
 	spin_lock_irqsave(&hw->voice_lock, flags);
 	hw->synth = NULL;
 	hw->get_synth_voice = NULL;

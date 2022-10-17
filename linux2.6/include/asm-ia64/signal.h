@@ -2,8 +2,8 @@
 #define _ASM_IA64_SIGNAL_H
 
 /*
- * Copyright (C) 1998-2001, 2003 Hewlett-Packard Co
- *	David Mosberger-Tang <davidm@hpl.hp.com>
+ * Modified 1998-2001, 2003
+ *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
  *
  * Unfortunately, this file is being included by bits/signal.h in
  * glibc-2.x.  Hence the #ifdef __KERNEL__ ugliness.
@@ -144,10 +144,10 @@
 struct siginfo;
 
 /* Type of a signal handler.  */
-typedef void (*__sighandler_t)(int);
+typedef void __user (*__sighandler_t)(int);
 
 typedef struct sigaltstack {
-	void *ss_sp;
+	void __user *ss_sp;
 	int ss_flags;
 	size_t ss_size;
 } stack_t;
@@ -176,7 +176,8 @@ struct k_sigaction {
 #  include <asm/sigcontext.h>
 
 #define ptrace_signal_deliver(regs, cookie) do { } while (0)
-#define HAVE_ARCH_SYS_PAUSE
+
+void set_sigdelayed(pid_t pid, int signo, int code, void __user *addr);
 
 #endif /* __KERNEL__ */
 

@@ -85,6 +85,24 @@ config MD_RAID1
 
 	  If unsure, say Y.
 
+config MD_RAID10
+	tristate "RAID-10 (mirrored striping) mode (EXPERIMENTAL)"
+	depends on BLK_DEV_MD && EXPERIMENTAL
+	---help---
+	  RAID-10 provides a combination of striping (RAID-0) and
+	  mirroring (RAID-1) with easier configuration and more flexable
+	  layout.
+	  Unlike RAID-0, but like RAID-1, RAID-10 requires all devices to
+	  be the same size (or atleast, only as much as the smallest device
+	  will be used).
+	  RAID-10 provides a variety of layouts that provide different levels
+	  of redundancy and performance.
+
+	  RAID-10 requires mdadm-1.7.0 or later, available at:
+
+	  ftp://ftp.kernel.org/pub/linux/utils/raid/mdadm/
+
+
 config MD_RAID5
 	tristate "RAID-4/RAID-5 mode"
 	depends on BLK_DEV_MD
@@ -107,6 +125,33 @@ config MD_RAID5
 
 	  If unsure, say Y.
 
+config MD_RAID6
+	tristate "RAID-6 mode (EXPERIMENTAL)"
+	depends on BLK_DEV_MD && EXPERIMENTAL
+	---help---
+	  WARNING: RAID-6 is currently highly experimental.  If you
+	  use it, there is no guarantee whatsoever that it won't
+	  destroy your data, eat your disk drives, insult your mother,
+	  or re-appoint George W. Bush.
+
+	  A RAID-6 set of N drives with a capacity of C MB per drive
+	  provides the capacity of C * (N - 2) MB, and protects
+	  against a failure of any two drives. For a given sector
+	  (row) number, (N - 2) drives contain data sectors, and two
+	  drives contains two independent redundancy syndromes.  Like
+	  RAID-5, RAID-6 distributes the syndromes across the drives
+	  in one of the available parity distribution methods.
+
+	  RAID-6 requires mdadm-1.5.0 or later, available at:
+
+	  ftp://ftp.kernel.org/pub/linux/utils/raid/mdadm/
+
+	  If you want to use such a RAID-6 set, say Y.  To compile
+	  this code as a module, choose M here: the module will be
+	  called raid6.
+
+	  If unsure, say N.
+
 config MD_MULTIPATH
 	tristate "Multipath I/O support"
 	depends on BLK_DEV_MD
@@ -118,6 +163,15 @@ config MD_MULTIPATH
 	  arrives on the primary path.
 
 	  If unsure, say N.
+
+config MD_FAULTY
+	tristate "Faulty test module for MD"
+	depends on BLK_DEV_MD
+	help
+	  The "faulty" module allows for a block device that occasionally returns
+	  read or write errors.  It is useful for testing.
+
+	  In unsure, say N.
 
 config BLK_DEV_DM
 	tristate "Device mapper support"
@@ -135,12 +189,43 @@ config BLK_DEV_DM
 
 	  If unsure, say N.
 
-config DM_IOCTL_V4
-	bool "ioctl interface version 4"
-	depends on BLK_DEV_DM
+config DM_CRYPT
+	tristate "Crypt target support"
+	depends on BLK_DEV_DM && EXPERIMENTAL
+	select CRYPTO
 	---help---
-	  Recent tools use a new version of the ioctl interface, only
-          select this option if you intend using such tools.
+	  This device-mapper target allows you to create a device that
+	  transparently encrypts the data on it. You'll need to activate
+	  the ciphers you're going to use in the cryptoapi configuration.
+
+	  Information on how to use dm-crypt can be found on
+
+	  <http://www.saout.de/misc/dm-crypt/>
+
+	  To compile this code as a module, choose M here: the module will
+	  be called dm-crypt.
+
+	  If unsure, say N.
+
+config DM_SNAPSHOT
+       tristate "Snapshot target (EXPERIMENTAL)"
+       depends on BLK_DEV_DM && EXPERIMENTAL
+       ---help---
+         Allow volume managers to take writeable snapshots of a device.
+
+config DM_MIRROR
+       tristate "Mirror target (EXPERIMENTAL)"
+       depends on BLK_DEV_DM && EXPERIMENTAL
+       ---help---
+         Allow volume managers to mirror logical volumes, also
+         needed for live data migration tools such as 'pvmove'.
+
+config DM_ZERO
+	tristate "Zero target (EXPERIMENTAL)"
+	depends on BLK_DEV_DM && EXPERIMENTAL
+	---help---
+	  A target that discards writes, and returns all zeroes for
+	  reads.  Useful in some recovery situations.
 
 endmenu
 

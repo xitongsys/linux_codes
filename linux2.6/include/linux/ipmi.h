@@ -109,6 +109,35 @@ struct ipmi_ipmb_addr
 	unsigned char lun;
 };
 
+/*
+ * A LAN Address.  This is an address to/from a LAN interface bridged
+ * by the BMC, not an address actually out on the LAN.
+ *
+ * A concious decision was made here to deviate slightly from the IPMI
+ * spec.  We do not use rqSWID and rsSWID like it shows in the
+ * message.  Instead, we use remote_SWID and local_SWID.  This means
+ * that any message (a request or response) from another device will
+ * always have exactly the same address.  If you didn't do this,
+ * requests and responses from the same device would have different
+ * addresses, and that's not too cool.
+ *
+ * In this address, the remote_SWID is always the SWID the remote
+ * message came from, or the SWID we are sending the message to.
+ * local_SWID is always our SWID.  Note that having our SWID in the
+ * message is a little weird, but this is required.
+ */
+#define IPMI_LAN_ADDR_TYPE		0x04
+struct ipmi_lan_addr
+{
+	int           addr_type;
+	short         channel;
+	unsigned char privilege;
+	unsigned char session_handle;
+	unsigned char remote_SWID;
+	unsigned char local_SWID;
+	unsigned char lun;
+};
+
 
 /*
  * Channel for talking directly with the BMC.  When using this
@@ -130,6 +159,14 @@ struct ipmi_msg
 	unsigned char  netfn;
 	unsigned char  cmd;
 	unsigned short data_len;
+	unsigned char  __user *data;
+};
+
+struct kernel_ipmi_msg
+{
+	unsigned char  netfn;
+	unsigned char  cmd;
+	unsigned short data_len;
 	unsigned char  *data;
 };
 
@@ -145,10 +182,20 @@ struct ipmi_msg
  * Receive types for messages coming from the receive interface.  This
  * is used for the receive in-kernel interface and in the receive
  * IOCTL.
+ *
+ * The "IPMI_RESPONSE_RESPNOSE_TYPE" is a little strange sounding, but
+ * it allows you to get the message results when you send a response
+ * message.
  */
 #define IPMI_RESPONSE_RECV_TYPE		1 /* A response to a command */
 #define IPMI_ASYNC_EVENT_RECV_TYPE	2 /* Something from the event queue */
 #define IPMI_CMD_RECV_TYPE		3 /* A command from somewhere else */
+#define IPMI_RESPONSE_RESPONSE_TYPE	4 /* The response for
+					      a sent response, giving any
+					      error status for sending the
+					      response.  When you send a
+					      response message, this will
+					      be returned. */
 /* Note that async events and received commands do not have a completion
    code as the first byte of the incoming data, unlike a response. */
 
@@ -160,6 +207,7 @@ struct ipmi_msg
  * The in-kernel interface.
  */
 #include <linux/list.h>
+#include <linux/module.h>
 
 /* Opaque type for a IPMI message user.  One of these is needed to
    send and receive messages. */
@@ -183,7 +231,13 @@ struct ipmi_recv_msg
 	ipmi_user_t      user;
 	struct ipmi_addr addr;
 	long             msgid;
-	struct ipmi_msg  msg;
+	struct kernel_ipmi_msg  msg;
+
+	/* The user_msg_data is the data supplied when a message was
+	   sent, if this is a response to a sent message.  If this is
+	   not a response to a sent message, then user_msg_data will
+	   be NULL. */
+	void             *user_msg_data;
 
 	/* Call this when done with the message.  It will presumably free
 	   the message and do any other necessary cleanup. */
@@ -199,16 +253,16 @@ static inline void ipmi_free_recv_msg(struct ipmi_recv_msg *msg)
 {
 	msg->done(msg);
 }
-struct ipmi_recv_msg *ipmi_alloc_recv_msg(void);
 
 struct ipmi_user_hndl
 {
         /* Routine type to call when a message needs to be routed to
 	   the upper layer.  This will be called with some locks held,
 	   the only IPMI routines that can be called are ipmi_request
-	   and the alloc/free operations. */
+	   and the alloc/free operations.  The handler_data is the
+	   variable supplied when the receive handler was registered. */
 	void (*ipmi_recv_hndl)(struct ipmi_recv_msg *msg,
-			       void                 *handler_data);
+			       void                 *user_msg_data);
 
 	/* Called when the interface detects a watchdog pre-timeout.  If
 	   this is NULL, it will be ignored for the user. */
@@ -221,7 +275,12 @@ int ipmi_create_user(unsigned int          if_num,
 		     void                  *handler_data,
 		     ipmi_user_t           *user);
 
-/* Destroy the given user of the IPMI layer. */
+/* Destroy the given user of the IPMI layer.  Note that after this
+   function returns, the system is guaranteed to not call any
+   callbacks for the user.  Thus as long as you destroy all the users
+   before you unload a module, you will be safe.  And if you destroy
+   the users before you destroy the callback structures, it should be
+   safe, too. */
 int ipmi_destroy_user(ipmi_user_t user);
 
 /* Get the IPMI version of the BMC we are talking to. */
@@ -243,33 +302,26 @@ void ipmi_set_my_LUN(ipmi_user_t   user,
 unsigned char ipmi_get_my_LUN(ipmi_user_t user);
 
 /*
- * Send a command request from the given user.  The address is the
- * proper address for the channel type.  If this is a command, then
- * the message response comes back, the receive handler for this user
- * will be called with the given msgid value in the recv msg.  If this
- * is a response to a command, then the msgid will be used as the
- * sequence number for the response (truncated if necessary), so when
- * sending a response you should use the sequence number you received
- * in the msgid field of the received command.  If the priority is >
- * 0, the message will go into a high-priority queue and be sent
- * first.  Otherwise, it goes into a normal-priority queue.
+ * Like ipmi_request, but lets you specify the number of retries and
+ * the retry time.  The retries is the number of times the message
+ * will be resent if no reply is received.  If set to -1, the default
+ * value will be used.  The retry time is the time in milliseconds
+ * between retries.  If set to zero, the default value will be
+ * used.
+ *
+ * Don't use this unless you *really* have to.  It's primarily for the
+ * IPMI over LAN converter; since the LAN stuff does its own retries,
+ * it makes no sense to do it here.  However, this can be used if you
+ * have unusual requirements.
  */
-int ipmi_request(ipmi_user_t      user,
-		 struct ipmi_addr *addr,
-		 long             msgid,
-		 struct ipmi_msg  *msg,
-		 int              priority);
-
-/*
- * Like ipmi_request, but lets you specify the slave return address.
- */
-int ipmi_request_with_source(ipmi_user_t      user,
-			     struct ipmi_addr *addr,
-			     long             msgid,
-			     struct ipmi_msg  *msg,
-			     int              priority,
-			     unsigned char    source_address,
-			     unsigned char    source_lun);
+int ipmi_request_settime(ipmi_user_t      user,
+			 struct ipmi_addr *addr,
+			 long             msgid,
+			 struct kernel_ipmi_msg  *msg,
+			 void             *user_msg_data,
+			 int              priority,
+			 int              max_retries,
+			 unsigned int     retry_time_ms);
 
 /*
  * Like ipmi_request, but with messages supplied.  This will not
@@ -283,7 +335,8 @@ int ipmi_request_with_source(ipmi_user_t      user,
 int ipmi_request_supply_msgs(ipmi_user_t          user,
 			     struct ipmi_addr     *addr,
 			     long                 msgid,
-			     struct ipmi_msg      *msg,
+			     struct kernel_ipmi_msg *msg,
+			     void                 *user_msg_data,
 			     void                 *supplied_smi,
 			     struct ipmi_recv_msg *supplied_recv,
 			     int                  priority);
@@ -304,23 +357,18 @@ int ipmi_unregister_for_cmd(ipmi_user_t   user,
 			    unsigned char cmd);
 
 /*
+ * Allow run-to-completion mode to be set for the interface of
+ * a specific user.
+ */
+void ipmi_user_set_run_to_completion(ipmi_user_t user, int val);
+
+/*
  * When the user is created, it will not receive IPMI events by
  * default.  The user must set this to TRUE to get incoming events.
  * The first user that sets this to TRUE will receive all events that
  * have been queued while no one was waiting for events.
  */
 int ipmi_set_gets_events(ipmi_user_t user, int val);
-
-/*
- * Register the given user to handle all received IPMI commands.  This
- * will fail if anyone is registered as a command receiver or if
- * another is already registered to receive all commands.  NOTE THAT
- * THIS IS FOR EMULATION USERS ONLY, DO NOT USER THIS FOR NORMAL
- * STUFF.
- */
-int ipmi_register_all_cmd_rcvr(ipmi_user_t user);
-int ipmi_unregister_all_cmd_rcvr(ipmi_user_t user);
-
 
 /*
  * Called when a new SMI is registered.  This will also be called on
@@ -330,6 +378,10 @@ int ipmi_unregister_all_cmd_rcvr(ipmi_user_t user);
 struct ipmi_smi_watcher
 {
 	struct list_head link;
+
+	/* You must set the owner to the current module, if you are in
+	   a module (generally just set it to "THIS_MODULE"). */
+	struct module *owner;
 
 	/* These two are called with read locks held for the interface
 	   the watcher list.  So you can add and remove users from the
@@ -350,9 +402,6 @@ unsigned int ipmi_addr_length(int addr_type);
 
 /* Validate that the given IPMI address is valid. */
 int ipmi_validate_addr(struct ipmi_addr *addr, int len);
-
-/* Return 1 if the given addresses are equal, 0 if not. */
-int ipmi_addr_equal(struct ipmi_addr *addr1, struct ipmi_addr *addr2);
 
 #endif /* __KERNEL__ */
 
@@ -400,7 +449,7 @@ int ipmi_addr_equal(struct ipmi_addr *addr1, struct ipmi_addr *addr2);
 /* Messages sent to the interface are this format. */
 struct ipmi_req
 {
-	unsigned char *addr; /* Address to send the message to. */
+	unsigned char __user *addr; /* Address to send the message to. */
 	unsigned int  addr_len;
 
 	long    msgid; /* The sequence number for the message.  This
@@ -422,13 +471,36 @@ struct ipmi_req
 #define IPMICTL_SEND_COMMAND		_IOR(IPMI_IOC_MAGIC, 13,	\
 					     struct ipmi_req)
 
+/* Messages sent to the interface with timing parameters are this
+   format. */
+struct ipmi_req_settime
+{
+	struct ipmi_req req;
+
+	/* See ipmi_request_settime() above for details on these
+           values. */
+	int          retries;
+	unsigned int retry_time_ms;
+};
+/*
+ * Send a message to the interfaces with timing parameters.  error values
+ * are:
+ *   - EFAULT - an address supplied was invalid.
+ *   - EINVAL - The address supplied was not valid, or the command
+ *              was not allowed.
+ *   - EMSGSIZE - The message to was too large.
+ *   - ENOMEM - Buffers could not be allocated for the command.
+ */
+#define IPMICTL_SEND_COMMAND_SETTIME	_IOR(IPMI_IOC_MAGIC, 21,	\
+					     struct ipmi_req_settime)
+
 /* Messages received from the interface are this format. */
 struct ipmi_recv
 {
 	int     recv_type; /* Is this a command, response or an
 			      asyncronous event. */
 
-	unsigned char *addr;    /* Address the message was from is put
+	unsigned char __user *addr;    /* Address the message was from is put
 				   here.  The caller must supply the
 				   memory. */
 	unsigned int  addr_len; /* The size of the address buffer.
@@ -512,5 +584,19 @@ struct ipmi_cmdspec
 #define IPMICTL_GET_MY_ADDRESS_CMD	_IOR(IPMI_IOC_MAGIC, 18, unsigned int)
 #define IPMICTL_SET_MY_LUN_CMD		_IOR(IPMI_IOC_MAGIC, 19, unsigned int)
 #define IPMICTL_GET_MY_LUN_CMD		_IOR(IPMI_IOC_MAGIC, 20, unsigned int)
+
+/*
+ * Get/set the default timing values for an interface.  You shouldn't
+ * generally mess with these.
+ */
+struct ipmi_timing_parms
+{
+	int          retries;
+	unsigned int retry_time_ms;
+};
+#define IPMICTL_SET_TIMING_PARMS_CMD	_IOR(IPMI_IOC_MAGIC, 22, \
+					     struct ipmi_timing_parms)
+#define IPMICTL_GET_TIMING_PARMS_CMD	_IOR(IPMI_IOC_MAGIC, 23, \
+					     struct ipmi_timing_parms)
 
 #endif /* __LINUX_IPMI_H */

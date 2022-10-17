@@ -45,7 +45,7 @@ extern void cache_push_v(unsigned long vaddr, int len);
 
 /* cache code */
 #define FLUSH_I_AND_D	(0x00000808)
-#define FLUSH_I 	(0x00000008)
+#define FLUSH_I		(0x00000008)
 
 /* This is needed whenever the virtual mapping of the current
    process changes.  */
@@ -83,7 +83,7 @@ extern void cache_push_v(unsigned long vaddr, int len);
 #define flush_cache_vmap(start, end)		flush_cache_all()
 #define flush_cache_vunmap(start, end)		flush_cache_all()
 
-extern inline void flush_cache_mm(struct mm_struct *mm)
+static inline void flush_cache_mm(struct mm_struct *mm)
 {
 	if (mm == current->mm)
 		__flush_cache_030();
@@ -91,25 +91,25 @@ extern inline void flush_cache_mm(struct mm_struct *mm)
 
 /* flush_cache_range/flush_cache_page must be macros to avoid
    a dependency on linux/mm.h, which includes this file... */
-extern inline void flush_cache_range(struct vm_area_struct *vma,
+static inline void flush_cache_range(struct vm_area_struct *vma,
 				     unsigned long start,
 				     unsigned long end)
 {
-	if (vma->vm_mm == current->mm) 
+	if (vma->vm_mm == current->mm)
 	        __flush_cache_030();
 }
 
-extern inline void flush_cache_page(struct vm_area_struct *vma,
+static inline void flush_cache_page(struct vm_area_struct *vma,
 				    unsigned long vmaddr)
 {
- 	if (vma->vm_mm == current->mm)
+	if (vma->vm_mm == current->mm)
 	        __flush_cache_030();
 }
 
 
 /* Push the page at kernel virtual address and clear the icache */
 /* RZ: use cpush %bc instead of cpush %dc, cinv %ic */
-extern inline void __flush_page_to_ram(void *vaddr)
+static inline void __flush_page_to_ram(void *vaddr)
 {
 	if (CPU_IS_040_OR_060) {
 		__asm__ __volatile__("nop\n\t"
@@ -128,12 +128,22 @@ extern inline void __flush_page_to_ram(void *vaddr)
 }
 
 #define flush_dcache_page(page)		__flush_page_to_ram(page_address(page))
+#define flush_dcache_mmap_lock(mapping)		do { } while (0)
+#define flush_dcache_mmap_unlock(mapping)	do { } while (0)
 #define flush_icache_page(vma, page)	__flush_page_to_ram(page_address(page))
 #define flush_icache_user_range(vma,pg,adr,len)	do { } while (0)
+
 #define copy_to_user_page(vma, page, vaddr, dst, src, len) \
-	memcpy(dst, src, len)
+	do {					\
+		flush_cache_page(vma, vaddr);	\
+		memcpy(dst, src, len);		\
+	} while (0)
+
 #define copy_from_user_page(vma, page, vaddr, dst, src, len) \
-	memcpy(dst, src, len)
+	do {					\
+		flush_cache_page(vma, vaddr);	\
+		memcpy(dst, src, len);		\
+	} while (0)
 
 extern void flush_icache_range(unsigned long address, unsigned long endaddr);
 

@@ -14,6 +14,7 @@
 #define PT_CCR	   8
 #define PT_PC	   9
 #define PT_USP	   10
+#define PT_EXR     12
 
 /* this struct defines the way the registers are stored on the
    stack during a system call. */
@@ -44,8 +45,19 @@ struct pt_regs {
 #define PS_S  (0x10)
 #endif
 
+#if defined(__H8300H__)
+#define H8300_REGS_NO 11
+#endif
+#if defined(__H8300S__)
+#define H8300_REGS_NO 12
+#endif
+
+/* Find the stack offset for a register, relative to thread.esp0. */
+#define PT_REG(reg)	((long)&((struct pt_regs *)0)->reg)
+
 #define user_mode(regs) (!((regs)->ccr & PS_S))
 #define instruction_pointer(regs) ((regs)->pc)
+#define profile_pc(regs) instruction_pointer(regs)
 extern void show_regs(struct pt_regs *);
 #endif /* __KERNEL__ */
 #endif /* __ASSEMBLY__ */

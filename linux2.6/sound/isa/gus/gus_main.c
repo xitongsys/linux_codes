@@ -35,8 +35,6 @@ MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>");
 MODULE_DESCRIPTION("Routines for Gravis UltraSound soundcards");
 MODULE_LICENSE("GPL");
 
-#define chip_t snd_gus_card_t
-
 static int snd_gus_init_dma_irq(snd_gus_card_t * gus, int latches);
 
 int snd_gus_use_inc(snd_gus_card_t * gus)
@@ -133,13 +131,13 @@ static int snd_gus_free(snd_gus_card_t *gus)
 		disable_dma(gus->gf1.dma2);
 		free_dma(gus->gf1.dma2);
 	}
-	snd_magic_kfree(gus);
+	kfree(gus);
 	return 0;
 }
 
 static int snd_gus_dev_free(snd_device_t *device)
 {
-	snd_gus_card_t *gus = snd_magic_cast(snd_gus_card_t, device->device_data, return -ENXIO);
+	snd_gus_card_t *gus = device->device_data;
 	return snd_gus_free(gus);
 }
 
@@ -159,7 +157,7 @@ int snd_gus_create(snd_card_t * card,
 	};
 
 	*rgus = NULL;
-	gus = snd_magic_kcalloc(snd_gus_card_t, 0, GFP_KERNEL);
+	gus = kcalloc(1, sizeof(*gus), GFP_KERNEL);
 	if (gus == NULL)
 		return -ENOMEM;
 	gus->gf1.irq = -1;
@@ -178,25 +176,30 @@ int snd_gus_create(snd_card_t * card,
 	gus->gf1.reg_timerdata = GUSP(gus, TIMERDATA);
 	/* allocate resources */
 	if ((gus->gf1.res_port1 = request_region(port, 16, "GUS GF1 (Adlib/SB)")) == NULL) {
+		snd_printk(KERN_ERR "gus: can't grab SB port 0x%lx\n", port);
 		snd_gus_free(gus);
 		return -EBUSY;
 	}
 	if ((gus->gf1.res_port2 = request_region(port + 0x100, 12, "GUS GF1 (Synth)")) == NULL) {
+		snd_printk(KERN_ERR "gus: can't grab synth port 0x%lx\n", port + 0x100);
 		snd_gus_free(gus);
 		return -EBUSY;
 	}
 	if (irq >= 0 && request_irq(irq, snd_gus_interrupt, SA_INTERRUPT, "GUS GF1", (void *) gus)) {
+		snd_printk(KERN_ERR "gus: can't grab irq %d\n", irq);
 		snd_gus_free(gus);
 		return -EBUSY;
 	}
 	gus->gf1.irq = irq;
 	if (request_dma(dma1, "GUS - 1")) {
+		snd_printk(KERN_ERR "gus: can't grab DMA1 %d\n", dma1);
 		snd_gus_free(gus);
 		return -EBUSY;
 	}
 	gus->gf1.dma1 = dma1;
 	if (dma2 >= 0 && dma1 != dma2) {
 		if (request_dma(dma2, "GUS - 2")) {
+			snd_printk(KERN_ERR "gus: can't grab DMA2 %d\n", dma2);
 			snd_gus_free(gus);
 			return -EBUSY;
 		}
@@ -416,7 +419,7 @@ static int snd_gus_check_version(snd_gus_card_t * gus)
 
 static void snd_gus_seq_dev_free(snd_seq_device_t *seq_dev)
 {
-	snd_gus_card_t *gus = snd_magic_cast(snd_gus_card_t, seq_dev->private_data, return);
+	snd_gus_card_t *gus = seq_dev->private_data;
 	gus->seq_dev = NULL;
 }
 

@@ -43,9 +43,11 @@
 #include <linux/major.h>
 #include <linux/blkdev.h>
 #include <scsi/scsi_ioctl.h>
+#include <linux/interrupt.h>
 
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
+#include "../qlogicfas408.h"
 
 #include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
@@ -54,31 +56,40 @@
 #include <pcmcia/ds.h>
 #include <pcmcia/ciscode.h>
 
+/* Set the following to 2 to use normal interrupt (active high/totempole-
+ * tristate), otherwise use 0 (REQUIRED FOR PCMCIA) for active low, open
+ * drain
+ */
+#define INT_TYPE	0
 
-extern Scsi_Host_Template qlogicfas_driver_template;
-extern void qlogicfas_preset(int port, int irq);
-extern struct Scsi_Host *__qlogicfas_detect(Scsi_Host_Template *);
-extern int qlogicfas_bus_reset(Scsi_Cmnd *);
+static char qlogic_name[] = "qlogic_cs";
 
 #ifdef PCMCIA_DEBUG
 static int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
+module_param(pc_debug, int, 0644);
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
 static char *version = "qlogic_cs.c 1.79-ac 2002/10/26 (David Hinds)";
 #else
 #define DEBUG(n, args...)
 #endif
 
-/*====================================================================*/
-
-/* Parameters that can be set with 'insmod' */
-
-/* Bit map of interrupts to choose from */
-static unsigned int irq_mask = 0xdeb8;
-static int irq_list[4] = { -1 };
-
-MODULE_PARM(irq_mask, "i");
-MODULE_PARM(irq_list, "1-4i");
+static Scsi_Host_Template qlogicfas_driver_template = {
+	.module			= THIS_MODULE,
+	.name			= qlogic_name,
+	.proc_name		= qlogic_name,
+	.info			= qlogicfas408_info,
+	.queuecommand		= qlogicfas408_queuecommand,
+	.eh_abort_handler	= qlogicfas408_abort,
+	.eh_bus_reset_handler	= qlogicfas408_bus_reset,
+	.eh_device_reset_handler= qlogicfas408_device_reset,
+	.eh_host_reset_handler	= qlogicfas408_host_reset,
+	.bios_param		= qlogicfas408_biosparam,
+	.can_queue		= 1,
+	.this_id		= -1,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= 1,
+	.use_clustering		= DISABLE_CLUSTERING,
+};
 
 /*====================================================================*/
 
@@ -100,12 +111,67 @@ static dev_link_t *dev_list = NULL;
 
 static dev_info_t dev_info = "qlogic_cs";
 
+static struct Scsi_Host *qlogic_detect(Scsi_Host_Template *host,
+				dev_link_t *link, int qbase, int qlirq)
+{
+	int qltyp;		/* type of chip */
+	int qinitid;
+	struct Scsi_Host *shost;	/* registered host structure */
+	struct qlogicfas408_priv *priv;
+
+	qltyp = qlogicfas408_get_chip_type(qbase, INT_TYPE);
+	qinitid = host->this_id;
+	if (qinitid < 0)
+		qinitid = 7;	/* if no ID, use 7 */
+
+	qlogicfas408_setup(qbase, qinitid, INT_TYPE);
+
+	host->name = qlogic_name;
+	shost = scsi_host_alloc(host, sizeof(struct qlogicfas408_priv));
+	if (!shost)
+		goto err;
+	shost->io_port = qbase;
+	shost->n_io_port = 16;
+	shost->dma_channel = -1;
+	if (qlirq != -1)
+		shost->irq = qlirq;
+
+	priv = get_priv_by_host(shost);
+	priv->qlirq = qlirq;
+	priv->qbase = qbase;
+	priv->qinitid = qinitid;
+	priv->shost = shost;
+	priv->int_type = INT_TYPE;					
+
+	if (request_irq(qlirq, qlogicfas408_ihandl, 0, qlogic_name, shost))
+		goto free_scsi_host;
+
+	sprintf(priv->qinfo,
+		"Qlogicfas Driver version 0.46, chip %02X at %03X, IRQ %d, TPdma:%d",
+		qltyp, qbase, qlirq, QL_TURBO_PDMA);
+
+	if (scsi_add_host(shost, NULL))
+		goto free_interrupt;
+
+	scsi_scan_host(shost);
+
+	return shost;
+
+free_interrupt:
+	free_irq(qlirq, shost);
+
+free_scsi_host:
+	scsi_host_put(shost);
+	
+err:
+	return NULL;
+}
 static dev_link_t *qlogic_attach(void)
 {
 	scsi_info_t *info;
 	client_reg_t client_reg;
 	dev_link_t *link;
-	int i, ret;
+	int ret;
 
 	DEBUG(0, "qlogic_attach()\n");
 
@@ -120,12 +186,7 @@ static dev_link_t *qlogic_attach(void)
 	link->io.Attributes1 = IO_DATA_PATH_WIDTH_AUTO;
 	link->io.IOAddrLines = 10;
 	link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
-	link->irq.IRQInfo1 = IRQ_INFO2_VALID | IRQ_LEVEL_ID;
-	if (irq_list[0] == -1)
-		link->irq.IRQInfo2 = irq_mask;
-	else
-		for (i = 0; i < 4; i++)
-			link->irq.IRQInfo2 |= 1 << irq_list[i];
+	link->irq.IRQInfo1 = IRQ_LEVEL_ID;
 	link->conf.Attributes = CONF_ENABLE_IRQ;
 	link->conf.Vcc = 50;
 	link->conf.IntType = INT_MEMORY_AND_IO;
@@ -135,12 +196,11 @@ static dev_link_t *qlogic_attach(void)
 	link->next = dev_list;
 	dev_list = link;
 	client_reg.dev_info = &dev_info;
-	client_reg.Attributes = INFO_IO_CLIENT | INFO_CARD_SHARE;
 	client_reg.event_handler = &qlogic_event;
 	client_reg.EventMask = CS_EVENT_RESET_REQUEST | CS_EVENT_CARD_RESET | CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL | CS_EVENT_PM_SUSPEND | CS_EVENT_PM_RESUME;
 	client_reg.Version = 0x0210;
 	client_reg.event_callback_args.client_data = link;
-	ret = CardServices(RegisterClient, &link->handle, &client_reg);
+	ret = pcmcia_register_client(&link->handle, &client_reg);
 	if (ret != 0) {
 		cs_error(link->handle, RegisterClient, ret);
 		qlogic_detach(link);
@@ -169,7 +229,7 @@ static void qlogic_detach(dev_link_t * link)
 		qlogic_release(link);
 
 	if (link->handle)
-		CardServices(DeregisterClient, link->handle);
+		pcmcia_deregister_client(link->handle);
 
 	/* Unlink device structure, free bits */
 	*linkp = link->next;
@@ -179,11 +239,8 @@ static void qlogic_detach(dev_link_t * link)
 
 /*====================================================================*/
 
-#define CS_CHECK(fn, args...) \
-while ((last_ret=CardServices(last_fn=(fn), args))!=0) goto cs_failed
-
-#define CFG_CHECK(fn, args...) \
-if (CardServices(fn, args) != 0) goto next_entry
+#define CS_CHECK(fn, ret) \
+do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
 
 static void qlogic_config(dev_link_t * link)
 {
@@ -201,37 +258,38 @@ static void qlogic_config(dev_link_t * link)
 	tuple.TupleDataMax = 64;
 	tuple.TupleOffset = 0;
 	tuple.DesiredTuple = CISTPL_CONFIG;
-	CS_CHECK(GetFirstTuple, handle, &tuple);
-	CS_CHECK(GetTupleData, handle, &tuple);
-	CS_CHECK(ParseTuple, handle, &tuple, &parse);
+	CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
+	CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
+	CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
 	link->conf.ConfigBase = parse.config.base;
 
 	tuple.DesiredTuple = CISTPL_MANFID;
-	if ((CardServices(GetFirstTuple, handle, &tuple) == CS_SUCCESS) && (CardServices(GetTupleData, handle, &tuple) == CS_SUCCESS))
+	if ((pcmcia_get_first_tuple(handle, &tuple) == CS_SUCCESS) && (pcmcia_get_tuple_data(handle, &tuple) == CS_SUCCESS))
 		info->manf_id = le16_to_cpu(tuple.TupleData[0]);
 
 	/* Configure card */
 	link->state |= DEV_CONFIG;
 
 	tuple.DesiredTuple = CISTPL_CFTABLE_ENTRY;
-	CS_CHECK(GetFirstTuple, handle, &tuple);
+	CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
 	while (1) {
-		CFG_CHECK(GetTupleData, handle, &tuple);
-		CFG_CHECK(ParseTuple, handle, &tuple, &parse);
+		if (pcmcia_get_tuple_data(handle, &tuple) != 0 ||
+				pcmcia_parse_tuple(handle, &tuple, &parse) != 0)
+			goto next_entry;
 		link->conf.ConfigIndex = parse.cftable_entry.index;
 		link->io.BasePort1 = parse.cftable_entry.io.win[0].base;
 		link->io.NumPorts1 = parse.cftable_entry.io.win[0].len;
 		if (link->io.BasePort1 != 0) {
-			i = CardServices(RequestIO, handle, &link->io);
+			i = pcmcia_request_io(handle, &link->io);
 			if (i == CS_SUCCESS)
 				break;
 		}
 	      next_entry:
-		CS_CHECK(GetNextTuple, handle, &tuple);
+		CS_CHECK(GetNextTuple, pcmcia_get_next_tuple(handle, &tuple));
 	}
 
-	CS_CHECK(RequestIRQ, handle, &link->irq);
-	CS_CHECK(RequestConfiguration, handle, &link->conf);
+	CS_CHECK(RequestIRQ, pcmcia_request_irq(handle, &link->irq));
+	CS_CHECK(RequestConfiguration, pcmcia_request_configuration(handle, &link->conf));
 
 	if ((info->manf_id == MANFID_MACNICA) || (info->manf_id == MANFID_PIONEER) || (info->manf_id == 0x0098)) {
 		/* set ATAcmd */
@@ -240,18 +298,16 @@ static void qlogic_config(dev_link_t * link)
 		outb(0x04, link->io.BasePort1 + 0xd);
 	}
 
-	/* A bad hack... */
-	release_region(link->io.BasePort1, link->io.NumPorts1);
-
 	/* The KXL-810AN has a bigger IO port window */
 	if (link->io.NumPorts1 == 32)
-		qlogicfas_preset(link->io.BasePort1 + 16, link->irq.AssignedIRQ);
+		host = qlogic_detect(&qlogicfas_driver_template, link,
+			link->io.BasePort1 + 16, link->irq.AssignedIRQ);
 	else
-		qlogicfas_preset(link->io.BasePort1, link->irq.AssignedIRQ);
-
-	host = __qlogicfas_detect(&qlogicfas_driver_template);
+		host = qlogic_detect(&qlogicfas_driver_template, link,
+			link->io.BasePort1, link->irq.AssignedIRQ);
+	
 	if (!host) {
-		printk(KERN_INFO "qlogic_cs: no SCSI devices found\n");
+		printk(KERN_INFO "%s: no SCSI devices found\n", qlogic_name);
 		goto out;
 	}
 
@@ -259,16 +315,17 @@ static void qlogic_config(dev_link_t * link)
 	link->dev = &info->node;
 	info->host = host;
 
-	scsi_add_host(host, NULL); /* XXX handle failure */
-	scsi_scan_host(host);
-
 out:
 	link->state &= ~DEV_CONFIG_PENDING;
 	return;
 
 cs_failed:
 	cs_error(link->handle, last_fn, last_ret);
-	qlogic_release(link);
+	link->dev = NULL;
+	pcmcia_release_configuration(link->handle);
+	pcmcia_release_io(link->handle, &link->io);
+	pcmcia_release_irq(link->handle, &link->irq);
+	link->state &= ~DEV_CONFIG;
 	return;
 
 }				/* qlogic_config */
@@ -284,11 +341,13 @@ static void qlogic_release(dev_link_t *link)
 	scsi_remove_host(info->host);
 	link->dev = NULL;
 
-	CardServices(ReleaseConfiguration, link->handle);
-	CardServices(ReleaseIO, link->handle, &link->io);
-	CardServices(ReleaseIRQ, link->handle, &link->irq);
+	free_irq(link->irq.AssignedIRQ, info->host);
 
-	scsi_unregister(info->host);
+	pcmcia_release_configuration(link->handle);
+	pcmcia_release_io(link->handle, &link->io);
+	pcmcia_release_irq(link->handle, &link->irq);
+
+	scsi_host_put(info->host);
 
 	link->state &= ~DEV_CONFIG;
 }
@@ -316,7 +375,7 @@ static int qlogic_event(event_t event, int priority, event_callback_args_t * arg
 		/* Fall through... */
 	case CS_EVENT_RESET_PHYSICAL:
 		if (link->state & DEV_CONFIG)
-			CardServices(ReleaseConfiguration, link->handle);
+			pcmcia_release_configuration(link->handle);
 		break;
 	case CS_EVENT_PM_RESUME:
 		link->state &= ~DEV_SUSPEND;
@@ -324,14 +383,14 @@ static int qlogic_event(event_t event, int priority, event_callback_args_t * arg
 	case CS_EVENT_CARD_RESET:
 		if (link->state & DEV_CONFIG) {
 			scsi_info_t *info = link->priv;
-			CardServices(RequestConfiguration, link->handle, &link->conf);
+			pcmcia_request_configuration(link->handle, &link->conf);
 			if ((info->manf_id == MANFID_MACNICA) || (info->manf_id == MANFID_PIONEER) || (info->manf_id == 0x0098)) {
 				outb(0x80, link->io.BasePort1 + 0xd);
 				outb(0x24, link->io.BasePort1 + 0x9);
 				outb(0x04, link->io.BasePort1 + 0xd);
 			}
 			/* Ugggglllyyyy!!! */
-			qlogicfas_bus_reset(NULL);
+			qlogicfas408_bus_reset(NULL);
 		}
 		break;
 	}
@@ -342,7 +401,7 @@ static int qlogic_event(event_t event, int priority, event_callback_args_t * arg
 static struct pcmcia_driver qlogic_cs_driver = {
 	.owner		= THIS_MODULE,
 	.drv		= {
-		.name	= "qlogic_cs",
+	.name		= "qlogic_cs",
 	},
 	.attach		= qlogic_attach,
 	.detach		= qlogic_detach,
@@ -356,11 +415,11 @@ static int __init init_qlogic_cs(void)
 static void __exit exit_qlogic_cs(void)
 {
 	pcmcia_unregister_driver(&qlogic_cs_driver);
-
-	/* XXX: this really needs to move into generic code.. */
-	while (dev_list != NULL)
-		qlogic_detach(dev_list);
+	BUG_ON(dev_list != NULL);
 }
 
+MODULE_AUTHOR("Tom Zerucha, Michael Griffith");
+MODULE_DESCRIPTION("Driver for the PCMCIA Qlogic FAS SCSI controllers");
+MODULE_LICENSE("GPL");
 module_init(init_qlogic_cs);
 module_exit(exit_qlogic_cs);

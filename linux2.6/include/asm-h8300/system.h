@@ -2,7 +2,6 @@
 #define _H8300_SYSTEM_H
 
 #include <linux/config.h> /* get configuration macros */
-#include <linux/kernel.h>
 #include <linux/linkage.h>
 
 #define prepare_to_switch()	do { } while(0)
@@ -57,14 +56,14 @@ asmlinkage void resume(void);
 #define __cli() asm volatile ("orc  #0x80,ccr")
 
 #define __save_flags(x) \
-       asm volatile ("stc ccr,r0l\n\tmov.l er0,%0":"=r" (x) : : "er0")
+       asm volatile ("stc ccr,%w0":"=r" (x))
 
 #define __restore_flags(x) \
-       asm volatile ("mov.l %0,er0\n\tldc r0l,ccr": :"r" (x) : "er0")
+       asm volatile ("ldc %w0,ccr": :"r" (x))
 
 #define	irqs_disabled()			\
 ({					\
-	unsigned long flags;		\
+	unsigned char flags;		\
 	__save_flags(flags);	        \
 	((flags & 0x80) == 0x80);	\
 })
@@ -119,7 +118,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
     __asm__ __volatile__
     ("mov.b %2,%0\n\t"
      "mov.b %1,%2"
-    : "=&r" (tmp) : "r" (x), "m" (*__xg(ptr)) : "er0","memory");
+    : "=&r" (tmp) : "r" (x), "m" (*__xg(ptr)) : "memory");
     break;
   case 2:
     __asm__ __volatile__

@@ -8,7 +8,7 @@ xconfig: $(obj)/qconf
 	$< arch/$(ARCH)/Kconfig
 
 gconfig: $(obj)/gconf
-	./$<  arch/$(ARCH)/Kconfig
+	$< arch/$(ARCH)/Kconfig
 
 menuconfig: $(obj)/mconf
 	$(Q)$(MAKE) $(build)=scripts/lxdialog
@@ -38,7 +38,12 @@ allmodconfig: $(obj)/conf
 	$< -m arch/$(ARCH)/Kconfig
 
 defconfig: $(obj)/conf
+ifeq ($(KBUILD_DEFCONFIG),)
 	$< -d arch/$(ARCH)/Kconfig
+else
+	@echo *** Default configuration is based on '$(KBUILD_DEFCONFIG)'
+	$(Q)$< -D arch/$(ARCH)/configs/$(KBUILD_DEFCONFIG) arch/$(ARCH)/Kconfig
+endif
 
 %_defconfig: $(obj)/conf
 	$(Q)$< -D arch/$(ARCH)/configs/$@ arch/$(ARCH)/Kconfig
@@ -65,11 +70,9 @@ help:
 #         Based on GTK which needs to be installed to compile it
 # object files used by all kconfig flavours
 
-libkconfig-objs := zconf.tab.o
-
-host-progs	:= conf mconf qconf gconf
-conf-objs	:= conf.o  libkconfig.so
-mconf-objs	:= mconf.o libkconfig.so
+hostprogs-y	:= conf mconf qconf gconf
+conf-objs	:= conf.o  zconf.tab.o
+mconf-objs	:= mconf.o zconf.tab.o
 
 ifeq ($(MAKECMDGOALS),xconfig)
 	qconf-target := 1
@@ -81,25 +84,26 @@ endif
 
 ifeq ($(qconf-target),1)
 qconf-cxxobjs	:= qconf.o
-qconf-objs	:= kconfig_load.o
+qconf-objs	:= kconfig_load.o zconf.tab.o
 endif
 
 ifeq ($(gconf-target),1)
-gconf-objs	:= gconf.o kconfig_load.o
+gconf-objs	:= gconf.o kconfig_load.o zconf.tab.o
 endif
 
-clean-files	:= libkconfig.so lkc_defs.h qconf.moc .tmp_qtcheck \
+clean-files	:= lkc_defs.h qconf.moc .tmp_qtcheck \
 		   .tmp_gtkcheck zconf.tab.c zconf.tab.h lex.zconf.c
 
 # generated files seem to need this to find local include files
 HOSTCFLAGS_lex.zconf.o	:= -I$(src)
 HOSTCFLAGS_zconf.tab.o	:= -I$(src)
 
-HOSTLOADLIBES_qconf	= -L$(QTDIR)/lib -Wl,-rpath,$(QTDIR)/lib -l$(QTLIB) -ldl
-HOSTCXXFLAGS_qconf.o	= -I$(QTDIR)/include 
+HOSTLOADLIBES_qconf	= -L$(QTLIBPATH) -Wl,-rpath,$(QTLIBPATH) -l$(QTLIB) -ldl
+HOSTCXXFLAGS_qconf.o	= -I$(QTDIR)/include -D LKC_DIRECT_LINK
 
 HOSTLOADLIBES_gconf	= `pkg-config gtk+-2.0 gmodule-2.0 libglade-2.0 --libs`
-HOSTCFLAGS_gconf.o	= `pkg-config gtk+-2.0 gmodule-2.0 libglade-2.0 --cflags`
+HOSTCFLAGS_gconf.o	= `pkg-config gtk+-2.0 gmodule-2.0 libglade-2.0 --cflags` \
+                          -D LKC_DIRECT_LINK
 
 $(obj)/conf.o $(obj)/mconf.o $(obj)/qconf.o $(obj)/gconf.o: $(obj)/zconf.tab.h
 
@@ -107,6 +111,7 @@ $(obj)/qconf.o: $(obj)/.tmp_qtcheck
 
 ifeq ($(qconf-target),1)
 MOC = $(QTDIR)/bin/moc
+QTLIBPATH = $(QTDIR)/lib
 -include $(obj)/.tmp_qtcheck
 
 # QT needs some extra effort...
@@ -122,9 +127,12 @@ $(obj)/.tmp_qtcheck:
 	  echo "*"; \
 	  false; \
 	fi; \
-	LIB=qt; \
-	if [ -f $$DIR/lib/libqt-mt.so ]; then LIB=qt-mt; fi; \
-	echo "QTDIR=$$DIR" > $@; echo "QTLIB=$$LIB" >> $@; \
+	LIBPATH=$$DIR/lib; LIB=qt; \
+	$(HOSTCXX) -print-multi-os-directory > /dev/null 2>&1 && \
+	  LIBPATH=$$DIR/lib/$$($(HOSTCXX) -print-multi-os-directory); \
+	if [ -f $$LIBPATH/libqt-mt.so ]; then LIB=qt-mt; fi; \
+	echo "QTDIR=$$DIR" > $@; echo "QTLIBPATH=$$LIBPATH" >> $@; \
+	echo "QTLIB=$$LIB" >> $@; \
 	if [ ! -x $$DIR/bin/moc -a -x /usr/bin/moc ]; then \
 	  echo "*"; \
 	  echo "* Unable to find $$DIR/bin/moc, using /usr/bin/moc instead."; \

@@ -25,7 +25,6 @@
 #include <asm/io.h>
 #include <asm/uaccess.h>
 #include <asm/pgalloc.h>
-#include <asm/hardirq.h>
 #include <asm/mmu_context.h>
 #include <asm/cacheflush.h>
 
@@ -68,7 +67,7 @@ void update_mmu_cache(struct vm_area_struct * vma,
 	/* Set PTEL register */
 	pteval &= _PAGE_FLAGS_HARDWARE_MASK; /* drop software flags */
 #ifdef CONFIG_SH_WRITETHROUGH
-	pteval |= 1;
+	pteval |= _PAGE_WT;
 #endif
 	/* conveniently, we want all the software flags to be 0 anyway */
 	ctrl_outl(pteval, MMU_PTEL);

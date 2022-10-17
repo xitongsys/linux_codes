@@ -17,8 +17,9 @@
 #ifndef __ASMARM_TLB_H
 #define __ASMARM_TLB_H
 
-#include <asm/tlbflush.h>
 #include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
+#include <asm/pgalloc.h>
 
 /*
  * TLB handling.  This allows us to remove pages from the page
@@ -70,6 +71,12 @@ tlb_finish_mmu(struct mmu_gather *tlb, unsigned long start, unsigned long end)
 	check_pgt_cache();
 }
 
+static inline unsigned int
+tlb_is_full_mm(struct mmu_gather *tlb)
+{
+     return tlb->fullmm;
+}
+
 #define tlb_remove_tlb_entry(tlb,ptep,address)	do { } while (0)
 
 #define tlb_start_vma(tlb,vma)						\
@@ -83,5 +90,7 @@ tlb_finish_mmu(struct mmu_gather *tlb, unsigned long start, unsigned long end)
 #define tlb_remove_page(tlb,page)	free_page_and_swap_cache(page)
 #define pte_free_tlb(tlb,ptep)		pte_free(ptep)
 #define pmd_free_tlb(tlb,pmdp)		pmd_free(pmdp)
+
+#define tlb_migrate_finish(mm)		do { } while (0)
 
 #endif

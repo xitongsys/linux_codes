@@ -1,14 +1,28 @@
+/*    SMP- and interrupt-safe semaphores.
+ *    PA-RISC version by Matthew Wilcox
+ *
+ *    Linux/PA-RISC Project (http://www.parisc-linux.org/)
+ *    Copyright (C) 1996 Linus Torvalds
+ *    Copyright (C) 1999-2001 Matthew Wilcox < willy at debian d0T org >
+ *    Copyright (C) 2000 Grant Grundler < grundler a debian org >
+ *
+ *    This program is free software; you can redistribute it and/or modify
+ *    it under the terms of the GNU General Public License as published by
+ *    the Free Software Foundation; either version 2 of the License, or
+ *    (at your option) any later version.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU General Public License for more details.
+ *
+ *    You should have received a copy of the GNU General Public License
+ *    along with this program; if not, write to the Free Software
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ */
+
 #ifndef _ASM_PARISC_SEMAPHORE_H
 #define _ASM_PARISC_SEMAPHORE_H
-
-/*
- * SMP- and interrupt-safe semaphores.
- *
- * (C) Copyright 1996 Linus Torvalds
- *
- * PA-RISC version by Matthew Wilcox
- *
- */
 
 #include <linux/spinlock.h>
 #include <linux/wait.h>
@@ -26,21 +40,14 @@ struct semaphore {
 	spinlock_t	sentry;
 	int		count;
 	wait_queue_head_t wait;
-#if WAITQUEUE_DEBUG
-	long __magic;
-#endif
 };
 
-#if WAITQUEUE_DEBUG
-# define __SEM_DEBUG_INIT(name) \
-		, (long)&(name).__magic
-#else
-# define __SEM_DEBUG_INIT(name)
-#endif
-
-#define __SEMAPHORE_INITIALIZER(name,count) \
-{ SPIN_LOCK_UNLOCKED, count, __WAIT_QUEUE_HEAD_INITIALIZER((name).wait) \
-	__SEM_DEBUG_INIT(name) }
+#define __SEMAPHORE_INITIALIZER(name, n)				\
+{									\
+	.sentry		= SPIN_LOCK_UNLOCKED,				\
+	.count		= n,						\
+	.wait		= __WAIT_QUEUE_HEAD_INITIALIZER((name).wait)	\
+}
 
 #define __MUTEX_INITIALIZER(name) \
 	__SEMAPHORE_INITIALIZER(name,1)
@@ -81,9 +88,6 @@ asmlinkage void __up(struct semaphore * sem);
 
 extern __inline__ void down(struct semaphore * sem)
 {
-#if WAITQUEUE_DEBUG
-	CHECK_MAGIC(sem->__magic);
-#endif
 	might_sleep();
 	spin_lock_irq(&sem->sentry);
 	if (sem->count > 0) {
@@ -97,9 +101,6 @@ extern __inline__ void down(struct semaphore * sem)
 extern __inline__ int down_interruptible(struct semaphore * sem)
 {
 	int ret = 0;
-#if WAITQUEUE_DEBUG
-	CHECK_MAGIC(sem->__magic);
-#endif
 	might_sleep();
 	spin_lock_irq(&sem->sentry);
 	if (sem->count > 0) {
@@ -118,9 +119,6 @@ extern __inline__ int down_interruptible(struct semaphore * sem)
 extern __inline__ int down_trylock(struct semaphore * sem)
 {
 	int flags, count;
-#if WAITQUEUE_DEBUG
-	CHECK_MAGIC(sem->__magic);
-#endif
 
 	spin_lock_irqsave(&sem->sentry, flags);
 	count = sem->count - 1;
@@ -137,9 +135,6 @@ extern __inline__ int down_trylock(struct semaphore * sem)
 extern __inline__ void up(struct semaphore * sem)
 {
 	int flags;
-#if WAITQUEUE_DEBUG
-	CHECK_MAGIC(sem->__magic);
-#endif
 	spin_lock_irqsave(&sem->sentry, flags);
 	if (sem->count < 0) {
 		__up(sem);

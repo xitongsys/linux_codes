@@ -8,6 +8,8 @@
  *         Greg Lonnon glonnon@ridgerun.com or info@ridgerun.com
  *
  */
+
+#include <linux/types.h>
 #include <linux/kdev_t.h>
 #include <linux/time.h>
 #include <linux/devfs_fs_kernel.h>
@@ -81,10 +83,10 @@ mmapper_mmap(struct file *file, struct vm_area_struct * vma)
 	size = vma->vm_end - vma->vm_start;
 	if(size > mmapper_size) return(-EFAULT);
 
-	/* XXX A comment above remap_page_range says it should only be
+	/* XXX A comment above remap_pfn_range says it should only be
 	 * called when the mm semaphore is held
 	 */
-	if (remap_page_range(vma, vma->vm_start, p_buf, size, 
+	if (remap_pfn_range(vma, vma->vm_start, p_buf >> PAGE_SHIFT, size,
 			     vma->vm_page_prot))
 		goto out;
 	ret = 0;
@@ -120,12 +122,14 @@ static int __init mmapper_init(void)
 	printk(KERN_INFO "Mapper v0.1\n");
 
 	v_buf = (char *) find_iomem("mmapper", &mmapper_size);
-	if(mmapper_size == 0) return(0);
+	if(mmapper_size == 0){
+		printk(KERN_ERR "mmapper_init - find_iomem failed\n");
+		return(0);
+	}
 
 	p_buf = __pa(v_buf);
 
 	devfs_mk_cdev(MKDEV(30, 0), S_IFCHR|S_IRUGO|S_IWUGO, "mmapper");
-	devfs_mk_symlink("mmapper0", "mmapper");
 	return(0);
 }
 

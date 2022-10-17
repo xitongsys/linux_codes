@@ -28,36 +28,6 @@
 
 #include <asm/processor.h>
 
-#define MMU_CONTEXT_DEBUG	0
-
-#if MMU_CONTEXT_DEBUG
-
-#include <ia64intrin.h>
-
-extern struct mmu_trace_entry {
-	char op;
-	u8 cpu;
-	u32 context;
-	void *mm;
-} mmu_tbuf[1024];
-
-extern volatile int mmu_tbuf_index;
-
-# define MMU_TRACE(_op,_cpu,_mm,_ctx)							\
-do {											\
-	int i = __sync_fetch_and_add(&mmu_tbuf_index, 1) % ARRAY_SIZE(mmu_tbuf);	\
-	struct mmu_trace_entry e;							\
-	e.op = (_op);									\
-	e.cpu = (_cpu);									\
-	e.mm = (_mm);									\
-	e.context = (_ctx);								\
-	mmu_tbuf[i] = e;								\
-} while (0)
-
-#else
-# define MMU_TRACE(op,cpu,mm,ctx)	do { ; } while (0)
-#endif
-
 struct ia64_ctx {
 	spinlock_t lock;
 	unsigned int next;	/* next context number to use */
@@ -95,22 +65,24 @@ delayed_tlb_flush (void)
 static inline mm_context_t
 get_mmu_context (struct mm_struct *mm)
 {
+	unsigned long flags;
 	mm_context_t context = mm->context;
 
 	if (context)
 		return context;
 
-	spin_lock(&ia64_ctx.lock);
+	spin_lock_irqsave(&ia64_ctx.lock, flags);
 	{
 		/* re-check, now that we've got the lock: */
 		context = mm->context;
 		if (context == 0) {
+			cpus_clear(mm->cpu_vm_mask);
 			if (ia64_ctx.next >= ia64_ctx.limit)
 				wrap_mmu_context(mm);
 			mm->context = context = ia64_ctx.next++;
 		}
 	}
-	spin_unlock(&ia64_ctx.lock);
+	spin_unlock_irqrestore(&ia64_ctx.lock, flags);
 	return context;
 }
 
@@ -121,7 +93,6 @@ get_mmu_context (struct mm_struct *mm)
 static inline int
 init_new_context (struct task_struct *p, struct mm_struct *mm)
 {
-	MMU_TRACE('N', smp_processor_id(), mm, 0);
 	mm->context = 0;
 	return 0;
 }
@@ -130,7 +101,6 @@ static inline void
 destroy_context (struct mm_struct *mm)
 {
 	/* Nothing to do.  */
-	MMU_TRACE('D', smp_processor_id(), mm, mm->context);
 }
 
 static inline void
@@ -138,8 +108,9 @@ reload_context (mm_context_t context)
 {
 	unsigned long rid;
 	unsigned long rid_incr = 0;
-	unsigned long rr0, rr1, rr2, rr3, rr4;
+	unsigned long rr0, rr1, rr2, rr3, rr4, old_rr4;
 
+	old_rr4 = ia64_get_rr(0x8000000000000000UL);
 	rid = context << 3;	/* make space for encoding the region number */
 	rid_incr = 1 << 8;
 
@@ -150,14 +121,14 @@ reload_context (mm_context_t context)
 	rr3 = rr0 + 3*rid_incr;
 	rr4 = rr0 + 4*rid_incr;
 #ifdef  CONFIG_HUGETLB_PAGE
-	rr4 = (rr4 & (~(0xfcUL))) | (HPAGE_SHIFT << 2);
+	rr4 = (rr4 & (~(0xfcUL))) | (old_rr4 & 0xfc);
 #endif
 
-	ia64_set_rr(0x0000000000000000, rr0);
-	ia64_set_rr(0x2000000000000000, rr1);
-	ia64_set_rr(0x4000000000000000, rr2);
-	ia64_set_rr(0x6000000000000000, rr3);
-	ia64_set_rr(0x8000000000000000, rr4);
+	ia64_set_rr(0x0000000000000000UL, rr0);
+	ia64_set_rr(0x2000000000000000UL, rr1);
+	ia64_set_rr(0x4000000000000000UL, rr2);
+	ia64_set_rr(0x6000000000000000UL, rr3);
+	ia64_set_rr(0x8000000000000000UL, rr4);
 	ia64_srlz_i();			/* srlz.i implies srlz.d */
 }
 
@@ -168,17 +139,14 @@ activate_context (struct mm_struct *mm)
 
 	do {
 		context = get_mmu_context(mm);
-		MMU_TRACE('A', smp_processor_id(), mm, context);
+		if (!cpu_isset(smp_processor_id(), mm->cpu_vm_mask))
+			cpu_set(smp_processor_id(), mm->cpu_vm_mask);
 		reload_context(context);
-		MMU_TRACE('a', smp_processor_id(), mm, context);
 		/* in the unlikely event of a TLB-flush by another thread, redo the load: */
 	} while (unlikely(context != mm->context));
 }
 
-#define deactivate_mm(tsk,mm)					\
-do {								\
-	MMU_TRACE('d', smp_processor_id(), mm, mm->context);	\
-} while (0)
+#define deactivate_mm(tsk,mm)	do { } while (0)
 
 /*
  * Switch from address space PREV to address space NEXT.

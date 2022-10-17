@@ -27,6 +27,9 @@
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 
+#include <asm/arch/pxa-regs.h>
+#include <asm/arch/idp.h>
+
 #include "generic.h"
 
 #ifndef PXA_IDP_REV02
@@ -54,13 +57,10 @@ unsigned int idp_control_port_shadow = ((0x7 << 21) | 		/* LCD power */
 
 #endif
 
-static int __init idp_init(void)
+static void __init idp_init(void)
 {
 	printk("idp_init()\n");
-	return 0;
 }
-
-__initcall(idp_init);
 
 static void __init idp_init_irq(void)
 {
@@ -101,7 +101,7 @@ static void __init idp_map_io(void)
 	pxa_map_io();
 	iotable_init(idp_io_desc, ARRAY_SIZE(idp_io_desc));
 
-	set_irq_type(IRQ_TO_GPIO_2_80(TOUCH_PANEL_IRQ), TOUCH_PANEL_IRQ_EDGE);
+	set_irq_type(TOUCH_PANEL_IRQ, TOUCH_PANEL_IRQ_EDGE);
 
 	// serial ports 2 & 3
 	pxa_gpio_mode(GPIO42_BTRXD_MD);
@@ -116,7 +116,9 @@ static void __init idp_map_io(void)
 
 MACHINE_START(PXA_IDP, "Accelent Xscale IDP")
 	MAINTAINER("Accelent Systems Inc.")
-	BOOT_MEM(0xa0000000, 0x40000000, 0xfc000000)
+	BOOT_MEM(0xa0000000, 0x40000000, io_p2v(0x40000000))
 	MAPIO(idp_map_io)
 	INITIRQ(idp_init_irq)
+	.timer		= &pxa_timer,
+	INIT_MACHINE(idp_init)
 MACHINE_END

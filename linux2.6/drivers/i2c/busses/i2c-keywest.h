@@ -51,20 +51,19 @@ typedef enum {
 /* Physical interface */
 struct keywest_iface
 {
-	unsigned long		base;
+	struct device_node	*node;
+	void __iomem *		base;
 	unsigned		bsteps;
 	int			irq;
-	struct semaphore	sem;
 	spinlock_t		lock;
-	struct keywest_chan*	channels;
+	struct keywest_chan	*channels;
 	unsigned		chan_count;
 	u8			cur_mode;
 	char			read_write;
-	u8*			data;
+	u8			*data;
 	unsigned		datalen;
 	int			state;
 	int			result;
-	int			stopretry;
 	struct timer_list	timeout_timer;
 	struct completion	complete;
 };
@@ -90,16 +89,15 @@ struct keywest_chan
 
 static inline u8 __read_reg(struct keywest_iface *iface, reg_t reg)
 {
-	return in_8(((volatile u8 *)iface->base)
+	return in_8(iface->base
 		+ (((unsigned)reg) << iface->bsteps));
 }
 
 static inline void __write_reg(struct keywest_iface *iface, reg_t reg, u8 val)
 {
-	out_8(((volatile u8 *)iface->base)
+	out_8(iface->base
 		+ (((unsigned)reg) << iface->bsteps), val);
-	(void)__read_reg(iface, reg);
-	udelay(10);
+	(void)__read_reg(iface, reg_subaddr);
 }
 
 #define write_reg(reg, val)	__write_reg(iface, reg, val) 

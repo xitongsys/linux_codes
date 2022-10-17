@@ -18,9 +18,11 @@
  *
  */
 
+#include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/netfilter.h>
 #include <linux/ip.h>
+#include <linux/moduleparam.h>
 #include <net/checksum.h>
 #include <net/udp.h>
 
@@ -33,147 +35,112 @@ static unsigned int master_timeout = 300;
 MODULE_AUTHOR("Brian J. Murrell <netfilter@interlinx.bc.ca>");
 MODULE_DESCRIPTION("Amanda connection tracking module");
 MODULE_LICENSE("GPL");
-MODULE_PARM(master_timeout, "i");
+module_param(master_timeout, int, 0600);
 MODULE_PARM_DESC(master_timeout, "timeout for the master connection");
 
-DECLARE_LOCK(ip_amanda_lock);
-
-char *conns[] = { "DATA ", "MESG ", "INDEX " };
-
-#if 0
-#define DEBUGP printk
-#else
-#define DEBUGP(format, args...)
-#endif
+static char *conns[] = { "DATA ", "MESG ", "INDEX " };
 
 /* This is slow, but it's simple. --RR */
 static char amanda_buffer[65536];
+static DECLARE_LOCK(amanda_buffer_lock);
 
-static int help(struct sk_buff *skb,
-		struct ip_conntrack *ct, enum ip_conntrack_info ctinfo)
+unsigned int (*ip_nat_amanda_hook)(struct sk_buff **pskb,
+				   enum ip_conntrack_info ctinfo,
+				   unsigned int matchoff,
+				   unsigned int matchlen,
+				   struct ip_conntrack_expect *exp);
+EXPORT_SYMBOL_GPL(ip_nat_amanda_hook);
+
+static int help(struct sk_buff **pskb,
+                struct ip_conntrack *ct, enum ip_conntrack_info ctinfo)
 {
-	char *data, *data_limit;
-	int dir = CTINFO2DIR(ctinfo);
+	struct ip_conntrack_expect *exp;
+	char *data, *data_limit, *tmp;
 	unsigned int dataoff, i;
-	struct ip_ct_amanda *info =
-				(struct ip_ct_amanda *)&ct->help.ct_ftp_info;
+	u_int16_t port, len;
+	int ret = NF_ACCEPT;
 
-	/* Can't track connections formed before we registered */
-	if (!info)
+	/* Only look at packets from the Amanda server */
+	if (CTINFO2DIR(ctinfo) == IP_CT_DIR_ORIGINAL)
 		return NF_ACCEPT;
 
 	/* increase the UDP timeout of the master connection as replies from
 	 * Amanda clients to the server can be quite delayed */
-	ip_ct_refresh(ct, master_timeout * HZ);
-
-	/* If packet is coming from Amanda server */
-	if (dir == IP_CT_DIR_ORIGINAL)
-		return NF_ACCEPT;
+	ip_ct_refresh_acct(ct, ctinfo, NULL, master_timeout * HZ);
 
 	/* No data? */
-	dataoff = skb->nh.iph->ihl*4 + sizeof(struct udphdr);
-	if (dataoff >= skb->len) {
+	dataoff = (*pskb)->nh.iph->ihl*4 + sizeof(struct udphdr);
+	if (dataoff >= (*pskb)->len) {
 		if (net_ratelimit())
-			printk("ip_conntrack_amanda_help: skblen = %u\n",
-			       (unsigned)skb->len);
+			printk("amanda_help: skblen = %u\n", (*pskb)->len);
 		return NF_ACCEPT;
 	}
 
-	LOCK_BH(&ip_amanda_lock);
-	skb_copy_bits(skb, dataoff, amanda_buffer, skb->len - dataoff);
+	LOCK_BH(&amanda_buffer_lock);
+	skb_copy_bits(*pskb, dataoff, amanda_buffer, (*pskb)->len - dataoff);
 	data = amanda_buffer;
-	data_limit = amanda_buffer + skb->len - dataoff;
+	data_limit = amanda_buffer + (*pskb)->len - dataoff;
 	*data_limit = '\0';
 
 	/* Search for the CONNECT string */
 	data = strstr(data, "CONNECT ");
 	if (!data)
 		goto out;
-
-	DEBUGP("ip_conntrack_amanda_help: CONNECT found in connection "
-		   "%u.%u.%u.%u:%u %u.%u.%u.%u:%u\n",
-		   NIPQUAD(iph->saddr), htons(udph->source),
-		   NIPQUAD(iph->daddr), htons(udph->dest));
 	data += strlen("CONNECT ");
 
 	/* Only search first line. */	
-	if (strchr(data, '\n'))
-		*strchr(data, '\n') = '\0';
+	if ((tmp = strchr(data, '\n')))
+		*tmp = '\0';
 
 	for (i = 0; i < ARRAY_SIZE(conns); i++) {
 		char *match = strstr(data, conns[i]);
-		if (match) {
-			char *portchr;
-			struct ip_conntrack_expect expect;
-			struct ip_ct_amanda_expect *exp_amanda_info =
-				&expect.help.exp_amanda_info;
+		if (!match)
+			continue;
+		tmp = data = match + strlen(conns[i]);
+		port = simple_strtoul(data, &data, 10);
+		len = data - tmp;
+		if (port == 0 || len > 5)
+			break;
 
-			memset(&expect, 0, sizeof(expect));
+		exp = ip_conntrack_expect_alloc();
+		if (exp == NULL) {
+			ret = NF_DROP;
+			goto out;
+		}
 
-			data += strlen(conns[i]);
-			/* this is not really tcp, but let's steal an
-			 * idea from a tcp stream helper :-) */
-			// XXX expect.seq = data - amanda_buffer;
-			exp_amanda_info->offset = data - amanda_buffer;
-// XXX DEBUGP("expect.seq = %p - %p = %d\n", data, amanda_buffer, expect.seq);
-DEBUGP("exp_amanda_info->offset = %p - %p = %d\n", data, amanda_buffer, exp_amanda_info->offset);
-			portchr = data;
-			exp_amanda_info->port = simple_strtoul(data, &data,10);
-			exp_amanda_info->len = data - portchr;
+		exp->expectfn = NULL;
+		exp->master = ct;
 
-			/* eat whitespace */
-			while (*data == ' ')
-				data++;
-			DEBUGP("ip_conntrack_amanda_help: "
-			       "CONNECT %s request with port "
-			       "%u found\n", conns[i],
-			       exp_amanda_info->port);
+		exp->tuple.src.ip = ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.ip;
+		exp->tuple.src.u.tcp.port = 0;
+		exp->tuple.dst.ip = ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.dst.ip;
+		exp->tuple.dst.protonum = IPPROTO_TCP;
+		exp->tuple.dst.u.tcp.port = htons(port);
 
-			expect.tuple = ((struct ip_conntrack_tuple)
-				{ { ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.ip,
-				    { 0 } },
-				  { ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.dst.ip,
-				    { htons(exp_amanda_info->port) },
-				    IPPROTO_TCP }});
-			expect.mask = ((struct ip_conntrack_tuple)
-				{ { 0, { 0 } },
-				  { 0xFFFFFFFF, { 0xFFFF }, 0xFFFF }});
+		exp->mask.src.ip = 0xFFFFFFFF;
+		exp->mask.src.u.tcp.port = 0;
+		exp->mask.dst.ip = 0xFFFFFFFF;
+		exp->mask.dst.protonum = 0xFF;
+		exp->mask.dst.u.tcp.port = 0xFFFF;
 
-			expect.expectfn = NULL;
-
-			DEBUGP ("ip_conntrack_amanda_help: "
-				"expect_related: %u.%u.%u.%u:%u - "
-				"%u.%u.%u.%u:%u\n",
-				NIPQUAD(expect.tuple.src.ip),
-				ntohs(expect.tuple.src.u.tcp.port),
-				NIPQUAD(expect.tuple.dst.ip),
-				ntohs(expect.tuple.dst.u.tcp.port));
-			if (ip_conntrack_expect_related(ct, &expect)
-			    == -EEXIST) {
-				;
-				/* this must be a packet being resent */
-				/* XXX - how do I get the
-				 *       ip_conntrack_expect that
-				 *       already exists so that I can
-				 *       update the .seq so that the
-				 *       nat module rewrites the port
-				 *       numbers?
-				 *       Perhaps I should use the
-				 *       exp_amanda_info instead of
-				 *       .seq.
-				 */
-			}
+		if (ip_nat_amanda_hook)
+			ret = ip_nat_amanda_hook(pskb, ctinfo,
+						 tmp - amanda_buffer,
+						 len, exp);
+		else if (ip_conntrack_expect_related(exp) != 0) {
+			ip_conntrack_expect_free(exp);
+			ret = NF_DROP;
 		}
 	}
- out:
-	UNLOCK_BH(&ip_amanda_lock);
-	return NF_ACCEPT;
+
+out:
+	UNLOCK_BH(&amanda_buffer_lock);
+	return ret;
 }
 
 static struct ip_conntrack_helper amanda_helper = {
 	.max_expected = ARRAY_SIZE(conns),
 	.timeout = 180,
-	.flags = IP_CT_HELPER_F_REUSE_EXPECT,
 	.me = THIS_MODULE,
 	.help = help,
 	.name = "amanda",
@@ -182,33 +149,19 @@ static struct ip_conntrack_helper amanda_helper = {
 		   .dst = { .protonum = IPPROTO_UDP },
 	},
 	.mask = { .src = { .u = { 0xFFFF } },
-		 .dst = { .protonum = 0xFFFF },
+		 .dst = { .protonum = 0xFF },
 	},
 };
 
-static void fini(void)
+static void __exit fini(void)
 {
-	DEBUGP("ip_ct_amanda: unregistering helper for port 10080\n");
 	ip_conntrack_helper_unregister(&amanda_helper);
 }
 
 static int __init init(void)
 {
-	int ret;
-
-	DEBUGP("ip_ct_amanda: registering helper for port 10080\n");
-	ret = ip_conntrack_helper_register(&amanda_helper);
-
-	if (ret) {
-		printk("ip_ct_amanda: ERROR registering helper\n");
-		fini();
-		return -EBUSY;
-	}
-	return 0;
+	return ip_conntrack_helper_register(&amanda_helper);
 }
-
-PROVIDES_CONNTRACK(amanda);
-EXPORT_SYMBOL(ip_amanda_lock);
 
 module_init(init);
 module_exit(fini);

@@ -10,24 +10,17 @@
 #include <linux/rwsem.h>
 
 struct semaphore {
-	atomic_t count;
+	atomic24_t count;
 	int sleepers;
 	wait_queue_head_t wait;
-#if WAITQUEUE_DEBUG
-	long __magic;
-#endif
 };
 
-#if WAITQUEUE_DEBUG
-# define __SEM_DEBUG_INIT(name) \
-		, (long)&(name).__magic
-#else
-# define __SEM_DEBUG_INIT(name)
-#endif
-
-#define __SEMAPHORE_INITIALIZER(name,count) \
-{ ATOMIC_INIT(count), 0, __WAIT_QUEUE_HEAD_INITIALIZER((name).wait) \
-	__SEM_DEBUG_INIT(name) }
+#define __SEMAPHORE_INITIALIZER(name, n)				\
+{									\
+	.count		= ATOMIC24_INIT(n),				\
+	.sleepers	= 0,						\
+	.wait		= __WAIT_QUEUE_HEAD_INITIALIZER((name).wait)	\
+}
 
 #define __MUTEX_INITIALIZER(name) \
 	__SEMAPHORE_INITIALIZER(name,1)
@@ -40,12 +33,9 @@ struct semaphore {
 
 static inline void sema_init (struct semaphore *sem, int val)
 {
-	atomic_set(&sem->count, val);
+	atomic24_set(&sem->count, val);
 	sem->sleepers = 0;
 	init_waitqueue_head(&sem->wait);
-#if WAITQUEUE_DEBUG
-	sem->__magic = (long)&sem->__magic;
-#endif
 }
 
 static inline void init_MUTEX (struct semaphore *sem)
@@ -68,9 +58,6 @@ static inline void down(struct semaphore * sem)
 	register volatile int *ptr asm("g1");
 	register int increment asm("g2");
 
-#if WAITQUEUE_DEBUG
-	CHECK_MAGIC(sem->__magic);
-#endif
 	might_sleep();
 
 	ptr = &(sem->count.counter);
@@ -78,7 +65,7 @@ static inline void down(struct semaphore * sem)
 
 	__asm__ __volatile__(
 	"mov	%%o7, %%g4\n\t"
-	"call	___atomic_sub\n\t"
+	"call	___atomic24_sub\n\t"
 	" add	%%o7, 8, %%o7\n\t"
 	"tst	%%g2\n\t"
 	"bl	2f\n\t"
@@ -105,9 +92,6 @@ static inline int down_interruptible(struct semaphore * sem)
 	register volatile int *ptr asm("g1");
 	register int increment asm("g2");
 
-#if WAITQUEUE_DEBUG
-	CHECK_MAGIC(sem->__magic);
-#endif
 	might_sleep();
 
 	ptr = &(sem->count.counter);
@@ -115,7 +99,7 @@ static inline int down_interruptible(struct semaphore * sem)
 
 	__asm__ __volatile__(
 	"mov	%%o7, %%g4\n\t"
-	"call	___atomic_sub\n\t"
+	"call	___atomic24_sub\n\t"
 	" add	%%o7, 8, %%o7\n\t"
 	"tst	%%g2\n\t"
 	"bl	2f\n\t"
@@ -145,16 +129,12 @@ static inline int down_trylock(struct semaphore * sem)
 	register volatile int *ptr asm("g1");
 	register int increment asm("g2");
 
-#if WAITQUEUE_DEBUG
-	CHECK_MAGIC(sem->__magic);
-#endif
-
 	ptr = &(sem->count.counter);
 	increment = 1;
 
 	__asm__ __volatile__(
 	"mov	%%o7, %%g4\n\t"
-	"call	___atomic_sub\n\t"
+	"call	___atomic24_sub\n\t"
 	" add	%%o7, 8, %%o7\n\t"
 	"tst	%%g2\n\t"
 	"bl	2f\n\t"
@@ -184,16 +164,12 @@ static inline void up(struct semaphore * sem)
 	register volatile int *ptr asm("g1");
 	register int increment asm("g2");
 
-#if WAITQUEUE_DEBUG
-	CHECK_MAGIC(sem->__magic);
-#endif
-
 	ptr = &(sem->count.counter);
 	increment = 1;
 
 	__asm__ __volatile__(
 	"mov	%%o7, %%g4\n\t"
-	"call	___atomic_add\n\t"
+	"call	___atomic24_add\n\t"
 	" add	%%o7, 8, %%o7\n\t"
 	"tst	%%g2\n\t"
 	"ble	2f\n\t"

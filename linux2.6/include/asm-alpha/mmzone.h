@@ -72,9 +72,8 @@ PLAT_NODE_DATA_LOCALNR(unsigned long p, int n)
     ((unsigned long)__va(NODE_DATA(kvaddr_to_nid(kaddr))->node_start_pfn  \
 			 << PAGE_SHIFT))
 
-#define kern_addr_valid(kaddr)						  \
-    test_bit(local_mapnr(kaddr), 					  \
-	     NODE_DATA(kvaddr_to_nid(kaddr))->valid_addr_bitmap)
+/* XXX: FIXME -- wli */
+#define kern_addr_valid(kaddr)	(0)
 
 #define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
 
@@ -108,7 +107,7 @@ PLAT_NODE_DATA_LOCALNR(unsigned long p, int n)
 
 #define pfn_to_page(pfn)						\
 ({									\
- 	unsigned long kaddr = (unsigned long)__va(pfn << PAGE_SHIFT);	\
+ 	unsigned long kaddr = (unsigned long)__va((pfn) << PAGE_SHIFT);	\
 	(node_mem_map(kvaddr_to_nid(kaddr)) + local_mapnr(kaddr));	\
 })
 
@@ -120,7 +119,7 @@ PLAT_NODE_DATA_LOCALNR(unsigned long p, int n)
 	((( (page) - page_zone(page)->zone_mem_map )			\
 	+ page_zone(page)->zone_start_pfn) << PAGE_SHIFT)
 
-#define pfn_to_nid(pfn)		pa_to_nid(((u64)pfn << PAGE_SHIFT))
+#define pfn_to_nid(pfn)		pa_to_nid(((u64)(pfn) << PAGE_SHIFT))
 #define pfn_valid(pfn)							\
 	(((pfn) - node_start_pfn(pfn_to_nid(pfn))) <			\
 	 node_spanned_pages(pfn_to_nid(pfn)))					\

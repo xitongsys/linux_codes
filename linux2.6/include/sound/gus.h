@@ -598,10 +598,6 @@ int snd_gf1_mem_proc_init(snd_gus_card_t * gus);
 
 /* gus_dma.c */
 
-void snd_gf1_dma_program(snd_gus_card_t * gus, unsigned int addr,
-			 unsigned long buf_addr, unsigned int count,
-			 unsigned int cmd);
-void snd_gf1_dma_ack(snd_gus_card_t * gus);
 int snd_gf1_dma_init(snd_gus_card_t * gus);
 int snd_gf1_dma_done(snd_gus_card_t * gus);
 int snd_gf1_dma_transfer_block(snd_gus_card_t * gus,
@@ -684,9 +680,9 @@ extern int snd_engine_instrument_register_ask(unsigned short mode);
 #endif
 
 /* gus_dram.c */
-int snd_gus_dram_write(snd_gus_card_t *gus, char *ptr,
+int snd_gus_dram_write(snd_gus_card_t *gus, char __user *ptr,
 		       unsigned int addr, unsigned int size);
-int snd_gus_dram_read(snd_gus_card_t *gus, char *ptr,
+int snd_gus_dram_read(snd_gus_card_t *gus, char __user *ptr,
 		      unsigned int addr, unsigned int size, int rom);
 
 #if defined(CONFIG_SND_SEQUENCER) || defined(CONFIG_SND_SEQUENCER_MODULE)
@@ -699,21 +695,21 @@ void snd_gf1_simple_init(snd_gus_voice_t *voice);
 
 /* gus_instr.c */
 int snd_gus_iwffff_put_sample(void *private_data, iwffff_wave_t *wave,
-			      char *data, long len, int atomic);
+			      char __user *data, long len, int atomic);
 int snd_gus_iwffff_get_sample(void *private_data, iwffff_wave_t *wave,
-			      char *data, long len, int atomic);
+			      char __user *data, long len, int atomic);
 int snd_gus_iwffff_remove_sample(void *private_data, iwffff_wave_t *wave,
 				 int atomic);
 int snd_gus_gf1_put_sample(void *private_data, gf1_wave_t *wave,
-			   char *data, long len, int atomic);
+			   char __user *data, long len, int atomic);
 int snd_gus_gf1_get_sample(void *private_data, gf1_wave_t *wave,
-			   char *data, long len, int atomic);
+			   char __user *data, long len, int atomic);
 int snd_gus_gf1_remove_sample(void *private_data, gf1_wave_t *wave,
 			      int atomic);
 int snd_gus_simple_put_sample(void *private_data, simple_instrument_t *instr,
-			      char *data, long len, int atomic);
+			      char __user *data, long len, int atomic);
 int snd_gus_simple_get_sample(void *private_data, simple_instrument_t *instr,
-			      char *data, long len, int atomic);
+			      char __user *data, long len, int atomic);
 int snd_gus_simple_remove_sample(void *private_data, simple_instrument_t *instr,
 				 int atomic);
 

@@ -33,7 +33,6 @@
 MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>");
 MODULE_DESCRIPTION("ICEnsemble ICE17xx <-> AK4xxx AD/DA chip interface");
 MODULE_LICENSE("GPL");
-MODULE_CLASSES("{sound}");
 
 static void snd_ice1712_akm4xxx_lock(akm4xxx_t *ak, int chip)
 {
@@ -152,8 +151,7 @@ void snd_ice1712_akm4xxx_free(ice1712_t *ice)
 		return;
 	for (akidx = 0; akidx < ice->akm_codecs; akidx++) {
 		akm4xxx_t *ak = &ice->akm[akidx];
-		if (ak->private_value[0])
-			kfree((void *)ak->private_value[0]);
+		kfree((void*)ak->private_value[0]);
 	}
 	kfree(ice->akm);
 }
@@ -174,6 +172,18 @@ int snd_ice1712_akm4xxx_build_controls(ice1712_t *ice)
 	}
 	return 0;
 }
+
+static int __init alsa_ice1712_akm4xxx_module_init(void)
+{
+	return 0;
+}
+        
+static void __exit alsa_ice1712_akm4xxx_module_exit(void)
+{
+}
+        
+module_init(alsa_ice1712_akm4xxx_module_init)
+module_exit(alsa_ice1712_akm4xxx_module_exit)
 
 EXPORT_SYMBOL(snd_ice1712_akm4xxx_init);
 EXPORT_SYMBOL(snd_ice1712_akm4xxx_free);

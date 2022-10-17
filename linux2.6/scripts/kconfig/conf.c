@@ -31,14 +31,14 @@ char *defconfig_file;
 static int indent = 1;
 static int valid_stdin = 1;
 static int conf_cnt;
-static char line[128];
+static signed char line[128];
 static struct menu *rootEntry;
 
 static char nohelp_text[] = "Sorry, no help available for this option yet.\n";
 
-static void strip(char *str)
+static void strip(signed char *str)
 {
-	char *p = str;
+	signed char *p = str;
 	int l;
 
 	while ((isspace(*p)))
@@ -175,7 +175,7 @@ int conf_string(struct menu *menu)
 			break;
 		case '?':
 			/* print help */
-			if (line[1] == 0) {
+			if (line[1] == '\n') {
 				help = nohelp_text;
 				if (menu->sym->help)
 					help = menu->sym->help;
@@ -575,6 +575,9 @@ int main(int ac, char **av)
 		conf_cnt = 0;
 		check_conf(&rootmenu);
 	} while (conf_cnt);
-	conf_write(NULL);
+	if (conf_write(NULL)) {
+		fprintf(stderr, "\n*** Error during writing of the kernel configuration.\n\n");
+		return 1;
+	}
 	return 0;
 }

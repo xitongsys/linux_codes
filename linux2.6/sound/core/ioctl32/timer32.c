@@ -41,9 +41,9 @@ struct sndrv_timer_info32 {
 {\
 	COPY(flags);\
 	COPY(card);\
-	memcpy(dst->id, src->id, sizeof(src->id));\
-	memcpy(dst->name, src->name, sizeof(src->name));\
-	COPY(resolution);\
+	COPY_ARRAY(id);\
+	COPY_ARRAY(name);\
+	COPY_CVT(resolution);\
 }
 
 struct sndrv_timer_status32 {
@@ -57,8 +57,8 @@ struct sndrv_timer_status32 {
 
 #define CVT_sndrv_timer_status()\
 {\
-	COPY(tstamp.tv_sec);\
-	COPY(tstamp.tv_nsec);\
+	COPY_CVT(tstamp.tv_sec);\
+	COPY_CVT(tstamp.tv_nsec);\
 	COPY(resolution);\
 	COPY(lost);\
 	COPY(overrun);\
@@ -88,8 +88,18 @@ struct ioctl32_mapper timer_mappers[] = {
 	{ SNDRV_TIMER_IOCTL_INFO32, AP(timer_info) },
 	MAP_COMPAT(SNDRV_TIMER_IOCTL_PARAMS),
 	{ SNDRV_TIMER_IOCTL_STATUS32, AP(timer_status) },
+#if 0
+	/* ** FIXME **
+	 * The following four entries are disabled because they conflict
+	 * with the TCOC* definitions.
+	 * Unfortunately, the current ioctl32 wrapper uses a single
+	 * hash table for all devices.  Once when the wrapper is fixed
+	 * with the table based on devices, they'll be back again.
+	 */
 	MAP_COMPAT(SNDRV_TIMER_IOCTL_START),
 	MAP_COMPAT(SNDRV_TIMER_IOCTL_STOP),
 	MAP_COMPAT(SNDRV_TIMER_IOCTL_CONTINUE),
+	MAP_COMPAT(SNDRV_TIMER_IOCTL_PAUSE),
+#endif
 	{ 0 },
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2001 Sistina Software (UK) Limited.
+ * Copyright (C) 2001-2003 Sistina Software (UK) Limited.
  *
  * This file is released under the GPL.
  */
@@ -21,7 +21,7 @@ struct stripe_c {
 	uint32_t stripes;
 
 	/* The size of this target / num. stripes */
-	uint32_t stripe_width;
+	sector_t stripe_width;
 
 	/* stripe chunk size */
 	uint32_t chunk_shift;
@@ -97,7 +97,8 @@ static int stripe_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	/*
 	 * chunk_size is a power of two
 	 */
-	if (!chunk_size || (chunk_size & (chunk_size - 1))) {
+	if (!chunk_size || (chunk_size & (chunk_size - 1)) ||
+	    (chunk_size < (PAGE_SIZE >> SECTOR_SHIFT))) {
 		ti->error = "dm-stripe: Invalid chunk size";
 		return -EINVAL;
 	}
@@ -166,14 +167,14 @@ static void stripe_dtr(struct dm_target *ti)
 	kfree(sc);
 }
 
-static int stripe_map(struct dm_target *ti, struct bio *bio)
+static int stripe_map(struct dm_target *ti, struct bio *bio,
+		      union map_info *map_context)
 {
 	struct stripe_c *sc = (struct stripe_c *) ti->private;
 
 	sector_t offset = bio->bi_sector - ti->begin;
-	uint32_t chunk = (uint32_t) (offset >> sc->chunk_shift);
-	uint32_t stripe = chunk % sc->stripes;	/* 32bit modulus */
-	chunk = chunk / sc->stripes;
+	sector_t chunk = offset >> sc->chunk_shift;
+	uint32_t stripe = sector_div(chunk, sc->stripes);
 
 	bio->bi_bdev = sc->stripe[stripe].dev->bdev;
 	bio->bi_sector = sc->stripe[stripe].physical_start +
@@ -185,7 +186,7 @@ static int stripe_status(struct dm_target *ti,
 			 status_type_t type, char *result, unsigned int maxlen)
 {
 	struct stripe_c *sc = (struct stripe_c *) ti->private;
-	int offset;
+	unsigned int sz = 0;
 	unsigned int i;
 	char buffer[32];
 
@@ -195,14 +196,11 @@ static int stripe_status(struct dm_target *ti,
 		break;
 
 	case STATUSTYPE_TABLE:
-		offset = snprintf(result, maxlen, "%d " SECTOR_FORMAT,
-				  sc->stripes, sc->chunk_mask + 1);
+		DMEMIT("%d " SECTOR_FORMAT, sc->stripes, sc->chunk_mask + 1);
 		for (i = 0; i < sc->stripes; i++) {
 			format_dev_t(buffer, sc->stripe[i].dev->bdev->bd_dev);
-			offset +=
-			    snprintf(result + offset, maxlen - offset,
-				     " %s " SECTOR_FORMAT, buffer,
-				     sc->stripe[i].physical_start);
+			DMEMIT(" %s " SECTOR_FORMAT, buffer,
+			       sc->stripe[i].physical_start);
 		}
 		break;
 	}
@@ -211,6 +209,7 @@ static int stripe_status(struct dm_target *ti,
 
 static struct target_type stripe_target = {
 	.name   = "striped",
+	.version= {1, 0, 2},
 	.module = THIS_MODULE,
 	.ctr    = stripe_ctr,
 	.dtr    = stripe_dtr,

@@ -22,10 +22,6 @@
    SOFTWARE IS DISCLAIMED.
 */
 
-/*
- *  $Id: hci.h,v 1.4 2002/04/18 22:26:15 maxk Exp $
- */
-
 #ifndef __HCI_H
 #define __HCI_H
 
@@ -35,20 +31,31 @@
 #define HCI_MAX_FRAME_SIZE	(HCI_MAX_ACL_SIZE + 4)
 
 /* HCI dev events */
-#define HCI_DEV_REG	1
-#define HCI_DEV_UNREG   2
-#define HCI_DEV_UP	3
-#define HCI_DEV_DOWN	4
-#define HCI_DEV_SUSPEND 5
-#define HCI_DEV_RESUME  6
+#define HCI_DEV_REG			1
+#define HCI_DEV_UNREG			2
+#define HCI_DEV_UP			3
+#define HCI_DEV_DOWN			4
+#define HCI_DEV_SUSPEND			5
+#define HCI_DEV_RESUME			6
+
+/* HCI notify events */
+#define HCI_NOTIFY_CONN_ADD		1
+#define HCI_NOTIFY_CONN_DEL		2
+#define HCI_NOTIFY_VOICE_SETTING	3
 
 /* HCI device types */
 #define HCI_VHCI	0
 #define HCI_USB		1
 #define HCI_PCCARD	2
-#define HCI_UART 	3
-#define HCI_RS232 	4
+#define HCI_UART	3
+#define HCI_RS232	4
 #define HCI_PCI		5
+
+/* HCI device quirks */
+enum {
+	HCI_QUIRK_RESET_ON_INIT,
+	HCI_QUIRK_RAW_DEVICE
+};
 
 /* HCI device flags */
 enum {
@@ -62,7 +69,9 @@ enum {
 	HCI_ENCRYPT,
 	HCI_INQUIRY,
 
-	HCI_RAW
+	HCI_RAW,
+
+	HCI_SECMGR
 };
 
 /* HCI ioctl defines */
@@ -85,29 +94,30 @@ enum {
 #define HCISETLINKMODE	_IOW('H', 226, int)
 #define HCISETACLMTU	_IOW('H', 227, int)
 #define HCISETSCOMTU	_IOW('H', 228, int)
-#define HCISETRAWVND	_IOW('H', 229, int)
+
+#define HCISETSECMGR	_IOW('H', 230, int)
 
 #define HCIINQUIRY	_IOR('H', 240, int)
 
 /* HCI timeouts */
-#define HCI_CONN_TIMEOUT 	(HZ * 40)
-#define HCI_DISCONN_TIMEOUT 	(HZ * 2)
+#define HCI_CONN_TIMEOUT	(HZ * 40)
+#define HCI_DISCONN_TIMEOUT	(HZ * 2)
 #define HCI_CONN_IDLE_TIMEOUT	(HZ * 60)
 
 /* HCI Packet types */
 #define HCI_COMMAND_PKT		0x01
-#define HCI_ACLDATA_PKT 	0x02
-#define HCI_SCODATA_PKT 	0x03
+#define HCI_ACLDATA_PKT		0x02
+#define HCI_SCODATA_PKT		0x03
 #define HCI_EVENT_PKT		0x04
-#define HCI_UNKNOWN_PKT		0xff
+#define HCI_VENDOR_PKT		0xff
 
 /* HCI Packet types */
-#define HCI_DM1 	0x0008
-#define HCI_DM3 	0x0400
-#define HCI_DM5 	0x4000
-#define HCI_DH1 	0x0010
-#define HCI_DH3 	0x0800
-#define HCI_DH5 	0x8000
+#define HCI_DM1		0x0008
+#define HCI_DM3		0x0400
+#define HCI_DM5		0x4000
+#define HCI_DH1		0x0010
+#define HCI_DH3		0x0800
+#define HCI_DH5		0x8000
 
 #define HCI_HV1		0x0020
 #define HCI_HV2		0x0040
@@ -161,6 +171,8 @@ enum {
 #define HCI_LM_AUTH	0x0002
 #define HCI_LM_ENCRYPT	0x0004
 #define HCI_LM_TRUSTED	0x0008
+#define HCI_LM_RELIABLE	0x0010
+#define HCI_LM_SECURE	0x0020
 
 /* -----  HCI Commands ---- */
 /* OGF & OCF values */
@@ -253,6 +265,17 @@ struct hci_cp_write_dev_class {
 	__u8     dev_class[3];
 } __attribute__ ((packed));
 
+#define OCF_READ_VOICE_SETTING	0x0025
+struct hci_rp_read_voice_setting {
+	__u8	status;
+	__u16	voice_setting;
+} __attribute__ ((packed));
+
+#define OCF_WRITE_VOICE_SETTING	0x0026
+struct hci_cp_write_voice_setting {
+	__u16	voice_setting;
+} __attribute__ ((packed));
+
 #define OCF_HOST_BUFFER_SIZE	0x0033
 struct hci_cp_host_buffer_size {
 	__u16    acl_mtu;
@@ -307,18 +330,26 @@ struct hci_cp_inquiry {
 #define OCF_INQUIRY_CANCEL	0x0002
 
 #define OCF_LINK_KEY_REPLY	0x000B
-#define OCF_LINK_KEY_NEG_REPLY	0x000C
 struct hci_cp_link_key_reply {
 	bdaddr_t bdaddr;
 	__u8     link_key[16];
 } __attribute__ ((packed));
 
+#define OCF_LINK_KEY_NEG_REPLY	0x000C
+struct hci_cp_link_key_neg_reply {
+	bdaddr_t bdaddr;
+} __attribute__ ((packed));
+
 #define OCF_PIN_CODE_REPLY	0x000D
-#define OCF_PIN_CODE_NEG_REPLY	0x000E
 struct hci_cp_pin_code_reply {
 	bdaddr_t bdaddr;
 	__u8     pin_len;
 	__u8     pin_code[16];
+} __attribute__ ((packed));
+
+#define OCF_PIN_CODE_NEG_REPLY	0x000E
+struct hci_cp_pin_code_neg_reply {
+	bdaddr_t bdaddr;
 } __attribute__ ((packed));
 
 #define OCF_CHANGE_CONN_PTYPE	0x000F
@@ -336,6 +367,11 @@ struct hci_cp_auth_requested {
 struct hci_cp_set_conn_encrypt {
 	__u16    handle;
 	__u8     encrypt;
+} __attribute__ ((packed));
+
+#define OCF_CHANGE_CONN_LINK_KEY 0x0015
+struct hci_cp_change_conn_link_key {
+	__u16    handle;
 } __attribute__ ((packed));
 
 #define OCF_READ_REMOTE_FEATURES 0x001B
@@ -408,6 +444,16 @@ struct inquiry_info {
 	__u16    clock_offset;
 } __attribute__ ((packed));
 
+#define HCI_EV_INQUIRY_RESULT_WITH_RSSI	0x22
+struct inquiry_info_with_rssi {
+	bdaddr_t bdaddr;
+	__u8     pscan_rep_mode;
+	__u8     pscan_period_mode;
+	__u8     dev_class[3];
+	__u16    clock_offset;
+	__s8     rssi;
+} __attribute__ ((packed));
+
 #define HCI_EV_CONN_COMPLETE 	0x03
 struct hci_ev_conn_complete {
 	__u8     status;
@@ -442,6 +488,12 @@ struct hci_ev_encrypt_change {
 	__u8     status;
 	__u16    handle;
 	__u8     encrypt;
+} __attribute__ ((packed));
+
+#define HCI_EV_CHANGE_CONN_LINK_KEY_COMPLETE	0x09
+struct hci_ev_change_conn_link_key_complete {
+	__u8     status;
+	__u16    handle;
 } __attribute__ ((packed));
 
 #define HCI_EV_QOS_SETUP_COMPLETE	0x0D
@@ -484,6 +536,14 @@ struct hci_ev_role_change {
 	__u8     role;
 } __attribute__ ((packed));
 
+#define HCI_EV_MODE_CHANGE	0x14
+struct hci_ev_mode_change {
+	__u8     status;
+	__u16    handle;
+	__u8     mode;
+	__u16    interval;
+} __attribute__ ((packed));
+
 #define HCI_EV_PIN_CODE_REQ	0x16
 struct hci_ev_pin_code_req {
 	bdaddr_t bdaddr;
@@ -515,6 +575,13 @@ struct hci_ev_rmt_version {
 	__u8     lmp_ver;
 	__u16    manufacturer;
 	__u16    lmp_subver;
+} __attribute__ ((packed));
+
+#define HCI_EV_CLOCK_OFFSET	0x01C
+struct hci_ev_clock_offset {
+	__u8     status;
+	__u16    handle;
+	__u16    clock_offset;
 } __attribute__ ((packed));
 
 /* Internal events generated by Bluetooth stack */

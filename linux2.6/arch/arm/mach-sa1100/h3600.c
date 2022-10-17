@@ -25,6 +25,9 @@
 #include <linux/kernel.h>
 #include <linux/tty.h>
 #include <linux/pm.h>
+#include <linux/device.h>
+#include <linux/mtd/mtd.h>
+#include <linux/mtd/partitions.h>
 #include <linux/serial_core.h>
 
 #include <asm/irq.h>
@@ -34,6 +37,8 @@
 
 #include <asm/mach/irq.h>
 #include <asm/mach/arch.h>
+#include <asm/mach/flash.h>
+#include <asm/mach/irda.h>
 #include <asm/mach/map.h>
 #include <asm/mach/serial_sa1100.h>
 
@@ -51,6 +56,99 @@
 
 struct ipaq_model_ops ipaq_model_ops;
 EXPORT_SYMBOL(ipaq_model_ops);
+
+static struct mtd_partition h3xxx_partitions[] = {
+	{
+		.name		= "H3XXX boot firmware",
+		.size		= 0x00040000,
+		.offset		= 0,
+		.mask_flags	= MTD_WRITEABLE,  /* force read-only */
+	}, {
+#ifdef CONFIG_MTD_2PARTS_IPAQ
+		.name		= "H3XXX root jffs2",
+		.size		= MTDPART_SIZ_FULL,
+		.offset		= 0x00040000,
+#else
+		.name		= "H3XXX kernel",
+		.size		= 0x00080000,
+		.offset		= 0x00040000,
+	}, {
+		.name		= "H3XXX params",
+		.size		= 0x00040000,
+		.offset		= 0x000C0000,
+	}, {
+#ifdef CONFIG_JFFS2_FS
+		.name		= "H3XXX root jffs2",
+		.size		= MTDPART_SIZ_FULL,
+		.offset		= 0x00100000,
+#else
+		.name		= "H3XXX initrd",
+		.size		= 0x00100000,
+		.offset		= 0x00100000,
+	}, {
+		.name		= "H3XXX root cramfs",
+		.size		= 0x00300000,
+		.offset		= 0x00200000,
+	}, {
+		.name		= "H3XXX usr cramfs",
+		.size		= 0x00800000,
+		.offset		= 0x00500000,
+	}, {
+		.name		= "H3XXX usr local",
+		.size		= MTDPART_SIZ_FULL,
+		.offset		= 0x00d00000,
+#endif
+#endif
+	}
+};
+
+static void h3xxx_set_vpp(int vpp)
+{
+	assign_h3600_egpio(IPAQ_EGPIO_VPP_ON, vpp);
+}
+
+static struct flash_platform_data h3xxx_flash_data = {
+	.map_name	= "cfi_probe",
+	.set_vpp	= h3xxx_set_vpp,
+	.parts		= h3xxx_partitions,
+	.nr_parts	= ARRAY_SIZE(h3xxx_partitions),
+};
+
+static struct resource h3xxx_flash_resource = {
+	.start		= SA1100_CS0_PHYS,
+	.end		= SA1100_CS0_PHYS + SZ_32M - 1,
+	.flags		= IORESOURCE_MEM,
+};
+
+/*
+ * This turns the IRDA power on or off on the Compaq H3600
+ */
+static int h3600_irda_set_power(struct device *dev, unsigned int state)
+{
+	assign_h3600_egpio( IPAQ_EGPIO_IR_ON, state );
+
+	return 0;
+}
+
+static void h3600_irda_set_speed(struct device *dev, int speed)
+{
+	if (speed < 4000000) {
+		clr_h3600_egpio(IPAQ_EGPIO_IR_FSEL);
+	} else {
+		set_h3600_egpio(IPAQ_EGPIO_IR_FSEL);
+	}
+}
+
+static struct irda_platform_data h3600_irda_data = {
+	.set_power	= h3600_irda_set_power,
+	.set_speed	= h3600_irda_set_speed,
+};
+
+static void h3xxx_mach_init(void)
+{
+	sa11x0_set_flash_data(&h3xxx_flash_data, &h3xxx_flash_resource, 1);
+	sa11x0_set_irda_data(&h3600_irda_data);
+}
 
 /*
  * low-level UART features
@@ -286,6 +384,8 @@ MACHINE_START(H3100, "Compaq iPAQ H3100")
 	BOOT_PARAMS(0xc0000100)
 	MAPIO(h3100_map_io)
 	INITIRQ(sa1100_init_irq)
+	.timer		= &sa1100_timer,
+	.init_machine	= h3xxx_mach_init,
 MACHINE_END
 
 #endif /* CONFIG_SA1100_H3100 */
@@ -400,6 +500,8 @@ MACHINE_START(H3600, "Compaq iPAQ H3600")
 	BOOT_PARAMS(0xc0000100)
 	MAPIO(h3600_map_io)
 	INITIRQ(sa1100_init_irq)
+	.timer		= &sa1100_timer,
+	.init_machine	= h3xxx_mach_init,
 MACHINE_END
 
 #endif /* CONFIG_SA1100_H3600 */
@@ -481,7 +583,7 @@ static void h3800_control_egpio(enum ipaq_egpio_type x, int setp)
 	case IPAQ_EGPIO_CODEC_NRESET:
 	case IPAQ_EGPIO_AUDIO_ON:
 	case IPAQ_EGPIO_QMUTE:
-		printk(__FUNCTION__ ": error - should not be called\n");
+		printk("%s: error - should not be called\n", __FUNCTION__);
 		break;
 	case IPAQ_EGPIO_OPT_NVRAM_ON:
 		SET_ASIC2(GPIO2_OPT_ON_NVRAM);
@@ -523,7 +625,7 @@ static int h3800_pm_callback(int req)
 	static u16 asic2_data;
 	int result = 0;
 
-	printk(__FUNCTION__ " %d\n", req);
+	printk("%s %d\n", __FUNCTION__, req);
 
 	switch (req) {
 	case PM_RESUME:
@@ -551,7 +653,7 @@ static int h3800_pm_callback(int req)
 		asic2_data = H3800_ASIC2_GPIOPIOD;
 		break;
 	default:
-		printk(__FUNCTION__ ": unrecognized PM callback\n");
+		printk("%s: unrecognized PM callback\n", __FUNCTION__);
 		break;
 	}
 	return result;
@@ -591,7 +693,7 @@ static void h3800_IRQ_demux(unsigned int irq, struct irqdesc *desc, struct pt_re
 {
 	int i;
 
-	if (0) printk(__FUNCTION__ ": interrupt received\n");
+	if (0) printk("%s: interrupt received\n", __FUNCTION__);
 
 	desc->chip->ack(irq);
 
@@ -601,21 +703,21 @@ static void h3800_IRQ_demux(unsigned int irq, struct irqdesc *desc, struct pt_re
 
 		/* KPIO */
 		irq = H3800_ASIC2_KPIINTFLAG;
-		if (0) printk(__FUNCTION__" KPIO 0x%08X\n", irq);
+		if (0) printk("%s KPIO 0x%08X\n", __FUNCTION__, irq);
 		for (j = 0; j < H3800_KPIO_IRQ_COUNT; j++)
 			if (irq & kpio_irq_mask[j])
 				do_edge_IRQ(H3800_KPIO_IRQ_COUNT + j, irq_desc + H3800_KPIO_IRQ_COUNT + j, regs);
 
 		/* GPIO2 */
 		irq = H3800_ASIC2_GPIINTFLAG;
-		if (0) printk(__FUNCTION__" GPIO 0x%08X\n", irq);
+		if (0) printk("%s GPIO 0x%08X\n", __FUNCTION__, irq);
 		for (j = 0; j < H3800_GPIO_IRQ_COUNT; j++)
 			if (irq & gpio_irq_mask[j])
 				do_edge_IRQ(H3800_GPIO_IRQ_COUNT + j, irq_desc + H3800_GPIO_IRQ_COUNT + j , regs);
 	}
 
 	if (i >= MAX_ASIC_ISR_LOOPS)
-		printk(__FUNCTION__ ": interrupt processing overrun\n");
+		printk("%s: interrupt processing overrun\n", __FUNCTION__);
 
 	/* For level-based interrupts */
 	desc->chip->unmask(irq);
@@ -783,6 +885,8 @@ MACHINE_START(H3800, "Compaq iPAQ H3800")
 	BOOT_PARAMS(0xc0000100)
 	MAPIO(h3800_map_io)
 	INITIRQ(h3800_init_irq)
+	.timer		= &sa1100_timer,
+	.init_machine	= h3xxx_mach_init,
 MACHINE_END
 
 #endif /* CONFIG_SA1100_H3800 */

@@ -19,15 +19,17 @@
 
 static inline cpumask_t target_cpus(void)
 {
-	cpumask_t tmp = CPU_MASK_ALL;
-	return tmp;
+	/* CPU_MASK_ALL (0xff) has undefined behaviour with
+	 * dest_LowestPrio mode logical clustered apic interrupt routing
+	 * Just start on cpu 0.  IRQ balancing will spread load
+	 */
+	return cpumask_of_cpu(0);
 } 
 #define TARGET_CPUS	(target_cpus())
 
-#define INT_DELIVERY_MODE (dest_Fixed)
+#define INT_DELIVERY_MODE (dest_LowestPrio)
 #define INT_DEST_MODE 1     /* logical delivery broadcast to all procs */
 
-#define APIC_BROADCAST_ID     (0xFF)
 static inline unsigned long check_apicid_used(physid_mask_t bitmap, int apicid)
 {
 	return 0;
@@ -140,14 +142,14 @@ static inline void enable_apic_mode(void)
 {
 }
 
-static inline unsigned int cpu_mask_to_apicid(cpumask_const_t cpumask)
+static inline unsigned int cpu_mask_to_apicid(cpumask_t cpumask)
 {
 	int num_bits_set;
 	int cpus_found = 0;
 	int cpu;
 	int apicid;	
 
-	num_bits_set = cpus_weight_const(cpumask);
+	num_bits_set = cpus_weight(cpumask);
 	/* Return id to all */
 	if (num_bits_set == NR_CPUS)
 		return (int) 0xFF;
@@ -155,10 +157,10 @@ static inline unsigned int cpu_mask_to_apicid(cpumask_const_t cpumask)
 	 * The cpus in the mask must all be on the apic cluster.  If are not 
 	 * on the same apicid cluster return default value of TARGET_CPUS. 
 	 */
-	cpu = first_cpu_const(cpumask);
+	cpu = first_cpu(cpumask);
 	apicid = cpu_to_logical_apicid(cpu);
 	while (cpus_found < num_bits_set) {
-		if (cpu_isset_const(cpu, cpumask)) {
+		if (cpu_isset(cpu, cpumask)) {
 			int new_apicid = cpu_to_logical_apicid(cpu);
 			if (apicid_cluster(apicid) != 
 					apicid_cluster(new_apicid)){
@@ -171,6 +173,17 @@ static inline unsigned int cpu_mask_to_apicid(cpumask_const_t cpumask)
 		cpu++;
 	}
 	return apicid;
+}
+
+/* cpuid returns the value latched in the HW at reset, not the APIC ID
+ * register's value.  For any box whose BIOS changes APIC IDs, like
+ * clustered APIC systems, we must use hard_smp_processor_id.
+ *
+ * See Intel's IA-32 SW Dev's Manual Vol2 under CPUID.
+ */
+static inline u32 phys_pkg_id(u32 cpuid_apic, int index_msb)
+{
+	return hard_smp_processor_id() >> index_msb;
 }
 
 #endif /* __ASM_MACH_APIC_H */

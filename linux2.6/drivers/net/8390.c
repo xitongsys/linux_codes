@@ -41,6 +41,9 @@
 			  module by all drivers that require it.
   Alan Cox		: Spinlocking work, added 'BUG_83C690'
   Paul Gortmaker	: Separate out Tx timeout code from Tx path.
+  Paul Gortmaker	: Remove old unused single Tx buffer code.
+  Hayato Fujiwara	: Add m32r support.
+  Paul Gortmaker	: use skb_padto() instead of stack scratch area
 
   Sources:
   The National Semiconductor LAN Databook, and the 3Com 3c503 databook.
@@ -56,9 +59,9 @@ static const char version[] =
 #include <linux/fs.h>
 #include <linux/types.h>
 #include <linux/string.h>
+#include <linux/bitops.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
-#include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <linux/delay.h>
@@ -157,15 +160,8 @@ static void do_set_multicast_list(struct net_device *dev);
 int ei_open(struct net_device *dev)
 {
 	unsigned long flags;
-	struct ei_device *ei_local = (struct ei_device *) dev->priv;
+	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
 
-	/* This can't happen unless somebody forgot to call ethdev_init(). */
-	if (ei_local == NULL) 
-	{
-		printk(KERN_EMERG "%s: ei_open passed a non-existent device!\n", dev->name);
-		return -ENXIO;
-	}
-	
 	/* The card I/O part of the driver (e.g. 3c503) can hook a Tx timeout
 	    wrapper that does e.g. media check & then calls ei_tx_timeout. */
 	if (dev->tx_timeout == NULL)
@@ -196,7 +192,7 @@ int ei_open(struct net_device *dev)
  */
 int ei_close(struct net_device *dev)
 {
-	struct ei_device *ei_local = (struct ei_device *) dev->priv;
+	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
 	unsigned long flags;
 
 	/*
@@ -221,10 +217,19 @@ int ei_close(struct net_device *dev)
 void ei_tx_timeout(struct net_device *dev)
 {
 	long e8390_base = dev->base_addr;
-	struct ei_device *ei_local = (struct ei_device *) dev->priv;
+	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
 	int txsr, isr, tickssofar = jiffies - dev->trans_start;
 	unsigned long flags;
 
+#if defined(CONFIG_M32R) && defined(CONFIG_SMP)
+	unsigned long icucr;
+
+	local_irq_save(flags);
+	icucr = inl(ICUCR1);
+	icucr |= M32R_ICUCR_ISMOD11;
+	outl(icucr, ICUCR1);
+	local_irq_restore(flags);
+#endif
 	ei_local->stat.tx_errors++;
 
 	spin_lock_irqsave(&ei_local->page_lock, flags);
@@ -267,12 +272,16 @@ void ei_tx_timeout(struct net_device *dev)
 static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	long e8390_base = dev->base_addr;
-	struct ei_device *ei_local = (struct ei_device *) dev->priv;
-	int length, send_length, output_page;
+	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
+	int send_length = skb->len, output_page;
 	unsigned long flags;
-	char scratch[ETH_ZLEN];
 
-	length = skb->len;
+	if (skb->len < ETH_ZLEN) {
+		skb = skb_padto(skb, ETH_ZLEN);
+		if (skb == NULL)
+			return 0;
+		send_length = ETH_ZLEN;
+	}
 
 	/* Mask interrupts from the ethercard. 
 	   SMP: We have to grab the lock here otherwise the IRQ handler
@@ -294,10 +303,6 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	
 	ei_local->irqlock = 1;
 
-	send_length = ETH_ZLEN < length ? length : ETH_ZLEN;
-    
-#ifdef EI_PINGPONG
-
 	/*
 	 * We have two Tx slots available for use. Find the first free
 	 * slot, and then perform some sanity checks. With two Tx bufs,
@@ -316,7 +321,7 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 	else if (ei_local->tx2 == 0) 
 	{
-		output_page = ei_local->tx_start_page + TX_1X_PAGES;
+		output_page = ei_local->tx_start_page + TX_PAGES/2;
 		ei_local->tx2 = send_length;
 		if (ei_debug  &&  ei_local->tx1 > 0)
 			printk(KERN_DEBUG "%s: idle transmitter, tx1=%d, lasttx=%d, txing=%d.\n",
@@ -342,13 +347,7 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * trigger the send later, upon receiving a Tx done interrupt.
 	 */
 	 
-	if (length == send_length)
-		ei_block_output(dev, length, skb->data, output_page);
-	else {
-		memset(scratch, 0, ETH_ZLEN);
-		memcpy(scratch, skb->data, skb->len);
-		ei_block_output(dev, ETH_ZLEN, scratch, output_page);
-	}
+	ei_block_output(dev, send_length, skb->data, output_page);
 		
 	if (! ei_local->txing) 
 	{
@@ -372,28 +371,6 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		netif_stop_queue(dev);
 	else
 		netif_start_queue(dev);
-
-#else	/* EI_PINGPONG */
-
-	/*
-	 * Only one Tx buffer in use. You need two Tx bufs to come close to
-	 * back-to-back transmits. Expect a 20 -> 25% performance hit on
-	 * reasonable hardware if you only use one Tx buffer.
-	 */
-
-	if (length == send_length)
-		ei_block_output(dev, length, skb->data, ei_local->tx_start_page);
-	else {
-		memset(scratch, 0, ETH_ZLEN);
-		memcpy(scratch, skb->data, skb->len);
-		ei_block_output(dev, ETH_ZLEN, scratch, ei_local->tx_start_page);
-	}
-	ei_local->txing = 1;
-	NS8390_trigger_send(dev, send_length, ei_local->tx_start_page);
-	dev->trans_start = jiffies;
-	netif_stop_queue(dev);
-
-#endif	/* EI_PINGPONG */
 
 	/* Turn 8390 interrupts back on. */
 	ei_local->irqlock = 0;
@@ -435,7 +412,7 @@ irqreturn_t ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	}
     
 	e8390_base = dev->base_addr;
-	ei_local = (struct ei_device *) dev->priv;
+	ei_local = (struct ei_device *) netdev_priv(dev);
 
 	/*
 	 *	Protect the irq test too.
@@ -520,8 +497,17 @@ irqreturn_t ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		}
 	}
 	spin_unlock(&ei_local->page_lock);
-	return IRQ_HANDLED;
+	return IRQ_RETVAL(nr_serviced > 0);
 }
+
+#ifdef CONFIG_NET_POLL_CONTROLLER
+void ei_poll(struct net_device *dev)
+{
+	disable_irq(dev->irq);
+	ei_interrupt(dev->irq, dev, NULL);
+	enable_irq(dev->irq);
+}
+#endif
 
 /**
  * ei_tx_err - handle transmitter error
@@ -540,7 +526,7 @@ irqreturn_t ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 static void ei_tx_err(struct net_device *dev)
 {
 	long e8390_base = dev->base_addr;
-	struct ei_device *ei_local = (struct ei_device *) dev->priv;
+	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
 	unsigned char txsr = inb_p(e8390_base+EN0_TSR);
 	unsigned char tx_was_aborted = txsr & (ENTSR_ABT+ENTSR_FU);
 
@@ -583,12 +569,10 @@ static void ei_tx_err(struct net_device *dev)
 static void ei_tx_intr(struct net_device *dev)
 {
 	long e8390_base = dev->base_addr;
-	struct ei_device *ei_local = (struct ei_device *) dev->priv;
+	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
 	int status = inb(e8390_base + EN0_TSR);
     
 	outb_p(ENISR_TX, e8390_base + EN0_ISR); /* Ack intr. */
-
-#ifdef EI_PINGPONG
 
 	/*
 	 * There are two Tx buffers, see which one finished, and trigger
@@ -632,13 +616,6 @@ static void ei_tx_intr(struct net_device *dev)
 //	else printk(KERN_WARNING "%s: unexpected TX-done interrupt, lasttx=%d.\n",
 //			dev->name, ei_local->lasttx);
 
-#else	/* EI_PINGPONG */
-	/*
-	 *  Single Tx buffer: mark it free so another packet can be loaded.
-	 */
-	ei_local->txing = 0;
-#endif
-
 	/* Minimize Tx latency: update the statistics after we restart TXing. */
 	if (status & ENTSR_COL)
 		ei_local->stat.collisions++;
@@ -675,7 +652,7 @@ static void ei_tx_intr(struct net_device *dev)
 static void ei_receive(struct net_device *dev)
 {
 	long e8390_base = dev->base_addr;
-	struct ei_device *ei_local = (struct ei_device *) dev->priv;
+	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
 	unsigned char rxing_page, this_frame, next_frame;
 	unsigned short current_offset;
 	int rx_pkt_count = 0;
@@ -813,7 +790,7 @@ static void ei_rx_overrun(struct net_device *dev)
 {
 	long e8390_base = dev->base_addr;
 	unsigned char was_txing, must_resend = 0;
-	struct ei_device *ei_local = (struct ei_device *) dev->priv;
+	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
     
 	/*
 	 * Record whether a Tx was in progress and then issue the
@@ -833,7 +810,7 @@ static void ei_rx_overrun(struct net_device *dev)
 	 * We wait at least 10ms.
 	 */
 
-	udelay(10*1000);
+	mdelay(10);
 
 	/*
 	 * Reset RBCR[01] back to zero as per magic incantation.
@@ -881,7 +858,7 @@ static void ei_rx_overrun(struct net_device *dev)
 static struct net_device_stats *get_stats(struct net_device *dev)
 {
 	long ioaddr = dev->base_addr;
-	struct ei_device *ei_local = (struct ei_device *) dev->priv;
+	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
 	unsigned long flags;
     
 	/* If the card is stopped, just return the present stats. */
@@ -936,7 +913,7 @@ static void do_set_multicast_list(struct net_device *dev)
 {
 	long e8390_base = dev->base_addr;
 	int i;
-	struct ei_device *ei_local = (struct ei_device*)dev->priv;
+	struct ei_device *ei_local = (struct ei_device*)netdev_priv(dev);
 
 	if (!(dev->flags&(IFF_PROMISC|IFF_ALLMULTI))) 
 	{
@@ -990,53 +967,34 @@ static void do_set_multicast_list(struct net_device *dev)
 static void set_multicast_list(struct net_device *dev)
 {
 	unsigned long flags;
-	struct ei_device *ei_local = (struct ei_device*)dev->priv;
+	struct ei_device *ei_local = (struct ei_device*)netdev_priv(dev);
 	
 	spin_lock_irqsave(&ei_local->page_lock, flags);
 	do_set_multicast_list(dev);
 	spin_unlock_irqrestore(&ei_local->page_lock, flags);
 }	
 
-static inline void ei_device_init(struct ei_device *ei_local)
-{
-	spin_lock_init(&ei_local->page_lock);
-}
-
 /**
- * ethdev_init - init rest of 8390 device struct
+ * ethdev_setup - init rest of 8390 device struct
  * @dev: network device structure to init
  *
  * Initialize the rest of the 8390 device structure.  Do NOT __init
  * this, as it is used by 8390 based modular drivers too.
  */
 
-int ethdev_init(struct net_device *dev)
+static void ethdev_setup(struct net_device *dev)
 {
+	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
 	if (ei_debug > 1)
 		printk(version);
-    
-	if (dev->priv == NULL) 
-	{
-		dev->priv = kmalloc(sizeof(struct ei_device), GFP_KERNEL);
-		if (dev->priv == NULL)
-			return -ENOMEM;
-		memset(dev->priv, 0, sizeof(struct ei_device));
-		ei_device_init(dev->priv);
-	}
     
 	dev->hard_start_xmit = &ei_start_xmit;
 	dev->get_stats	= get_stats;
 	dev->set_multicast_list = &set_multicast_list;
 
 	ether_setup(dev);
-        
-	return 0;
-}
 
-/* wrapper to make alloc_netdev happy; probably should just cast... */
-static void __ethdev_init(struct net_device *dev)
-{
-	ethdev_init(dev);
+	spin_lock_init(&ei_local->page_lock);
 }
 
 /**
@@ -1044,15 +1002,10 @@ static void __ethdev_init(struct net_device *dev)
  *
  * Allocate 8390-specific net_device.
  */
-struct net_device *alloc_ei_netdev(void)
+struct net_device *__alloc_ei_netdev(int size)
 {
-	struct net_device *dev;
-	
-	dev = alloc_netdev(sizeof(struct ei_device), "eth%d", __ethdev_init);
-	if (dev)
-		ei_device_init(dev->priv);
-
-	return dev;
+	return alloc_netdev(sizeof(struct ei_device) + size, "eth%d",
+				ethdev_setup);
 }
 
 
@@ -1072,7 +1025,7 @@ struct net_device *alloc_ei_netdev(void)
 void NS8390_init(struct net_device *dev, int startp)
 {
 	long e8390_base = dev->base_addr;
-	struct ei_device *ei_local = (struct ei_device *) dev->priv;
+	struct ei_device *ei_local = (struct ei_device *) netdev_priv(dev);
 	int i;
 	int endcfg = ei_local->word16
 	    ? (0x48 | ENDCFG_WTS | (ei_local->bigendian ? ENDCFG_BOS : 0))
@@ -1106,7 +1059,7 @@ void NS8390_init(struct net_device *dev, int startp)
 	for(i = 0; i < 6; i++) 
 	{
 		outb_p(dev->dev_addr[i], e8390_base + EN1_PHYS_SHIFT(i));
-		if(inb_p(e8390_base + EN1_PHYS_SHIFT(i))!=dev->dev_addr[i])
+		if (ei_debug > 1 && inb_p(e8390_base + EN1_PHYS_SHIFT(i))!=dev->dev_addr[i])
 			printk(KERN_ERR "Hw. address read/write mismap %d\n",i);
 	}
 
@@ -1136,7 +1089,7 @@ static void NS8390_trigger_send(struct net_device *dev, unsigned int length,
 								int start_page)
 {
 	long e8390_base = dev->base_addr;
- 	struct ei_device *ei_local __attribute((unused)) = (struct ei_device *) dev->priv;
+ 	struct ei_device *ei_local __attribute((unused)) = (struct ei_device *) netdev_priv(dev);
    
 	outb_p(E8390_NODMA+E8390_PAGE0, e8390_base+E8390_CMD);
     
@@ -1155,10 +1108,11 @@ static void NS8390_trigger_send(struct net_device *dev, unsigned int length,
 EXPORT_SYMBOL(ei_open);
 EXPORT_SYMBOL(ei_close);
 EXPORT_SYMBOL(ei_interrupt);
-EXPORT_SYMBOL(ei_tx_timeout);
-EXPORT_SYMBOL(ethdev_init);
+#ifdef CONFIG_NET_POLL_CONTROLLER
+EXPORT_SYMBOL(ei_poll);
+#endif
 EXPORT_SYMBOL(NS8390_init);
-EXPORT_SYMBOL(alloc_ei_netdev);
+EXPORT_SYMBOL(__alloc_ei_netdev);
 
 #if defined(MODULE)
 

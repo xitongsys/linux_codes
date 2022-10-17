@@ -46,7 +46,7 @@ static void print_string(char *str)
 	struct tty_struct *my_tty;
 
 	/* The tty for the current task */
-	my_tty = current->tty;
+	my_tty = current->signal->tty;
 	if (my_tty != NULL) {
 		my_tty->driver->write(my_tty, 0, str, strlen(str));
 		my_tty->driver->write(my_tty, 0, "\015\012", 2);
@@ -90,10 +90,10 @@ static struct ebt_target ebt_standard_target =
 { {NULL, NULL}, EBT_STANDARD_TARGET, NULL, NULL, NULL, NULL};
 
 static inline int ebt_do_watcher (struct ebt_entry_watcher *w,
-   const struct sk_buff *skb, const struct net_device *in,
+   const struct sk_buff *skb, unsigned int hooknr, const struct net_device *in,
    const struct net_device *out)
 {
-	w->u.watcher->watcher(skb, in, out, w->data,
+	w->u.watcher->watcher(skb, hooknr, in, out, w->data,
 	   w->watcher_size);
 	/* watchers don't give a verdict */
 	return 0;
@@ -109,11 +109,17 @@ static inline int ebt_do_match (struct ebt_entry_match *m,
 
 static inline int ebt_dev_check(char *entry, const struct net_device *device)
 {
+	int i = 0;
+	char *devname = device->name;
+
 	if (*entry == '\0')
 		return 0;
 	if (!device)
 		return 1;
-	return !!strcmp(entry, device->name);
+	/* 1 is the wildcard token */
+	while (entry[i] != '\0' && entry[i] != 1 && entry[i] == devname[i])
+		i++;
+	return (devname[i] != entry[i] && entry[i] != 1);
 }
 
 #define FWINV2(bool,invflg) ((bool) ^ !!(e->invflags & invflg))
@@ -190,7 +196,7 @@ unsigned int ebt_do_table (unsigned int hook, struct sk_buff **pskb,
 	base = private->entries;
 	i = 0;
 	while (i < nentries) {
-		if (ebt_basic_match(point, (**pskb).mac.ethernet, in, out))
+		if (ebt_basic_match(point, eth_hdr(*pskb), in, out))
 			goto letscontinue;
 
 		if (EBT_MATCH_ITERATE(point, ebt_do_match, *pskb, in, out) != 0)
@@ -202,7 +208,7 @@ unsigned int ebt_do_table (unsigned int hook, struct sk_buff **pskb,
 
 		/* these should only watch: not modify, nor tell us
 		   what to do with the packet */
-		EBT_WATCHER_ITERATE(point, ebt_do_watcher, *pskb, in,
+		EBT_WATCHER_ITERATE(point, ebt_do_watcher, *pskb, hook, in,
 		   out);
 
 		t = (struct ebt_entry_target *)
@@ -902,7 +908,7 @@ static void get_counters(struct ebt_counter *oldcounters,
 }
 
 /* replace the table */
-static int do_replace(void *user, unsigned int len)
+static int do_replace(void __user *user, unsigned int len)
 {
 	int ret, i, countersize;
 	struct ebt_table_info *newinfo;
@@ -1162,7 +1168,7 @@ int ebt_register_table(struct ebt_table *table)
 	}
 
 	table->private = newinfo;
-	table->lock = RW_LOCK_UNLOCKED;
+	rwlock_init(&table->lock);
 	ret = down_interruptible(&ebt_mutex);
 	if (ret != 0)
 		goto free_chainstack;
@@ -1217,7 +1223,7 @@ void ebt_unregister_table(struct ebt_table *table)
 }
 
 /* userspace just supplied us with counters */
-static int update_counters(void *user, unsigned int len)
+static int update_counters(void __user *user, unsigned int len)
 {
 	int i, ret;
 	struct ebt_counter *tmp;
@@ -1315,7 +1321,7 @@ static inline int ebt_make_names(struct ebt_entry *e, char *base, char *ubase)
 }
 
 /* called with ebt_mutex down */
-static int copy_everything_to_user(struct ebt_table *t, void *user,
+static int copy_everything_to_user(struct ebt_table *t, void __user *user,
    int *len, int cmd)
 {
 	struct ebt_replace tmp;
@@ -1391,7 +1397,7 @@ static int copy_everything_to_user(struct ebt_table *t, void *user,
 }
 
 static int do_ebt_set_ctl(struct sock *sk,
-	int cmd, void *user, unsigned int len)
+	int cmd, void __user *user, unsigned int len)
 {
 	int ret;
 
@@ -1408,7 +1414,7 @@ static int do_ebt_set_ctl(struct sock *sk,
 	return ret;
 }
 
-static int do_ebt_get_ctl(struct sock *sk, int cmd, void *user, int *len)
+static int do_ebt_get_ctl(struct sock *sk, int cmd, void __user *user, int *len)
 {
 	int ret;
 	struct ebt_replace tmp;

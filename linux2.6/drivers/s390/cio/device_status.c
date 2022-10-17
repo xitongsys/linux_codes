@@ -35,7 +35,7 @@ ccw_device_msg_control_check(struct ccw_device *cdev, struct irb *irb)
 		return;
 		
 	CIO_MSG_EVENT(0, "Channel-Check or Interface-Control-Check "
-		      "received\n"
+		      "received"
 		      " ... device %04X on subchannel %04X, dev_stat "
 		      ": %02X sch_stat : %02X\n",
 		      cdev->private->devno, cdev->private->irq,
@@ -62,7 +62,7 @@ ccw_device_path_notoper(struct ccw_device *cdev)
 	sch = to_subchannel(cdev->dev.parent);
 	stsch (sch->irq, &sch->schib);
 
-	CIO_MSG_EVENT(0, "%s(%04X) - path(s) %02x are "
+	CIO_MSG_EVENT(0, "%s(%04x) - path(s) %02x are "
 		      "not operational \n", __FUNCTION__, sch->irq,
 		      sch->schib.pmcw.pnom);
 
@@ -99,7 +99,7 @@ ccw_device_accumulate_ecw(struct ccw_device *cdev, struct irb *irb)
 static inline int
 ccw_device_accumulate_esw_valid(struct irb *irb)
 {
-	if (irb->scsw.eswf && irb->scsw.stctl == SCSW_STCTL_STATUS_PEND)
+	if (!irb->scsw.eswf && irb->scsw.stctl == SCSW_STCTL_STATUS_PEND)
 		return 0;
 	if (irb->scsw.stctl == 
 	    		(SCSW_STCTL_INTER_STATUS|SCSW_STCTL_STATUS_PEND) &&
@@ -216,8 +216,9 @@ ccw_device_accumulate_irb(struct ccw_device *cdev, struct irb *irb)
 	/*
 	 * Don't accumulate unsolicited interrupts.
 	 */
-	if (irb->scsw.stctl ==
-	    (SCSW_STCTL_STATUS_PEND | SCSW_STCTL_ALERT_STATUS))
+	if ((irb->scsw.stctl ==
+	     (SCSW_STCTL_STATUS_PEND | SCSW_STCTL_ALERT_STATUS)) &&
+	    (!irb->scsw.cc))
 		return;
 
 	cdev_irb = &cdev->private->irb;
@@ -228,8 +229,8 @@ ccw_device_accumulate_irb(struct ccw_device *cdev, struct irb *irb)
 		cdev_irb->scsw.key = irb->scsw.key;
 		/* Copy suspend control bit. */
 		cdev_irb->scsw.sctl = irb->scsw.sctl;
-		/* Copy deferred condition code. */
-		cdev_irb->scsw.cc = irb->scsw.cc;
+		/* Accumulate deferred condition code. */
+		cdev_irb->scsw.cc |= irb->scsw.cc;
 		/* Copy ccw format bit. */
 		cdev_irb->scsw.fmt = irb->scsw.fmt;
 		/* Copy prefetch bit. */
@@ -321,8 +322,7 @@ ccw_device_do_sense(struct ccw_device *cdev, struct irb *irb)
 	sch->sense_ccw.count = SENSE_MAX_COUNT;
 	sch->sense_ccw.flags = CCW_FLAG_SLI;
 
-	/* 0xe2C5D5E2 == "SENS" in ebcdic */
-	return cio_start (sch, &sch->sense_ccw, 0xE2C5D5E2, 0xff);
+	return cio_start (sch, &sch->sense_ccw, 0xff);
 }
 
 /*
@@ -348,7 +348,8 @@ ccw_device_accumulate_basic_sense(struct ccw_device *cdev, struct irb *irb)
 	     (irb->scsw.actl & SCSW_ACTL_SUSPENDED)))
 		ccw_device_path_notoper(cdev);
 
-	if (!(irb->scsw.dstat & DEV_STAT_UNIT_CHECK)) {
+	if (!(irb->scsw.dstat & DEV_STAT_UNIT_CHECK) &&
+	    (irb->scsw.dstat & DEV_STAT_CHN_END)) {
 		cdev->private->irb.esw.esw0.erw.cons = 1;
 		cdev->private->flags.dosense = 0;
 	}

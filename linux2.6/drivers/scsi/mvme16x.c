@@ -15,15 +15,12 @@
 #include <asm/irq.h>
 
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 #include "53c7xx.h"
 #include "mvme16x.h"
 
 #include<linux/stat.h>
 
-extern int ncr53c7xx_init(Scsi_Host_Template *tpnt, int board, int chip,
-			  unsigned long base, int io_port, int irq, int dma,
-			  long long options, int clock);
 
 int mvme16x_scsi_detect(Scsi_Host_Template *tpnt)
 {

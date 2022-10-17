@@ -29,7 +29,7 @@
  *
  * First, the atomic bitops. These use native endian.
  */
-static inline void ____atomic_set_bit(unsigned int bit, unsigned long *p)
+static inline void ____atomic_set_bit(unsigned int bit, volatile unsigned long *p)
 {
 	unsigned long flags;
 	unsigned long mask = 1UL << (bit & 31);
@@ -41,7 +41,7 @@ static inline void ____atomic_set_bit(unsigned int bit, unsigned long *p)
 	local_irq_restore(flags);
 }
 
-static inline void ____atomic_clear_bit(unsigned int bit, unsigned long *p)
+static inline void ____atomic_clear_bit(unsigned int bit, volatile unsigned long *p)
 {
 	unsigned long flags;
 	unsigned long mask = 1UL << (bit & 31);
@@ -53,7 +53,7 @@ static inline void ____atomic_clear_bit(unsigned int bit, unsigned long *p)
 	local_irq_restore(flags);
 }
 
-static inline void ____atomic_change_bit(unsigned int bit, unsigned long *p)
+static inline void ____atomic_change_bit(unsigned int bit, volatile unsigned long *p)
 {
 	unsigned long flags;
 	unsigned long mask = 1UL << (bit & 31);
@@ -66,7 +66,7 @@ static inline void ____atomic_change_bit(unsigned int bit, unsigned long *p)
 }
 
 static inline int
-____atomic_test_and_set_bit(unsigned int bit, unsigned long *p)
+____atomic_test_and_set_bit(unsigned int bit, volatile unsigned long *p)
 {
 	unsigned long flags;
 	unsigned int res;
@@ -83,7 +83,7 @@ ____atomic_test_and_set_bit(unsigned int bit, unsigned long *p)
 }
 
 static inline int
-____atomic_test_and_clear_bit(unsigned int bit, unsigned long *p)
+____atomic_test_and_clear_bit(unsigned int bit, volatile unsigned long *p)
 {
 	unsigned long flags;
 	unsigned int res;
@@ -100,7 +100,7 @@ ____atomic_test_and_clear_bit(unsigned int bit, unsigned long *p)
 }
 
 static inline int
-____atomic_test_and_change_bit(unsigned int bit, unsigned long *p)
+____atomic_test_and_change_bit(unsigned int bit, volatile unsigned long *p)
 {
 	unsigned long flags;
 	unsigned int res;
@@ -171,7 +171,7 @@ static inline int __test_and_change_bit(int nr, volatile unsigned long *p)
 /*
  * This routine doesn't need to be atomic.
  */
-static inline int __test_bit(int nr, const unsigned long * p)
+static inline int __test_bit(int nr, const volatile unsigned long * p)
 {
 	return (p[nr >> 5] >> (nr & 31)) & 1UL;
 }
@@ -204,27 +204,30 @@ static inline int __test_bit(int nr, const unsigned long * p)
 /*
  * Little endian assembly bitops.  nr = 0 -> byte 0 bit 0.
  */
-extern void _set_bit_le(int nr, unsigned long * p);
-extern void _clear_bit_le(int nr, unsigned long * p);
-extern void _change_bit_le(int nr, unsigned long * p);
-extern int _test_and_set_bit_le(int nr, unsigned long * p);
-extern int _test_and_clear_bit_le(int nr, unsigned long * p);
-extern int _test_and_change_bit_le(int nr, unsigned long * p);
-extern int _find_first_zero_bit_le(void * p, unsigned size);
-extern int _find_next_zero_bit_le(void * p, int size, int offset);
+extern void _set_bit_le(int nr, volatile unsigned long * p);
+extern void _clear_bit_le(int nr, volatile unsigned long * p);
+extern void _change_bit_le(int nr, volatile unsigned long * p);
+extern int _test_and_set_bit_le(int nr, volatile unsigned long * p);
+extern int _test_and_clear_bit_le(int nr, volatile unsigned long * p);
+extern int _test_and_change_bit_le(int nr, volatile unsigned long * p);
+extern int _find_first_zero_bit_le(const void * p, unsigned size);
+extern int _find_next_zero_bit_le(const void * p, int size, int offset);
+extern int _find_first_bit_le(const unsigned long *p, unsigned size);
+extern int _find_next_bit_le(const unsigned long *p, int size, int offset);
 
 /*
  * Big endian assembly bitops.  nr = 0 -> byte 3 bit 0.
  */
-extern void _set_bit_be(int nr, unsigned long * p);
-extern void _clear_bit_be(int nr, unsigned long * p);
-extern void _change_bit_be(int nr, unsigned long * p);
-extern int _test_and_set_bit_be(int nr, unsigned long * p);
-extern int _test_and_clear_bit_be(int nr, unsigned long * p);
-extern int _test_and_change_bit_be(int nr, unsigned long * p);
-extern int _find_first_zero_bit_be(void * p, unsigned size);
-extern int _find_next_zero_bit_be(void * p, int size, int offset);
-
+extern void _set_bit_be(int nr, volatile unsigned long * p);
+extern void _clear_bit_be(int nr, volatile unsigned long * p);
+extern void _change_bit_be(int nr, volatile unsigned long * p);
+extern int _test_and_set_bit_be(int nr, volatile unsigned long * p);
+extern int _test_and_clear_bit_be(int nr, volatile unsigned long * p);
+extern int _test_and_change_bit_be(int nr, volatile unsigned long * p);
+extern int _find_first_zero_bit_be(const void * p, unsigned size);
+extern int _find_next_zero_bit_be(const void * p, int size, int offset);
+extern int _find_first_bit_be(const unsigned long *p, unsigned size);
+extern int _find_next_bit_be(const unsigned long *p, int size, int offset);
 
 /*
  * The __* form of bitops are non-atomic and may be reordered.
@@ -255,6 +258,8 @@ extern int _find_next_zero_bit_be(void * p, int size, int offset);
 #define test_bit(nr,p)			__test_bit(nr,p)
 #define find_first_zero_bit(p,sz)	_find_first_zero_bit_le(p,sz)
 #define find_next_zero_bit(p,sz,off)	_find_next_zero_bit_le(p,sz,off)
+#define find_first_bit(p,sz)		_find_first_bit_le(p,sz)
+#define find_next_bit(p,sz,off)		_find_next_bit_le(p,sz,off)
 
 #define WORD_BITOFF_TO_LE(x)		((x))
 
@@ -272,6 +277,8 @@ extern int _find_next_zero_bit_be(void * p, int size, int offset);
 #define test_bit(nr,p)			__test_bit(nr,p)
 #define find_first_zero_bit(p,sz)	_find_first_zero_bit_be(p,sz)
 #define find_next_zero_bit(p,sz,off)	_find_next_zero_bit_be(p,sz,off)
+#define find_first_bit(p,sz)		_find_first_bit_be(p,sz)
+#define find_next_bit(p,sz,off)		_find_next_bit_be(p,sz,off)
 
 #define WORD_BITOFF_TO_LE(x)		((x) ^ 0x18)
 
@@ -335,10 +342,10 @@ static inline unsigned long __ffs(unsigned long word)
  * the clz instruction for much better code efficiency.
  */
 
-extern __inline__ int generic_fls(int x);
+static __inline__ int generic_fls(int x);
 #define fls(x) \
 	( __builtin_constant_p(x) ? generic_fls(x) : \
-	  ({ int __r; asm("clz%?\t%0, %1" : "=r"(__r) : "r"(x)); 32-__r; }) )
+	  ({ int __r; asm("clz\t%0, %1" : "=r"(__r) : "r"(x) : "cc"); 32-__r; }) )
 #define ffs(x) ({ unsigned long __t = (x); fls(__t & -__t); })
 #define __ffs(x) (ffs(x) - 1)
 #define ffz(x) __ffs( ~(x) )
@@ -349,7 +356,7 @@ extern __inline__ int generic_fls(int x);
  * Find first bit set in a 168-bit bitmap, where the first
  * 128 bits are unlikely to be set.
  */
-static inline int sched_find_first_bit(unsigned long *b)
+static inline int sched_find_first_bit(const unsigned long *b)
 {
 	unsigned long v;
 	unsigned int off;

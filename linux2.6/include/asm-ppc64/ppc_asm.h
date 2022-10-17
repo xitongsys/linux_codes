@@ -11,6 +11,8 @@
  *  2 of the License, or (at your option) any later version.
  */
 
+#ifndef _PPC64_PPC_ASM_H
+#define _PPC64_PPC_ASM_H
 /*
  * Macros for storing registers into and loading registers from
  * exception frames.
@@ -26,6 +28,9 @@
 #define REST_8GPRS(n, base)	REST_4GPRS(n, base); REST_4GPRS(n+4, base)
 #define REST_10GPRS(n, base)	REST_8GPRS(n, base); REST_2GPRS(n+8, base)
 
+#define SAVE_NVGPRS(base)	SAVE_8GPRS(14, base); SAVE_10GPRS(22, base)
+#define REST_NVGPRS(base)	REST_8GPRS(14, base); REST_10GPRS(22, base)
+
 #define SAVE_FPR(n, base)	stfd	n,THREAD_FPR0+8*(n)(base)
 #define SAVE_2FPRS(n, base)	SAVE_FPR(n, base); SAVE_FPR(n+1, base)
 #define SAVE_4FPRS(n, base)	SAVE_2FPRS(n, base); SAVE_2FPRS(n+2, base)
@@ -39,10 +44,18 @@
 #define REST_16FPRS(n, base)	REST_8FPRS(n, base); REST_8FPRS(n+8, base)
 #define REST_32FPRS(n, base)	REST_16FPRS(n, base); REST_16FPRS(n+16, base)
 
-#define CHECKANYINT(ra,rb)			\
-	mfspr	rb,SPRG3;		/* Get Paca address */\
-	ld	ra,PACALPPACA+LPPACAANYINT(rb); /* Get pending interrupt flags */\
-	cmpldi	0,ra,0;
+#define SAVE_VR(n,b,base)	li b,THREAD_VR0+(16*(n));  stvx n,b,base
+#define SAVE_2VRS(n,b,base)	SAVE_VR(n,b,base); SAVE_VR(n+1,b,base)
+#define SAVE_4VRS(n,b,base)	SAVE_2VRS(n,b,base); SAVE_2VRS(n+2,b,base)
+#define SAVE_8VRS(n,b,base)	SAVE_4VRS(n,b,base); SAVE_4VRS(n+4,b,base)
+#define SAVE_16VRS(n,b,base)	SAVE_8VRS(n,b,base); SAVE_8VRS(n+8,b,base)
+#define SAVE_32VRS(n,b,base)	SAVE_16VRS(n,b,base); SAVE_16VRS(n+16,b,base)
+#define REST_VR(n,b,base)	li b,THREAD_VR0+(16*(n)); lvx n,b,base
+#define REST_2VRS(n,b,base)	REST_VR(n,b,base); REST_VR(n+1,b,base)
+#define REST_4VRS(n,b,base)	REST_2VRS(n,b,base); REST_2VRS(n+2,b,base)
+#define REST_8VRS(n,b,base)	REST_4VRS(n,b,base); REST_4VRS(n+4,b,base)
+#define REST_16VRS(n,b,base)	REST_8VRS(n,b,base); REST_8VRS(n+8,b,base)
+#define REST_32VRS(n,b,base)	REST_16VRS(n,b,base); REST_16VRS(n+16,b,base)
 
 /* Macros to adjust thread priority for Iseries hardware multithreading */
 #define HMT_LOW		or 1,1,1
@@ -225,3 +238,5 @@
 #define	vr29	29
 #define	vr30	30
 #define	vr31	31
+
+#endif /* _PPC64_PPC_ASM_H */

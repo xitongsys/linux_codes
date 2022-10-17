@@ -142,7 +142,7 @@ setup_7410_workarounds:
 	sync
 	isync
 	blr
-	
+
 /* 740/750/7400/7410
  * Enable Store Gathering (SGE), Address Brodcast (ABE),
  * Branch History Table (BHTE), Branch Target ICache (BTIC)
@@ -172,9 +172,9 @@ END_FTR_SECTION_IFCLR(CPU_FTR_NO_DPM)
 setup_750cx:
 	mfspr	r10, SPRN_HID1
 	rlwinm	r10,r10,4,28,31
-	cmpi	cr0,r10,7
-	cmpi	cr1,r10,9
-	cmpi	cr2,r10,11
+	cmpwi	cr0,r10,7
+	cmpwi	cr1,r10,9
+	cmpwi	cr2,r10,11
 	cror	4*cr0+eq,4*cr0+eq,4*cr1+eq
 	cror	4*cr0+eq,4*cr0+eq,4*cr2+eq
 	bnelr
@@ -213,12 +213,15 @@ setup_745x_specifics:
 	li	r7,CPU_FTR_CAN_NAP
 	andc	r6,r6,r7
 	stw	r6,CPU_SPEC_FEATURES(r5)
-1:	
+1:
 	mfspr	r11,HID0
 
 	/* All of the bits we have to set.....
 	 */
-	ori	r11,r11,HID0_SGE | HID0_FOLD | HID0_BHTE | HID0_BTIC | HID0_LRSTK
+	ori	r11,r11,HID0_SGE | HID0_FOLD | HID0_BHTE | HID0_LRSTK | HID0_BTIC
+BEGIN_FTR_SECTION
+	xori	r11,r11,HID0_BTIC
+END_FTR_SECTION_IFSET(CPU_FTR_NO_BTIC)
 BEGIN_FTR_SECTION
 	oris	r11,r11,HID0_DPM@h	/* enable dynamic power mgmt */
 END_FTR_SECTION_IFCLR(CPU_FTR_NO_DPM)
@@ -248,20 +251,21 @@ END_FTR_SECTION_IFCLR(CPU_FTR_NO_DPM)
 /* Definitions for the table use to save CPU states */
 #define CS_HID0		0
 #define CS_HID1		4
-#define	CS_MSSCR0	8
-#define CS_MSSSR0	12
-#define CS_ICTRL	16
-#define CS_LDSTCR	20
-#define CS_LDSTDB	24
-#define CS_SIZE		28
+#define CS_HID2		8
+#define	CS_MSSCR0	12
+#define CS_MSSSR0	16
+#define CS_ICTRL	20
+#define CS_LDSTCR	24
+#define CS_LDSTDB	28
+#define CS_SIZE		32
 
 	.data
 	.balign	L1_CACHE_LINE_SIZE
-cpu_state_storage:	
+cpu_state_storage:
 	.space	CS_SIZE
 	.balign	L1_CACHE_LINE_SIZE,0
 	.text
-	
+
 /* Called in normal context to backup CPU 0 state. This
  * does not include cache settings. This function is also
  * called for machine sleep. This does not include the MMU
@@ -283,18 +287,20 @@ _GLOBAL(__save_cpu_setup)
 	/* Now deal with CPU type dependent registers */
 	mfspr	r3,PVR
 	srwi	r3,r3,16
-	cmpli	cr0,r3,0x8000	/* 7450 */
-	cmpli	cr1,r3,0x000c	/* 7400 */
-	cmpli	cr2,r3,0x800c	/* 7410 */
-	cmpli	cr3,r3,0x8001	/* 7455 */
-	cmpli	cr4,r3,0x8002	/* 7457 */
-	cmpli	cr5,r3,0x7000	/* 750FX */
+	cmplwi	cr0,r3,0x8000	/* 7450 */
+	cmplwi	cr1,r3,0x000c	/* 7400 */
+	cmplwi	cr2,r3,0x800c	/* 7410 */
+	cmplwi	cr3,r3,0x8001	/* 7455 */
+	cmplwi	cr4,r3,0x8002	/* 7457 */
+	cmplwi	cr5,r3,0x8003	/* 7447A */
+	cmplwi	cr6,r3,0x7000	/* 750FX */
 	/* cr1 is 7400 || 7410 */
 	cror	4*cr1+eq,4*cr1+eq,4*cr2+eq
 	/* cr0 is 74xx */
 	cror	4*cr0+eq,4*cr0+eq,4*cr3+eq
 	cror	4*cr0+eq,4*cr0+eq,4*cr4+eq
 	cror	4*cr0+eq,4*cr0+eq,4*cr1+eq
+	cror	4*cr0+eq,4*cr0+eq,4*cr5+eq
 	bne	1f
 	/* Backup 74xx specific regs */
 	mfspr	r4,SPRN_MSSCR0
@@ -311,11 +317,18 @@ _GLOBAL(__save_cpu_setup)
 	stw	r4,CS_LDSTCR(r5)
 	mfspr	r4,SPRN_LDSTDB
 	stw	r4,CS_LDSTDB(r5)
-1:	
-	bne	cr5,1f
+1:
+	bne	cr6,1f
 	/* Backup 750FX specific registers */
 	mfspr	r4,SPRN_HID1
 	stw	r4,CS_HID1(r5)
+	/* If rev 2.x, backup HID2 */
+	mfspr	r3,PVR
+	andi.	r3,r3,0xff00
+	cmpwi	cr0,r3,0x0200
+	bne	1f
+	mfspr	r4,SPRN_HID2
+	stw	r4,CS_HID2(r5)
 1:
 	mtcr	r7
 	blr
@@ -343,18 +356,20 @@ _GLOBAL(__restore_cpu_setup)
 	/* Now deal with CPU type dependent registers */
 	mfspr	r3,PVR
 	srwi	r3,r3,16
-	cmpli	cr0,r3,0x8000	/* 7450 */
-	cmpli	cr1,r3,0x000c	/* 7400 */
-	cmpli	cr2,r3,0x800c	/* 7410 */
-	cmpli	cr3,r3,0x8001	/* 7455 */
-	cmpli	cr4,r3,0x8002	/* 7457 */
-	cmpli	cr5,r3,0x7000	/* 750FX */
+	cmplwi	cr0,r3,0x8000	/* 7450 */
+	cmplwi	cr1,r3,0x000c	/* 7400 */
+	cmplwi	cr2,r3,0x800c	/* 7410 */
+	cmplwi	cr3,r3,0x8001	/* 7455 */
+	cmplwi	cr4,r3,0x8002	/* 7457 */
+	cmplwi	cr5,r3,0x8003	/* 7447A */
+	cmplwi	cr6,r3,0x7000	/* 750FX */
 	/* cr1 is 7400 || 7410 */
 	cror	4*cr1+eq,4*cr1+eq,4*cr2+eq
 	/* cr0 is 74xx */
 	cror	4*cr0+eq,4*cr0+eq,4*cr3+eq
 	cror	4*cr0+eq,4*cr0+eq,4*cr4+eq
 	cror	4*cr0+eq,4*cr0+eq,4*cr1+eq
+	cror	4*cr0+eq,4*cr0+eq,4*cr5+eq
 	bne	2f
 	/* Restore 74xx specific regs */
 	lwz	r4,CS_MSSCR0(r5)
@@ -393,11 +408,21 @@ _GLOBAL(__restore_cpu_setup)
 	mtspr	SPRN_LDSTDB,r4
 	isync
 	sync
-2:	bne	cr5,1f
+2:	bne	cr6,1f
 	/* Restore 750FX specific registers
-	 * that is restore PLL config & switch
-	 * to PLL 0
+	 * that is restore HID2 on rev 2.x and PLL config & switch
+	 * to PLL 0 on all
 	 */
+	/* If rev 2.x, restore HID2 with low voltage bit cleared */
+	mfspr	r3,PVR
+	andi.	r3,r3,0xff00
+	cmpwi	cr0,r3,0x0200
+	bne	4f
+	lwz	r4,CS_HID2(r5)
+	rlwinm	r4,r4,0,19,17
+	mtspr	SPRN_HID2,r4
+	sync
+4:
 	lwz	r4,CS_HID1(r5)
 	rlwinm  r5,r4,0,16,14
 	mtspr	SPRN_HID1,r5
@@ -405,7 +430,7 @@ _GLOBAL(__restore_cpu_setup)
 	mftbl	r5
 3:	mftbl	r6
 	sub	r6,r6,r5
-	cmpli	cr0,r6,10000
+	cmplwi	cr0,r6,10000
 	ble	3b
 	/* Setup final PLL */
 	mtspr	SPRN_HID1,r4

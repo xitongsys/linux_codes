@@ -4,10 +4,8 @@
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
 
-#include <asm/cprefix.h>
 #include <asm/page.h>
 #include <asm/ptrace.h>
-#include <asm/asm_offsets.h>
 #include <asm/psr.h>
 #include <asm/asi.h>
 #include <asm/smp.h>
@@ -48,9 +46,9 @@ rtrap_7win_patch5:	and	%g1, 0x7f, %g1
 
 	.globl	ret_trap_entry, rtrap_patch1, rtrap_patch2
 	.globl	rtrap_patch3, rtrap_patch4, rtrap_patch5
-	.globl	C_LABEL(ret_trap_lockless_ipi)
+	.globl	ret_trap_lockless_ipi
 ret_trap_entry:
-C_LABEL(ret_trap_lockless_ipi):
+ret_trap_lockless_ipi:
 	andcc	%t_psr, PSR_PS, %g0
 	be	1f
 	 nop
@@ -65,7 +63,7 @@ C_LABEL(ret_trap_lockless_ipi):
 	be	signal_p
 	 nop
 
-	call	C_LABEL(schedule)
+	call	schedule
 	 nop
 
 	ld	[%curptr + TI_FLAGS], %g2
@@ -77,7 +75,7 @@ signal_p:
 	clr	%o0
 	mov	%l5, %o2
 	mov	%l6, %o3
-	call	C_LABEL(do_signal)
+	call	do_signal
 	 add	%sp, STACKFRAME_SZ, %o1	! pt_regs ptr
 
 	/* Fall through. */
@@ -87,8 +85,7 @@ ret_trap_continue:
 	wr	%t_psr, 0x0, %psr
 	WRITE_PAUSE
 
-	ld	[%curptr + TI_TASK], %o5
-	ld	[%o5 + AOFF_task_thread + AOFF_thread_w_saved], %twin_tmp1
+	ld	[%curptr + TI_W_SAVED], %twin_tmp1
 	orcc	%g0, %twin_tmp1, %g0
 	be	ret_trap_nobufwins
 	 nop
@@ -97,7 +94,7 @@ ret_trap_continue:
 	WRITE_PAUSE
 
 	mov	1, %o1
-	call	C_LABEL(try_to_clear_window_buffer)
+	call	try_to_clear_window_buffer
 	 add	%sp, STACKFRAME_SZ, %o0
 
 	b	signal_p
@@ -133,8 +130,8 @@ rtrap_patch2:	and	%glob_tmp, 0xff, %glob_tmp
 				 * branch to the user stack checking routine
 				 * for return from traps.
 				 */
-				.globl	C_LABEL(rtrap_mmu_patchme)
-C_LABEL(rtrap_mmu_patchme):	b	C_LABEL(sun4c_rett_stackchk)
+				.globl	rtrap_mmu_patchme
+rtrap_mmu_patchme:	b	sun4c_rett_stackchk
 				 andcc	%fp, 0x7, %g0	
 
 ret_trap_userwins_ok:
@@ -167,7 +164,7 @@ ret_trap_unaligned_pc:
 	wr	%t_psr, PSR_ET, %psr
 	WRITE_PAUSE
 
-	call	C_LABEL(do_memaccess_unaligned)
+	call	do_memaccess_unaligned
 	 nop
 
 	b	signal_p
@@ -217,15 +214,15 @@ ret_trap_user_stack_is_bolixed:
 	wr	%t_psr, PSR_ET, %psr
 	WRITE_PAUSE
 
-	call	C_LABEL(window_ret_fault)
+	call	window_ret_fault
 	 add	%sp, STACKFRAME_SZ, %o0
 
 	b	signal_p
 	 ld	[%curptr + TI_FLAGS], %g2
 
 
-	.globl	C_LABEL(sun4c_rett_stackchk)
-C_LABEL(sun4c_rett_stackchk):
+	.globl	sun4c_rett_stackchk
+sun4c_rett_stackchk:
 	be	1f
 	 and	%fp, 0xfff, %g1		! delay slot
 
@@ -288,8 +285,8 @@ sun4c_rett_onepage:
 	b	ret_trap_userwins_ok
 	 save	%g0, %g0, %g0
 
-	.globl	C_LABEL(srmmu_rett_stackchk)
-C_LABEL(srmmu_rett_stackchk):
+	.globl	srmmu_rett_stackchk
+srmmu_rett_stackchk:
 	bne	ret_trap_user_stack_is_bolixed
 	 sethi   %hi(PAGE_OFFSET), %g1
 	cmp	%g1, %fp

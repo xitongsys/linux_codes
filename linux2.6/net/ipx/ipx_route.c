@@ -16,7 +16,7 @@
 #include <net/sock.h>
 
 LIST_HEAD(ipx_routes);
-rwlock_t ipx_routes_lock = RW_LOCK_UNLOCKED;
+DEFINE_RWLOCK(ipx_routes_lock);
 
 extern struct ipx_interface *ipx_internal_net;
 
@@ -169,13 +169,13 @@ int ipxrtr_route_skb(struct sk_buff *skb)
  * Route an outgoing frame from a socket.
  */
 int ipxrtr_route_packet(struct sock *sk, struct sockaddr_ipx *usipx,
-			struct iovec *iov, int len, int noblock)
+			struct iovec *iov, size_t len, int noblock)
 {
 	struct sk_buff *skb;
-	struct ipx_opt *ipxs = ipx_sk(sk);
+	struct ipx_sock *ipxs = ipx_sk(sk);
 	struct ipx_interface *intrfc;
 	struct ipxhdr *ipx;
-	int size;
+	size_t size;
 	int ipx_offset;
 	struct ipx_route *rt = NULL;
 	int rc;
@@ -256,7 +256,7 @@ out:
 /*
  * We use a normal struct rtentry for route handling
  */
-int ipxrtr_ioctl(unsigned int cmd, void *arg)
+int ipxrtr_ioctl(unsigned int cmd, void __user *arg)
 {
 	struct rtentry rt;	/* Use these to behave like 'other' stacks */
 	struct sockaddr_ipx *sg, *st;

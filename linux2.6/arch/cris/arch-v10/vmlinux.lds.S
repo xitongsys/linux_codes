@@ -25,6 +25,8 @@ SECTIONS
 	__stext = .;
 	.text : {
 		*(.text)
+		SCHED_TEXT
+		LOCK_TEXT
 		*(.fixup)
 		*(.text.__*)
 	}
@@ -63,9 +65,6 @@ SECTIONS
   	__setup_start = .;
   	.init.setup : { *(.init.setup) }
   	__setup_end = .;
-	__start___param = .;
-	__param : { *(__param) }
-	__stop___param = .;
   	.initcall.init : {
 		__initcall_start = .;
 		*(.initcall1.init);

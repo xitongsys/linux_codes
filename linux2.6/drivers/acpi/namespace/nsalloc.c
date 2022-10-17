@@ -5,7 +5,7 @@
  ******************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -267,11 +267,11 @@ acpi_ns_install_node (
 	else {
 #ifdef ACPI_ALPHABETIC_NAMESPACE
 		/*
-		 * Walk the list whilst searching for the the correct
+		 * Walk the list whilst searching for the correct
 		 * alphabetic placement.
 		 */
 		previous_child_node = NULL;
-		while (acpi_ns_compare_names (child_node->name.ascii, node->name.ascii) < 0) {
+		while (acpi_ns_compare_names (acpi_ut_get_node_name (child_node), acpi_ut_get_node_name (node)) < 0) {
 			if (child_node->flags & ANOBJ_END_OF_PEER_LIST) {
 				/* Last peer;  Clear end-of-list flag */
 
@@ -334,9 +334,11 @@ acpi_ns_install_node (
 	node->owner_id = owner_id;
 	node->type = (u8) type;
 
-	ACPI_DEBUG_PRINT ((ACPI_DB_NAMES, "%4.4s (%s) added to %4.4s (%s) %p at %p\n",
-		node->name.ascii, acpi_ut_get_type_name (node->type),
-		parent_node->name.ascii, acpi_ut_get_type_name (parent_node->type), parent_node, node));
+	ACPI_DEBUG_PRINT ((ACPI_DB_NAMES,
+		"%4.4s (%s) [Node %p Owner %X] added to %4.4s (%s) [Node %p]\n",
+		acpi_ut_get_node_name (node), acpi_ut_get_type_name (node->type), node, owner_id,
+		acpi_ut_get_node_name (parent_node), acpi_ut_get_type_name (parent_node->type),
+		parent_node));
 
 	/*
 	 * Increment the reference count(s) of all parents up to
@@ -494,14 +496,14 @@ acpi_ns_delete_namespace_subtree (
 
 			/* Check if this node has any children */
 
-			if (acpi_ns_get_next_node (ACPI_TYPE_ANY, child_node, 0)) {
+			if (acpi_ns_get_next_node (ACPI_TYPE_ANY, child_node, NULL)) {
 				/*
 				 * There is at least one child of this node,
 				 * visit the node
 				 */
 				level++;
-				parent_node   = child_node;
-				child_node    = 0;
+				parent_node = child_node;
+				child_node = NULL;
 			}
 		}
 		else {
@@ -648,8 +650,8 @@ acpi_ns_delete_namespace_by_owner (
 				 * visit the node
 				 */
 				level++;
-				parent_node   = child_node;
-				child_node    = NULL;
+				parent_node = child_node;
+				child_node = NULL;
 			}
 			else if (child_node->owner_id == owner_id) {
 				deletion_node = child_node;

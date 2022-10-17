@@ -35,6 +35,7 @@
 #include <linux/init.h>
 #include <linux/devfs_fs_kernel.h>
 #include <linux/smp_lock.h>
+#include <linux/device.h>
 
 #include <asm/atarihw.h>
 #include <asm/traps.h>
@@ -57,12 +58,6 @@
 #define DSP56K_TRANSMIT		(dsp56k_host_interface.isr & DSP56K_ISR_TXDE)
 #define DSP56K_RECEIVE		(dsp56k_host_interface.isr & DSP56K_ISR_RXDF)
 
-#define wait_some(n) \
-{ \
-	set_current_state(TASK_INTERRUPTIBLE); \
-	schedule_timeout(n); \
-}
-
 #define handshake(count, maxio, timeout, ENABLE, f) \
 { \
 	long i, t, m; \
@@ -70,13 +65,13 @@
 		m = min_t(unsigned long, count, maxio); \
 		for (i = 0; i < m; i++) { \
 			for (t = 0; t < timeout && !ENABLE; t++) \
-				wait_some(HZ/50); \
+				msleep(20); \
 			if(!ENABLE) \
 				return -EIO; \
 			f; \
 		} \
 		count -= m; \
-		if (m == maxio) wait_some(HZ/50); \
+		if (m == maxio) msleep(20); \
 	} \
 }
 
@@ -84,7 +79,7 @@
 { \
 	int t; \
 	for(t = 0; t < n && !DSP56K_TRANSMIT; t++) \
-		wait_some(HZ/100); \
+		msleep(10); \
 	if(!DSP56K_TRANSMIT) { \
 		return -EIO; \
 	} \
@@ -94,7 +89,7 @@
 { \
 	int t; \
 	for(t = 0; t < n && !DSP56K_RECEIVE; t++) \
-		wait_some(HZ/100); \
+		msleep(10); \
 	if(!DSP56K_RECEIVE) { \
 		return -EIO; \
 	} \
@@ -148,6 +143,8 @@ static struct dsp56k_device {
 	long maxio, timeout;
 	int tx_wsize, rx_wsize;
 } dsp56k;
+
+static struct class_simple *dsp56k_class;
 
 static int dsp56k_reset(void)
 {
@@ -290,10 +287,10 @@ static ssize_t dsp56k_write(struct file *file, const char *buf, size_t count,
 		}
 		case 2:  /* 16 bit */
 		{
-			short *data;
+			const short *data;
 
 			count /= 2;
-			data = (short*) buf;
+			data = (const short *)buf;
 			handshake(count, dsp56k.maxio, dsp56k.timeout, DSP56K_TRANSMIT,
 				  get_user(dsp56k_host_interface.data.w[1], data+n++));
 			return 2*n;
@@ -309,10 +306,10 @@ static ssize_t dsp56k_write(struct file *file, const char *buf, size_t count,
 		}
 		case 4:  /* 32 bit */
 		{
-			long *data;
+			const long *data;
 
 			count /= 4;
-			data = (long*) buf;
+			data = (const long *)buf;
 			handshake(count, dsp56k.maxio, dsp56k.timeout, DSP56K_TRANSMIT,
 				  get_user(dsp56k_host_interface.data.l, data+n++));
 			return 4*n;
@@ -502,6 +499,8 @@ static char banner[] __initdata = KERN_INFO "DSP56k driver installed\n";
 
 static int __init dsp56k_init_driver(void)
 {
+	int err = 0;
+
 	if(!MACH_IS_ATARI || !ATARIHW_PRESENT(DSP56K)) {
 		printk("DSP56k driver: Hardware not present\n");
 		return -ENODEV;
@@ -511,17 +510,35 @@ static int __init dsp56k_init_driver(void)
 		printk("DSP56k driver: Unable to register driver\n");
 		return -ENODEV;
 	}
+	dsp56k_class = class_simple_create(THIS_MODULE, "dsp56k");
+	if (IS_ERR(dsp56k_class)) {
+		err = PTR_ERR(dsp56k_class);
+		goto out_chrdev;
+	}
+	class_simple_device_add(dsp56k_class, MKDEV(DSP56K_MAJOR, 0), NULL, "dsp56k");
 
-	devfs_mk_cdev(MKDEV(DSP56K_MAJOR, 0),
+	err = devfs_mk_cdev(MKDEV(DSP56K_MAJOR, 0),
 		      S_IFCHR | S_IRUSR | S_IWUSR, "dsp56k");
+	if(err)
+		goto out_class;
 
 	printk(banner);
-	return 0;
+	goto out;
+
+out_class:
+	class_simple_device_remove(MKDEV(DSP56K_MAJOR, 0));
+	class_simple_destroy(dsp56k_class);
+out_chrdev:
+	unregister_chrdev(DSP56K_MAJOR, "dsp56k");
+out:
+	return err;
 }
 module_init(dsp56k_init_driver);
 
 static void __exit dsp56k_cleanup_driver(void)
 {
+	class_simple_device_remove(MKDEV(DSP56K_MAJOR, 0));
+	class_simple_destroy(dsp56k_class);
 	unregister_chrdev(DSP56K_MAJOR, "dsp56k");
 	devfs_remove("dsp56k");
 }

@@ -47,7 +47,7 @@
                     : <klee@crystal.cirrus.com>)
                     : Don't call netif_wake_queue() in net_send_packet()
                     : Fixed an out-of-mem bug in dma_rx()
-                    : Updated Documentation/cs89x0.txt
+                    : Updated Documentation/networking/cs89x0.txt
 
   Andrew Morton     : andrewm@uow.edu.au / Kernel 2.3.99-pre1
                     : Use skb_reserve to longword align IP header (two places)
@@ -84,6 +84,9 @@
   Oskar Schirmer    : oskar@scara.com
                     : HiCO.SH4 (superh) support added (irq#1, cs89x0_media=)
 
+  Deepak Saxena     : dsaxena@plexity.net
+                    : Intel IXDP2x01 (XScale ixp2x00 NPU) platform support
+
 */
 
 /* Always include 'config.h' first in case the user wants to turn on
@@ -97,7 +100,11 @@
  * Note that even if DMA is turned off we still support the 'dma' and  'use_dma'
  * module options so we don't break any startup scripts.
  */
+#ifndef CONFIG_ARCH_IXDP2X01
+#define ALLOW_DMA	0
+#else
 #define ALLOW_DMA	1
+#endif
 
 /*
  * Set this to zero to remove all the debug statements via
@@ -128,9 +135,9 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <linux/bitops.h>
 
 #include <asm/system.h>
-#include <asm/bitops.h>
 #include <asm/io.h>
 #if ALLOW_DMA
 #include <asm/dma.h>
@@ -140,6 +147,8 @@
 
 static char version[] __initdata =
 "cs89x0.c: v2.4.3-pre1 Russell Nelson <nelson@crynwr.com>, Andrew Morton <andrewm@uow.edu.au>\n";
+
+#define DRV_NAME "cs89x0"
 
 /* First, a few definitions that the brave might change.
    A zero-terminated list of I/O addresses to be probed. Some special flags..
@@ -160,6 +169,10 @@ static unsigned int cs8900_irq_map[] = {12,0,0,0};
 static unsigned int netcard_portlist[] __initdata =
    { 0x0300, 0};
 static unsigned int cs8900_irq_map[] = {1,0,0,0};
+#elif defined(CONFIG_ARCH_IXDP2X01)
+#include <asm/irq.h>
+static unsigned int netcard_portlist[] __initdata = {IXDP2X01_CS8900_VIRT_BASE, 0};
+static unsigned int cs8900_irq_map[] = {IRQ_IXDP2X01_CS8900, 0, 0, 0};
 #else
 static unsigned int netcard_portlist[] __initdata =
    { 0x300, 0x320, 0x340, 0x360, 0x200, 0x220, 0x240, 0x260, 0x280, 0x2a0, 0x2c0, 0x2e0, 0};
@@ -212,9 +225,7 @@ struct net_local {
 
 /* Index to functions, as function prototypes. */
 
-extern int cs89x0_probe(struct net_device *dev);
-
-static int cs89x0_probe1(struct net_device *dev, int ioaddr);
+static int cs89x0_probe1(struct net_device *dev, int ioaddr, int modular);
 static int net_open(struct net_device *dev);
 static int net_send_packet(struct sk_buff *skb, struct net_device *dev);
 static irqreturn_t net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
@@ -263,7 +274,6 @@ static int __init media_fn(char *str)
 }
 
 __setup("cs89x0_media=", media_fn);
-#endif
 
 
 /* Check for a network adaptor of this type, and return '0' iff one exists.
@@ -274,28 +284,53 @@ __setup("cs89x0_media=", media_fn);
    Return 0 on success.
    */
 
-int __init cs89x0_probe(struct net_device *dev)
+struct net_device * __init cs89x0_probe(int unit)
 {
-	int i;
-	int base_addr = dev ? dev->base_addr : 0;
+	struct net_device *dev = alloc_etherdev(sizeof(struct net_local));
+	unsigned *port;
+	int err = 0;
+	int irq;
+	int io;
 
-	SET_MODULE_OWNER(dev);
+	if (!dev)
+		return ERR_PTR(-ENODEV);
+
+	sprintf(dev->name, "eth%d", unit);
+	netdev_boot_setup_check(dev);
+	io = dev->base_addr;
+	irq = dev->irq;
 
 	if (net_debug)
-		printk("cs89x0:cs89x0_probe(0x%x)\n", base_addr);
+		printk("cs89x0:cs89x0_probe(0x%x)\n", io);
 
-	if (base_addr > 0x1ff)		/* Check a single specified location. */
-		return cs89x0_probe1(dev, base_addr);
-	else if (base_addr != 0)	/* Don't probe at all. */
-		return -ENXIO;
-
-	for (i = 0; netcard_portlist[i]; i++) {
-		if (cs89x0_probe1(dev, netcard_portlist[i]) == 0)
-			return 0;
+	if (io > 0x1ff)	{	/* Check a single specified location. */
+		err = cs89x0_probe1(dev, io, 0);
+	} else if (io != 0) {	/* Don't probe at all. */
+		err = -ENXIO;
+	} else {
+		for (port = netcard_portlist; *port; port++) {
+			if (cs89x0_probe1(dev, *port, 0) == 0)
+				break;
+			dev->irq = irq;
+		}
+		if (!*port)
+			err = -ENODEV;
 	}
+	if (err)
+		goto out;
+	err = register_netdev(dev);
+	if (err)
+		goto out1;
+	return dev;
+out1:
+	outw(PP_ChipID, dev->base_addr + ADD_PORT);
+	release_region(dev->base_addr, NETCARD_IO_EXTENT);
+out:
+	free_netdev(dev);
 	printk(KERN_WARNING "cs89x0: no cs8900 or cs8920 detected.  Be sure to disable PnP with SETUP\n");
-	return -ENODEV;
+	return ERR_PTR(err);
 }
+#endif
 
 static int
 readreg(struct net_device *dev, int portno)
@@ -375,42 +410,37 @@ get_eeprom_cksum(int off, int len, int *buffer)
  */
 
 static int __init
-cs89x0_probe1(struct net_device *dev, int ioaddr)
+cs89x0_probe1(struct net_device *dev, int ioaddr, int modular)
 {
-	struct net_local *lp;
+	struct net_local *lp = netdev_priv(dev);
 	static unsigned version_printed;
 	int i;
 	unsigned rev_type = 0;
 	int eeprom_buff[CHKSUM_LEN];
 	int retval;
 
+	SET_MODULE_OWNER(dev);
 	/* Initialize the device structure. */
-	if (dev->priv == NULL) {
-		dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
-		if (dev->priv == 0) {
-			retval = -ENOMEM;
-			goto out;
-		}
-		lp = (struct net_local *)dev->priv;
+	if (!modular) {
 		memset(lp, 0, sizeof(*lp));
 		spin_lock_init(&lp->lock);
-#if !defined(MODULE) && (ALLOW_DMA != 0)
+#ifndef MODULE
+#if ALLOW_DMA
 		if (g_cs89x0_dma) {
 			lp->use_dma = 1;
 			lp->dma = g_cs89x0_dma;
 			lp->dmasize = 16;	/* Could make this an option... */
 		}
 #endif
-#ifndef MODULE
 		lp->force = g_cs89x0_media__force;
 #endif
         }
-	lp = (struct net_local *)dev->priv;
 
 	/* Grab the region so we can find another board if autoIRQ fails. */
-	if (!request_region(ioaddr & ~3, NETCARD_IO_EXTENT, dev->name)) {
+	/* WTF is going on here? */
+	if (!request_region(ioaddr & ~3, NETCARD_IO_EXTENT, DRV_NAME)) {
 		printk(KERN_ERR "%s: request_region(0x%x, 0x%x) failed\n",
-				dev->name, ioaddr, NETCARD_IO_EXTENT);
+				DRV_NAME, ioaddr, NETCARD_IO_EXTENT);
 		retval = -EBUSY;
 		goto out1;
 	}
@@ -435,10 +465,11 @@ cs89x0_probe1(struct net_device *dev, int ioaddr)
 		        	retval = -ENODEV;
 				goto out2;
 			}
-		ioaddr &= ~3;
-		outw(PP_ChipID, ioaddr + ADD_PORT);
 	}
 printk("PP_addr=0x%x\n", inw(ioaddr + ADD_PORT));
+
+	ioaddr &= ~3;
+	outw(PP_ChipID, ioaddr + ADD_PORT);
 
 	if (inw(ioaddr + DATA_PORT) != CHIP_EISA_ID_SIG) {
 		printk(KERN_ERR "%s: incorrect signature 0x%x\n",
@@ -646,6 +677,9 @@ printk("PP_addr=0x%x\n", inw(ioaddr + ADD_PORT));
 	} else {
 		i = lp->isa_config & INT_NO_MASK;
 		if (lp->chip_type == CS8900) {
+#ifdef CONFIG_ARCH_IXDP2X01
+		        i = cs8900_irq_map[0];
+#else
 			/* Translate the IRQ using the IRQ mapping table. */
 			if (i >= sizeof(cs8900_irq_map)/sizeof(cs8900_irq_map[0]))
 				printk("\ncs89x0: invalid ISA interrupt number %d\n", i);
@@ -662,6 +696,7 @@ printk("PP_addr=0x%x\n", inw(ioaddr + ADD_PORT));
 				if ((irq_map_buff[0] & 0xff) == PNP_IRQ_FRMT)
 					lp->irq_map = (irq_map_buff[0]>>8) | (irq_map_buff[1] << 8);
 			}
+#endif
 		}
 		if (!dev->irq)
 			dev->irq = i;
@@ -696,9 +731,6 @@ printk("PP_addr=0x%x\n", inw(ioaddr + ADD_PORT));
 	dev->set_multicast_list = set_multicast_list;
 	dev->set_mac_address 	= set_mac_address;
 
-	/* Fill in the fields of the device structure with ethernet values. */
-	ether_setup(dev);
-
 	printk("\n");
 	if (net_debug)
 		printk("cs89x0_probe1() successful\n");
@@ -706,9 +738,6 @@ printk("PP_addr=0x%x\n", inw(ioaddr + ADD_PORT));
 out2:
 	release_region(ioaddr & ~3, NETCARD_IO_EXTENT);
 out1:
-	kfree(dev->priv);
-	dev->priv = 0;
-out:
 	return retval;
 }
 
@@ -724,7 +753,7 @@ out:
 static void
 get_dma_channel(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 
 	if (lp->dma) {
 		dev->dma = lp->dma;
@@ -746,7 +775,7 @@ get_dma_channel(struct net_device *dev)
 static void
 write_dma(struct net_device *dev, int chip_type, int dma)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	if ((lp->isa_config & ANY_ISA_DMA) == 0)
 		return;
 	if (chip_type == CS8900) {
@@ -759,7 +788,7 @@ write_dma(struct net_device *dev, int chip_type, int dma)
 static void
 set_dma_cfg(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 
 	if (lp->use_dma) {
 		if ((lp->isa_config & ANY_ISA_DMA) == 0) {
@@ -782,7 +811,7 @@ set_dma_cfg(struct net_device *dev)
 static int
 dma_bufcfg(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	if (lp->use_dma)
 		return (lp->isa_config & ANY_ISA_DMA)? RX_DMA_ENBL : 0;
 	else
@@ -793,7 +822,7 @@ static int
 dma_busctl(struct net_device *dev)
 {
 	int retval = 0;
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	if (lp->use_dma) {
 		if (lp->isa_config & ANY_ISA_DMA)
 			retval |= RESET_RX_DMA; /* Reset the DMA pointer */
@@ -809,7 +838,7 @@ dma_busctl(struct net_device *dev)
 static void
 dma_rx(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	struct sk_buff *skb;
 	int status, length;
 	unsigned char *bp = lp->rx_dma_ptr;
@@ -871,8 +900,10 @@ skip_this_frame:
 
 void  __init reset_chip(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+#ifndef CONFIG_ARCH_IXDP2X01
+	struct net_local *lp = netdev_priv(dev);
 	int ioaddr = dev->base_addr;
+#endif
 	int reset_start_time;
 
 	writereg(dev, PP_SelfCTL, readreg(dev, PP_SelfCTL) | POWER_ON_RESET);
@@ -881,6 +912,7 @@ void  __init reset_chip(struct net_device *dev)
 	current->state = TASK_INTERRUPTIBLE;
 	schedule_timeout(30*HZ/1000);
 
+#ifndef CONFIG_ARCH_IXDP2X01
 	if (lp->chip_type != CS8900) {
 		/* Hardware problem requires PNP registers to be reconfigured after a reset */
 		outw(PP_CS8920_ISAINT, ioaddr + ADD_PORT);
@@ -891,6 +923,8 @@ void  __init reset_chip(struct net_device *dev)
 		outb((dev->mem_start >> 16) & 0xff, ioaddr + DATA_PORT);
 		outb((dev->mem_start >> 8) & 0xff,   ioaddr + DATA_PORT + 1);
 	}
+#endif	/* IXDP2x01 */
+
 	/* Wait until the chip is reset */
 	reset_start_time = jiffies;
 	while( (readreg(dev, PP_SelfST) & INIT_DONE) == 0 && jiffies - reset_start_time < 2)
@@ -901,7 +935,7 @@ void  __init reset_chip(struct net_device *dev)
 static void
 control_dc_dc(struct net_device *dev, int on_not_off)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	unsigned int selfcontrol;
 	int timenow = jiffies;
 	/* control the DC to DC convertor in the SelfControl register.  
@@ -929,7 +963,7 @@ control_dc_dc(struct net_device *dev, int on_not_off)
 static int
 detect_tp(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	int timenow = jiffies;
 	int fdx;
 
@@ -1044,7 +1078,7 @@ send_test_pkt(struct net_device *dev)
 static int
 detect_aui(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 
 	if (net_debug > 1) printk("%s: Attempting AUI\n", dev->name);
 	control_dc_dc(dev, 0);
@@ -1060,7 +1094,7 @@ detect_aui(struct net_device *dev)
 static int
 detect_bnc(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 
 	if (net_debug > 1) printk("%s: Attempting BNC\n", dev->name);
 	control_dc_dc(dev, 1);
@@ -1106,7 +1140,7 @@ write_irq(struct net_device *dev, int chip_type, int irq)
 static int
 net_open(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	int result = 0;
 	int i;
 	int ret;
@@ -1142,12 +1176,14 @@ net_open(struct net_device *dev)
 	else
 #endif
 	{
+#ifndef CONFIG_ARCH_IXDP2X01
 		if (((1 << dev->irq) & lp->irq_map) == 0) {
 			printk(KERN_ERR "%s: IRQ %d is not in our map of allowable IRQs, which is %x\n",
                                dev->name, dev->irq, lp->irq_map);
 			ret = -EAGAIN;
 			goto bad_out;
 		}
+#endif
 /* FIXME: Cirrus' release had this: */
 		writereg(dev, PP_BusCTL, readreg(dev, PP_BusCTL)|ENABLE_IRQ );
 /* And 2.3.47 had this: */
@@ -1347,7 +1383,7 @@ static void net_timeout(struct net_device *dev)
 
 static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 
 	if (net_debug > 3) {
 		printk("%s: sent %d byte packet of type %x\n",
@@ -1408,7 +1444,7 @@ static irqreturn_t net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
  	int handled = 0;
 
 	ioaddr = dev->base_addr;
-	lp = (struct net_local *)dev->priv;
+	lp = netdev_priv(dev);
 
 	/* we MUST read all the events out of the ISQ, otherwise we'll never
            get interrupted again.  As a consequence, we can't have any limit
@@ -1506,7 +1542,7 @@ count_rx_errors(int status, struct net_local *lp)
 static void
 net_rx(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	struct sk_buff *skb;
 	int status, length;
 
@@ -1553,7 +1589,7 @@ static void release_dma_buff(struct net_local *lp)
 {
 	if (lp->dma_buff) {
 		free_pages((unsigned long)(lp->dma_buff), get_order(lp->dmasize * 1024));
-		lp->dma_buff = 0;
+		lp->dma_buff = NULL;
 	}
 }
 #endif
@@ -1562,7 +1598,9 @@ static void release_dma_buff(struct net_local *lp)
 static int
 net_close(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+#if ALLOW_DMA
+	struct net_local *lp = netdev_priv(dev);
+#endif
 
 	netif_stop_queue(dev);
 	
@@ -1589,7 +1627,7 @@ net_close(struct net_device *dev)
 static struct net_device_stats *
 net_get_stats(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	unsigned long flags;
 
 	spin_lock_irqsave(&lp->lock, flags);
@@ -1603,7 +1641,7 @@ net_get_stats(struct net_device *dev)
 
 static void set_multicast_list(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = netdev_priv(dev);
 	unsigned long flags;
 
 	spin_lock_irqsave(&lp->lock, flags);
@@ -1655,7 +1693,7 @@ static int set_mac_address(struct net_device *dev, void *p)
 
 #ifdef MODULE
 
-static struct net_device dev_cs89x0;
+static struct net_device *dev_cs89x0;
 
 /*
  * Support the 'debug' module parm even if we're compiled for non-debug to 
@@ -1672,14 +1710,14 @@ static int use_dma;			/* These generate unused var warnings if ALLOW_DMA = 0 */
 static int dma;
 static int dmasize=16;			/* or 64 */
 
-MODULE_PARM(io, "i");
-MODULE_PARM(irq, "i");
-MODULE_PARM(debug, "i");
-MODULE_PARM(media, "c8");
-MODULE_PARM(duplex, "i");
-MODULE_PARM(dma , "i");
-MODULE_PARM(dmasize , "i");
-MODULE_PARM(use_dma , "i");
+module_param(io, int, 0);
+module_param(irq, int, 0);
+module_param(debug, int, 0);
+module_param_string(media, media, sizeof(media), 0);
+module_param(duplex, int, 0);
+module_param(dma , int, 0);
+module_param(dmasize , int, 0);
+module_param(use_dma , int, 0);
 MODULE_PARM_DESC(io, "cs89x0 I/O base address");
 MODULE_PARM_DESC(irq, "cs89x0 IRQ number");
 #if DEBUGGING
@@ -1733,6 +1771,7 @@ MODULE_LICENSE("GPL");
 int
 init_module(void)
 {
+	struct net_device *dev = alloc_etherdev(sizeof(struct net_local));
 	struct net_local *lp;
 	int ret = 0;
 
@@ -1741,18 +1780,12 @@ init_module(void)
 #else
 	debug = 0;
 #endif
-
-	dev_cs89x0.irq = irq;
-	dev_cs89x0.base_addr = io;
-
-        dev_cs89x0.init = cs89x0_probe;
-        dev_cs89x0.priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
-	if (dev_cs89x0.priv == 0) {
-		printk(KERN_ERR "cs89x0.c: Out of memory.\n");
+	if (!dev)
 		return -ENOMEM;
-	}
-	memset(dev_cs89x0.priv, 0, sizeof(struct net_local));
-	lp = (struct net_local *)dev_cs89x0.priv;
+
+	dev->irq = irq;
+	dev->base_addr = io;
+	lp = netdev_priv(dev);
 
 #if ALLOW_DMA
 	if (use_dma) {
@@ -1782,7 +1815,10 @@ init_module(void)
                 printk(KERN_ERR "cs89x0.c: Append io=0xNNN\n");
                 ret = -EPERM;
 		goto out;
-        }
+        } else if (io <= 0x1ff) {
+		ret = -ENXIO;
+		goto out;
+	}
 
 #if ALLOW_DMA
 	if (use_dma && dmasize != 16 && dmasize != 64) {
@@ -1791,30 +1827,31 @@ init_module(void)
 		goto out;
 	}
 #endif
+	ret = cs89x0_probe1(dev, io, 1);
+	if (ret)
+		goto out;
 
-        if (register_netdev(&dev_cs89x0) != 0) {
+        if (register_netdev(dev) != 0) {
                 printk(KERN_ERR "cs89x0.c: No card found at 0x%x\n", io);
                 ret = -ENXIO;
+		outw(PP_ChipID, dev->base_addr + ADD_PORT);
+		release_region(dev->base_addr, NETCARD_IO_EXTENT);
 		goto out;
         }
+	dev_cs89x0 = dev;
+	return 0;
 out:
-	if (ret)
-		kfree(dev_cs89x0.priv);
+	free_netdev(dev);
 	return ret;
 }
 
 void
 cleanup_module(void)
 {
-        if (dev_cs89x0.priv != NULL) {
-                /* Free up the private structure, or leak memory :-)  */
-                unregister_netdev(&dev_cs89x0);
-		outw(PP_ChipID, dev_cs89x0.base_addr + ADD_PORT);
-                kfree(dev_cs89x0.priv);
-                dev_cs89x0.priv = NULL;	/* gets re-allocated by cs89x0_probe1 */
-                /* If we don't do this, we can't re-insmod it later. */
-                release_region(dev_cs89x0.base_addr, NETCARD_IO_EXTENT);
-        }
+	unregister_netdev(dev_cs89x0);
+	outw(PP_ChipID, dev_cs89x0->base_addr + ADD_PORT);
+	release_region(dev_cs89x0->base_addr, NETCARD_IO_EXTENT);
+	free_netdev(dev_cs89x0);
 }
 #endif /* MODULE */
 

@@ -14,7 +14,6 @@
 #include <asm/processor.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
-#include <asm/hardirq.h>
 
 extern void die (char *, struct pt_regs *, long);
 
@@ -33,13 +32,14 @@ expand_backing_store (struct vm_area_struct *vma, unsigned long address)
 	unsigned long grow;
 
 	grow = PAGE_SIZE >> PAGE_SHIFT;
-	if (address - vma->vm_start > current->rlim[RLIMIT_STACK].rlim_cur
-	    || (((vma->vm_mm->total_vm + grow) << PAGE_SHIFT) > current->rlim[RLIMIT_AS].rlim_cur))
+	if (address - vma->vm_start > current->signal->rlim[RLIMIT_STACK].rlim_cur
+	    || (((vma->vm_mm->total_vm + grow) << PAGE_SHIFT) > current->signal->rlim[RLIMIT_AS].rlim_cur))
 		return -ENOMEM;
 	vma->vm_end += PAGE_SIZE;
 	vma->vm_mm->total_vm += grow;
 	if (vma->vm_flags & VM_LOCKED)
 		vma->vm_mm->locked_vm += grow;
+	__vm_stat_account(vma->vm_mm, vma->vm_flags, vma->vm_file, grow);
 	return 0;
 }
 
@@ -51,6 +51,7 @@ static int
 mapped_kernel_page_is_present (unsigned long address)
 {
 	pgd_t *pgd;
+	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *ptep, pte;
 
@@ -58,7 +59,11 @@ mapped_kernel_page_is_present (unsigned long address)
 	if (pgd_none(*pgd) || pgd_bad(*pgd))
 		return 0;
 
-	pmd = pmd_offset(pgd,address);
+	pud = pud_offset(pgd, address);
+	if (pud_none(*pud) || pud_bad(*pud))
+		return 0;
+
+	pmd = pmd_offset(pud, address);
 	if (pmd_none(*pmd) || pmd_bad(*pmd))
 		return 0;
 
@@ -196,7 +201,7 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 		si.si_signo = signal;
 		si.si_errno = 0;
 		si.si_code = code;
-		si.si_addr = (void *) address;
+		si.si_addr = (void __user *) address;
 		si.si_isr = isr;
 		si.si_flags = __ISR_VALID;
 		force_sig_info(signal, &si, current);
@@ -213,7 +218,7 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 		return;
 	}
 
-	if (done_with_exception(regs))
+	if (ia64_done_with_exception(regs))
 		return;
 
 	/*
@@ -233,7 +238,7 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	bust_spinlocks(1);
 
 	if (address < PAGE_SIZE)
-		printk(KERN_ALERT "Unable to handle kernel NULL pointer dereference");
+		printk(KERN_ALERT "Unable to handle kernel NULL pointer dereference (address %016lx)\n", address);
 	else
 		printk(KERN_ALERT "Unable to handle kernel paging request at "
 		       "virtual address %016lx\n", address);

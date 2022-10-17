@@ -1,7 +1,6 @@
 #
 # oprofile for x86-64.
-# Just reuse the one from i386. The Hammer performance counters 
-# are similar to Athlon.
+# Just reuse the one from i386. 
 #
 
 obj-$(CONFIG_OPROFILE) += oprofile.o
@@ -12,8 +11,9 @@ DRIVER_OBJS = $(addprefix ../../../drivers/oprofile/, \
 	oprofilefs.o oprofile_stats.o \
 	timer_int.o )
 
-OPROFILE-y := init.o
-OPROFILE-$(CONFIG_X86_LOCAL_APIC) += nmi_int.o op_model_athlon.o
+OPROFILE-y := init.o backtrace.o
+OPROFILE-$(CONFIG_X86_LOCAL_APIC) += nmi_int.o op_model_athlon.o op_model_p4.o \
+				     op_model_ppro.o
 OPROFILE-$(CONFIG_X86_IO_APIC)    += nmi_timer_int.o 
 
 oprofile-y = $(DRIVER_OBJS) $(addprefix ../../i386/oprofile/, $(OPROFILE-y))

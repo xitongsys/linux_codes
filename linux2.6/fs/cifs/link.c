@@ -20,6 +20,7 @@
  */
 #include <linux/fs.h>
 #include <linux/stat.h>
+#include <linux/namei.h>
 #include "cifsfs.h"
 #include "cifspdu.h"
 #include "cifsglob.h"
@@ -44,10 +45,18 @@ cifs_hardlink(struct dentry *old_file, struct inode *inode,
 	cifs_sb_target = CIFS_SB(inode->i_sb);
 	pTcon = cifs_sb_target->tcon;
 
-/* No need to check for cross device links since server will do that - BB note DFS case in future though (when we may have to check) */
+/* No need to check for cross device links since server will do that
+   BB note DFS case in future though (when we may have to check) */
 
+	down(&inode->i_sb->s_vfs_rename_sem);
 	fromName = build_path_from_dentry(old_file);
 	toName = build_path_from_dentry(direntry);
+	up(&inode->i_sb->s_vfs_rename_sem);
+	if((fromName == NULL) || (toName == NULL)) {
+		rc = -ENOMEM;
+		goto cifs_hl_exit;
+	}
+
 	if (cifs_sb_target->tcon->ses->capabilities & CAP_UNIX)
 		rc = CIFSUnixCreateHardLink(xid, pTcon, fromName, toName,
 					    cifs_sb_target->local_nls);
@@ -70,6 +79,7 @@ cifs_hardlink(struct dentry *old_file, struct inode *inode,
 	cifsInode = CIFS_I(old_file->d_inode);
 	cifsInode->time = 0;	/* will force revalidate to go get info when needed */
 
+cifs_hl_exit:
 	if (fromName)
 		kfree(fromName);
 	if (toName)
@@ -85,22 +95,27 @@ cifs_follow_link(struct dentry *direntry, struct nameidata *nd)
 	int rc = -EACCES;
 	int xid;
 	char *full_path = NULL;
-	char * target_path;
+	char * target_path = ERR_PTR(-ENOMEM);
 	struct cifs_sb_info *cifs_sb;
 	struct cifsTconInfo *pTcon;
 
 	xid = GetXid();
+
+	down(&direntry->d_sb->s_vfs_rename_sem);
 	full_path = build_path_from_dentry(direntry);
+	up(&direntry->d_sb->s_vfs_rename_sem);
+
+	if (!full_path)
+		goto out_no_free;
+
 	cFYI(1, ("Full path: %s inode = 0x%p", full_path, inode));
 	cifs_sb = CIFS_SB(inode->i_sb);
 	pTcon = cifs_sb->tcon;
 	target_path = kmalloc(PATH_MAX, GFP_KERNEL);
-	if(target_path == NULL) {
-		FreeXid(xid);
-		return -ENOMEM;
+	if (!target_path) {
+		target_path = ERR_PTR(-ENOMEM);
+		goto out;
 	}
-	/* can not call the following line due to EFAULT in vfs_readlink which is presumably expecting a user space buffer */
-	/* length = cifs_readlink(direntry,target_path, sizeof(target_path) - 1);    */
 
 /* BB add read reparse point symlink code and Unix extensions symlink code here BB */
 	if (pTcon->ses->capabilities & CAP_UNIX)
@@ -111,25 +126,25 @@ cifs_follow_link(struct dentry *direntry, struct nameidata *nd)
 	else {
 		/* rc = CIFSSMBQueryReparseLinkInfo */
 		/* BB Add code to Query ReparsePoint info */
+		/* BB Add MAC style xsymlink check here if enabled */
 	}
-	/* BB Anything else to do to handle recursive links? */
-	/* BB Should we be using page symlink ops here? */
 
 	if (rc == 0) {
 
 /* BB Add special case check for Samba DFS symlinks */
 
 		target_path[PATH_MAX-1] = 0;
-		rc = vfs_follow_link(nd, target_path);
-	}
-	/* else EACCESS */
-
-	if (target_path)
+	} else {
 		kfree(target_path);
-	if (full_path)
-		kfree(full_path);
+		target_path = ERR_PTR(rc);
+	}
+
+out:
+	kfree(full_path);
+out_no_free:
 	FreeXid(xid);
-	return rc;
+	nd_set_link(nd, target_path);
+	return 0;
 }
 
 int
@@ -147,7 +162,15 @@ cifs_symlink(struct inode *inode, struct dentry *direntry, const char *symname)
 	cifs_sb = CIFS_SB(inode->i_sb);
 	pTcon = cifs_sb->tcon;
 
+	down(&inode->i_sb->s_vfs_rename_sem);
 	full_path = build_path_from_dentry(direntry);
+	up(&inode->i_sb->s_vfs_rename_sem);
+
+	if(full_path == NULL) {
+		FreeXid(xid);
+		return -ENOMEM;
+	}
+
 	cFYI(1, ("Full path: %s ", full_path));
 	cFYI(1, ("symname is %s", symname));
 
@@ -161,10 +184,10 @@ cifs_symlink(struct inode *inode, struct dentry *direntry, const char *symname)
 	if (rc == 0) {
 		if (pTcon->ses->capabilities & CAP_UNIX)
 			rc = cifs_get_inode_info_unix(&newinode, full_path,
-						      inode->i_sb);
+						      inode->i_sb,xid);
 		else
 			rc = cifs_get_inode_info(&newinode, full_path, NULL,
-						 inode->i_sb);
+						 inode->i_sb,xid);
 
 		if (rc != 0) {
 			cFYI(1,
@@ -183,7 +206,7 @@ cifs_symlink(struct inode *inode, struct dentry *direntry, const char *symname)
 }
 
 int
-cifs_readlink(struct dentry *direntry, char *pBuffer, int buflen)
+cifs_readlink(struct dentry *direntry, char __user *pBuffer, int buflen)
 {
 	struct inode *inode = direntry->d_inode;
 	int rc = -EACCES;
@@ -202,7 +225,18 @@ cifs_readlink(struct dentry *direntry, char *pBuffer, int buflen)
 	xid = GetXid();
 	cifs_sb = CIFS_SB(inode->i_sb);
 	pTcon = cifs_sb->tcon;
+
+/* BB would it be safe against deadlock to grab this sem 
+      even though rename itself grabs the sem and calls lookup? */
+/*       down(&inode->i_sb->s_vfs_rename_sem);*/
 	full_path = build_path_from_dentry(direntry);
+/*       up(&inode->i_sb->s_vfs_rename_sem);*/
+
+	if(full_path == NULL) {
+		FreeXid(xid);
+		return -ENOMEM;
+	}
+
 	cFYI(1,
 	     ("Full path: %s inode = 0x%p pBuffer = 0x%p buflen = %d",
 	      full_path, inode, pBuffer, buflen));
@@ -212,6 +246,8 @@ cifs_readlink(struct dentry *direntry, char *pBuffer, int buflen)
 		len = buflen;
 	tmpbuffer = kmalloc(len,GFP_KERNEL);   
 	if(tmpbuffer == NULL) {
+		if (full_path)
+			kfree(full_path);
 		FreeXid(xid);
 		return -ENOMEM;
 	}
@@ -251,15 +287,13 @@ cifs_readlink(struct dentry *direntry, char *pBuffer, int buflen)
 						cFYI(1,("num referral: %d",num_referrals));
 						if(referrals) {
 							cFYI(1,("referral string: %s ",referrals));
-							strncpy(tmpbuffer, referrals, len-1);
+							strncpy(tmpbuffer, referrals, len-1);                            
 						}
 					}
-
-					kfree(tmp_path);
-					if(referrals) {
+					if(referrals)
 						kfree(referrals);
-					}
-				}
+					kfree(tmp_path);
+}
 				/* BB add code like else decode referrals then memcpy to
 				  tmpbuffer and free referrals string array BB */
 			}
@@ -284,4 +318,11 @@ cifs_readlink(struct dentry *direntry, char *pBuffer, int buflen)
 	}
 	FreeXid(xid);
 	return rc;
+}
+
+void cifs_put_link(struct dentry *direntry, struct nameidata *nd)
+{
+	char *p = nd_get_link(nd);
+	if (!IS_ERR(p))
+		kfree(p);
 }

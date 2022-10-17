@@ -27,7 +27,7 @@ extern void flush_tlb_all(void);
 
 static inline void flush_tlb_mm(struct mm_struct *mm)
 {
-	if (mm == &init_mm) BUG(); /* Should never happen */
+	BUG_ON(mm == &init_mm); /* Should never happen */
 
 #ifdef CONFIG_SMP
 	flush_tlb_all();
@@ -51,9 +51,12 @@ static inline void flush_tlb_page(struct vm_area_struct *vma,
 {
 	/* For one page, it's not worth testing the split_tlb variable */
 
+	mb();
 	mtsp(vma->vm_mm->context,1);
+	purge_tlb_start();
 	pdtlb(addr);
 	pitlb(addr);
+	purge_tlb_end();
 }
 
 static inline void flush_tlb_range(struct vm_area_struct *vma,
@@ -61,6 +64,7 @@ static inline void flush_tlb_range(struct vm_area_struct *vma,
 {
 	unsigned long npages;
 
+	
 	npages = ((end - (start & PAGE_MASK)) + (PAGE_SIZE - 1)) >> PAGE_SHIFT;
 	if (npages >= 512)  /* XXX arbitrary, should be tuned */
 		flush_tlb_all();
@@ -68,16 +72,20 @@ static inline void flush_tlb_range(struct vm_area_struct *vma,
 
 		mtsp(vma->vm_mm->context,1);
 		if (split_tlb) {
+			purge_tlb_start();
 			while (npages--) {
 				pdtlb(start);
 				pitlb(start);
 				start += PAGE_SIZE;
 			}
+			purge_tlb_end();
 		} else {
+			purge_tlb_start();
 			while (npages--) {
 				pdtlb(start);
 				start += PAGE_SIZE;
 			}
+			purge_tlb_end();
 		}
 	}
 }

@@ -33,10 +33,10 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/if_arp.h>
+#include <linux/bitops.h>
 #include <net/arp.h>
 
 #include <asm/system.h>
-#include <asm/bitops.h>
 #include <asm/byteorder.h>
 
 #include <net/irda/irda.h>
@@ -66,6 +66,7 @@ static void irlan_client_ctrl_connect_confirm(void *instance, void *sap,
 					      struct sk_buff *);
 static void irlan_check_response_param(struct irlan_cb *self, char *param, 
 				       char *value, int val_len);
+static void irlan_client_open_ctrl_tsap(struct irlan_cb *self);
 
 static void irlan_client_kick_timer_expired(void *data)
 {
@@ -88,7 +89,7 @@ static void irlan_client_kick_timer_expired(void *data)
 	}
 }
 
-void irlan_client_start_kick_timer(struct irlan_cb *self, int timeout)
+static void irlan_client_start_kick_timer(struct irlan_cb *self, int timeout)
 {
 	IRDA_DEBUG(4, "%s()\n", __FUNCTION__ );
 	
@@ -234,7 +235,7 @@ static void irlan_client_ctrl_disconnect_indication(void *instance, void *sap,
 	ASSERT(tsap == self->client.tsap_ctrl, return;);
 
        	/* Remove frames queued on the control channel */
-	while ((skb = skb_dequeue(&self->client.txq))) {
+	while ((skb = skb_dequeue(&self->client.txq)) != NULL) {
 		dev_kfree_skb(skb);
 	}
 	self->client.tx_busy = FALSE;
@@ -248,7 +249,7 @@ static void irlan_client_ctrl_disconnect_indication(void *instance, void *sap,
  *    Initialize callbacks and open IrTTP TSAPs
  *
  */
-void irlan_client_open_ctrl_tsap(struct irlan_cb *self)
+static void irlan_client_open_ctrl_tsap(struct irlan_cb *self)
 {
 	struct tsap_cb *tsap;
 	notify_t notify;
@@ -309,38 +310,48 @@ static void irlan_client_ctrl_connect_confirm(void *instance, void *sap,
 }
 
 /*
- * Function irlan_client_reconnect_data_channel (self)
+ * Function print_ret_code (code)
  *
- *    Try to reconnect data channel (currently not used)
+ *    Print return code of request to peer IrLAN layer.
  *
  */
-void irlan_client_reconnect_data_channel(struct irlan_cb *self) 
+static void print_ret_code(__u8 code) 
 {
-	struct sk_buff *skb;
-	__u8 *frame;
-		
-	IRDA_DEBUG(4, "%s()\n", __FUNCTION__ );
-
-	ASSERT(self != NULL, return;);
-	ASSERT(self->magic == IRLAN_MAGIC, return;);
-	
-	skb = dev_alloc_skb(128);
-	if (!skb)
-		return;
-
-	/* Reserve space for TTP, LMP, and LAP header */
-	skb_reserve(skb, self->max_header_size);
-	skb_put(skb, 2);
-	
-	frame = skb->data;
-	
- 	frame[0] = CMD_RECONNECT_DATA_CHAN;
-	frame[1] = 0x01;
- 	irlan_insert_array_param(skb, "RECONNECT_KEY", 
-				 self->client.reconnect_key,
-				 self->client.key_len);
-	
-	irttp_data_request(self->client.tsap_ctrl, skb);	
+	switch(code) {
+	case 0:
+		printk(KERN_INFO "Success\n");
+		break;
+	case 1:
+		WARNING("IrLAN: Insufficient resources\n");
+		break;
+	case 2:
+		WARNING("IrLAN: Invalid command format\n");
+		break;
+	case 3:
+		WARNING("IrLAN: Command not supported\n");
+		break;
+	case 4:
+		WARNING("IrLAN: Parameter not supported\n");
+		break;
+	case 5:
+		WARNING("IrLAN: Value not supported\n");
+		break;
+	case 6:
+		WARNING("IrLAN: Not open\n");
+		break;
+	case 7:
+		WARNING("IrLAN: Authentication required\n");
+		break;
+	case 8:
+		WARNING("IrLAN: Invalid password\n");
+		break;
+	case 9:
+		WARNING("IrLAN: Protocol error\n");
+		break;
+	case 255:
+		WARNING("IrLAN: Asynchronous status\n");
+		break;
+	}
 }
 
 /*

@@ -8,67 +8,25 @@
 
 #define __ARCH_SI_PREAMBLE_SIZE	(4 * sizeof(int))
 #define __ARCH_SI_TRAPNO
+#define __ARCH_SI_BAND_T int
 
 #include <asm-generic/siginfo.h>
 
 #ifdef __KERNEL__
 
+#include <linux/config.h>
 #include <linux/compat.h>
+
+#ifdef CONFIG_COMPAT
 
 typedef union sigval32 {
 	int sival_int;
 	u32 sival_ptr;
 } sigval_t32;
 
-typedef struct siginfo32 {
-	int si_signo;
-	int si_errno;
-	int si_code;
+struct compat_siginfo;
 
-	union {
-		int _pad[SI_PAD_SIZE32];
-
-		/* kill() */
-		struct {
-			compat_pid_t _pid;		/* sender's pid */
-			unsigned int _uid;		/* sender's uid */
-		} _kill;
-
-		/* POSIX.1b timers */
-		struct {
-			unsigned int _timer1;
-			unsigned int _timer2;
-		} _timer;
-
-		/* POSIX.1b signals */
-		struct {
-			compat_pid_t _pid;		/* sender's pid */
-			unsigned int _uid;		/* sender's uid */
-			sigval_t32 _sigval;
-		} _rt;
-
-		/* SIGCHLD */
-		struct {
-			compat_pid_t _pid;		/* which child */
-			unsigned int _uid;		/* sender's uid */
-			int _status;			/* exit code */
-			compat_clock_t _utime;
-			compat_clock_t _stime;
-		} _sigchld;
-
-		/* SIGILL, SIGFPE, SIGSEGV, SIGBUS, SIGEMT */
-		struct {
-			u32 _addr; /* faulting insn/memory ref. */
-			int _trapno;
-		} _sigfault;
-
-		/* SIGPOLL */
-		struct {
-			int _band;	/* POLL_IN, POLL_OUT, POLL_MSG */
-			int _fd;
-		} _sigpoll;
-	} _sifields;
-} siginfo_t32;
+#endif /* CONFIG_COMPAT */
 
 #endif /* __KERNEL__ */
 
@@ -81,6 +39,8 @@ typedef struct siginfo32 {
 #define NSIGEMT		1
 
 #ifdef __KERNEL__
+
+#ifdef CONFIG_COMPAT
 
 typedef struct sigevent32 {
 	sigval_t32 sigev_value;
@@ -96,7 +56,7 @@ typedef struct sigevent32 {
 	} _sigev_un;
 } sigevent_t32;
 
-extern int copy_siginfo_to_user32(siginfo_t32 *to, siginfo_t *from);
+#endif /* CONFIG_COMPAT */
 
 #endif /* __KERNEL__ */
 

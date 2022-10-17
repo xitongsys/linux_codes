@@ -3,6 +3,8 @@
 #
 
 obj-y				:= main.o version.o mounts.o initramfs.o
+obj-$(CONFIG_GENERIC_CALIBRATE_DELAY) += calibrate.o
+
 mounts-y			:= do_mounts.o
 mounts-$(CONFIG_DEVFS_FS)	+= do_mounts_devfs.o
 mounts-$(CONFIG_BLK_DEV_RAM)	+= do_mounts_rd.o
@@ -23,4 +25,4 @@ $(obj)/version.o: include/linux/compile.h
 
 include/linux/compile.h: FORCE
 	@echo '  CHK     $@'
-	@sh $(srctree)/scripts/mkcompile_h $@ "$(UTS_MACHINE)" "$(CONFIG_SMP)" "$(CC) $(CFLAGS)"
+	@$(CONFIG_SHELL) $(srctree)/scripts/mkcompile_h $@ "$(UTS_MACHINE)" "$(CONFIG_SMP)" "$(CC) $(CFLAGS)"

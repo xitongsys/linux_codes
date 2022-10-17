@@ -49,6 +49,7 @@
 #include <asm/cache.h>
 #include <asm/dma.h>
 #include <asm/machdep.h>
+#include <asm/mc146818rtc.h>
 #include <asm/mk48t59.h>
 #include <asm/prep_nvram.h>
 #include <asm/raven.h>
@@ -58,15 +59,13 @@
 #include <asm/i8259.h>
 #include <asm/open_pic.h>
 #include <asm/pci-bridge.h>
+#include <asm/todc.h>
+
+TODC_ALLOC();
 
 unsigned char ucSystemType;
 unsigned char ucBoardRev;
 unsigned char ucBoardRevMaj, ucBoardRevMin;
-
-extern unsigned long mc146818_get_rtc_time(void);
-extern int mc146818_set_rtc_time(unsigned long nowtime);
-extern unsigned long mk48t59_get_rtc_time(void);
-extern int mk48t59_set_rtc_time(unsigned long nowtime);
 
 extern unsigned char prep_nvram_read_val(int addr);
 extern void prep_nvram_write_val(int addr,
@@ -77,10 +76,10 @@ extern void rs_nvram_write_val(int addr,
 extern void ibm_prep_init(void);
 
 extern void prep_find_bridges(void);
-extern char saved_command_line[];
 
 int _prep_type;
 
+extern void prep_residual_setup_pci(char *irq_edge_mask_lo, char *irq_edge_mask_hi);
 extern void prep_sandalfoot_setup_pci(char *irq_edge_mask_lo, char *irq_edge_mask_hi);
 extern void prep_thinkpad_setup_pci(char *irq_edge_mask_lo, char *irq_edge_mask_hi);
 extern void prep_carolina_setup_pci(char *irq_edge_mask_lo, char *irq_edge_mask_hi);
@@ -135,6 +134,7 @@ EXPORT_SYMBOL(ppc_cs4232_dma2);
 #define PREP_IBM_CAROLINA_IDE_0	0xf0
 #define PREP_IBM_CAROLINA_IDE_1	0xf1
 #define PREP_IBM_CAROLINA_IDE_2	0xf2
+#define PREP_IBM_CAROLINA_IDE_3	0xf3
 /* 7248-43P */
 #define PREP_IBM_CAROLINA_SCSI_0	0xf4
 #define PREP_IBM_CAROLINA_SCSI_1	0xf5
@@ -194,9 +194,8 @@ prep_ibm_cpuinfo(struct seq_file *m)
 		seq_printf(m, "bad");
 	seq_printf(m, "\n");
 
-#ifdef CONFIG_PREP_RESIDUAL
 	/* print info about SIMMs */
-	if (res->ResidualLength != 0) {
+	if (have_residual_data) {
 		int i;
 		seq_printf(m, "simms\t\t: ");
 		for (i = 0; (res->ActualNumMemories) && (i < MAX_MEMS); i++) {
@@ -208,7 +207,13 @@ prep_ibm_cpuinfo(struct seq_file *m)
 		}
 		seq_printf(m, "\n");
 	}
-#endif
+}
+
+static int __prep
+prep_gen_cpuinfo(struct seq_file *m)
+{
+	prep_ibm_cpuinfo(m);
+	return 0;
 }
 
 static int __prep
@@ -324,7 +329,7 @@ prep_carolina_cpuinfo(struct seq_file *m)
 		/* L2 size */
 		if ((l2_reg & 0x60) == 0)
 			seq_printf(m, "256KiB");
-		else if ((l2_reg & 0x60) == 1)
+		else if ((l2_reg & 0x60) == 0x20)
 			seq_printf(m, "512KiB");
 		else
 			seq_printf(m, "unknown size");
@@ -432,9 +437,8 @@ prep_mot_cpuinfo(struct seq_file *m)
 	}
 
 no_l2:
-#ifdef CONFIG_PREP_RESIDUAL
 	/* print info about SIMMs */
-	if (res->ResidualLength != 0) {
+	if (have_residual_data) {
 		int i;
 		seq_printf(m, "simms\t\t: ");
 		for (i = 0; (res->ActualNumMemories) && (i < MAX_MEMS); i++) {
@@ -446,15 +450,8 @@ no_l2:
 		}
 		seq_printf(m, "\n");
 	}
-#endif
 
 	return 0;
-}
-
-static void __prep
-prep_tiger1_progress(char *msg, unsigned short code)
-{
-	outw(code, PREP_IBM_DISP);
 }
 
 static void __prep
@@ -562,14 +559,12 @@ prep_show_percpuinfo(struct seq_file *m, int i)
 {
 	/* PREP's without residual data will give incorrect values here */
 	seq_printf(m, "clock\t\t: ");
-#ifdef CONFIG_PREP_RESIDUAL
-	if (res->ResidualLength)
+	if (have_residual_data)
 		seq_printf(m, "%ldMHz\n",
 			   (res->VitalProductData.ProcessorHz > 1024) ?
 			   res->VitalProductData.ProcessorHz / 1000000 :
 			   res->VitalProductData.ProcessorHz);
 	else
-#endif /* CONFIG_PREP_RESIDUAL */
 		seq_printf(m, "???\n");
 
 	return 0;
@@ -599,9 +594,10 @@ static void __init prep_init_sound(void)
 	 * Get the needed resource informations from residual data.
 	 *
 	 */
-#ifdef CONFIG_PREP_RESIDUAL
-	audiodevice = residual_find_device(~0, NULL, MultimediaController,
-			AudioController, -1, 0);
+	if (have_residual_data)
+		audiodevice = residual_find_device(~0, NULL,
+				MultimediaController, AudioController, -1, 0);
+
 	if (audiodevice != NULL) {
 		PnP_TAG_PACKET *pkt;
 
@@ -614,7 +610,6 @@ static void __init prep_init_sound(void)
 		if (pkt != NULL)
 			ppc_cs4232_dma2 = masktoint(pkt->S5_Pack.DMAMask);
 	}
-#endif
 
 	/*
 	 * These are the PReP specs' defaults for the cs4231.  We use these
@@ -650,13 +645,14 @@ static void __init prep_init_sound(void)
 static void __init
 prep_init_vesa(void)
 {
-#if defined(CONFIG_PREP_RESIDUAL) && \
-	(defined(CONFIG_FB_VGA16) || defined(CONFIG_FB_VGA_16_MODULE) || \
+#if     (defined(CONFIG_FB_VGA16) || defined(CONFIG_FB_VGA16_MODULE) || \
 	 defined(CONFIG_FB_VESA))
-	PPC_DEVICE *vgadev;
+	PPC_DEVICE *vgadev = NULL;
 
-	vgadev = residual_find_device(~0, NULL, DisplayController, SVGAController,
-									-1, 0);
+	if (have_residual_data)
+		vgadev = residual_find_device(~0, NULL, DisplayController,
+							SVGAController, -1, 0);
+
 	if (vgadev != NULL) {
 		PnP_TAG_PACKET *pkt;
 
@@ -681,7 +677,112 @@ prep_init_vesa(void)
 			}
 		}
 	}
-#endif /* CONFIG_PREP_RESIDUAL */
+#endif
+}
+
+/*
+ * Set DBAT 2 to access 0x80000000 so early progress messages will work
+ */
+static __inline__ void
+prep_set_bat(void)
+{
+	/* wait for all outstanding memory access to complete */
+	mb();
+
+	/* setup DBATs */
+	mtspr(DBAT2U, 0x80001ffe);
+	mtspr(DBAT2L, 0x8000002a);
+
+	/* wait for updates */
+	mb();
+}
+
+/*
+ * IBM 3-digit status LED
+ */
+static unsigned int ibm_statusled_base __prepdata;
+
+static void __prep
+ibm_statusled_progress(char *s, unsigned short hex);
+
+static int __prep
+ibm_statusled_panic(struct notifier_block *dummy1, unsigned long dummy2,
+		    void * dummy3)
+{
+	ibm_statusled_progress(NULL, 0x505); /* SOS */
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block ibm_statusled_block __prepdata = {
+	ibm_statusled_panic,
+	NULL,
+	INT_MAX /* try to do it first */
+};
+
+static void __prep
+ibm_statusled_progress(char *s, unsigned short hex)
+{
+	static int notifier_installed;
+	/*
+	 * Progress uses 4 digits and we have only 3.  So, we map 0xffff to
+	 * 0xfff for display switch off.  Out of range values are mapped to
+	 * 0xeff, as I'm told 0xf00 and above are reserved for hardware codes.
+	 * Install the panic notifier when the display is first switched off.
+	 */
+	if (hex == 0xffff) {
+		hex = 0xfff;
+		if (!notifier_installed) {
+			++notifier_installed;
+			notifier_chain_register(&panic_notifier_list,
+						&ibm_statusled_block);
+		}
+	}
+	else
+		if (hex > 0xfff)
+			hex = 0xeff;
+
+	mb();
+	outw(hex, ibm_statusled_base);
+}
+
+static void __init
+ibm_statusled_init(void)
+{
+	/*
+	 * The IBM 3-digit LED display is specified in the residual data
+	 * as an operator panel device, type "System Status LED".  Find
+	 * that device and determine its address.  We validate all the
+	 * other parameters on the off-chance another, similar device
+	 * exists.
+	 */
+	if (have_residual_data) {
+		PPC_DEVICE *led;
+		PnP_TAG_PACKET *pkt;
+
+		led = residual_find_device(~0, NULL, SystemPeripheral,
+					   OperatorPanel, SystemStatusLED, 0);
+		if (!led)
+			return;
+
+		pkt = PnP_find_packet((unsigned char *)
+		       &res->DevicePnPHeap[led->AllocatedOffset], S8_Packet, 0);
+		if (!pkt)
+			return;
+
+		if (pkt->S8_Pack.IOInfo != ISAAddr16bit)
+			return;
+		if (*(unsigned short *)pkt->S8_Pack.RangeMin !=
+		    *(unsigned short *)pkt->S8_Pack.RangeMax)
+			return;
+		if (pkt->S8_Pack.IOAlign != 2)
+			return;
+		if (pkt->S8_Pack.IONum != 2)
+			return;
+
+		ibm_statusled_base = ld_le16((unsigned short *)
+					     (pkt->S8_Pack.RangeMin));
+		ppc_md.progress = ibm_statusled_progress;
+	}
 }
 
 static void __init
@@ -707,7 +808,7 @@ prep_setup_arch(void)
 	{
 	case _PREP_IBM:
 		reg = inb(PREP_IBM_PLANAR);
-		printk(KERN_INFO "IBM planar ID: %08x", reg);
+		printk(KERN_INFO "IBM planar ID: %02x", reg);
 		switch (reg) {
 			case PREP_IBM_SANDALFOOT:
 				prep_gen_enable_l2();
@@ -722,10 +823,20 @@ prep_setup_arch(void)
 				ppc_md.show_cpuinfo = prep_thinkpad_cpuinfo;
 				break;
 			default:
-				printk(" -- unknown! Assuming Carolina");
+				if (have_residual_data) {
+					prep_gen_enable_l2();
+					setup_ibm_pci = prep_residual_setup_pci;
+					ppc_md.power_off = prep_halt;
+					ppc_md.show_cpuinfo = prep_gen_cpuinfo;
+					break;
+				}
+				else
+					printk(" - unknown! Assuming Carolina");
+					/* fall through */
 			case PREP_IBM_CAROLINA_IDE_0:
 			case PREP_IBM_CAROLINA_IDE_1:
 			case PREP_IBM_CAROLINA_IDE_2:
+			case PREP_IBM_CAROLINA_IDE_3:
 				is_ide = 1;
 			case PREP_IBM_CAROLINA_SCSI_0:
 			case PREP_IBM_CAROLINA_SCSI_1:
@@ -745,7 +856,6 @@ prep_setup_arch(void)
 				setup_ibm_pci = prep_tiger1_setup_pci;
 				ppc_md.power_off = prep_sig750_poweroff;
 				ppc_md.show_cpuinfo = prep_tiger1_cpuinfo;
-				ppc_md.progress = prep_tiger1_progress;
 				break;
 		}
 		printk("\n");
@@ -808,172 +918,31 @@ prep_setup_arch(void)
 	/* vgacon.c needs to know where we mapped IO memory in io_block_mapping() */
 	vgacon_remap_base = 0xf0000000;
 	conswitchp = &vga_con;
-#elif defined(CONFIG_DUMMY_CONSOLE)
-	conswitchp = &dummy_con;
 #endif
 }
 
 /*
- * Determine the decrementer frequency from the residual data
- * This allows for a faster boot as we do not need to calibrate the
- * decrementer against another clock. This is important for embedded systems.
+ * First, see if we can get this information from the residual data.
+ * This is important on some IBM PReP systems.  If we cannot, we let the
+ * TODC code handle doing this.
  */
-static int __init
-prep_res_calibrate_decr(void)
-{
-#ifdef CONFIG_PREP_RESIDUAL
-	unsigned long freq, divisor = 4;
-
-	if ( res->VitalProductData.ProcessorBusHz ) {
-		freq = res->VitalProductData.ProcessorBusHz;
-		printk("time_init: decrementer frequency = %lu.%.6lu MHz\n",
-				(freq/divisor)/1000000,
-				(freq/divisor)%1000000);
-		tb_to_us = mulhwu_scale_factor(freq/divisor, 1000000);
-		tb_ticks_per_jiffy = freq / HZ / divisor;
-		return 0;
-	} else
-#endif
-		return 1;
-}
-
-/*
- * Uses the on-board timer to calibrate the on-chip decrementer register
- * for prep systems.  On the pmac the OF tells us what the frequency is
- * but on prep we have to figure it out.
- * -- Cort
- */
-/* Done with 3 interrupts: the first one primes the cache and the
- * 2 following ones measure the interval. The precision of the method
- * is still doubtful due to the short interval sampled.
- */
-static volatile int calibrate_steps __initdata = 3;
-static unsigned tbstamp __initdata = 0;
-
-static irqreturn_t __init
-prep_calibrate_decr_handler(int irq, void *dev, struct pt_regs *regs)
-{
-	unsigned long t, freq;
-	int step=--calibrate_steps;
-
-	t = get_tbl();
-	if (step > 0) {
-		tbstamp = t;
-	} else {
-		freq = (t - tbstamp)*HZ;
-		printk("time_init: decrementer frequency = %lu.%.6lu MHz\n",
-			 freq/1000000, freq%1000000);
-		tb_ticks_per_jiffy = freq / HZ;
-		tb_to_us = mulhwu_scale_factor(freq, 1000000);
-	}
-	return IRQ_HANDLED;
-}
-
 static void __init
 prep_calibrate_decr(void)
 {
-	int res;
+	if (have_residual_data) {
+		unsigned long freq, divisor = 4;
 
-	/* Try and get this from the residual data. */
-	res = prep_res_calibrate_decr();
-
-	/* If we didn't get it from the residual data, try this. */
-	if ( res ) {
-#define TIMER0_COUNT 0x40
-#define TIMER_CONTROL 0x43
-		/* set timer to periodic mode */
-		outb_p(0x34,TIMER_CONTROL);/* binary, mode 2, LSB/MSB, ch 0 */
-		/* set the clock to ~100 Hz */
-		outb_p(LATCH & 0xff , TIMER0_COUNT);	/* LSB */
-		outb(LATCH >> 8 , TIMER0_COUNT);	/* MSB */
-
-		if (request_irq(0, prep_calibrate_decr_handler, 0, "timer", NULL) != 0)
-			panic("Could not allocate timer IRQ!");
-		local_irq_enable();
-		/* wait for calibrate */
-		while ( calibrate_steps )
-			;
-		local_irq_disable();
-		free_irq( 0, NULL);
-	}
-}
-
-static long __init
-mk48t59_init(void) {
-	unsigned char tmp;
-
-	tmp = ppc_md.nvram_read_val(MK48T59_RTC_CONTROLB);
-	if (tmp & MK48T59_RTC_CB_STOP) {
-		printk("Warning: RTC was stopped, date will be wrong.\n");
-		ppc_md.nvram_write_val(MK48T59_RTC_CONTROLB,
-					 tmp & ~MK48T59_RTC_CB_STOP);
-		/* Low frequency crystal oscillators may take a very long
-		 * time to startup and stabilize. For now just ignore the
-		 * the issue, but attempting to calibrate the decrementer
-		 * from the RTC just after this wakeup is likely to be very
-		 * inaccurate. Firmware should not allow to load
-		 * the OS with the clock stopped anyway...
-		 */
-	}
-	/* Ensure that the clock registers are updated */
-	tmp = ppc_md.nvram_read_val(MK48T59_RTC_CONTROLA);
-	tmp &= ~(MK48T59_RTC_CA_READ | MK48T59_RTC_CA_WRITE);
-	ppc_md.nvram_write_val(MK48T59_RTC_CONTROLA, tmp);
-	return 0;
-}
-
-/* We use the NVRAM RTC to time a second to calibrate the decrementer,
- * the RTC registers have just been set up in the right state by the
- * preceding routine.
- */
-static void __init
-mk48t59_calibrate_decr(void)
-{
-	unsigned long freq;
-	unsigned long t1;
-	unsigned char save_control;
-	long i;
-	unsigned char sec;
-
-	
-	/* Make sure the time is not stopped. */
-	save_control = ppc_md.nvram_read_val(MK48T59_RTC_CONTROLB);
-
-	ppc_md.nvram_write_val(MK48T59_RTC_CONTROLA,
-			(save_control & (~MK48T59_RTC_CB_STOP)));
-
-	/* Now make sure the read bit is off so the value will change. */
-	save_control = ppc_md.nvram_read_val(MK48T59_RTC_CONTROLA);
-	save_control &= ~MK48T59_RTC_CA_READ;
-	ppc_md.nvram_write_val(MK48T59_RTC_CONTROLA, save_control);
-
-
-	/* Read the seconds value to see when it changes. */
-	sec = ppc_md.nvram_read_val(MK48T59_RTC_SECONDS);
-	/* Actually this is bad for precision, we should have a loop in
-	 * which we only read the seconds counter. nvram_read_val writes
-	 * the address bytes on every call and this takes a lot of time.
-	 * Perhaps an nvram_wait_change method returning a time
-	 * stamp with a loop count as parameter would be the  solution.
-	 */
-	for (i = 0 ; i < 1000000 ; i++)	{ /* may take up to 1 second... */
-		t1 = get_tbl();
-		if (ppc_md.nvram_read_val(MK48T59_RTC_SECONDS) != sec) {
-			break;
+		if ( res->VitalProductData.ProcessorBusHz ) {
+			freq = res->VitalProductData.ProcessorBusHz;
+			printk("time_init: decrementer frequency = %lu.%.6lu MHz\n",
+					(freq/divisor)/1000000,
+					(freq/divisor)%1000000);
+			tb_to_us = mulhwu_scale_factor(freq/divisor, 1000000);
+			tb_ticks_per_jiffy = freq / HZ / divisor;
 		}
 	}
-
-	sec = ppc_md.nvram_read_val(MK48T59_RTC_SECONDS);
-	for (i = 0 ; i < 1000000 ; i++)	{ /* Should take up 1 second... */
-		freq = get_tbl()-t1;
-		if (ppc_md.nvram_read_val(MK48T59_RTC_SECONDS) != sec)
-			break;
-	}
-
-	printk("time_init: decrementer frequency = %lu.%.6lu MHz\n",
-		 freq/1000000, freq%1000000);
-	tb_ticks_per_jiffy = freq / HZ;
-	tb_to_us = mulhwu_scale_factor(freq, 1000000);
+	else
+		todc_calibrate_decr();
 }
 
 static unsigned int __prep
@@ -995,13 +964,23 @@ prep_init_IRQ(void)
 	int i;
 	unsigned int pci_viddid, pci_did;
 
-	if (OpenPIC_Addr != NULL)
+	if (OpenPIC_Addr != NULL) {
 		openpic_init(NUM_8259_INTERRUPTS);
+		/* We have a cascade on OpenPIC IRQ 0, Linux IRQ 16 */
+		openpic_hookup_cascade(NUM_8259_INTERRUPTS, "82c59 cascade",
+				       i8259_irq);
+	}
 	for ( i = 0 ; i < NUM_8259_INTERRUPTS ; i++ )
 		irq_desc[i].handler = &i8259_pic;
+
+	if (have_residual_data) {
+		i8259_init(residual_isapic_addr());
+		return;
+	}
+
 	/* If we have a Raven PCI bridge or a Hawk PCI bridge / Memory
 	 * controller, we poll (as they have a different int-ack address). */
-	early_read_config_dword(0, 0, 0, PCI_VENDOR_ID, &pci_viddid);
+	early_read_config_dword(NULL, 0, 0, PCI_VENDOR_ID, &pci_viddid);
 	pci_did = (pci_viddid & 0xffff0000) >> 16;
 	if (((pci_viddid & 0xffff) == PCI_VENDOR_ID_MOTOROLA)
 			&& ((pci_did == PCI_DEVICE_ID_MOTOROLA_RAVEN)
@@ -1136,17 +1115,26 @@ prep_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	DMA_MODE_WRITE = 0x48;
 
 	/* figure out what kind of prep workstation we are */
-#ifdef CONFIG_PREP_RESIDUAL
-	if ( res->ResidualLength != 0 ) {
+	if (have_residual_data) {
 		if ( !strncmp(res->VitalProductData.PrintableModel,"IBM",3) )
 			_prep_type = _PREP_IBM;
 		else
 			_prep_type = _PREP_Motorola;
-	} else /* assume motorola if no residual (netboot?) */
-#endif
-	{
+	}
+	else {
+		/* assume motorola if no residual (netboot?) */
 		_prep_type = _PREP_Motorola;
 	}
+
+#ifdef CONFIG_PREP_RESIDUAL
+	/* Switch off all residual data processing if the user requests it */
+	if (strstr(cmd_line, "noresidual") != NULL)
+			res = NULL;
+#endif
+
+	/* Initialise progress early to get maximum benefit */
+	prep_set_bat();
+	ibm_statusled_init();
 
 	ppc_md.setup_arch     = prep_setup_arch;
 	ppc_md.show_percpuinfo = prep_show_percpuinfo;
@@ -1163,17 +1151,20 @@ prep_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.nvram_read_val = prep_nvram_read_val;
 	ppc_md.nvram_write_val = prep_nvram_write_val;
 
-	ppc_md.time_init      = NULL;
+	ppc_md.time_init      = todc_time_init;
 	if (_prep_type == _PREP_IBM) {
-		ppc_md.set_rtc_time   = mc146818_set_rtc_time;
-		ppc_md.get_rtc_time   = mc146818_get_rtc_time;
-		ppc_md.calibrate_decr = prep_calibrate_decr;
+		ppc_md.rtc_read_val = todc_mc146818_read_val;
+		ppc_md.rtc_write_val = todc_mc146818_write_val;
+		TODC_INIT(TODC_TYPE_MC146818, RTC_PORT(0), NULL, RTC_PORT(1),
+				8);
 	} else {
-		ppc_md.set_rtc_time   = mk48t59_set_rtc_time;
-		ppc_md.get_rtc_time   = mk48t59_get_rtc_time;
-		ppc_md.calibrate_decr = mk48t59_calibrate_decr;
-		ppc_md.time_init      = mk48t59_init;
+		TODC_INIT(TODC_TYPE_MK48T59, PREP_NVRAM_AS0, PREP_NVRAM_AS1,
+				PREP_NVRAM_DATA, 8);
 	}
+
+	ppc_md.calibrate_decr = prep_calibrate_decr;
+	ppc_md.set_rtc_time   = todc_set_rtc_time;
+	ppc_md.get_rtc_time   = todc_get_rtc_time;
 
 	ppc_md.setup_io_mappings = prep_map_io;
 

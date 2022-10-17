@@ -5,11 +5,9 @@
 
 #include <stdlib.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <sys/time.h>
-#include <sys/ioctl.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <asm/page.h>
@@ -20,7 +18,6 @@
 #include "sigcontext.h"
 #include "sysdep/sigcontext.h"
 #include "irq_user.h"
-#include "frame_user.h"
 #include "signal_user.h"
 #include "time_user.h"
 #include "task.h"
@@ -34,7 +31,14 @@ void kill_child_dead(int pid)
 {
 	kill(pid, SIGKILL);
 	kill(pid, SIGCONT);
-	while(waitpid(pid, NULL, 0) > 0) kill(pid, SIGCONT);
+	do {
+		int n;
+		CATCH_EINTR(n = waitpid(pid, NULL, 0));
+		if (n > 0)
+			kill(pid, SIGCONT);
+		else
+			break;
+	} while(1);
 }
 
 /* Unlocked - don't care if this is a bit off */
@@ -82,6 +86,8 @@ struct signal_info sig_info[] = {
 		     .is_irq 		= 0 },
 	[ SIGILL ] { .handler 		= relay_signal,
 		     .is_irq 		= 0 },
+	[ SIGWINCH ] { .handler		= winch,
+		       .is_irq		= 1 },
 	[ SIGBUS ] { .handler 		= bus_handler,
 		     .is_irq 		= 0 },
 	[ SIGSEGV] { .handler 		= segv_handler,
@@ -96,34 +102,11 @@ struct signal_info sig_info[] = {
 		      .is_irq 		= 0 },
 };
 
-void sig_handler(int sig, struct sigcontext sc)
-{
-	CHOOSE_MODE_PROC(sig_handler_common_tt, sig_handler_common_skas,
-			 sig, &sc);
-}
-
-extern int timer_irq_inited, missed_ticks[];
-
-void alarm_handler(int sig, struct sigcontext sc)
-{
-	if(!timer_irq_inited) return;
-	missed_ticks[cpu()]++;
-
-	if(sig == SIGALRM)
-		switch_timers(0);
-
-	CHOOSE_MODE_PROC(sig_handler_common_tt, sig_handler_common_skas,
-			 sig, &sc);
-
-	if(sig == SIGALRM)
-		switch_timers(1);
-}
-
 void do_longjmp(void *b, int val)
 {
-	jmp_buf *buf = b;
+	sigjmp_buf *buf = b;
 
-	longjmp(*buf, val);
+	siglongjmp(*buf, val);
 }
 
 /*

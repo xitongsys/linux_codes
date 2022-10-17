@@ -36,7 +36,7 @@
  */
 int
 snd_emu10k1_sample_new(snd_emux_t *rec, snd_sf_sample_t *sp,
-		       snd_util_memhdr_t *hdr, const void *data, long count)
+		       snd_util_memhdr_t *hdr, const void __user *data, long count)
 {
 	int offset;
 	int truesize, size, loopsize, blocksize;
@@ -44,7 +44,7 @@ snd_emu10k1_sample_new(snd_emux_t *rec, snd_sf_sample_t *sp,
 	unsigned int start_addr;
 	emu10k1_t *emu;
 
-	emu = snd_magic_cast(emu10k1_t, rec->hw, return -ENXIO);
+	emu = rec->hw;
 	snd_assert(sp != NULL, return -EINVAL);
 	snd_assert(hdr != NULL, return -EINVAL);
 
@@ -210,7 +210,7 @@ snd_emu10k1_sample_free(snd_emux_t *rec, snd_sf_sample_t *sp,
 {
 	emu10k1_t *emu;
 
-	emu = snd_magic_cast(emu10k1_t, rec->hw, return -ENXIO);
+	emu = rec->hw;
 	snd_assert(sp != NULL, return -EINVAL);
 	snd_assert(hdr != NULL, return -EINVAL);
 

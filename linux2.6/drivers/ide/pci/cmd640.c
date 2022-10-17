@@ -101,6 +101,8 @@
 #undef REALLY_SLOW_IO		/* most systems can safely undef this */
 #define CMD640_PREFETCH_MASKS 1
 
+//#define CMD640_DUMP_REGS
+
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -213,13 +215,13 @@ static unsigned int cmd640_chip_version;
 
 static void put_cmd640_reg_pci1 (u16 reg, u8 val)
 {
-	outb_p((reg & 0xfc) | cmd640_key, 0xcf8);
+	outl_p((reg & 0xfc) | cmd640_key, 0xcf8);
 	outb_p(val, (reg & 3) | 0xcfc);
 }
 
 static u8 get_cmd640_reg_pci1 (u16 reg)
 {
-	outb_p((reg & 0xfc) | cmd640_key, 0xcf8);
+	outl_p((reg & 0xfc) | cmd640_key, 0xcf8);
 	return inb_p((reg & 3) | 0xcfc);
 }
 
@@ -419,7 +421,7 @@ static void __init setup_device_ptrs (void)
 	cmd_hwif1 = &ide_hwifs[1]; /* default, if not found below */
 	for (i = 0; i < MAX_HWIFS; i++) {
 		ide_hwif_t *hwif = &ide_hwifs[i];
-		if (hwif->chipset == ide_unknown || hwif->chipset == ide_generic) {
+		if (hwif->chipset == ide_unknown || hwif->chipset == ide_forced) {
 			if (hwif->io_ports[IDE_DATA_OFFSET] == 0x1f0)
 				cmd_hwif0 = hwif;
 			else if (hwif->io_ports[IDE_DATA_OFFSET] == 0x170)
@@ -748,7 +750,7 @@ int __init ide_probe_for_cmd640x (void)
 	put_cmd640_reg(0x5b, 0);
 
 #ifdef CMD640_DUMP_REGS
-	CMD640_DUMP_REGS;
+	cmd640_dump_regs();
 #endif
 
 	/*
@@ -870,7 +872,7 @@ int __init ide_probe_for_cmd640x (void)
 	}
 
 #ifdef CMD640_DUMP_REGS
-	CMD640_DUMP_REGS;
+	cmd640_dump_regs();
 #endif
 	return 1;
 }

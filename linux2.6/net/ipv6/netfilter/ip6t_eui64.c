@@ -1,4 +1,12 @@
 /* Kernel module to match EUI64 address parameters. */
+
+/* (C) 2001-2002 Andras Kis-Szabo <kisza@sch.bme.hu>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/ipv6.h>
@@ -16,8 +24,7 @@ match(const struct sk_buff *skb,
       const struct net_device *out,
       const void *matchinfo,
       int offset,
-      const void *hdr,
-      u_int16_t datalen,
+      unsigned int protoff,
       int *hotdrop)
 {
 
@@ -33,16 +40,16 @@ match(const struct sk_buff *skb,
     
     memset(eui64, 0, sizeof(eui64));
 
-    if (skb->mac.ethernet->h_proto == ntohs(ETH_P_IPV6)) {
+    if (eth_hdr(skb)->h_proto == ntohs(ETH_P_IPV6)) {
       if (skb->nh.ipv6h->version == 0x6) { 
-         memcpy(eui64, skb->mac.ethernet->h_source, 3);
-         memcpy(eui64 + 5, skb->mac.ethernet->h_source + 3, 3);
+         memcpy(eui64, eth_hdr(skb)->h_source, 3);
+         memcpy(eui64 + 5, eth_hdr(skb)->h_source + 3, 3);
 	 eui64[3]=0xff;
 	 eui64[4]=0xfe;
 	 eui64[0] |= 0x02;
 
 	 i=0;
-	 while ((skb->nh.ipv6h->saddr.in6_u.u6_addr8[8+i] ==
+	 while ((skb->nh.ipv6h->saddr.s6_addr[8+i] ==
 			 eui64[i]) && (i<8)) i++;
 
 	 if ( i == 8 )
@@ -62,7 +69,7 @@ ip6t_eui64_checkentry(const char *tablename,
 {
 	if (hook_mask
 	    & ~((1 << NF_IP6_PRE_ROUTING) | (1 << NF_IP6_LOCAL_IN) |
-		(1 << NF_IP6_PRE_ROUTING) )) {
+		(1 << NF_IP6_FORWARD))) {
 		printk("ip6t_eui64: only valid for PRE_ROUTING, LOCAL_IN or FORWARD.\n");
 		return 0;
 	}

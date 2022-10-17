@@ -40,7 +40,9 @@
 #include <asm/mach/flash.h>
 #include <asm/mach/irq.h>
 #include <asm/mach/map.h>
+#include <asm/mach/time.h>
 
+#include "common.h"
 
 /* 
  * All IO addresses are mapped onto VA 0xFFFx.xxxx, where x.xxxx
@@ -66,7 +68,6 @@
  * f1200000	12000000	EBI registers
  * f1300000	13000000	Counter/Timer
  * f1400000	14000000	Interrupt controller
- * f1500000	15000000	RTC
  * f1600000	16000000	UART 0
  * f1700000	17000000	UART 1
  * f1a00000	1a000000	Debug LEDs
@@ -79,7 +80,6 @@ static struct map_desc ap_io_desc[] __initdata = {
  { IO_ADDRESS(INTEGRATOR_EBI_BASE),   INTEGRATOR_EBI_BASE,   SZ_4K,  MT_DEVICE },
  { IO_ADDRESS(INTEGRATOR_CT_BASE),    INTEGRATOR_CT_BASE,    SZ_4K,  MT_DEVICE },
  { IO_ADDRESS(INTEGRATOR_IC_BASE),    INTEGRATOR_IC_BASE,    SZ_4K,  MT_DEVICE },
- { IO_ADDRESS(INTEGRATOR_RTC_BASE),   INTEGRATOR_RTC_BASE,   SZ_4K,  MT_DEVICE },
  { IO_ADDRESS(INTEGRATOR_UART0_BASE), INTEGRATOR_UART0_BASE, SZ_4K,  MT_DEVICE },
  { IO_ADDRESS(INTEGRATOR_UART1_BASE), INTEGRATOR_UART1_BASE, SZ_4K,  MT_DEVICE },
  { IO_ADDRESS(INTEGRATOR_DBG_BASE),   INTEGRATOR_DBG_BASE,   SZ_4K,  MT_DEVICE },
@@ -126,7 +126,7 @@ static void __init ap_init_irq(void)
 	writel(-1, VA_IC_BASE + FIQ_ENABLE_CLEAR);
 
 	for (i = 0; i < NR_IRQS; i++) {
-		if (((1 << i) && INTEGRATOR_SC_VALID_INT) != 0) {
+		if (((1 << i) & INTEGRATOR_SC_VALID_INT) != 0) {
 			set_irq_chip(i, &sc_chip);
 			set_irq_handler(i, do_level_IRQ);
 			set_irq_flags(i, IRQF_VALID | IRQF_PROBE);
@@ -173,7 +173,7 @@ static int __init irq_init_sysfs(void)
 {
 	int ret = sysdev_class_register(&irq_class);
 	if (ret == 0)
-		ret = sys_device_register(&irq_device);
+		ret = sysdev_register(&irq_device);
 	return ret;
 }
 
@@ -251,12 +251,12 @@ static struct platform_device cfi_flash_device = {
 	.resource	= &cfi_flash_resource,
 };
 
-static int __init ap_init(void)
+static void __init ap_init(void)
 {
 	unsigned long sc_dec;
 	int i;
 
-	platform_add_device(&cfi_flash_device);
+	platform_device_register(&cfi_flash_device);
 
 	sc_dec = readl(VA_SC_BASE + INTEGRATOR_SC_DEC_OFFSET);
 	for (i = 0; i < 4; i++) {
@@ -279,11 +279,17 @@ static int __init ap_init(void)
 
 		lm_device_register(lmdev);
 	}
-
-	return 0;
 }
 
-arch_initcall(ap_init);
+static void __init ap_init_timer(void)
+{
+	integrator_time_init(1000000 * TICKS_PER_uSEC / HZ, 0);
+}
+
+static struct sys_timer ap_timer = {
+	.init		= ap_init_timer,
+	.offset		= integrator_gettimeoffset,
+};
 
 MACHINE_START(INTEGRATOR, "ARM-Integrator")
 	MAINTAINER("ARM Ltd/Deep Blue Solutions Ltd")
@@ -291,4 +297,6 @@ MACHINE_START(INTEGRATOR, "ARM-Integrator")
 	BOOT_PARAMS(0x00000100)
 	MAPIO(ap_map_io)
 	INITIRQ(ap_init_irq)
+	.timer		= &ap_timer,
+	INIT_MACHINE(ap_init)
 MACHINE_END

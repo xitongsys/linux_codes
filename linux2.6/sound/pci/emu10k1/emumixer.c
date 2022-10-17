@@ -32,7 +32,7 @@
 #include <sound/core.h>
 #include <sound/emu10k1.h>
 
-#define chip_t emu10k1_t
+#define AC97_ID_STAC9758	0x83847658
 
 static int snd_emu10k1_spdif_info(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t * uinfo)
 {
@@ -54,7 +54,7 @@ static int snd_emu10k1_spdif_get(snd_kcontrol_t * kcontrol,
 	ucontrol->value.iec958.status[2] = (emu->spdif_bits[idx] >> 16) & 0xff;
 	ucontrol->value.iec958.status[3] = (emu->spdif_bits[idx] >> 24) & 0xff;
 	spin_unlock_irqrestore(&emu->reg_lock, flags);
-        return 0;
+	return 0;
 }
 
 static int snd_emu10k1_spdif_get_mask(snd_kcontrol_t * kcontrol,
@@ -64,7 +64,7 @@ static int snd_emu10k1_spdif_get_mask(snd_kcontrol_t * kcontrol,
 	ucontrol->value.iec958.status[1] = 0xff;
 	ucontrol->value.iec958.status[2] = 0xff;
 	ucontrol->value.iec958.status[3] = 0xff;
-        return 0;
+	return 0;
 }
 
 static int snd_emu10k1_spdif_put(snd_kcontrol_t * kcontrol,
@@ -87,27 +87,27 @@ static int snd_emu10k1_spdif_put(snd_kcontrol_t * kcontrol,
 		emu->spdif_bits[idx] = val;
 	}
 	spin_unlock_irqrestore(&emu->reg_lock, flags);
-        return change;
+	return change;
 }
 
 static snd_kcontrol_new_t snd_emu10k1_spdif_mask_control =
 {
 	.access =	SNDRV_CTL_ELEM_ACCESS_READ,
-        .iface =        SNDRV_CTL_ELEM_IFACE_MIXER,
-        .name =         SNDRV_CTL_NAME_IEC958("",PLAYBACK,MASK),
+	.iface =        SNDRV_CTL_ELEM_IFACE_MIXER,
+	.name =         SNDRV_CTL_NAME_IEC958("",PLAYBACK,MASK),
 	.count =	4,
-        .info =         snd_emu10k1_spdif_info,
-        .get =          snd_emu10k1_spdif_get_mask
+	.info =         snd_emu10k1_spdif_info,
+	.get =          snd_emu10k1_spdif_get_mask
 };
 
 static snd_kcontrol_new_t snd_emu10k1_spdif_control =
 {
-        .iface =	SNDRV_CTL_ELEM_IFACE_MIXER,
-        .name =         SNDRV_CTL_NAME_IEC958("",PLAYBACK,DEFAULT),
+	.iface =	SNDRV_CTL_ELEM_IFACE_MIXER,
+	.name =         SNDRV_CTL_NAME_IEC958("",PLAYBACK,DEFAULT),
 	.count =	4,
-        .info =         snd_emu10k1_spdif_info,
-        .get =          snd_emu10k1_spdif_get,
-        .put =          snd_emu10k1_spdif_put
+	.info =         snd_emu10k1_spdif_info,
+	.get =          snd_emu10k1_spdif_get,
+	.put =          snd_emu10k1_spdif_put
 };
 
 
@@ -165,7 +165,7 @@ static int snd_emu10k1_send_routing_get(snd_kcontrol_t * kcontrol,
 			ucontrol->value.integer.value[(voice * num_efx) + idx] = 
 				mix->send_routing[voice][idx] & mask;
 	spin_unlock_irqrestore(&emu->reg_lock, flags);
-        return 0;
+	return 0;
 }
 
 static int snd_emu10k1_send_routing_put(snd_kcontrol_t * kcontrol,
@@ -199,18 +199,18 @@ static int snd_emu10k1_send_routing_put(snd_kcontrol_t * kcontrol,
 		}
 	}
 	spin_unlock_irqrestore(&emu->reg_lock, flags);
-        return change;
+	return change;
 }
 
 static snd_kcontrol_new_t snd_emu10k1_send_routing_control =
 {
 	.access =	SNDRV_CTL_ELEM_ACCESS_READWRITE | SNDRV_CTL_ELEM_ACCESS_INACTIVE,
-        .iface =        SNDRV_CTL_ELEM_IFACE_MIXER,
-        .name =         "EMU10K1 PCM Send Routing",
+	.iface =        SNDRV_CTL_ELEM_IFACE_MIXER,
+	.name =         "EMU10K1 PCM Send Routing",
 	.count =	32,
-        .info =         snd_emu10k1_send_routing_info,
-        .get =          snd_emu10k1_send_routing_get,
-        .put =          snd_emu10k1_send_routing_put
+	.info =         snd_emu10k1_send_routing_info,
+	.get =          snd_emu10k1_send_routing_get,
+	.put =          snd_emu10k1_send_routing_put
 };
 
 static int snd_emu10k1_send_volume_info(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t * uinfo)
@@ -236,7 +236,7 @@ static int snd_emu10k1_send_volume_get(snd_kcontrol_t * kcontrol,
 	for (idx = 0; idx < 3*num_efx; idx++)
 		ucontrol->value.integer.value[idx] = mix->send_volume[idx/num_efx][idx%num_efx];
 	spin_unlock_irqrestore(&emu->reg_lock, flags);
-        return 0;
+	return 0;
 }
 
 static int snd_emu10k1_send_volume_put(snd_kcontrol_t * kcontrol,
@@ -268,18 +268,18 @@ static int snd_emu10k1_send_volume_put(snd_kcontrol_t * kcontrol,
 		}
 	}
 	spin_unlock_irqrestore(&emu->reg_lock, flags);
-        return change;
+	return change;
 }
 
 static snd_kcontrol_new_t snd_emu10k1_send_volume_control =
 {
 	.access =	SNDRV_CTL_ELEM_ACCESS_READWRITE | SNDRV_CTL_ELEM_ACCESS_INACTIVE,
-        .iface =        SNDRV_CTL_ELEM_IFACE_MIXER,
-        .name =         "EMU10K1 PCM Send Volume",
+	.iface =        SNDRV_CTL_ELEM_IFACE_MIXER,
+	.name =         "EMU10K1 PCM Send Volume",
 	.count =	32,
-        .info =         snd_emu10k1_send_volume_info,
-        .get =          snd_emu10k1_send_volume_get,
-        .put =          snd_emu10k1_send_volume_put
+	.info =         snd_emu10k1_send_volume_info,
+	.get =          snd_emu10k1_send_volume_get,
+	.put =          snd_emu10k1_send_volume_put
 };
 
 static int snd_emu10k1_attn_info(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t * uinfo)
@@ -303,7 +303,7 @@ static int snd_emu10k1_attn_get(snd_kcontrol_t * kcontrol,
 	for (idx = 0; idx < 3; idx++)
 		ucontrol->value.integer.value[idx] = mix->attn[idx];
 	spin_unlock_irqrestore(&emu->reg_lock, flags);
-        return 0;
+	return 0;
 }
 
 static int snd_emu10k1_attn_put(snd_kcontrol_t * kcontrol,
@@ -331,18 +331,18 @@ static int snd_emu10k1_attn_put(snd_kcontrol_t * kcontrol,
 		}
 	}
 	spin_unlock_irqrestore(&emu->reg_lock, flags);
-        return change;
+	return change;
 }
 
 static snd_kcontrol_new_t snd_emu10k1_attn_control =
 {
 	.access =	SNDRV_CTL_ELEM_ACCESS_READWRITE | SNDRV_CTL_ELEM_ACCESS_INACTIVE,
-        .iface =        SNDRV_CTL_ELEM_IFACE_MIXER,
-        .name =         "EMU10K1 PCM Volume",
+	.iface =        SNDRV_CTL_ELEM_IFACE_MIXER,
+	.name =         "EMU10K1 PCM Volume",
 	.count =	32,
-        .info =         snd_emu10k1_attn_info,
-        .get =          snd_emu10k1_attn_get,
-        .put =          snd_emu10k1_attn_put
+	.info =         snd_emu10k1_attn_info,
+	.get =          snd_emu10k1_attn_get,
+	.put =          snd_emu10k1_attn_put
 };
 
 static int snd_emu10k1_shared_spdif_info(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t * uinfo)
@@ -363,7 +363,7 @@ static int snd_emu10k1_shared_spdif_get(snd_kcontrol_t * kcontrol,
 		ucontrol->value.integer.value[0] = inl(emu->port + A_IOCFG) & A_IOCFG_GPOUT0 ? 1 : 0;
 	else
 		ucontrol->value.integer.value[0] = inl(emu->port + HCFG) & HCFG_GPOUT0 ? 1 : 0;
-        return 0;
+	return 0;
 }
 
 static int snd_emu10k1_shared_spdif_put(snd_kcontrol_t * kcontrol,
@@ -394,7 +394,7 @@ static int snd_emu10k1_shared_spdif_put(snd_kcontrol_t * kcontrol,
 		outl(reg | val, emu->port + HCFG);
 	}
 	spin_unlock_irqrestore(&emu->reg_lock, flags);
-        return change;
+	return change;
 }
 
 static snd_kcontrol_new_t snd_emu10k1_shared_spdif __devinitdata =
@@ -419,7 +419,7 @@ static snd_kcontrol_new_t snd_audigy_shared_spdif __devinitdata =
  */
 static void snd_emu10k1_mixer_free_ac97(ac97_t *ac97)
 {
-	emu10k1_t *emu = snd_magic_cast(emu10k1_t, ac97->private_data, return);
+	emu10k1_t *emu = ac97->private_data;
 	emu->ac97 = NULL;
 }
 
@@ -455,31 +455,100 @@ static int rename_ctl(snd_card_t *card, const char *src, const char *dst)
 
 int __devinit snd_emu10k1_mixer(emu10k1_t *emu)
 {
-	ac97_t ac97;
 	int err, pcm;
 	snd_kcontrol_t *kctl;
 	snd_card_t *card = emu->card;
+	char **c;
+	static char *emu10k1_remove_ctls[] = {
+		/* no AC97 mono, surround, center/lfe */
+		"Master Mono Playback Switch",
+		"Master Mono Playback Volume",
+		"PCM Out Path & Mute",
+		"Mono Output Select",
+		"Surround Playback Switch",
+		"Surround Playback Volume",
+		"Center Playback Switch",
+		"Center Playback Volume",
+		"LFE Playback Switch",
+		"LFE Playback Volume",
+		NULL
+	};
+	static char *emu10k1_rename_ctls[] = {
+		"Surround Digital Playback Volume", "Surround Playback Volume",
+		"Center Digital Playback Volume", "Center Playback Volume",
+		"LFE Digital Playback Volume", "LFE Playback Volume",
+		NULL
+	};
+	static char *audigy_remove_ctls[] = {
+		/* Master/PCM controls on ac97 of Audigy has no effect */
+		"PCM Playback Switch",
+		"PCM Playback Volume",
+		"Master Mono Playback Switch",
+		"Master Mono Playback Volume",
+		"Master Playback Switch",
+		"Master Playback Volume",
+		"PCM Out Path & Mute",
+		"Mono Output Select",
+		/* remove unused AC97 capture controls */
+		"Capture Source",
+		"Capture Switch",
+		"Capture Volume",
+		"Mic Select",
+		"Video Playback Switch",
+		"Video Playback Volume",
+		"Mic Playback Switch",
+		"Mic Playback Volume",
+		NULL
+	};
+	static char *audigy_rename_ctls[] = {
+		/* use conventional names */
+		"Wave Playback Volume", "PCM Playback Volume",
+		/* "Wave Capture Volume", "PCM Capture Volume", */
+		"Wave Master Playback Volume", "Master Playback Volume",
+		"AMic Playback Volume", "Mic Playback Volume",
+		NULL
+	};
 
 	if (!emu->no_ac97) {
+		ac97_bus_t *pbus;
+		ac97_template_t ac97;
+		static ac97_bus_ops_t ops = {
+			.write = snd_emu10k1_ac97_write,
+			.read = snd_emu10k1_ac97_read,
+		};
+
+		if ((err = snd_ac97_bus(emu->card, 0, &ops, NULL, &pbus)) < 0)
+			return err;
+		pbus->no_vra = 1; /* we don't need VRA */
+		
 		memset(&ac97, 0, sizeof(ac97));
-		ac97.write = snd_emu10k1_ac97_write;
-		ac97.read = snd_emu10k1_ac97_read;
 		ac97.private_data = emu;
 		ac97.private_free = snd_emu10k1_mixer_free_ac97;
-		if ((err = snd_ac97_mixer(emu->card, &ac97, &emu->ac97)) < 0)
+		if ((err = snd_ac97_mixer(pbus, &ac97, &emu->ac97)) < 0)
 			return err;
-		if (emu->audigy && emu->revision == 4) {
-			/* Master/PCM controls on ac97 of Audigy2 has no effect */
-			/* FIXME: keep master volume/switch to be sure.
-			 * once after we check that they play really no roles,
-			 * they shall be removed.
+		if (emu->audigy) {
+			/* set master volume to 0 dB */
+			snd_ac97_write(emu->ac97, AC97_MASTER, 0x0000);
+			/* set capture source to mic */
+			snd_ac97_write(emu->ac97, AC97_REC_SEL, 0x0000);
+			c = audigy_remove_ctls;
+		} else {
+			/*
+			 * Credits for cards based on STAC9758:
+			 *   James Courtier-Dutton <James@superbug.demon.co.uk>
+			 *   Voluspa <voluspa@comhem.se>
 			 */
-			rename_ctl(card, "Master Playback Switch", "AC97 Master Playback Switch");
-			rename_ctl(card, "Master Playback Volume", "AC97 Master Playback Volume");
-			/* pcm controls are removed */
-			remove_ctl(card, "PCM Playback Switch");
-			remove_ctl(card, "PCM Playback Volume");
+			if (emu->ac97->id == AC97_ID_STAC9758) {
+				emu->rear_ac97 = 1;
+				snd_emu10k1_ptr_write(emu, AC97SLOT, 0, AC97SLOT_CNTR|AC97SLOT_LFE|AC97SLOT_REAR_LEFT|AC97SLOT_REAR_RIGHT);
+			}
+			/* remove unused AC97 controls */
+			snd_ac97_write(emu->ac97, AC97_SURROUND_MASTER, 0x0202);
+			snd_ac97_write(emu->ac97, AC97_CENTER_LFE_MASTER, 0x0202);
+			c = emu10k1_remove_ctls;
 		}
+		for (; *c; c++)
+			remove_ctl(card, *c);
 	} else {
 		if (emu->APS)
 			strcpy(emu->card->mixername, "EMU APS");
@@ -489,13 +558,12 @@ int __devinit snd_emu10k1_mixer(emu10k1_t *emu)
 			strcpy(emu->card->mixername, "Emu10k1");
 	}
 
-	if (emu->audigy && emu->revision == 4) {
-		/* Audigy2 and Audigy2 EX */
-		/* use the conventional names */
-		rename_ctl(card, "Wave Playback Volume", "PCM Playback Volume");
-		rename_ctl(card, "Wave Playback Volume", "PCM Capture Volume");
-		rename_ctl(card, "Wave Master Playback Volume", "Master Playback Volume");
-	}
+	if (emu->audigy)
+		c = audigy_rename_ctls;
+	else
+		c = emu10k1_rename_ctls;
+	for (; *c; c += 2)
+		rename_ctl(card, c[0], c[1]);
 
 	if ((kctl = emu->ctl_send_routing = snd_ctl_new1(&snd_emu10k1_send_routing_control, emu)) == NULL)
 		return -ENOMEM;
@@ -536,6 +604,11 @@ int __devinit snd_emu10k1_mixer(emu10k1_t *emu)
 			return -ENOMEM;
 		if ((err = snd_ctl_add(card, kctl)))
 			return err;
+		if ((kctl = ctl_find(card, SNDRV_CTL_NAME_IEC958("",PLAYBACK,DEFAULT))) != NULL) {
+			/* already defined by ac97, remove it */
+			/* FIXME: or do we need both controls? */
+			remove_ctl(card, SNDRV_CTL_NAME_IEC958("",PLAYBACK,DEFAULT));
+		}
 		if ((kctl = snd_ctl_new1(&snd_emu10k1_spdif_control, emu)) == NULL)
 			return -ENOMEM;
 		if ((err = snd_ctl_add(card, kctl)))

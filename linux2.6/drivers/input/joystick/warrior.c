@@ -11,18 +11,18 @@
 /*
  * This program is free warftware; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or 
+ * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- * 
+ *
  *  Should you need to contact me, the author, you can do so either by
  * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
  * Vojtech Pavlik, Simunkova 1594, Prague 8, 182 00 Czech Republic
@@ -35,8 +35,10 @@
 #include <linux/serio.h>
 #include <linux/init.h>
 
+#define DRIVER_DESC	"Logitech WingMan Warrior joystick driver"
+
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
-MODULE_DESCRIPTION("Logitech WingMan Warrior joystick driver");
+MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
 /*
@@ -44,7 +46,7 @@ MODULE_LICENSE("GPL");
  */
 
 #define WARRIOR_MAX_LENGTH	16
-static char warrior_lengths[] = { 0, 4, 12, 3, 4, 4, 0, 0 }; 
+static char warrior_lengths[] = { 0, 4, 12, 3, 4, 4, 0, 0 };
 static char *warrior_name = "Logitech WingMan Warrior";
 
 /*
@@ -114,7 +116,7 @@ static irqreturn_t warrior_interrupt(struct serio *serio,
 		warrior->data[warrior->idx++] = data;
 
 	if (warrior->idx == warrior->len) {
-		if (warrior->idx) warrior_process_packet(warrior, regs);	
+		if (warrior->idx) warrior_process_packet(warrior, regs);
 		warrior->idx = 0;
 		warrior->len = 0;
 	}
@@ -139,7 +141,7 @@ static void warrior_disconnect(struct serio *serio)
  * it as an input device.
  */
 
-static void warrior_connect(struct serio *serio, struct serio_dev *dev)
+static void warrior_connect(struct serio *serio, struct serio_driver *drv)
 {
 	struct warrior *warrior;
 	int i;
@@ -152,7 +154,7 @@ static void warrior_connect(struct serio *serio, struct serio_dev *dev)
 
 	memset(warrior, 0, sizeof(struct warrior));
 
-	warrior->dev.evbit[0] = BIT(EV_KEY) | BIT(EV_REL) | BIT(EV_ABS);	
+	warrior->dev.evbit[0] = BIT(EV_KEY) | BIT(EV_REL) | BIT(EV_ABS);
 	warrior->dev.keybit[LONG(BTN_TRIGGER)] = BIT(BTN_TRIGGER) | BIT(BTN_THUMB) | BIT(BTN_TOP) | BIT(BTN_TOP2);
 	warrior->dev.relbit[0] = BIT(REL_DIAL);
 	warrior->dev.absbit[0] = BIT(ABS_X) | BIT(ABS_Y) | BIT(ABS_THROTTLE) | BIT(ABS_HAT0X) | BIT(ABS_HAT0Y);
@@ -166,26 +168,27 @@ static void warrior_connect(struct serio *serio, struct serio_dev *dev)
 	warrior->dev.id.vendor = SERIO_WARRIOR;
 	warrior->dev.id.product = 0x0001;
 	warrior->dev.id.version = 0x0100;
+	warrior->dev.dev = &serio->dev;
 
 	for (i = 0; i < 2; i++) {
-		warrior->dev.absmax[ABS_X+i] = -64;	
-		warrior->dev.absmin[ABS_X+i] =  64;	
-		warrior->dev.absflat[ABS_X+i] = 8;	
+		warrior->dev.absmax[ABS_X+i] = -64;
+		warrior->dev.absmin[ABS_X+i] =  64;
+		warrior->dev.absflat[ABS_X+i] = 8;
 	}
 
-	warrior->dev.absmax[ABS_THROTTLE] = -112;	
-	warrior->dev.absmin[ABS_THROTTLE] =  112;	
+	warrior->dev.absmax[ABS_THROTTLE] = -112;
+	warrior->dev.absmin[ABS_THROTTLE] =  112;
 
 	for (i = 0; i < 2; i++) {
-		warrior->dev.absmax[ABS_HAT0X+i] = -1;	
-		warrior->dev.absmin[ABS_HAT0X+i] =  1;	
+		warrior->dev.absmax[ABS_HAT0X+i] = -1;
+		warrior->dev.absmin[ABS_HAT0X+i] =  1;
 	}
 
 	warrior->dev.private = warrior;
-	
+
 	serio->private = warrior;
 
-	if (serio_open(serio, dev)) { 
+	if (serio_open(serio, drv)) {
 		kfree(warrior);
 		return;
 	}
@@ -199,10 +202,14 @@ static void warrior_connect(struct serio *serio, struct serio_dev *dev)
  * The serio device structure.
  */
 
-static struct serio_dev warrior_dev = {
-	.interrupt =	warrior_interrupt,
-	.connect =	warrior_connect,
-	.disconnect =	warrior_disconnect,
+static struct serio_driver warrior_drv = {
+	.driver		= {
+		.name	= "warrior",
+	},
+	.description	= DRIVER_DESC,
+	.interrupt	= warrior_interrupt,
+	.connect	= warrior_connect,
+	.disconnect	= warrior_disconnect,
 };
 
 /*
@@ -211,13 +218,13 @@ static struct serio_dev warrior_dev = {
 
 int __init warrior_init(void)
 {
-	serio_register_device(&warrior_dev);
+	serio_register_driver(&warrior_drv);
 	return 0;
 }
 
 void __exit warrior_exit(void)
 {
-	serio_unregister_device(&warrior_dev);
+	serio_unregister_driver(&warrior_drv);
 }
 
 module_init(warrior_init);

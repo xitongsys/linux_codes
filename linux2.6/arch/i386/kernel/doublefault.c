@@ -6,13 +6,14 @@
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
+#include <asm/processor.h>
 #include <asm/desc.h>
 
 #define DOUBLEFAULT_STACKSIZE (1024)
 static unsigned long doublefault_stack[DOUBLEFAULT_STACKSIZE];
 #define STACK_START (unsigned long)(doublefault_stack+DOUBLEFAULT_STACKSIZE)
 
-#define ptr_ok(x) ((x) > 0xc0000000 && (x) < 0xc1000000)
+#define ptr_ok(x) ((x) > PAGE_OFFSET && (x) < PAGE_OFFSET + 0x1000000)
 
 static void doublefault_fn(void)
 {
@@ -53,7 +54,7 @@ struct tss_struct doublefault_tss __cacheline_aligned = {
 	.io_bitmap_base	= INVALID_IO_BITMAP_OFFSET,
 
 	.eip		= (unsigned long) doublefault_fn,
-	.eflags		= 0x00000082,
+	.eflags		= X86_EFLAGS_SF | 0x2,	/* 0x2 bit is always set */
 	.esp		= STACK_START,
 	.es		= __USER_DS,
 	.cs		= __KERNEL_CS,

@@ -3,6 +3,7 @@
 
 #include <linux/config.h>
 #include <asm/kmap_types.h>
+#include <asm/archparam.h>
 
 /*
  * Here we define all the compile-time 'special' virtual

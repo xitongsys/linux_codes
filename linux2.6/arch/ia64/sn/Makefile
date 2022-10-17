@@ -4,11 +4,11 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 2003 Silicon Graphics, Inc.  All Rights Reserved.
+# Copyright (C) 2004 Silicon Graphics, Inc.  All Rights Reserved.
 #
 # Makefile for the sn ia64 subplatform
 #
 
-EXTRA_CFLAGS := -DLITTLE_ENDIAN
+CPPFLAGS += -I$(srctree)/arch/ia64/sn/include
 
-obj-y += kernel/ io/
+obj-y += kernel/ pci/

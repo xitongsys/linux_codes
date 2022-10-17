@@ -19,7 +19,9 @@
 #include <linux/stddef.h>
 #include <linux/personality.h>
 #include <linux/suspend.h>
+#include <linux/ptrace.h>
 #include <linux/elf.h>
+#include <asm/processor.h>
 #include <asm/ucontext.h>
 #include <asm/uaccess.h>
 #include <asm/i387.h>
@@ -55,16 +57,15 @@ sys_sigsuspend(int history0, int history1, old_sigset_t mask)
 }
 
 asmlinkage int
-sys_rt_sigsuspend(sigset_t __user *unewset, size_t sigsetsize)
+sys_rt_sigsuspend(struct pt_regs regs)
 {
-	struct pt_regs * regs = (struct pt_regs *) &unewset;
 	sigset_t saveset, newset;
 
 	/* XXX: Don't preclude handling different sized sigset_t's.  */
-	if (sigsetsize != sizeof(sigset_t))
+	if (regs.ecx != sizeof(sigset_t))
 		return -EINVAL;
 
-	if (copy_from_user(&newset, unewset, sizeof(newset)))
+	if (copy_from_user(&newset, (sigset_t __user *)regs.ebx, sizeof(newset)))
 		return -EFAULT;
 	sigdelsetmask(&newset, ~_BLOCKABLE);
 
@@ -74,11 +75,11 @@ sys_rt_sigsuspend(sigset_t __user *unewset, size_t sigsetsize)
 	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
 
-	regs->eax = -EINTR;
+	regs.eax = -EINTR;
 	while (1) {
 		current->state = TASK_INTERRUPTIBLE;
 		schedule();
-		if (do_signal(regs, &saveset))
+		if (do_signal(&regs, &saveset))
 			return -EINTR;
 	}
 }
@@ -116,9 +117,13 @@ sys_sigaction(int sig, const struct old_sigaction __user *act,
 }
 
 asmlinkage int
-sys_sigaltstack(const stack_t __user *uss, stack_t __user *uoss)
+sys_sigaltstack(unsigned long ebx)
 {
-	struct pt_regs *regs = (struct pt_regs *) &uss;
+	/* This is needed to make gcc realize it doesn't own the "struct pt_regs" */
+	struct pt_regs *regs = (struct pt_regs *)&ebx;
+	const stack_t __user *uss = (const stack_t __user *)ebx;
+	stack_t __user *uoss = (stack_t __user *)regs->ecx;
+
 	return do_sigaltstack(uss, uoss, regs->esp);
 }
 
@@ -152,6 +157,10 @@ restore_sigcontext(struct pt_regs *regs, struct sigcontext __user *sc, int *peax
 	  err |= __get_user(tmp, &sc->seg);				\
 	  loadsegment(seg,tmp); }
 
+#define	FIX_EFLAGS	(X86_EFLAGS_AC | X86_EFLAGS_OF | X86_EFLAGS_DF | \
+			 X86_EFLAGS_TF | X86_EFLAGS_SF | X86_EFLAGS_ZF | \
+			 X86_EFLAGS_AF | X86_EFLAGS_PF | X86_EFLAGS_CF)
+
 	GET_SEG(gs);
 	GET_SEG(fs);
 	COPY_SEG(es);
@@ -170,7 +179,7 @@ restore_sigcontext(struct pt_regs *regs, struct sigcontext __user *sc, int *peax
 	{
 		unsigned int tmpflags;
 		err |= __get_user(tmpflags, &sc->eflags);
-		regs->eflags = (regs->eflags & ~0x40DD5) | (tmpflags & 0x40DD5);
+		regs->eflags = (regs->eflags & ~FIX_EFLAGS) | (tmpflags & FIX_EFLAGS);
 		regs->orig_eax = -1;		/* disable syscall checks */
 	}
 
@@ -181,6 +190,12 @@ restore_sigcontext(struct pt_regs *regs, struct sigcontext __user *sc, int *peax
 			if (verify_area(VERIFY_READ, buf, sizeof(*buf)))
 				goto badframe;
 			err |= restore_i387(buf);
+		} else {
+			struct task_struct *me = current;
+			if (used_math()) {
+				clear_fpu(me);
+				clear_used_math();
+			}
 		}
 	}
 
@@ -226,7 +241,6 @@ asmlinkage int sys_rt_sigreturn(unsigned long __unused)
 	struct pt_regs *regs = (struct pt_regs *) &__unused;
 	struct rt_sigframe __user *frame = (struct rt_sigframe __user *)(regs->esp - 4);
 	sigset_t set;
-	stack_t st;
 	int eax;
 
 	if (verify_area(VERIFY_READ, frame, sizeof(*frame)))
@@ -243,16 +257,8 @@ asmlinkage int sys_rt_sigreturn(unsigned long __unused)
 	if (restore_sigcontext(regs, &frame->uc.uc_mcontext, &eax))
 		goto badframe;
 
-	if (__copy_from_user(&st, &frame->uc.uc_stack, sizeof(st)))
+	if (do_sigaltstack(&frame->uc.uc_stack, NULL, regs->esp) == -EFAULT)
 		goto badframe;
-	/* It is more difficult to avoid calling this function than to
-	   call it and ignore errors.  */
-	/*
-	 * THIS CANNOT WORK! "&st" is a kernel address, and "do_sigaltstack()"
-	 * takes a user address (and verifies that it is a user address). End
-	 * result: it does exactly _nothing_.
-	 */
-	do_sigaltstack(&st, NULL, regs->esp);
 
 	return eax;
 
@@ -273,12 +279,12 @@ setup_sigcontext(struct sigcontext __user *sc, struct _fpstate __user *fpstate,
 
 	tmp = 0;
 	__asm__("movl %%gs,%0" : "=r"(tmp): "0"(tmp));
-	err |= __put_user(tmp, (unsigned int *)&sc->gs);
+	err |= __put_user(tmp, (unsigned int __user *)&sc->gs);
 	__asm__("movl %%fs,%0" : "=r"(tmp): "0"(tmp));
-	err |= __put_user(tmp, (unsigned int *)&sc->fs);
+	err |= __put_user(tmp, (unsigned int __user *)&sc->fs);
 
-	err |= __put_user(regs->xes, (unsigned int *)&sc->es);
-	err |= __put_user(regs->xds, (unsigned int *)&sc->ds);
+	err |= __put_user(regs->xes, (unsigned int __user *)&sc->es);
+	err |= __put_user(regs->xds, (unsigned int __user *)&sc->ds);
 	err |= __put_user(regs->edi, &sc->edi);
 	err |= __put_user(regs->esi, &sc->esi);
 	err |= __put_user(regs->ebp, &sc->ebp);
@@ -290,10 +296,10 @@ setup_sigcontext(struct sigcontext __user *sc, struct _fpstate __user *fpstate,
 	err |= __put_user(current->thread.trap_no, &sc->trapno);
 	err |= __put_user(current->thread.error_code, &sc->err);
 	err |= __put_user(regs->eip, &sc->eip);
-	err |= __put_user(regs->xcs, (unsigned int *)&sc->cs);
+	err |= __put_user(regs->xcs, (unsigned int __user *)&sc->cs);
 	err |= __put_user(regs->eflags, &sc->eflags);
 	err |= __put_user(regs->esp, &sc->esp_at_signal);
-	err |= __put_user(regs->xss, (unsigned int *)&sc->ss);
+	err |= __put_user(regs->xss, (unsigned int __user *)&sc->ss);
 
 	tmp = save_i387(fpstate);
 	if (tmp < 0)
@@ -337,39 +343,42 @@ get_sigframe(struct k_sigaction *ka, struct pt_regs * regs, size_t frame_size)
 
 /* These symbols are defined with the addresses in the vsyscall page.
    See vsyscall-sigreturn.S.  */
-extern void __kernel_sigreturn, __kernel_rt_sigreturn;
+extern void __user __kernel_sigreturn;
+extern void __user __kernel_rt_sigreturn;
 
 static void setup_frame(int sig, struct k_sigaction *ka,
 			sigset_t *set, struct pt_regs * regs)
 {
-	void *restorer;
+	void __user *restorer;
 	struct sigframe __user *frame;
 	int err = 0;
+	int usig;
 
 	frame = get_sigframe(ka, regs, sizeof(*frame));
 
 	if (!access_ok(VERIFY_WRITE, frame, sizeof(*frame)))
 		goto give_sigsegv;
 
-	err |= __put_user((current_thread_info()->exec_domain
-		           && current_thread_info()->exec_domain->signal_invmap
-		           && sig < 32
-		           ? current_thread_info()->exec_domain->signal_invmap[sig]
-		           : sig),
-		          &frame->sig);
+	usig = current_thread_info()->exec_domain
+		&& current_thread_info()->exec_domain->signal_invmap
+		&& sig < 32
+		? current_thread_info()->exec_domain->signal_invmap[sig]
+		: sig;
+
+	err = __put_user(usig, &frame->sig);
 	if (err)
 		goto give_sigsegv;
 
-	err |= setup_sigcontext(&frame->sc, &frame->fpstate, regs, set->sig[0]);
+	err = setup_sigcontext(&frame->sc, &frame->fpstate, regs, set->sig[0]);
 	if (err)
 		goto give_sigsegv;
 
 	if (_NSIG_WORDS > 1) {
-		err |= __copy_to_user(&frame->extramask, &set->sig[1],
+		err = __copy_to_user(&frame->extramask, &set->sig[1],
 				      sizeof(frame->extramask));
+		if (err)
+			goto give_sigsegv;
 	}
-	if (err)
-		goto give_sigsegv;
 
 	restorer = &__kernel_sigreturn;
 	if (ka->sa.sa_flags & SA_RESTORER)
@@ -385,9 +394,9 @@ static void setup_frame(int sig, struct k_sigaction *ka,
 	 * reasons and because gdb uses it as a signature to notice
 	 * signal handler stack frames.
 	 */
-	err |= __put_user(0xb858, (short *)(frame->retcode+0));
-	err |= __put_user(__NR_sigreturn, (int *)(frame->retcode+2));
-	err |= __put_user(0x80cd, (short *)(frame->retcode+6));
+	err |= __put_user(0xb858, (short __user *)(frame->retcode+0));
+	err |= __put_user(__NR_sigreturn, (int __user *)(frame->retcode+2));
+	err |= __put_user(0x80cd, (short __user *)(frame->retcode+6));
 
 	if (err)
 		goto give_sigsegv;
@@ -395,13 +404,25 @@ static void setup_frame(int sig, struct k_sigaction *ka,
 	/* Set up registers for signal handler */
 	regs->esp = (unsigned long) frame;
 	regs->eip = (unsigned long) ka->sa.sa_handler;
+	regs->eax = (unsigned long) sig;
+	regs->edx = (unsigned long) 0;
+	regs->ecx = (unsigned long) 0;
 
 	set_fs(USER_DS);
 	regs->xds = __USER_DS;
 	regs->xes = __USER_DS;
 	regs->xss = __USER_DS;
 	regs->xcs = __USER_CS;
+
+	/*
+	 * Clear TF when entering the signal handler, but
+	 * notify any tracer that was single-stepping it.
+	 * The tracer may want to single-step inside the
+	 * handler too.
+	 */
 	regs->eflags &= ~TF_MASK;
+	if (test_thread_flag(TIF_SINGLESTEP))
+		ptrace_notify(SIGTRAP);
 
 #if DEBUG_SIG
 	printk("SIG deliver (%s:%d): sp=%p pc=%p ra=%p\n",
@@ -411,29 +432,29 @@ static void setup_frame(int sig, struct k_sigaction *ka,
 	return;
 
 give_sigsegv:
-	if (sig == SIGSEGV)
-		ka->sa.sa_handler = SIG_DFL;
-	force_sig(SIGSEGV, current);
+	force_sigsegv(sig, current);
 }
 
 static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 			   sigset_t *set, struct pt_regs * regs)
 {
-	void *restorer;
+	void __user *restorer;
 	struct rt_sigframe __user *frame;
 	int err = 0;
+	int usig;
 
 	frame = get_sigframe(ka, regs, sizeof(*frame));
 
 	if (!access_ok(VERIFY_WRITE, frame, sizeof(*frame)))
 		goto give_sigsegv;
 
-	err |= __put_user((current_thread_info()->exec_domain
-		    	   && current_thread_info()->exec_domain->signal_invmap
-		    	   && sig < 32
-		    	   ? current_thread_info()->exec_domain->signal_invmap[sig]
-			   : sig),
-			  &frame->sig);
+	usig = current_thread_info()->exec_domain
+		&& current_thread_info()->exec_domain->signal_invmap
+		&& sig < 32
+		? current_thread_info()->exec_domain->signal_invmap[sig]
+		: sig;
+
+	err |= __put_user(usig, &frame->sig);
 	err |= __put_user(&frame->info, &frame->pinfo);
 	err |= __put_user(&frame->uc, &frame->puc);
 	err |= copy_siginfo_to_user(&frame->info, info);
@@ -466,9 +487,9 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	 * reasons and because gdb uses it as a signature to notice
 	 * signal handler stack frames.
 	 */
-	err |= __put_user(0xb8, (char *)(frame->retcode+0));
-	err |= __put_user(__NR_rt_sigreturn, (int *)(frame->retcode+1));
-	err |= __put_user(0x80cd, (short *)(frame->retcode+5));
+	err |= __put_user(0xb8, (char __user *)(frame->retcode+0));
+	err |= __put_user(__NR_rt_sigreturn, (int __user *)(frame->retcode+1));
+	err |= __put_user(0x80cd, (short __user *)(frame->retcode+5));
 
 	if (err)
 		goto give_sigsegv;
@@ -476,13 +497,25 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	/* Set up registers for signal handler */
 	regs->esp = (unsigned long) frame;
 	regs->eip = (unsigned long) ka->sa.sa_handler;
+	regs->eax = (unsigned long) usig;
+	regs->edx = (unsigned long) &frame->info;
+	regs->ecx = (unsigned long) &frame->uc;
 
 	set_fs(USER_DS);
 	regs->xds = __USER_DS;
 	regs->xes = __USER_DS;
 	regs->xss = __USER_DS;
 	regs->xcs = __USER_CS;
+
+	/*
+	 * Clear TF when entering the signal handler, but
+	 * notify any tracer that was single-stepping it.
+	 * The tracer may want to single-step inside the
+	 * handler too.
+	 */
 	regs->eflags &= ~TF_MASK;
+	if (test_thread_flag(TIF_SINGLESTEP))
+		ptrace_notify(SIGTRAP);
 
 #if DEBUG_SIG
 	printk("SIG deliver (%s:%d): sp=%p pc=%p ra=%p\n",
@@ -492,9 +525,7 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	return;
 
 give_sigsegv:
-	if (sig == SIGSEGV)
-		ka->sa.sa_handler = SIG_DFL;
-	force_sig(SIGSEGV, current);
+	force_sigsegv(sig, current);
 }
 
 /*
@@ -502,11 +533,9 @@ give_sigsegv:
  */	
 
 static void
-handle_signal(unsigned long sig, siginfo_t *info, sigset_t *oldset,
-	struct pt_regs * regs)
+handle_signal(unsigned long sig, siginfo_t *info, struct k_sigaction *ka,
+	      sigset_t *oldset,	struct pt_regs * regs)
 {
-	struct k_sigaction *ka = &current->sighand->action[sig-1];
-
 	/* Are we from a system call? */
 	if (regs->orig_eax >= 0) {
 		/* If so, check system call restarting.. */
@@ -534,9 +563,6 @@ handle_signal(unsigned long sig, siginfo_t *info, sigset_t *oldset,
 	else
 		setup_frame(sig, ka, oldset, regs);
 
-	if (ka->sa.sa_flags & SA_ONESHOT)
-		ka->sa.sa_handler = SIG_DFL;
-
 	if (!(ka->sa.sa_flags & SA_NODEFER)) {
 		spin_lock_irq(&current->sighand->siglock);
 		sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
@@ -551,10 +577,11 @@ handle_signal(unsigned long sig, siginfo_t *info, sigset_t *oldset,
  * want to handle. Thus you cannot kill init even with a SIGKILL even by
  * mistake.
  */
-int do_signal(struct pt_regs *regs, sigset_t *oldset)
+int fastcall do_signal(struct pt_regs *regs, sigset_t *oldset)
 {
 	siginfo_t info;
 	int signr;
+	struct k_sigaction ka;
 
 	/*
 	 * We want the common case to go fast, which
@@ -573,17 +600,19 @@ int do_signal(struct pt_regs *regs, sigset_t *oldset)
 	if (!oldset)
 		oldset = &current->blocked;
 
-	signr = get_signal_to_deliver(&info, regs, NULL);
+	signr = get_signal_to_deliver(&info, &ka, regs, NULL);
 	if (signr > 0) {
 		/* Reenable any watchpoints before delivering the
 		 * signal to user space. The processor register will
 		 * have been cleared if the watchpoint triggered
 		 * inside the kernel.
 		 */
-		__asm__("movl %0,%%db7"	: : "r" (current->thread.debugreg[7]));
+		if (unlikely(current->thread.debugreg[7])) {
+			__asm__("movl %0,%%db7"	: : "r" (current->thread.debugreg[7]));
+		}
 
 		/* Whee!  Actually deliver the signal.  */
-		handle_signal(signr, &info, oldset, regs);
+		handle_signal(signr, &info, &ka, oldset, regs);
 		return 1;
 	}
 

@@ -16,6 +16,7 @@
 #include <asm/segment.h>
 #include <asm/page.h>
 #include <asm/msr.h>
+#include <asm/cache.h>
 	
 /* we are not able to switch in one step to the final KERNEL ADRESS SPACE
  * because we need identity-mapped pages on setup so define __START_KERNEL to
@@ -37,6 +38,9 @@ startup_32:
 	 */
 
 	movl %ebx,%ebp	/* Save trampoline flag */
+	
+	movl $__KERNEL_DS,%eax
+	movl %eax,%ds
 	
 	/* If the CPU doesn't support CPUID this will double fault.
 	 * Unfortunately it is hard to check for CPUID without a stack. 
@@ -114,24 +118,10 @@ reach_compatibility_mode:
 	movl	$(pGDT32 - __START_KERNEL_map), %eax
 	lgdt	(%eax)
 
+second:	
 	movl    $(ljumpvector - __START_KERNEL_map), %eax
 	/* Finally jump in 64bit mode */
 	ljmp	*(%eax)
-
-second:
-	/* abuse syscall to get into 64bit mode. this way we don't need
-	   a working low identity mapping just for the short 32bit roundtrip. 
-	   XXX kludge. this should not be needed. */
-	movl  $MSR_STAR,%ecx
-	xorl  %eax,%eax
-	movl  $(__USER32_CS<<16)|__KERNEL_CS,%edx
-	wrmsr
-
-	movl  $MSR_CSTAR,%ecx
-	movl  $0xffffffff,%edx
-	movl  $0x80100100,%eax	# reach_long64 absolute
-	wrmsr
-	syscall
 
 	.code64
 	.org 0x100	
@@ -186,6 +176,18 @@ initial_code:
 init_rsp:
 	.quad  init_thread_union+THREAD_SIZE-8
 
+ENTRY(early_idt_handler)
+	xorl %eax,%eax
+	movq 8(%rsp),%rsi	# get rip
+	movq (%rsp),%rdx
+	movq %cr2,%rcx
+	leaq early_idt_msg(%rip),%rdi
+	call early_printk
+1:	hlt
+	jmp 1b
+
+early_idt_msg:
+	.asciz "PANIC: early exception rip %lx error %lx cr2 %lx\n"
 
 .code32
 ENTRY(no_long_mode)
@@ -223,7 +225,6 @@ ENTRY(init_level4_pgt)
 	.quad	0x0000000000103007		/* -> level3_kernel_pgt */
 
 .org 0x2000
-/* Kernel does not "know" about 4-th level of page tables. */
 ENTRY(level3_ident_pgt)
 	.quad	0x0000000000104007
 	.fill	511,8,0
@@ -333,7 +334,6 @@ gdt:
 	.endr
 #endif
 
-.align 64 /* cacheline aligned */
 ENTRY(gdt_table32)
 	.quad	0x0000000000000000	/* This one is magic */
 	.quad	0x0000000000000000	/* unused */
@@ -345,17 +345,17 @@ gdt32_end:
  * Also sysret mandates a special GDT layout 
  */
 		 		
-.align 64 /* cacheline aligned, keep this synchronized with asm/desc.h */
+.align L1_CACHE_BYTES
 
 /* The TLS descriptors are currently at a different place compared to i386.
    Hopefully nobody expects them at a fixed place (Wine?) */
 	
 ENTRY(cpu_gdt_table)
 	.quad	0x0000000000000000	/* NULL descriptor */
-	.quad	0x00af9a000000ffff ^ (1<<21)	/* __KERNEL_COMPAT32_CS */	
+	.quad	0x008f9a000000ffff	/* __KERNEL_COMPAT32_CS */	
 	.quad	0x00af9a000000ffff	/* __KERNEL_CS */
 	.quad	0x00cf92000000ffff	/* __KERNEL_DS */
-	.quad	0x00cffe000000ffff	/* __USER32_CS */
+	.quad	0x00cffa000000ffff	/* __USER32_CS */
 	.quad	0x00cff2000000ffff	/* __USER_DS, __USER32_DS  */		
 	.quad	0x00affa000000ffff	/* __USER_CS */
 	.quad	0x00cf9a000000ffff	/* __KERNEL32_CS */
@@ -365,18 +365,13 @@ ENTRY(cpu_gdt_table)
 	.quad	0			/* unused now */
 	.quad	0x00009a000000ffff	/* __KERNEL16_CS - 16bit PM for S3 wakeup. */
 					/* base must be patched for real base address. */
-	/* This should be a multiple of the cache line size */
 gdt_end:	
-	.globl gdt_end
+	/* asm/segment.h:GDT_ENTRIES must match this */	
+	/* This should be a multiple of the cache line size */
+	/* GDTs of other CPUs: */	
+	.fill (GDT_SIZE * NR_CPUS) - (gdt_end - cpu_gdt_table)
 
-	/* GDTs of other CPUs */	
-#ifdef CONFIG_SMP
-	.rept NR_CPUS-1
-	.quad 0,0,0,0,0,0,0,0,0,0,0
-	.endr	
-#endif
-
-	.align  64
+	.align  L1_CACHE_BYTES
 ENTRY(idt_table)	
 	.rept   256
 	.quad   0

@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -50,6 +50,9 @@
 #include <acpi/acnamesp.h>
 #include <acpi/acevents.h>
 
+#ifdef _ACPI_ASL_COMPILER
+#include <acpi/acdisasm.h>
+#endif
 
 #define _COMPONENT          ACPI_DISPATCHER
 	 ACPI_MODULE_NAME    ("dswload")
@@ -167,7 +170,7 @@ acpi_ds_load1_begin_op (
 	object_type = walk_state->op_info->object_type;
 
 	ACPI_DEBUG_PRINT ((ACPI_DB_DISPATCH,
-		"State=%p Op=%p [%s] ", walk_state, op, acpi_ut_get_type_name (object_type)));
+		"State=%p Op=%p [%s]\n", walk_state, op, acpi_ut_get_type_name (object_type)));
 
 	switch (walk_state->opcode) {
 	case AML_SCOPE_OP:
@@ -179,6 +182,18 @@ acpi_ds_load1_begin_op (
 		 */
 		status = acpi_ns_lookup (walk_state->scope_info, path, object_type,
 				  ACPI_IMODE_EXECUTE, ACPI_NS_SEARCH_PARENT, walk_state, &(node));
+#ifdef _ACPI_ASL_COMPILER
+		if (status == AE_NOT_FOUND) {
+			/*
+			 * Table disassembly:
+			 * Target of Scope() not found.  Generate an External for it, and
+			 * insert the name into the namespace.
+			 */
+			acpi_dm_add_to_external_list (path);
+			status = acpi_ns_lookup (walk_state->scope_info, path, object_type,
+					   ACPI_IMODE_LOAD_PASS1, ACPI_NS_SEARCH_PARENT, walk_state, &(node));
+		}
+#endif
 		if (ACPI_FAILURE (status)) {
 			ACPI_REPORT_NSERROR (path, status);
 			return (status);
@@ -260,10 +275,12 @@ acpi_ds_load1_begin_op (
 		if ((walk_state->opcode != AML_SCOPE_OP) &&
 			(!(walk_state->parse_flags & ACPI_PARSE_DEFERRED_OP))) {
 			flags |= ACPI_NS_ERROR_IF_FOUND;
-			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_DISPATCH, "Cannot already exist\n"));
+			ACPI_DEBUG_PRINT ((ACPI_DB_DISPATCH, "[%s] Cannot already exist\n",
+					acpi_ut_get_type_name (object_type)));
 		}
 		else {
-			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_DISPATCH, "Both Find or Create allowed\n"));
+			ACPI_DEBUG_PRINT ((ACPI_DB_DISPATCH, "[%s] Both Find or Create allowed\n",
+					acpi_ut_get_type_name (object_type)));
 		}
 
 		/*
@@ -527,7 +544,16 @@ acpi_ds_load2_begin_op (
 		status = acpi_ns_lookup (walk_state->scope_info, buffer_ptr, object_type,
 				  ACPI_IMODE_EXECUTE, ACPI_NS_SEARCH_PARENT, walk_state, &(node));
 		if (ACPI_FAILURE (status)) {
+#ifdef _ACPI_ASL_COMPILER
+			if (status == AE_NOT_FOUND) {
+				status = AE_OK;
+			}
+			else {
+				ACPI_REPORT_NSERROR (buffer_ptr, status);
+			}
+#else
 			ACPI_REPORT_NSERROR (buffer_ptr, status);
+#endif
 			return_ACPI_STATUS (status);
 		}
 		/*

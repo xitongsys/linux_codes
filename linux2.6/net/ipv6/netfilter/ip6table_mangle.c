@@ -2,6 +2,13 @@
  * IPv6 packet mangling table, a port of the IPv4 mangle table to IPv6
  *
  * Copyright (C) 2000-2001 by Harald Welte <laforge@gnumonks.org>
+ * Copyright (C) 2000-2004 Netfilter Core Team <coreteam@netfilter.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * Extended to all five netfilter hooks by Brad Chapman & Harald Welte
  */
 #include <linux/module.h>
 #include <linux/netfilter_ipv6/ip6_tables.h>
@@ -117,7 +124,6 @@ static struct
 
 static struct ip6t_table packet_mangler = {
 	.name		= "mangle",
-	.table		= &initial_table.repl,
 	.valid_hooks	= MANGLE_VALID_HOOKS,
 	.lock		= RW_LOCK_UNLOCKED,
 	.me		= THIS_MODULE,
@@ -157,10 +163,6 @@ ip6t_local_hook(unsigned int hook,
 		return NF_ACCEPT;
 	}
 #endif
-
-	/* FIXME: Push down to extensions --RR */
-	if (skb_is_nonlinear(*pskb) && skb_linearize(*pskb, GFP_ATOMIC) != 0)
-		return NF_DROP;
 
 	/* save source/dest address, nfmark, hoplimit, flowlabel, priority,  */
 	memcpy(&saddr, &(*pskb)->nh.ipv6h->saddr, sizeof(saddr));
@@ -230,7 +232,7 @@ static int __init init(void)
 	int ret;
 
 	/* Register table */
-	ret = ip6t_register_table(&packet_mangler);
+	ret = ip6t_register_table(&packet_mangler, &initial_table.repl);
 	if (ret < 0)
 		return ret;
 

@@ -17,6 +17,7 @@
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/fixmap.h>
+#include "io_ports.h"
 
 extern spinlock_t i8253_lock;
 
@@ -62,6 +63,17 @@ static void mark_offset_cyclone(void)
 
 	count = inb_p(0x40);    /* read the latched count */
 	count |= inb(0x40) << 8;
+
+	/*
+	 * VIA686a test code... reset the latch if count > max + 1
+	 * from timer_pit.c - cjb
+	 */
+	if (count > LATCH) {
+		outb_p(0x34, PIT_MODE);
+		outb_p(LATCH & 0xff, PIT_CH0);
+		outb(LATCH >> 8, PIT_CH0);
+		count = LATCH - 1;
+	}
 	spin_unlock(&i8253_lock);
 
 	/* lost tick compensation */
@@ -71,7 +83,7 @@ static void mark_offset_cyclone(void)
 	lost = delta/(1000000/HZ);
 	delay = delta%(1000000/HZ);
 	if (lost >= 2)
-		jiffies += lost-1;
+		jiffies_64 += lost-1;
 	
 	/* update the monotonic base value */
 	this_offset = ((unsigned long long)last_cyclone_high<<32)|last_cyclone_low;
@@ -88,7 +100,7 @@ static void mark_offset_cyclone(void)
 	 * usec delta is > 90% # of usecs/tick)
 	 */
 	if (lost && abs(delay - delay_at_last_interrupt) > (900000/HZ))
-		jiffies++;
+		jiffies_64++;
 }
 
 static unsigned long get_offset_cyclone(void)
@@ -212,26 +224,7 @@ static int __init init_cyclone(char* override)
 		}
 	}
 
-	/* init cpu_khz.
-	 * XXX - This should really be done elsewhere, 
-	 * 		and in a more generic fashion. -johnstul@us.ibm.com
-	 */
-	if (cpu_has_tsc) {
-		unsigned long tsc_quotient = calibrate_tsc();
-		if (tsc_quotient) {
-			/* report CPU clock rate in Hz.
-			 * The formula is (10^6 * 2^32) / (2^32 * 1 / (clocks/us)) =
-			 * clock/second. Our precision is about 100 ppm.
-			 */
-			{	unsigned long eax=0, edx=1000;
-				__asm__("divl %2"
-		       		:"=a" (cpu_khz), "=d" (edx)
-        	       		:"r" (tsc_quotient),
-	                	"0" (eax), "1" (edx));
-				printk("Detected %lu.%03lu MHz processor.\n", cpu_khz / 1000, cpu_khz % 1000);
-			}
-		}
-	}
+	init_cpu_khz();
 
 	/* Everything looks good! */
 	return 0;
@@ -252,10 +245,15 @@ static void delay_cyclone(unsigned long loops)
 /************************************************************/
 
 /* cyclone timer_opts struct */
-struct timer_opts timer_cyclone = {
-	.init = init_cyclone, 
+static struct timer_opts timer_cyclone = {
+	.name = "cyclone",
 	.mark_offset = mark_offset_cyclone, 
 	.get_offset = get_offset_cyclone,
 	.monotonic_clock =	monotonic_clock_cyclone,
 	.delay = delay_cyclone,
+};
+
+struct init_timer_opts __initdata timer_cyclone_init = {
+	.init = init_cyclone,
+	.opts = &timer_cyclone,
 };

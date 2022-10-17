@@ -22,6 +22,9 @@
 #define EPOLL_CTL_DEL 2
 #define EPOLL_CTL_MOD 3
 
+/* Set the One Shot behaviour for the target file descriptor */
+#define EPOLLONESHOT (1 << 30)
+
 /* Set the Edge Triggered behaviour for the target file descriptor */
 #define EPOLLET (1 << 31)
 
@@ -45,13 +48,6 @@ struct epoll_event {
 /* Forward declarations to avoid compiler errors */
 struct file;
 
-
-/* Kernel space functions implementing the user space "epoll" API */
-asmlinkage long sys_epoll_create(int size);
-asmlinkage long sys_epoll_ctl(int epfd, int op, int fd,
-			      struct epoll_event __user *event);
-asmlinkage long sys_epoll_wait(int epfd, struct epoll_event __user *events,
-			       int maxevents, int timeout);
 
 #ifdef CONFIG_EPOLL
 

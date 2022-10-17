@@ -22,7 +22,6 @@
 #include <asm/mcfsim.h>
 #include <asm/mcfdma.h>
 #include <asm/irq.h>
-#include <asm/delay.h>
 
 /***************************************************************************/
 
@@ -41,6 +40,8 @@ unsigned int   dma_base_addr[MAX_M68K_DMA_CHANNELS] = {
         MCF_MBAR + MCFDMA_BASE0,
         MCF_MBAR + MCFDMA_BASE1,
 };
+
+unsigned int dma_device_address[MAX_M68K_DMA_CHANNELS];
 
 /***************************************************************************/
 

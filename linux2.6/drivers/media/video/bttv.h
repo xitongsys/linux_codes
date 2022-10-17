@@ -1,4 +1,6 @@
 /*
+ * $Id: bttv.h,v 1.14 2005/01/07 13:11:19 kraxel Exp $
+ *
  *  bttv - Bt848 frame grabber driver
  *
  *  card ID's and external interfaces of the bttv driver
@@ -14,6 +16,7 @@
 #define _BTTV_H_
 
 #include <linux/videodev.h>
+#include <linux/i2c.h>
 
 /* ---------------------------------------------------------- */
 /* exported by bttv-cards.c                                   */
@@ -23,9 +26,9 @@
 #define BTTV_HAUPPAUGE     0x02
 #define BTTV_STB           0x03
 #define BTTV_INTEL         0x04
-#define BTTV_DIAMOND       0x05 
-#define BTTV_AVERMEDIA     0x06 
-#define BTTV_MATRIX_VISION 0x07 
+#define BTTV_DIAMOND       0x05
+#define BTTV_AVERMEDIA     0x06
+#define BTTV_MATRIX_VISION 0x07
 #define BTTV_FLYVIDEO      0x08
 #define BTTV_TURBOTV       0x09
 #define BTTV_HAUPPAUGE878  0x0a
@@ -117,6 +120,20 @@
 #define BTTV_PV143          0x69
 #define BTTV_IVC100         0x6e
 #define BTTV_IVC120         0x6f
+#define BTTV_PC_HDTV        0x70
+#define BTTV_TWINHAN_DST    0x71
+#define BTTV_WINFASTVC100   0x72
+#define BTTV_SIMUS_GVC1100  0x74
+#define BTTV_NGSTV_PLUS     0x75
+#define BTTV_LMLBT4         0x76
+#define BTTV_PICOLO_TETRA_CHIP 0x79
+#define BTTV_AVDVBT_771     0x7b
+#define BTTV_AVDVBT_761     0x7c
+#define BTTV_MATRIX_VISIONSQ  0x7d
+#define BTTV_MATRIX_VISIONSLC 0x7e
+#define BTTV_APAC_VIEWCOMP  0x7f
+#define BTTV_DVICO_DVBT_LITE  0x80
+#define BTTV_TIBET_CS16  0x83
 
 /* i2c address list */
 #define I2C_TSA5522        0xc2
@@ -133,7 +150,7 @@
 #define I2C_VHX            0xc0
 #define I2C_MSP3400        0x80
 #define I2C_MSP3400_ALT    0x88
-#define I2C_TEA6300        0x80
+#define I2C_TEA6300        0x80 /* also used by 6320 */
 #define I2C_DPL3518	   0x84
 #define I2C_TDA9887	   0x86
 
@@ -149,6 +166,18 @@
 /* digital_mode */
 #define DIGITAL_MODE_VIDEO 1
 #define DIGITAL_MODE_CAMERA 2
+
+struct bttv_core {
+	/* device structs */
+	struct pci_dev       *pci;
+	struct i2c_adapter   i2c_adap;
+	struct list_head     subs;     /* struct bttv_sub_device */
+
+	/* device config */
+        unsigned int         nr;       /* dev nr (for printk("bttv%d: ...");  */
+	unsigned int         type;     /* card type (pointer into tvcards[])  */
+	char                 name[8];  /* dev name */
+};
 
 struct bttv;
 
@@ -173,7 +202,10 @@ struct tvcard
 	unsigned int msp34xx_alt:1;
 
 	/* flag: video pci function is unused */
-	unsigned int no_video;
+	unsigned int no_video:1;
+	unsigned int has_dvb:1;
+	unsigned int has_remote:1;
+	unsigned int no_gpioirq:1;
 
 	/* other settings */
 	unsigned int pll;
@@ -188,7 +220,6 @@ struct tvcard
 };
 
 extern struct tvcard bttv_tvcards[];
-extern const unsigned int bttv_num_tvcards;
 
 /* identification / initialization of the card */
 extern void bttv_idcard(struct bttv *btv);
@@ -199,20 +230,19 @@ extern void bttv_init_card2(struct bttv *btv);
 extern void tea5757_set_freq(struct bttv *btv, unsigned short freq);
 extern void bttv_tda9880_setnorm(struct bttv *btv, int norm);
 
-/* kernel cmd line parse helper */
-extern int bttv_parse(char *str, int max, int *vals);
-
 /* extra tweaks for some chipsets */
 extern void bttv_check_chipset(void);
 extern int bttv_handle_chipset(struct bttv *btv);
 
 /* ---------------------------------------------------------- */
 /* exported by bttv-if.c                                      */
-/* interface for gpio access by other modules                 */
+
+/* this obsolete -- please use the sysfs-based
+   interface below for new code */
 
 /* returns card type + card ID (for bt878-based ones)
    for possible values see lines below beginning with #define BTTV_UNKNOWN
-   returns negative value if error occurred 
+   returns negative value if error occurred
 */
 extern int bttv_get_cardinfo(unsigned int card, int *type,
 			     unsigned int *cardid);
@@ -235,18 +265,18 @@ extern int bttv_read_gpio(unsigned int card, unsigned long *data);
 
 /* sets GPDATA register to new value:
   (data & mask) | (current_GPDATA_value & ~mask)
-  returns negative value if error occurred 
+  returns negative value if error occurred
 */
 extern int bttv_write_gpio(unsigned int card,
 			   unsigned long mask, unsigned long data);
 
-/* returns pointer to task queue which can be used as parameter to 
+/* returns pointer to task queue which can be used as parameter to
    interruptible_sleep_on
    in interrupt handler if BT848_INT_GPINT bit is set - this queue is activated
-   (wake_up_interruptible) and following call to the function bttv_read_gpio 
+   (wake_up_interruptible) and following call to the function bttv_read_gpio
    should return new value of GPDATA,
    returns NULL value if error occurred or queue is not available
-   WARNING: because there is no buffer for GPIO data, one MUST 
+   WARNING: because there is no buffer for GPIO data, one MUST
    process data ASAP
 */
 extern wait_queue_head_t* bttv_get_gpio_queue(unsigned int card);
@@ -256,9 +286,45 @@ extern wait_queue_head_t* bttv_get_gpio_queue(unsigned int card);
 extern void bttv_i2c_call(unsigned int card, unsigned int cmd, void *arg);
 
 
-/* i2c */
-extern void bttv_bit_setscl(void *data, int state);
-extern void bttv_bit_setsda(void *data, int state);
+
+/* ---------------------------------------------------------- */
+/* sysfs/driver-moded based gpio access interface             */
+
+
+struct bttv_sub_device {
+	struct device    dev;
+	struct bttv_core *core;
+	struct list_head list;
+};
+#define to_bttv_sub_dev(x) container_of((x), struct bttv_sub_device, dev)
+
+struct bttv_sub_driver {
+	struct device_driver   drv;
+	char                   wanted[BUS_ID_SIZE];
+	void                   (*gpio_irq)(struct bttv_sub_device *sub);
+	void                   (*i2c_info)(struct bttv_sub_device *sub,
+					   struct i2c_client *client, int attach);
+};
+#define to_bttv_sub_drv(x) container_of((x), struct bttv_sub_driver, drv)
+
+int bttv_sub_register(struct bttv_sub_driver *drv, char *wanted);
+int bttv_sub_unregister(struct bttv_sub_driver *drv);
+
+/* gpio access functions */
+void bttv_gpio_inout(struct bttv_core *core, u32 mask, u32 outbits);
+u32 bttv_gpio_read(struct bttv_core *core);
+void bttv_gpio_write(struct bttv_core *core, u32 value);
+void bttv_gpio_bits(struct bttv_core *core, u32 mask, u32 bits);
+
+#define gpio_inout(mask,bits)  bttv_gpio_inout(&btv->c, mask, bits)
+#define gpio_read()            bttv_gpio_read(&btv->c)
+#define gpio_write(value)      bttv_gpio_write(&btv->c, value)
+#define gpio_bits(mask,bits)   bttv_gpio_bits(&btv->c, mask, bits)
+
+
+/* ---------------------------------------------------------- */
+/* i2c                                                        */
+
 extern void bttv_call_i2c_clients(struct bttv *btv, unsigned int cmd, void *arg);
 extern int bttv_I2CRead(struct bttv *btv, unsigned char addr, char *probe_for);
 extern int bttv_I2CWrite(struct bttv *btv, unsigned char addr, unsigned char b1,

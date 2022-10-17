@@ -9,6 +9,7 @@
 #define __LINUX_MII_H__
 
 #include <linux/types.h>
+#include <linux/if.h>
 
 /* Generic MII registers. */
 
@@ -32,7 +33,8 @@
 #define MII_NCONFIG         0x1c        /* Network interface config    */
 
 /* Basic mode control register. */
-#define BMCR_RESV               0x007f  /* Unused...                   */
+#define BMCR_RESV               0x003f  /* Unused...                   */
+#define BMCR_SPEED1000		0x0040  /* MSB of Speed (1000)         */
 #define BMCR_CTST               0x0080  /* Collision test              */
 #define BMCR_FULLDPLX           0x0100  /* Full duplex                 */
 #define BMCR_ANRESTART          0x0200  /* Auto negotiation restart    */
@@ -142,6 +144,12 @@ struct mii_ioctl_data {
 	u16		val_in;
 	u16		val_out;
 };
+
+
+static inline struct mii_ioctl_data *if_mii(struct ifreq *rq)
+{
+	return (struct mii_ioctl_data *) &rq->ifr_ifru;
+}
 
 
 /**

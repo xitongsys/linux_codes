@@ -56,7 +56,7 @@ static void hid_pid_exit(struct hid_device* hid)
     struct hid_ff_pid *private = hid->ff_private;
     
     if (private->urbffout) {
-	usb_unlink_urb(private->urbffout);
+	usb_kill_urb(private->urbffout);
 	usb_free_urb(private->urbffout);
     }
 }
@@ -200,6 +200,7 @@ static int hid_pid_upload_effect(struct input_dev *dev,
 			    break;
 
 		if ( id == FF_EFFECTS_MAX) {
+			spin_unlock_irqrestore(&pid_private->lock,flags);
 // TEMP - We need to get ff_effects_max correctly first:  || id >= dev->ff_effects_max) {
 			dev_dbg(&pid_private->hid->dev->dev, "Not enough device memory\n");
 			return -ENOMEM;

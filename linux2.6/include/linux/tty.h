@@ -28,29 +28,13 @@
 
 
 /*
- * Note: don't mess with NR_PTYS until you understand the tty minor 
- * number allocation game...
  * (Note: the *_driver.minor_start values 1, 64, 128, 192 are
  * hardcoded at present.)
  */
-#define NR_PTYS		256	/* ptys/major */
-#define NR_LDISCS	16
-
-/*
- * Unix98 PTY's can be defined as any multiple of NR_PTYS up to
- * UNIX98_PTY_MAJOR_COUNT; this section defines what we need from the
- * config options
- */
-#ifdef CONFIG_UNIX98_PTYS
-# define UNIX98_NR_MAJORS ((CONFIG_UNIX98_PTY_COUNT+NR_PTYS-1)/NR_PTYS)
-# if UNIX98_NR_MAJORS <= 0
-#  undef CONFIG_UNIX98_PTYS
-# elif UNIX98_NR_MAJORS > UNIX98_PTY_MAJOR_COUNT
-#  error  Too many Unix98 ptys defined
-#  undef  UNIX98_NR_MAJORS
-#  define UNIX98_NR_MAJORS UNIX98_PTY_MAJOR_COUNT
-# endif
-#endif
+#define NR_PTYS	CONFIG_LEGACY_PTY_COUNT   /* Number of legacy ptys */
+#define NR_UNIX98_PTY_DEFAULT	4096      /* Default maximum for Unix98 ptys */
+#define NR_UNIX98_PTY_MAX	(1 << MINORBITS) /* Absolute limit */
+#define NR_LDISCS		16
 
 /*
  * These are set up by the setup-routine at boot-time:
@@ -113,7 +97,6 @@ extern struct screen_info screen_info;
 
 #define VIDEO_TYPE_PICA_S3	0x30	/* ACER PICA-61 local S3 video	*/
 #define VIDEO_TYPE_MIPS_G364	0x31    /* MIPS Magnum 4000 G364 video  */
-#define VIDEO_TYPE_SNI_RM	0x32    /* SNI RM200 PCI video          */
 #define VIDEO_TYPE_SGI          0x33    /* Various SGI graphics hardware */
 
 #define VIDEO_TYPE_TGAC		0x40	/* DEC TGA */
@@ -200,6 +183,7 @@ struct tty_flip_buffer {
 #define I_IXANY(tty)	_I_FLAG((tty),IXANY)
 #define I_IXOFF(tty)	_I_FLAG((tty),IXOFF)
 #define I_IMAXBEL(tty)	_I_FLAG((tty),IMAXBEL)
+#define I_IUTF8(tty)	_I_FLAG((tty),IUTF8)
 
 #define O_OPOST(tty)	_O_FLAG((tty),OPOST)
 #define O_OLCUC(tty)	_O_FLAG((tty),OLCUC)
@@ -260,6 +244,7 @@ struct tty_struct {
 	struct tty_driver *driver;
 	int index;
 	struct tty_ldisc ldisc;
+	struct semaphore termios_sem;
 	struct termios *termios, *termios_locked;
 	char name[64];
 	int pgrp;
@@ -306,6 +291,8 @@ struct tty_struct {
 	unsigned int canon_column;
 	struct semaphore atomic_read;
 	struct semaphore atomic_write;
+	unsigned char *write_buf;
+	int write_cnt;
 	spinlock_t read_lock;
 	/* If the tty has a pending do_SAK, queue it here - akpm */
 	struct work_struct SAK_work;
@@ -322,26 +309,27 @@ struct tty_struct {
  * tty->write.  Thus, you must use the inline functions set_bit() and
  * clear_bit() to make things atomic.
  */
-#define TTY_THROTTLED 0
-#define TTY_IO_ERROR 1
-#define TTY_OTHER_CLOSED 2
-#define TTY_EXCLUSIVE 3
-#define TTY_DEBUG 4
-#define TTY_DO_WRITE_WAKEUP 5
-#define TTY_PUSH 6
-#define TTY_CLOSING 7
-#define TTY_DONT_FLIP 8
-#define TTY_HW_COOK_OUT 14
-#define TTY_HW_COOK_IN 15
-#define TTY_PTY_LOCK 16
-#define TTY_NO_WRITE_SPLIT 17
+#define TTY_THROTTLED 		0	/* Call unthrottle() at threshold min */
+#define TTY_IO_ERROR 		1	/* Canse an I/O error (may be no ldisc too) */
+#define TTY_OTHER_CLOSED 	2	/* Other side (if any) has closed */
+#define TTY_EXCLUSIVE 		3	/* Exclusive open mode */
+#define TTY_DEBUG 		4	/* Debugging */
+#define TTY_DO_WRITE_WAKEUP 	5	/* Call write_wakeup after queuing new */
+#define TTY_PUSH 		6	/* n_tty private */
+#define TTY_CLOSING 		7	/* ->close() in progress */
+#define TTY_DONT_FLIP 		8	/* Defer buffer flip */
+#define TTY_LDISC 		9	/* Line discipline attached */
+#define TTY_HW_COOK_OUT 	14	/* Hardware can do output cooking */
+#define TTY_HW_COOK_IN 		15	/* Hardware can do input cooking */
+#define TTY_PTY_LOCK 		16	/* pty private */
+#define TTY_NO_WRITE_SPLIT 	17	/* Preserve write boundaries to driver */
+#define TTY_HUPPED 		18	/* Post driver->hangup() */
 
 #define TTY_WRITE_FLUSH(tty) tty_write_flush((tty))
 
 extern void tty_write_flush(struct tty_struct *);
 
 extern struct termios tty_std_termios;
-extern struct tty_ldisc ldiscs[];
 extern int fg_console, last_console, want_console;
 
 extern int kmsg_redirect;
@@ -377,6 +365,19 @@ extern void disassociate_ctty(int priv);
 extern void tty_flip_buffer_push(struct tty_struct *tty);
 extern int tty_get_baud_rate(struct tty_struct *tty);
 extern int tty_termios_baud_rate(struct termios *termios);
+
+extern struct tty_ldisc *tty_ldisc_ref(struct tty_struct *);
+extern void tty_ldisc_deref(struct tty_ldisc *);
+extern struct tty_ldisc *tty_ldisc_ref_wait(struct tty_struct *);
+
+extern struct tty_ldisc *tty_ldisc_get(int);
+extern void tty_ldisc_put(int);
+
+extern void tty_wakeup(struct tty_struct *tty);
+extern void tty_ldisc_flush(struct tty_struct *tty);
+
+struct semaphore;
+extern struct semaphore tty_sem;
 
 /* n_tty.c */
 extern struct tty_ldisc tty_ldisc_N_TTY;

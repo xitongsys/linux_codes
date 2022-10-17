@@ -176,8 +176,8 @@ int __init myradio_init(struct video_init *v)
   <para>
         The types available are
   </para>
-   <table frame=all><title>Device Types</title>
-   <tgroup cols=3 align=left>
+   <table frame="all"><title>Device Types</title>
+   <tgroup cols="3" align="left">
    <tbody>
    <row>
         <entry>VFL_TYPE_RADIO</><entry>/dev/radio{n}</><entry>
@@ -232,7 +232,6 @@ static int radio_open(stuct video_device *dev, int flags)
         if(users)
                 return -EBUSY;
         users++;
-        MOD_INC_USE_COUNT;
         return 0;
 }
 
@@ -248,7 +247,6 @@ static int radio_open(stuct video_device *dev, int flags)
 static int radio_close(struct video_device *dev)
 {
         users--;
-        MOD_DEC_USE_COUNT;
 }
 
   </programlisting>
@@ -299,8 +297,8 @@ static int radio_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
         allows the applications to find out what sort of a card they have found and
         to figure out what they want to do about it. The fields in the structure are
   </para>
-   <table frame=all><title>struct video_capability fields</title>
-   <tgroup cols=2 align=left>
+   <table frame="all"><title>struct video_capability fields</title>
+   <tgroup cols="2" align="left">
    <tbody>
    <row>
         <entry>name</><entry>The device text name. This is intended for the user.</>
@@ -373,8 +371,8 @@ static int radio_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
   <para>
         The video_tuner structure has the following fields
   </para>
-   <table frame=all><title>struct video_tuner fields</title>
-   <tgroup cols=2 align=left>
+   <table frame="all"><title>struct video_tuner fields</title>
+   <tgroup cols="2" align="left">
    <tbody>
    <row>
         <entry>int tuner</><entry>The number of the tuner in question</entry>
@@ -406,8 +404,8 @@ static int radio_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
     </tgroup>
     </table>
 
-   <table frame=all><title>struct video_tuner flags</title>
-   <tgroup cols=2 align=left>
+   <table frame="all"><title>struct video_tuner flags</title>
+   <tgroup cols="2" align="left">
    <tbody>
    <row>
 	<entry>VIDEO_TUNER_PAL</><entry>A PAL TV tuner</entry>
@@ -429,8 +427,8 @@ static int radio_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
     </tgroup>
     </table>
 
-   <table frame=all><title>struct video_tuner modes</title>
-   <tgroup cols=2 align=left>
+   <table frame="all"><title>struct video_tuner modes</title>
+   <tgroup cols="2" align="left">
    <tbody>
    <row>
                 <entry>VIDEO_MODE_PAL</><entry>PAL Format</entry>
@@ -580,8 +578,8 @@ static int current_volume=0;
   <para>
         Then we fill in the video_audio structure. This has the following format
   </para>
-   <table frame=all><title>struct video_audio fields</title>
-   <tgroup cols=2 align=left>
+   <table frame="all"><title>struct video_audio fields</title>
+   <tgroup cols="2" align="left">
    <tbody>
    <row>
    <entry>audio</><entry>The input the user wishes to query</>
@@ -615,8 +613,8 @@ static int current_volume=0;
    </tgroup>
    </table>
 
-   <table frame=all><title>struct video_audio flags</title>
-   <tgroup cols=2 align=left>
+   <table frame="all"><title>struct video_audio flags</title>
+   <tgroup cols="2" align="left">
    <tbody>
    <row>
                 <entry>VIDEO_AUDIO_MUTE</><entry>The audio is currently muted. We
@@ -633,8 +631,8 @@ static int current_volume=0;
    </tgroup>
    </table>
 
-   <table frame=all><title>struct video_audio modes</title>
-   <tgroup cols=2 align=left>
+   <table frame="all"><title>struct video_audio modes</title>
+   <tgroup cols="2" align="left">
    <tbody>
    <row>
                 <entry>VIDEO_SOUND_MONO</><entry>Mono sound</entry>
@@ -733,13 +731,14 @@ static int io = 0x300;
 
 static int io = -1;
 
+#endif
 
 MODULE_AUTHOR("Alan Cox");
 MODULE_DESCRIPTION("A driver for an imaginary radio card.");
-MODULE_PARM(io, "i");
+module_param(io, int, 0444);
 MODULE_PARM_DESC(io, "I/O address of the card.");
 
-int init_module(void)
+static int __init init(void)
 {
         if(io==-1)
         {
@@ -750,25 +749,26 @@ int init_module(void)
         return myradio_init(NULL);
 }
 
-void cleanup_module(void)
+static void __exit cleanup(void)
 {
         video_unregister_device(&amp;my_radio);
         release_region(io, MY_IO_SIZE);
 }
 
-#endif
+module_init(init);
+module_exit(cleanup);
 
   </programlisting>
   <para>
         In this example we set the IO base by default if the driver is compiled into
-        the kernel where you cannot pass a parameter. For the module we require the
+        the kernel: you can still set it using "my_radio.irq" if this file is called <filename>my_radio.c</filename>. For the module we require the
         user sets the parameter. We set io to a nonsense port (-1) so that we can
         tell if the user supplied an io parameter or not.
   </para>
   <para>
         We use MODULE_ defines to give an author for the card driver and a
         description. We also use them to declare that io is an integer and it is the
-        address of the card.
+        address of the card, and can be read by anyone from sysfs.
   </para>
   <para>
         The clean-up routine unregisters the video_device we registered, and frees
@@ -862,8 +862,8 @@ static struct video_device my_camera
         We use the extra video capability flags that did not apply to the
         radio interface. The video related flags are
   </para>
-   <table frame=all><title>Capture Capabilities</title>
-   <tgroup cols=2 align=left>
+   <table frame="all"><title>Capture Capabilities</title>
+   <tgroup cols="2" align="left">
    <tbody>
    <row>
 <entry>VID_TYPE_CAPTURE</><entry>We support image capture</>
@@ -954,7 +954,6 @@ static int camera_open(stuct video_device *dev, int flags)
         if(request_irq(irq, camera_irq, 0, "camera", dev)&lt;0)
                 return -EBUSY;
         users++;
-        MOD_INC_USE_COUNT;
         return 0;
 }
 
@@ -963,7 +962,6 @@ static int camera_close(struct video_device *dev)
 {
         users--;
         free_irq(irq, dev);
-        MOD_DEC_USE_COUNT;
 }
   </programlisting>
   <para>
@@ -1204,8 +1202,8 @@ static int camera_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
         inputs to the video card). Our example card has a single camera input. The
         fields in the structure are
   </para>
-   <table frame=all><title>struct video_channel fields</title>
-   <tgroup cols=2 align=left>
+   <table frame="all"><title>struct video_channel fields</title>
+   <tgroup cols="2" align="left">
    <tbody>
    <row>
 
@@ -1227,8 +1225,8 @@ static int camera_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
     </tbody>
     </tgroup>
     </table>
-    <table frame=all><title>struct video_channel flags</title>
-    <tgroup cols=2 align=left>
+    <table frame="all"><title>struct video_channel flags</title>
+    <tgroup cols="2" align="left">
     <tbody>
     <row>
         <entry>VIDEO_VC_TUNER</><entry>Channel has a tuner.</entry>
@@ -1238,8 +1236,8 @@ static int camera_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
     </tbody>
     </tgroup>
     </table>
-    <table frame=all><title>struct video_channel types</title>
-    <tgroup cols=2 align=left>
+    <table frame="all"><title>struct video_channel types</title>
+    <tgroup cols="2" align="left">
     <tbody>
     <row>
         <entry>VIDEO_TYPE_TV</><entry>Television input.</entry>
@@ -1251,8 +1249,8 @@ static int camera_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
     </tbody>
     </tgroup>
     </table>
-    <table frame=all><title>struct video_channel norms</title>
-    <tgroup cols=2 align=left>
+    <table frame="all"><title>struct video_channel norms</title>
+    <tgroup cols="2" align="left">
     <tbody>
     <row>
         <entry>VIDEO_MODE_PAL</><entry>PAL encoded Television</entry>
@@ -1337,8 +1335,8 @@ static int camera_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
         for every other pixel in the image. The other common formats the interface 
         defines are
   </para>
-   <table frame=all><title>Framebuffer Encodings</title>
-   <tgroup cols=2 align=left>
+   <table frame="all"><title>Framebuffer Encodings</title>
+   <tgroup cols="2" align="left">
    <tbody>
    <row>
    <entry>GREY</><entry>Linear greyscale. This is for simple cameras and the
@@ -1475,8 +1473,8 @@ static struct video_buffer capture_fb;
         display. The video_window structure is used to describe the way the image 
         should be displayed. 
    </para>
-   <table frame=all><title>struct video_window fields</title>
-   <tgroup cols=2 align=left>
+   <table frame="all"><title>struct video_window fields</title>
+   <tgroup cols="2" align="left">
    <tbody>
    <row>
         <entry>width</><entry>The width in pixels of the desired image. The card
@@ -1512,8 +1510,8 @@ static struct video_buffer capture_fb;
     <para>
         Each clip is a struct video_clip which has the following fields
    </para>
-   <table frame=all><title>video_clip fields</title>
-   <tgroup cols=2 align=left>
+   <table frame="all"><title>video_clip fields</title>
+   <tgroup cols="2" align="left">
    <tbody>
    <row>
         <entry>x, y</><entry>Co-ordinates relative to the display</>

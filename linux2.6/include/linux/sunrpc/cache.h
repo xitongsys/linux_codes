@@ -94,8 +94,12 @@ struct cache_detail {
 	/* fields for communication over channel */
 	struct list_head	queue;
 	struct proc_dir_entry	*proc_ent;
+	struct proc_dir_entry   *flush_ent, *channel_ent, *content_ent;
+
 	atomic_t		readers;		/* how many time is /chennel open */
-	time_t			last_close;		/* it no readers, when did last close */
+	time_t			last_close;		/* if no readers, when did last close */
+	time_t			last_warn;		/* when we last warned about no readers */
+	void			(*warn_no_listener)(struct cache_detail *cd);
 };
 
 
@@ -130,12 +134,14 @@ struct cache_deferred_req {
  * If "set" == 0 :
  *    If an entry is found, it is returned
  *    If no entry is found, a new non-VALID entry is created.
- * If "set" == 1 :
+ * If "set" == 1 and INPLACE == 0 :
  *    If no entry is found a new one is inserted with data from "template"
  *    If a non-CACHE_VALID entry is found, it is updated from template using UPDATE
  *    If a CACHE_VALID entry is found, a new entry is swapped in with data
  *       from "template"
- * If set == 2, we UPDATE, but don't swap. i.e. update in place
+ * If set == 1, and INPLACE == 1 :
+ *    As above, except that if a CACHE_VALID entry is found, we UPDATE in place
+ *       instead of swapping in a new entry.
  *
  * If the passed handle has the CACHE_NEGATIVE flag set, then UPDATE is not
  * run but insteead CACHE_NEGATIVE is set in any new item.
@@ -155,6 +161,10 @@ struct cache_deferred_req {
  * INIT copies key information from "item" to "new"
  * UPDATE copies content information from "item" to "tmp"
  * INPLACE is true if updates can happen inplace rather than allocating a new structure
+ *
+ * WARNING: any substantial changes to this must be reflected in
+ *   net/sunrpc/svcauth.c(auth_domain_lookup)
+ *  which is a similar routine that is open-coded.
  */
 #define DefineCacheLookup(RTN,MEMBER,FNAME,ARGS,SETUP,DETAIL,HASHFN,TEST,INIT,UPDATE,INPLACE)	\
 RTN *FNAME ARGS										\
@@ -162,8 +172,8 @@ RTN *FNAME ARGS										\
 	RTN *tmp, *new=NULL;								\
 	struct cache_head **hp, **head;							\
 	SETUP;										\
- retry:											\
 	head = &(DETAIL)->hash_table[HASHFN];						\
+ retry:											\
 	if (set||new) write_lock(&(DETAIL)->hash_lock);					\
 	else read_lock(&(DETAIL)->hash_lock);						\
 	for(hp=head; *hp != NULL; hp = &tmp->MEMBER.next) {				\
@@ -173,6 +183,8 @@ RTN *FNAME ARGS										\
 			if (set && !INPLACE && test_bit(CACHE_VALID, &tmp->MEMBER.flags) && !new) \
 				break;							\
 											\
+			if (new)							\
+				{INIT;}							\
 			cache_get(&tmp->MEMBER);					\
 			if (set) {							\
 				if (!INPLACE && test_bit(CACHE_VALID, &tmp->MEMBER.flags))\
@@ -187,8 +199,11 @@ RTN *FNAME ARGS										\
 					t2 = tmp; tmp = new; new = t2;			\
 				}							\
 				if (test_bit(CACHE_NEGATIVE,  &item->MEMBER.flags))	\
-					 set_bit(CACHE_NEGATIVE, &tmp->MEMBER.flags);	\
-				else {UPDATE;}						\
+					set_bit(CACHE_NEGATIVE, &tmp->MEMBER.flags);	\
+				else {							\
+					UPDATE;						\
+					clear_bit(CACHE_NEGATIVE, &tmp->MEMBER.flags);	\
+				}							\
 			}								\
 			if (set||new) write_unlock(&(DETAIL)->hash_lock);		\
 			else read_unlock(&(DETAIL)->hash_lock);				\
@@ -201,6 +216,7 @@ RTN *FNAME ARGS										\
 	}										\
 	/* Didn't find anything */							\
 	if (new) {									\
+		INIT;									\
 		new->MEMBER.next = *head;						\
 		*head = &new->MEMBER;							\
 		(DETAIL)->entries ++;							\
@@ -221,9 +237,6 @@ RTN *FNAME ARGS										\
 	new = kmalloc(sizeof(*new), GFP_KERNEL);					\
 	if (new) {									\
 		cache_init(&new->MEMBER);						\
-		cache_get(&new->MEMBER);						\
-		INIT;									\
-		tmp = new;								\
 		goto retry;								\
 	}										\
 	return NULL;									\
@@ -244,8 +257,6 @@ RTN *FNAME ARGS										\
 
 	     
 
-extern void cache_defer_req(struct cache_req *req, struct cache_head *item);
-extern void cache_revisit_request(struct cache_head *item);
 extern void cache_clean_deferred(void *owner);
 
 static inline struct cache_head  *cache_get(struct cache_head *h)
@@ -273,14 +284,11 @@ extern void cache_fresh(struct cache_detail *detail,
 			struct cache_head *head, time_t expiry);
 extern int cache_check(struct cache_detail *detail,
 		       struct cache_head *h, struct cache_req *rqstp);
-extern int cache_clean(void);
 extern void cache_flush(void);
 extern void cache_purge(struct cache_detail *detail);
 #define NEVER (0x7FFFFFFF)
 extern void cache_register(struct cache_detail *cd);
 extern int cache_unregister(struct cache_detail *cd);
-extern struct cache_detail *cache_find(char *name);
-extern void cache_drop(struct cache_detail *detail);
 
 extern void qword_add(char **bpp, int *lp, char *str);
 extern void qword_addhex(char **bpp, int *lp, char *buf, int blen);

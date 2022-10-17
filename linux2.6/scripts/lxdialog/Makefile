@@ -1,5 +1,9 @@
 HOST_EXTRACFLAGS := -DLOCALE 
+ifeq ($(shell uname),SunOS)
+HOST_LOADLIBES   := -lcurses
+else
 HOST_LOADLIBES   := -lncurses
+endif
 
 ifeq (/usr/include/ncurses/ncurses.h, $(wildcard /usr/include/ncurses/ncurses.h))
         HOST_EXTRACFLAGS += -I/usr/include/ncurses -DCURSES_LOC="<ncurses.h>"
@@ -15,16 +19,14 @@ endif
 endif
 endif
 
-host-progs	:= lxdialog
-always		:= $(host-progs)
+hostprogs-y	:= lxdialog
+always		:= ncurses $(hostprogs-y)
 
 lxdialog-objs := checklist.o menubox.o textbox.o yesno.o inputbox.o \
 		 util.o lxdialog.o msgbox.o
 
-first_rule: ncurses
-
-.PHONY: ncurses
-ncurses:
+.PHONY: $(obj)/ncurses
+$(obj)/ncurses:
 	@echo "main() {}" > lxtemp.c
 	@if $(HOSTCC) lxtemp.c  $(HOST_LOADLIBES); then \
 		rm -f lxtemp.c a.out; \
@@ -33,7 +35,7 @@ ncurses:
 		echo -e "\007" ;\
 		echo ">> Unable to find the Ncurses libraries." ;\
 		echo ">>" ;\
-		echo ">> You must have Ncurses installed in order" ;\
+		echo ">> You must install ncurses-devel in order" ;\
 		echo ">> to use 'make menuconfig'" ;\
 		echo ;\
 		exit 1 ;\

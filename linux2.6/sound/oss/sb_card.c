@@ -52,7 +52,7 @@ static int __initdata esstype   = 0; /* ESS chip type */
 static int __initdata acer 	= 0; /* Do acer notebook init? */
 static int __initdata sm_games 	= 0; /* Logitech soundman games? */
 
-struct sb_card_config *legacy = NULL;
+static struct sb_card_config *legacy = NULL;
 
 #ifdef CONFIG_PNP
 static int __initdata pnp       = 1;
@@ -100,7 +100,14 @@ MODULE_PARM_DESC(uart401,  "When set to 1, will attempt to detect and enable"\
 /* OSS subsystem card registration shared by PnP and legacy routines */
 static int sb_register_oss(struct sb_card_config *scc, struct sb_module_options *sbmo)
 {
-	if(!sb_dsp_detect(&scc->conf, 0, 0, sbmo)) {
+	if (!request_region(scc->conf.io_base, 16, "soundblaster")) {
+		printk(KERN_ERR "sb: ports busy.\n");
+		kfree(scc);
+		return -EBUSY;
+	}
+
+	if (!sb_dsp_detect(&scc->conf, 0, 0, sbmo)) {
+		release_region(scc->conf.io_base, 16);
 		printk(KERN_ERR "sb: Failed DSP Detect.\n");
 		kfree(scc);
 		return -ENODEV;
@@ -179,6 +186,13 @@ static void sb_dev2cfg(struct pnp_dev *dev, struct sb_card_config *scc)
 		scc->conf.dma       = pnp_dma(dev,0);
 		scc->conf.dma2      = pnp_dma(dev,1);
 		scc->mpucnf.io_base = pnp_port_start(dev,1);
+		return;
+	}
+	if(!strncmp("tBA",scc->card_id,3)) {
+		scc->conf.io_base   = pnp_port_start(dev,0);
+		scc->conf.irq       = pnp_irq(dev,0);
+		scc->conf.dma       = pnp_dma(dev,0);
+		scc->conf.dma2      = pnp_dma(dev,1);
 		return;
 	}
 	if(!strncmp("ESS",scc->card_id,3)) {
@@ -302,7 +316,13 @@ static int __init sb_init(void)
 
 	/* If either PnP or Legacy registered a card then return
 	 * success */
-	return (pres > 0 || lres > 0) ? 0 : -ENODEV;
+	if (pres <= 0 && lres <= 0) {
+#ifdef CONFIG_PNP
+		pnp_unregister_card_driver(&sb_pnp_driver);
+#endif
+		return -ENODEV;
+	}
+	return 0;
 }
 
 static void __exit sb_exit(void)

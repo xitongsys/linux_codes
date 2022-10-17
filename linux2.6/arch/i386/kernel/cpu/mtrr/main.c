@@ -77,22 +77,24 @@ static int have_wrcomb(void)
 {
 	struct pci_dev *dev;
 	
-	if ((dev = pci_find_class(PCI_CLASS_BRIDGE_HOST << 8, NULL)) != NULL) {
+	if ((dev = pci_get_class(PCI_CLASS_BRIDGE_HOST << 8, NULL)) != NULL) {
 		/* ServerWorks LE chipsets have problems with write-combining 
 		   Don't allow it and leave room for other chipsets to be tagged */
 		if (dev->vendor == PCI_VENDOR_ID_SERVERWORKS &&
 		    dev->device == PCI_DEVICE_ID_SERVERWORKS_LE) {
 			printk(KERN_INFO "mtrr: Serverworks LE detected. Write-combining disabled.\n");
+			pci_dev_put(dev);
 			return 0;
 		}
 		/* Intel 450NX errata # 23. Non ascending cachline evictions to
 		   write combining memory may resulting in data corruption */
 		if (dev->vendor == PCI_VENDOR_ID_INTEL &&
-		    dev->device == PCI_DEVICE_ID_INTEL_82451NX)
-		{
+		    dev->device == PCI_DEVICE_ID_INTEL_82451NX) {
 			printk(KERN_INFO "mtrr: Intel 450NX MMC detected. Write-combining disabled.\n");
+			pci_dev_put(dev);
 			return 0;
 		}
+		pci_dev_put(dev);
 	}		
 	return (mtrr_if->have_wrcomb ? mtrr_if->have_wrcomb() : 0);
 }
@@ -111,7 +113,7 @@ void __init set_num_var_ranges(void)
 	num_var_ranges = config & 0xff;
 }
 
-static void init_table(void)
+static void __init init_table(void)
 {
 	int i, max;
 
@@ -147,10 +149,8 @@ static void ipi_handler(void *info)
 	local_irq_save(flags);
 
 	atomic_dec(&data->count);
-	while(!atomic_read(&data->gate)) {
+	while(!atomic_read(&data->gate))
 		cpu_relax();
-		barrier();
-	}
 
 	/*  The master has cleared me to execute  */
 	if (data->smp_reg != ~0U) 
@@ -160,10 +160,9 @@ static void ipi_handler(void *info)
 		mtrr_if->set_all();
 
 	atomic_dec(&data->count);
-	while(atomic_read(&data->gate)) {
+	while(atomic_read(&data->gate))
 		cpu_relax();
-		barrier();
-	}
+
 	atomic_dec(&data->count);
 	local_irq_restore(flags);
 }
@@ -228,10 +227,9 @@ static void set_mtrr(unsigned int reg, unsigned long base,
 
 	local_irq_save(flags);
 
-	while(atomic_read(&data.count)) {
+	while(atomic_read(&data.count))
 		cpu_relax();
-		barrier();
-	}
+
 	/* ok, reset count and toggle gate */
 	atomic_set(&data.count, num_booting_cpus() - 1);
 	atomic_set(&data.gate,1);
@@ -248,10 +246,9 @@ static void set_mtrr(unsigned int reg, unsigned long base,
 		mtrr_if->set(reg,base,size,type);
 
 	/* wait for the others */
-	while(atomic_read(&data.count)) {
+	while(atomic_read(&data.count))
 		cpu_relax();
-		barrier();
-	}
+
 	atomic_set(&data.count, num_booting_cpus() - 1);
 	atomic_set(&data.gate,0);
 
@@ -259,10 +256,9 @@ static void set_mtrr(unsigned int reg, unsigned long base,
 	 * Wait here for everyone to have seen the gate change
 	 * So we're the last ones to touch 'data'
 	 */
-	while(atomic_read(&data.count)) {
+	while(atomic_read(&data.count))
 		cpu_relax();
-		barrier();
-	}
+
 	local_irq_restore(flags);
 }
 
@@ -541,7 +537,7 @@ static void __init init_ifs(void)
 	centaur_init_mtrr();
 }
 
-static void init_other_cpus(void)
+static void __init init_other_cpus(void)
 {
 	if (use_intel())
 		get_mtrr_state();
@@ -608,7 +604,7 @@ static struct sysdev_driver mtrr_sysdev_driver = {
 
 
 /**
- * mtrr_init - initialie mtrrs on the boot CPU
+ * mtrr_init - initialize mtrrs on the boot CPU
  *
  * This needs to be called early; before any of the other CPUs are 
  * initialized (i.e. before smp_init()).
@@ -618,7 +614,7 @@ static int __init mtrr_init(void)
 {
 	init_ifs();
 
-	if ( cpu_has_mtrr ) {
+	if (cpu_has_mtrr) {
 		mtrr_if = &generic_mtrr_ops;
 		size_or_mask = 0xff000000;	/* 36 bits */
 		size_and_mask = 0x00f00000;
@@ -660,7 +656,7 @@ static int __init mtrr_init(void)
 	} else {
 		switch (boot_cpu_data.x86_vendor) {
 		case X86_VENDOR_AMD:
-			if ( cpu_has_k6_mtrr ) {
+			if (cpu_has_k6_mtrr) {
 				/* Pre-Athlon (K6) AMD CPU MTRRs */
 				mtrr_if = mtrr_ops[X86_VENDOR_AMD];
 				size_or_mask = 0xfff00000;	/* 32 bits */
@@ -668,14 +664,14 @@ static int __init mtrr_init(void)
 			}
 			break;
 		case X86_VENDOR_CENTAUR:
-			if ( cpu_has_centaur_mcr ) {
+			if (cpu_has_centaur_mcr) {
 				mtrr_if = mtrr_ops[X86_VENDOR_CENTAUR];
 				size_or_mask = 0xfff00000;	/* 32 bits */
 				size_and_mask = 0;
 			}
 			break;
 		case X86_VENDOR_CYRIX:
-			if ( cpu_has_cyrix_arr ) {
+			if (cpu_has_cyrix_arr) {
 				mtrr_if = mtrr_ops[X86_VENDOR_CYRIX];
 				size_or_mask = 0xfff00000;	/* 32 bits */
 				size_and_mask = 0;

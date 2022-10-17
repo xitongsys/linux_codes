@@ -72,14 +72,14 @@ __flush_whole_cache:
 	mov	pc, lr
 
 /*
- *	flush_user_cache_range(start, end, vm_flags)
+ *	flush_user_cache_range(start, end, flags)
  *
  *	Invalidate a range of cache entries in the specified
  *	address space.
  *
  *	- start - start address (inclusive, page aligned)
  *	- end	- end address (exclusive, page aligned)
- *	- vma	- vma_area_struct describing address space
+ *	- flags	- vma_area_struct flags describing address space
  */
 ENTRY(v4wb_flush_user_cache_range)
 	sub	r3, r1, r0			@ calculate total size
@@ -121,6 +121,19 @@ ENTRY(v4wb_flush_kern_dcache_page)
  *	- end	 - virtual end address
  */
 ENTRY(v4wb_coherent_kern_range)
+	/* fall through */
+
+/*
+ *	coherent_user_range(start, end)
+ *
+ *	Ensure coherency between the Icache and the Dcache in the
+ *	region described by start.  If you have non-snooping
+ *	Harvard caches, you need to implement this function.
+ *
+ *	- start  - virtual start address
+ *	- end	 - virtual end address
+ */
+ENTRY(v4wb_coherent_user_range)
 	bic	r0, r0, #CACHE_DLINESIZE - 1
 1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
@@ -195,6 +208,7 @@ ENTRY(v4wb_cache_fns)
 	.long	v4wb_flush_user_cache_all
 	.long	v4wb_flush_user_cache_range
 	.long	v4wb_coherent_kern_range
+	.long	v4wb_coherent_user_range
 	.long	v4wb_flush_kern_dcache_page
 	.long	v4wb_dma_inv_range
 	.long	v4wb_dma_clean_range

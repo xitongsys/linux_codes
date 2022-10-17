@@ -18,6 +18,7 @@ struct nfs_server {
 	unsigned int		rpages;		/* read size (in pages) */
 	unsigned int		wsize;		/* write size */
 	unsigned int		wpages;		/* write size (in pages) */
+	unsigned int		wtmult;		/* server disk block size */
 	unsigned int		dtsize;		/* readdir size */
 	unsigned int		bsize;		/* server block size */
 	unsigned int		acregmin;	/* attr cache timeouts */
@@ -35,13 +36,22 @@ struct nfs_server {
 	char			ip_addr[16];
 	char *			mnt_path;
 	struct nfs4_client *	nfs4_state;	/* all NFSv4 state starts here */
-	unsigned long		lease_time;	/* in jiffies */
-	unsigned long		last_renewal;	/* in jiffies */
-	void                   *idmap;
+	struct list_head	nfs4_siblings;	/* List of other nfs_server structs
+						 * that share the same clientid
+						 */
+	u32			attr_bitmask[2];/* V4 bitmask representing the set
+						   of attributes supported on this
+						   filesystem */
+	u32			acl_bitmask;	/* V4 bitmask representing the ACEs
+						   that are supported on this
+						   filesystem */
 #endif
 };
 
 /* Server capabilities */
-#define NFS_CAP_READDIRPLUS	(1)
+#define NFS_CAP_READDIRPLUS	(1U << 0)
+#define NFS_CAP_HARDLINKS	(1U << 1)
+#define NFS_CAP_SYMLINKS	(1U << 2)
+#define NFS_CAP_ACLS		(1U << 3)
 
 #endif

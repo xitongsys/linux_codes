@@ -10,6 +10,7 @@
  */
 #include <linux/config.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -42,7 +43,7 @@
 #include <net/arp.h>
 #include <linux/init.h>
 
-int nr_ndevs = 4;
+static int nr_ndevs = 4;
 
 int sysctl_netrom_default_path_quality            = NR_DEFAULT_QUAL;
 int sysctl_netrom_obsolescence_count_initialiser  = NR_DEFAULT_OBS;
@@ -59,7 +60,7 @@ int sysctl_netrom_link_fails_count                = NR_DEFAULT_FAILS;
 static unsigned short circuit = 0x101;
 
 static HLIST_HEAD(nr_list);
-static spinlock_t nr_list_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(nr_list_lock);
 
 static struct proto_ops nr_proto_ops;
 void nr_init_timers(struct sock *sk);
@@ -72,7 +73,7 @@ static struct sock *nr_alloc_sock(void)
 	if (!sk)
 		goto out;
 
-	nr = nr_sk(sk) = kmalloc(sizeof(*nr), GFP_ATOMIC);
+	nr = sk->sk_protinfo = kmalloc(sizeof(*nr), GFP_ATOMIC);
 	if (!nr)
 		goto frees;
 
@@ -297,7 +298,7 @@ void nr_destroy_socket(struct sock *sk)
  */
 
 static int nr_setsockopt(struct socket *sock, int level, int optname,
-	char *optval, int optlen)
+	char __user *optval, int optlen)
 {
 	struct sock *sk = sock->sk;
 	nr_cb *nr = nr_sk(sk);
@@ -309,7 +310,7 @@ static int nr_setsockopt(struct socket *sock, int level, int optname,
 	if (optlen < sizeof(int))
 		return -EINVAL;
 
-	if (get_user(opt, (int *)optval))
+	if (get_user(opt, (int __user *)optval))
 		return -EFAULT;
 
 	switch (optname) {
@@ -349,7 +350,7 @@ static int nr_setsockopt(struct socket *sock, int level, int optname,
 }
 
 static int nr_getsockopt(struct socket *sock, int level, int optname,
-	char *optval, int *optlen)
+	char __user *optval, int __user *optlen)
 {
 	struct sock *sk = sock->sk;
 	nr_cb *nr = nr_sk(sk);
@@ -532,7 +533,7 @@ static int nr_release(struct socket *sock)
 		sk->sk_state    = TCP_CLOSE;
 		sk->sk_shutdown |= SEND_SHUTDOWN;
 		sk->sk_state_change(sk);
-		sock_set_flag(sk, SOCK_DEAD);
+		sock_orphan(sk);
 		sock_set_flag(sk, SOCK_DESTROY);
 		sk->sk_socket   = NULL;
 		break;
@@ -727,6 +728,8 @@ static int nr_connect(struct socket *sock, struct sockaddr *uaddr,
 				lock_sock(sk);
 				continue;
 			}
+			current->state = TASK_RUNNING;
+			remove_wait_queue(sk->sk_sleep, &wait);
 			return -ERESTARTSYS;
 		}
 		current->state = TASK_RUNNING;
@@ -780,20 +783,24 @@ static int nr_accept(struct socket *sock, struct socket *newsock, int flags)
 
 		current->state = TASK_INTERRUPTIBLE;
 		release_sock(sk);
-		if (flags & O_NONBLOCK)
+		if (flags & O_NONBLOCK) {
+			current->state = TASK_RUNNING;
+			remove_wait_queue(sk->sk_sleep, &wait);
 			return -EWOULDBLOCK;
+		}
 		if (!signal_pending(tsk)) {
 			schedule();
 			lock_sock(sk);
 			continue;
 		}
+		current->state = TASK_RUNNING;
+		remove_wait_queue(sk->sk_sleep, &wait);
 		return -ERESTARTSYS;
 	}
 	current->state = TASK_RUNNING;
 	remove_wait_queue(sk->sk_sleep, &wait);
 
 	newsk = skb->sk;
-	newsk->sk_pair = NULL;
 	newsk->sk_socket = newsock;
 	newsk->sk_sleep = &newsock->wait;
 
@@ -986,7 +993,6 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 	nr_make->vl        = 0;
 	nr_make->state     = NR_STATE_3;
 	sk->sk_ack_backlog++;
-	make->sk_pair = sk;
 
 	nr_insert_socket(make);
 
@@ -1003,7 +1009,7 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 }
 
 static int nr_sendmsg(struct kiocb *iocb, struct socket *sock,
-		      struct msghdr *msg, int len)
+		      struct msghdr *msg, size_t len)
 {
 	struct sock *sk = sock->sk;
 	nr_cb *nr = nr_sk(sk);
@@ -1014,7 +1020,7 @@ static int nr_sendmsg(struct kiocb *iocb, struct socket *sock,
 	unsigned char *asmptr;
 	int size;
 
-	if (msg->msg_flags & ~(MSG_DONTWAIT|MSG_EOR))
+	if (msg->msg_flags & ~(MSG_DONTWAIT|MSG_EOR|MSG_CMSG_COMPAT))
 		return -EINVAL;
 
 	lock_sock(sk);
@@ -1094,7 +1100,12 @@ static int nr_sendmsg(struct kiocb *iocb, struct socket *sock,
 	SOCK_DEBUG(sk, "NET/ROM: Appending user data\n");
 
 	/* User data follows immediately after the NET/ROM transport header */
-	memcpy_fromiovec(asmptr, msg->msg_iov, len);
+	if (memcpy_fromiovec(asmptr, msg->msg_iov, len)) {
+		kfree_skb(skb);
+		err = -EFAULT;
+		goto out;
+	}
+
 	SOCK_DEBUG(sk, "NET/ROM: Transmitting buffer\n");
 
 	if (sk->sk_state != TCP_ESTABLISHED) {
@@ -1112,11 +1123,11 @@ out:
 }
 
 static int nr_recvmsg(struct kiocb *iocb, struct socket *sock,
-		      struct msghdr *msg, int size, int flags)
+		      struct msghdr *msg, size_t size, int flags)
 {
 	struct sock *sk = sock->sk;
 	struct sockaddr_ax25 *sax = (struct sockaddr_ax25 *)msg->msg_name;
-	int copied;
+	size_t copied;
 	struct sk_buff *skb;
 	int er;
 
@@ -1164,6 +1175,7 @@ static int nr_recvmsg(struct kiocb *iocb, struct socket *sock,
 static int nr_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	struct sock *sk = sock->sk;
+	void __user *argp = (void __user *)arg;
 	int ret;
 
 	lock_sock(sk);
@@ -1174,7 +1186,7 @@ static int nr_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		if (amount < 0)
 			amount = 0;
 		release_sock(sk);
-		return put_user(amount, (int *)arg);
+		return put_user(amount, (int __user *)argp);
 	}
 
 	case TIOCINQ: {
@@ -1184,21 +1196,15 @@ static int nr_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		if ((skb = skb_peek(&sk->sk_receive_queue)) != NULL)
 			amount = skb->len;
 		release_sock(sk);
-		return put_user(amount, (int *)arg);
+		return put_user(amount, (int __user *)argp);
 	}
 
 	case SIOCGSTAMP:
-		if (sk != NULL) {
-			if (!sk->sk_stamp.tv_sec) {
-				release_sock(sk);
-				return -ENOENT;
-			}
-			ret = copy_to_user((void *)arg, &sk->sk_stamp, sizeof(struct timeval)) ? -EFAULT : 0;
-			release_sock(sk);
-			return ret;
-		}
+		ret = -EINVAL;
+		if (sk != NULL)
+			ret = sock_get_timestamp(sk, argp);
 		release_sock(sk);
-		return -EINVAL;
+		return ret;
 
 	case SIOCGIFADDR:
 	case SIOCSIFADDR:
@@ -1218,11 +1224,11 @@ static int nr_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	case SIOCNRDECOBS:
 		release_sock(sk);
 		if (!capable(CAP_NET_ADMIN)) return -EPERM;
-		return nr_rt_ioctl(cmd, (void *)arg);
+		return nr_rt_ioctl(cmd, argp);
 
 	default:
 		release_sock(sk);
-		return dev_ioctl(cmd, (void *)arg);
+		return dev_ioctl(cmd, argp);
 	}
 	release_sock(sk);
 
@@ -1377,7 +1383,7 @@ static int __init nr_proto_init(void)
 {
 	int i;
 
-	if (nr_ndevs > 0x7fffffff/sizeof(struct net_device)) {
+	if (nr_ndevs > 0x7fffffff/sizeof(struct net_device *)) {
 		printk(KERN_ERR "NET/ROM: nr_proto_init - nr_ndevs parameter to large\n");
 		return -1;
 	}
@@ -1405,6 +1411,7 @@ static int __init nr_proto_init(void)
 		dev->base_addr = i;
 		if (register_netdev(dev)) {
 			printk(KERN_ERR "NET/ROM: nr_proto_init - unable to register network device\n");
+			free_netdev(dev);
 			goto fail;
 		}
 		dev_nr[i] = dev;
@@ -1433,16 +1440,17 @@ static int __init nr_proto_init(void)
 	return 0;
 
  fail:
-	while (--i >= 0)
+	while (--i >= 0) {
 		unregister_netdev(dev_nr[i]);
+		free_netdev(dev_nr[i]);
+	}
 	kfree(dev_nr);
 	return -1;
 }
 
 module_init(nr_proto_init);
 
-
-MODULE_PARM(nr_ndevs, "i");
+module_param(nr_ndevs, int, 0);
 MODULE_PARM_DESC(nr_ndevs, "number of NET/ROM devices");
 
 MODULE_AUTHOR("Jonathan Naylor G4KLX <g4klx@g4klx.demon.co.uk>");
@@ -1474,8 +1482,10 @@ static void __exit nr_exit(void)
 
 	for (i = 0; i < nr_ndevs; i++) {
 		struct net_device *dev = dev_nr[i];
-		if (dev) 
+		if (dev) {
 			unregister_netdev(dev);
+			free_netdev(dev);
+		}
 	}
 
 	kfree(dev_nr);

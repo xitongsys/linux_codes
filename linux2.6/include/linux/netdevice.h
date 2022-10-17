@@ -29,11 +29,11 @@
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
 
+#ifdef __KERNEL__
 #include <asm/atomic.h>
 #include <asm/cache.h>
 #include <asm/byteorder.h>
 
-#ifdef __KERNEL__
 #include <linux/config.h>
 #include <linux/device.h>
 #include <linux/percpu.h>
@@ -42,13 +42,14 @@ struct divert_blk;
 struct vlan_group;
 struct ethtool_ops;
 
-					/* source back-compat hook */
+					/* source back-compat hooks */
 #define SET_ETHTOOL_OPS(netdev,ops) \
 	( (netdev)->ethtool_ops = (ops) )
 
 #define HAVE_ALLOC_NETDEV		/* feature macro: alloc_xxxdev
 					   functions are available. */
-#define HAVE_FREE_NETDEV
+#define HAVE_FREE_NETDEV		/* free_netdev() */
+#define HAVE_NETDEV_PRIV		/* netdev_priv() */
 
 #define NET_XMIT_SUCCESS	0
 #define NET_XMIT_DROP		1	/* skb dropped			*/
@@ -71,6 +72,11 @@ struct ethtool_ops;
 #endif
 
 #define MAX_ADDR_LEN	32		/* Largest hardware address length */
+
+/* Driver transmit return codes */
+#define NETDEV_TX_OK 0		/* driver took care of packet */
+#define NETDEV_TX_BUSY 1	/* driver tx path was busy*/
+#define NETDEV_TX_LOCKED -1	/* driver tx lock was already taken */
 
 /*
  *	Compute the worst case header length according to the protocols
@@ -214,6 +220,8 @@ struct hh_cache
  */
 #define LL_RESERVED_SPACE(dev) \
 	(((dev)->hard_header_len&~(HH_DATA_MOD - 1)) + HH_DATA_MOD)
+#define LL_RESERVED_SPACE_EXTRA(dev,extra) \
+	((((dev)->hard_header_len+extra)&~(HH_DATA_MOD - 1)) + HH_DATA_MOD)
 
 /* These flag bits are private to the generic network queueing
  * layer, they may not be explicitly referenced by any other
@@ -301,7 +309,9 @@ struct net_device
 
 	/* List of functions to handle Wireless Extensions (instead of ioctl).
 	 * See <net/iw_handler.h> for details. Jean II */
-	struct iw_handler_def *	wireless_handlers;
+	const struct iw_handler_def *	wireless_handlers;
+	/* Instance data managed by the core of Wireless Extensions. */
+	struct iw_public_data *	wireless_data;
 
 	struct ethtool_ops *ethtool_ops;
 
@@ -335,6 +345,7 @@ struct net_device
 	unsigned char		broadcast[MAX_ADDR_LEN];	/* hw bcast add	*/
 	unsigned char		dev_addr[MAX_ADDR_LEN];	/* hw address	*/
 	unsigned char		addr_len;	/* hardware address length	*/
+	unsigned short          dev_id;		/* for shared network cards */
 
 	struct dev_mc_list	*mc_list;	/* Multicast mac addresses	*/
 	int			mc_count;	/* Number of installed mcasts	*/
@@ -359,10 +370,12 @@ struct net_device
 
 	struct Qdisc		*qdisc;
 	struct Qdisc		*qdisc_sleeping;
-	struct Qdisc		*qdisc_list;
 	struct Qdisc		*qdisc_ingress;
+	struct list_head	qdisc_list;
 	unsigned long		tx_queue_len;	/* Max frames per queue allowed */
 
+	/* ingress path synchronizer */
+	spinlock_t		ingress_lock;
 	/* hard_start_xmit synchronizer */
 	spinlock_t		xmit_lock;
 	/* cpu id of processor entered to hard_start_xmit or -1,
@@ -375,6 +388,10 @@ struct net_device
 	atomic_t		refcnt;
 	/* delayed register/unregister */
 	struct list_head	todo_list;
+	/* device name hash chain */
+	struct hlist_node	name_hlist;
+	/* device index hash chain */
+	struct hlist_node	index_hlist;
 
 	/* register/unregister state machine */
 	enum { NETREG_UNINITIALIZED=0,
@@ -398,6 +415,7 @@ struct net_device
 #define NETIF_F_HW_VLAN_FILTER	512	/* Receive filtering on VLAN */
 #define NETIF_F_VLAN_CHALLENGED	1024	/* Device cannot handle VLAN packets */
 #define NETIF_F_TSO		2048	/* Can offload TCP/IP segmentation */
+#define NETIF_F_LLTX		4096	/* LockLess TX */
 
 	/* Called after device is detached from network. */
 	void			(*uninit)(struct net_device *dev);
@@ -452,16 +470,16 @@ struct net_device
 						     unsigned char *haddr);
 	int			(*neigh_setup)(struct net_device *dev, struct neigh_parms *);
 	int			(*accept_fastpath)(struct net_device *, struct dst_entry*);
+#ifdef CONFIG_NETPOLL
+	int			netpoll_rx;
+#endif
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	void                    (*poll_controller)(struct net_device *dev);
+#endif
 
 	/* bridge stuff */
 	struct net_bridge_port	*br_port;
 
-#ifdef CONFIG_NET_FASTROUTE
-#define NETDEV_FASTROUTE_HMASK 0xF
-	/* Semi-private data. Keep it at the end of device struct. */
-	rwlock_t		fastpath_lock;
-	struct dst_entry	*fastpath[NETDEV_FASTROUTE_HMASK+1];
-#endif
 #ifdef CONFIG_NET_DIVERT
 	/* this will get initialized at each interface type init routine */
 	struct divert_blk	*divert;
@@ -469,8 +487,19 @@ struct net_device
 
 	/* class/net/name entry */
 	struct class_device	class_dev;
-	struct net_device_stats* (*last_stats)(struct net_device *);
+	/* how much padding had been added by alloc_netdev() */
+	int padded;
 };
+
+#define	NETDEV_ALIGN		32
+#define	NETDEV_ALIGN_CONST	(NETDEV_ALIGN - 1)
+
+static inline void *netdev_priv(struct net_device *dev)
+{
+	return (char *)dev + ((sizeof(struct net_device)
+					+ NETDEV_ALIGN_CONST)
+				& ~NETDEV_ALIGN_CONST);
+}
 
 #define SET_MODULE_OWNER(dev) do { } while (0)
 /* Set the sysfs physical device reference for the network logical device
@@ -494,30 +523,18 @@ extern struct net_device		loopback_dev;		/* The loopback */
 extern struct net_device		*dev_base;		/* All devices */
 extern rwlock_t				dev_base_lock;		/* Device list lock */
 
-extern int			netdev_boot_setup_add(char *name, struct ifmap *map);
 extern int 			netdev_boot_setup_check(struct net_device *dev);
+extern unsigned long		netdev_boot_base(const char *prefix, int unit);
 extern struct net_device    *dev_getbyhwaddr(unsigned short type, char *hwaddr);
-extern struct net_device *__dev_getfirstbyhwtype(unsigned short type);
 extern struct net_device *dev_getfirstbyhwtype(unsigned short type);
 extern void		dev_add_pack(struct packet_type *pt);
 extern void		dev_remove_pack(struct packet_type *pt);
 extern void		__dev_remove_pack(struct packet_type *pt);
-extern int		__dev_get(const char *name);
-static inline int __deprecated dev_get(const char *name)
-{
-	return __dev_get(name);
-}
+
 extern struct net_device	*dev_get_by_flags(unsigned short flags,
 						  unsigned short mask);
-extern struct net_device	*__dev_get_by_flags(unsigned short flags,
-						    unsigned short mask);
 extern struct net_device	*dev_get_by_name(const char *name);
 extern struct net_device	*__dev_get_by_name(const char *name);
-extern struct net_device        *__dev_alloc(const char *name, int *err);
-static inline __deprecated struct net_device *dev_alloc(const char *name, int *err)
-{
-	return __dev_alloc(name, err);
-}
 extern int		dev_alloc_name(struct net_device *dev, const char *name);
 extern int		dev_open(struct net_device *dev);
 extern int		dev_close(struct net_device *dev);
@@ -529,16 +546,18 @@ extern void		synchronize_net(void);
 extern int 		register_netdevice_notifier(struct notifier_block *nb);
 extern int		unregister_netdevice_notifier(struct notifier_block *nb);
 extern int		call_netdevice_notifiers(unsigned long val, void *v);
-extern int		dev_new_index(void);
 extern struct net_device	*dev_get_by_index(int ifindex);
 extern struct net_device	*__dev_get_by_index(int ifindex);
 extern int		dev_restart(struct net_device *dev);
+#ifdef CONFIG_NETPOLL_TRAP
+extern int		netpoll_trap(void);
+#endif
 
-typedef int gifconf_func_t(struct net_device * dev, char * bufptr, int len);
+typedef int gifconf_func_t(struct net_device * dev, char __user * bufptr, int len);
 extern int		register_gifconf(unsigned int family, gifconf_func_t * gifconf);
 static inline int unregister_gifconf(unsigned int family)
 {
-	return register_gifconf(family, 0);
+	return register_gifconf(family, NULL);
 }
 
 /*
@@ -591,12 +610,20 @@ static inline void netif_start_queue(struct net_device *dev)
 
 static inline void netif_wake_queue(struct net_device *dev)
 {
+#ifdef CONFIG_NETPOLL_TRAP
+	if (netpoll_trap())
+		return;
+#endif
 	if (test_and_clear_bit(__LINK_STATE_XOFF, &dev->state))
 		__netif_schedule(dev);
 }
 
 static inline void netif_stop_queue(struct net_device *dev)
 {
+#ifdef CONFIG_NETPOLL_TRAP
+	if (netpoll_trap())
+		return;
+#endif
 	set_bit(__LINK_STATE_XOFF, &dev->state);
 }
 
@@ -634,7 +661,7 @@ static inline void dev_kfree_skb_irq(struct sk_buff *skb)
  */
 static inline void dev_kfree_skb_any(struct sk_buff *skb)
 {
-	if (in_irq())
+	if (in_irq() || irqs_disabled())
 		dev_kfree_skb_irq(skb);
 	else
 		dev_kfree_skb(skb);
@@ -642,29 +669,20 @@ static inline void dev_kfree_skb_any(struct sk_buff *skb)
 
 #define HAVE_NETIF_RX 1
 extern int		netif_rx(struct sk_buff *skb);
+extern int		netif_rx_ni(struct sk_buff *skb);
 #define HAVE_NETIF_RECEIVE_SKB 1
 extern int		netif_receive_skb(struct sk_buff *skb);
-extern int		dev_ioctl(unsigned int cmd, void *);
+extern int		dev_ioctl(unsigned int cmd, void __user *);
 extern int		dev_ethtool(struct ifreq *);
 extern unsigned		dev_get_flags(const struct net_device *);
 extern int		dev_change_flags(struct net_device *, unsigned);
+extern int		dev_change_name(struct net_device *, char *);
 extern int		dev_set_mtu(struct net_device *, int);
 extern void		dev_queue_xmit_nit(struct sk_buff *skb, struct net_device *dev);
 
 extern void		dev_init(void);
 
 extern int		netdev_nit;
-
-/* Post buffer to the network code from _non interrupt_ context.
- * see net/core/dev.c for netif_rx description.
- */
-static inline int netif_rx_ni(struct sk_buff *skb)
-{
-       int err = netif_rx(skb);
-       if (softirq_pending(smp_processor_id()))
-               do_softirq();
-       return err;
-}
 
 /* Called by rtnetlink.c:rtnl_unlock() */
 extern void netdev_run_todo(void);
@@ -767,6 +785,17 @@ enum {
 #define netif_msg_hw(p)		((p)->msg_enable & NETIF_MSG_HW)
 #define netif_msg_wol(p)	((p)->msg_enable & NETIF_MSG_WOL)
 
+static inline u32 netif_msg_init(int debug_value, int default_msg_enable_bits)
+{
+	/* use default */
+	if (debug_value < 0 || debug_value >= (sizeof(u32) * 8))
+		return default_msg_enable_bits;
+	if (debug_value == 0)	/* no output */
+		return 0;
+	/* set low N bits */
+	return (1 << debug_value) - 1;
+}
+
 /* Schedule rx intr now? */
 
 static inline int netif_rx_schedule_prep(struct net_device *dev)
@@ -831,7 +860,7 @@ static inline void netif_rx_complete(struct net_device *dev)
 	unsigned long flags;
 
 	local_irq_save(flags);
-	if (!test_bit(__LINK_STATE_RX_SCHED, &dev->state)) BUG();
+	BUG_ON(!test_bit(__LINK_STATE_RX_SCHED, &dev->state));
 	list_del(&dev->poll_list);
 	smp_mb__before_clear_bit();
 	clear_bit(__LINK_STATE_RX_SCHED, &dev->state);
@@ -857,7 +886,7 @@ static inline void netif_poll_enable(struct net_device *dev)
  */
 static inline void __netif_rx_complete(struct net_device *dev)
 {
-	if (!test_bit(__LINK_STATE_RX_SCHED, &dev->state)) BUG();
+	BUG_ON(!test_bit(__LINK_STATE_RX_SCHED, &dev->state));
 	list_del(&dev->poll_list);
 	smp_mb__before_clear_bit();
 	clear_bit(__LINK_STATE_RX_SCHED, &dev->state);
@@ -873,10 +902,7 @@ static inline void netif_tx_disable(struct net_device *dev)
 /* These functions live elsewhere (drivers/net/net_init.c, but related) */
 
 extern void		ether_setup(struct net_device *dev);
-extern void		fddi_setup(struct net_device *dev);
-extern void		tr_setup(struct net_device *dev);
-extern void		fc_setup(struct net_device *dev);
-extern void		fc_freedev(struct net_device *dev);
+
 /* Support for loadable net-drivers */
 extern struct net_device *alloc_netdev(int sizeof_priv, const char *name,
 				       void (*setup)(struct net_device *));
@@ -893,19 +919,15 @@ extern void		netdev_state_change(struct net_device *dev);
 /* Load a device via the kmod */
 extern void		dev_load(const char *name);
 extern void		dev_mcast_init(void);
-extern int		netdev_register_fc(struct net_device *dev, void (*stimul)(struct net_device *dev));
-extern void		netdev_unregister_fc(int bit);
 extern int		netdev_max_backlog;
 extern int		weight_p;
 extern unsigned long	netdev_fc_xoff;
 extern atomic_t netdev_dropping;
 extern int		netdev_set_master(struct net_device *dev, struct net_device *master);
-extern struct sk_buff * skb_checksum_help(struct sk_buff *skb);
-#ifdef CONFIG_NET_FASTROUTE
-extern int		netdev_fastroute;
-extern int		netdev_fastroute_obstacles;
-extern void		dev_clear_fastroute(struct net_device *dev);
-#endif
+extern int skb_checksum_help(struct sk_buff *skb, int inward);
+/* rx skb timestamps */
+extern void		net_enable_timestamp(void);
+extern void		net_disable_timestamp(void);
 
 #ifdef CONFIG_SYSCTL
 extern char *net_sysctl_strdup(const char *s);

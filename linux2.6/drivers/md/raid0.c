@@ -25,6 +25,42 @@
 #define MD_DRIVER
 #define MD_PERSONALITY
 
+static void raid0_unplug(request_queue_t *q)
+{
+	mddev_t *mddev = q->queuedata;
+	raid0_conf_t *conf = mddev_to_conf(mddev);
+	mdk_rdev_t **devlist = conf->strip_zone[0].dev;
+	int i;
+
+	for (i=0; i<mddev->raid_disks; i++) {
+		request_queue_t *r_queue = bdev_get_queue(devlist[i]->bdev);
+
+		if (r_queue->unplug_fn)
+			r_queue->unplug_fn(r_queue);
+	}
+}
+
+static int raid0_issue_flush(request_queue_t *q, struct gendisk *disk,
+			     sector_t *error_sector)
+{
+	mddev_t *mddev = q->queuedata;
+	raid0_conf_t *conf = mddev_to_conf(mddev);
+	mdk_rdev_t **devlist = conf->strip_zone[0].dev;
+	int i, ret = 0;
+
+	for (i=0; i<mddev->raid_disks && ret == 0; i++) {
+		struct block_device *bdev = devlist[i]->bdev;
+		request_queue_t *r_queue = bdev_get_queue(bdev);
+
+		if (!r_queue->issue_flush_fn)
+			ret = -EOPNOTSUPP;
+		else
+			ret = r_queue->issue_flush_fn(r_queue, bdev->bd_disk, error_sector);
+	}
+	return ret;
+}
+
+
 static int create_strip_zones (mddev_t *mddev)
 {
 	int i, c, j;
@@ -112,8 +148,18 @@ static int create_strip_zones (mddev_t *mddev)
 			goto abort;
 		}
 		zone->dev[j] = rdev1;
+
 		blk_queue_stack_limits(mddev->queue,
 				       rdev1->bdev->bd_disk->queue);
+		/* as we don't honour merge_bvec_fn, we must never risk
+		 * violating it, so limit ->max_sector to one PAGE, as
+		 * a one page request is never in violation.
+		 */
+
+		if (rdev1->bdev->bd_disk->queue->merge_bvec_fn &&
+		    mddev->queue->max_sectors > (PAGE_SIZE>>9))
+			blk_queue_max_sectors(mddev->queue, PAGE_SIZE>>9);
+
 		if (!smallest || (rdev1->size <smallest->size))
 			smallest = rdev1;
 		cnt++;
@@ -192,6 +238,10 @@ static int create_strip_zones (mddev_t *mddev)
 			conf->hash_spacing = sz;
 	}
 
+	mddev->queue->unplug_fn = raid0_unplug;
+
+	mddev->queue->issue_flush_fn = raid0_issue_flush;
+
 	printk("raid0: done.\n");
 	return 0;
  abort:
@@ -209,7 +259,7 @@ static int create_strip_zones (mddev_t *mddev)
 static int raid0_mergeable_bvec(request_queue_t *q, struct bio *bio, struct bio_vec *biovec)
 {
 	mddev_t *mddev = q->queuedata;
-	sector_t sector = bio->bi_sector;
+	sector_t sector = bio->bi_sector + get_start_sect(bio->bi_bdev);
 	int max;
 	unsigned int chunk_sectors = mddev->chunk_size >> 9;
 	unsigned int bio_sectors = bio->bi_size >> 9;
@@ -230,8 +280,8 @@ static int raid0_run (mddev_t *mddev)
 	mdk_rdev_t *rdev;
 	struct list_head *tmp;
 
-	printk("md%d: setting max_sectors to %d, segment boundary to %d\n",
-	       mdidx(mddev),
+	printk("%s: setting max_sectors to %d, segment boundary to %d\n",
+	       mdname(mddev),
 	       mddev->chunk_size >> 9,
 	       (mddev->chunk_size>>1)-1);
 	blk_queue_max_sectors(mddev->queue, mddev->chunk_size >> 9);
@@ -301,6 +351,22 @@ static int raid0_run (mddev_t *mddev)
 		conf->hash_spacing++;
 	}
 
+	/* calculate the max read-ahead size.
+	 * For read-ahead of large files to be effective, we need to
+	 * readahead at least twice a whole stripe. i.e. number of devices
+	 * multiplied by chunk size times 2.
+	 * If an individual device has an ra_pages greater than the
+	 * chunk size, then we will not drive that device as hard as it
+	 * wants.  We consider this a configuration error: a larger
+	 * chunksize should be used in that case.
+	 */
+	{
+		int stripe = mddev->raid_disks * mddev->chunk_size / PAGE_CACHE_SIZE;
+		if (mddev->queue->backing_dev_info.ra_pages < 2* stripe)
+			mddev->queue->backing_dev_info.ra_pages = 2* stripe;
+	}
+
+
 	blk_queue_merge_bvec(mddev->queue, raid0_mergeable_bvec);
 	return 0;
 
@@ -319,6 +385,7 @@ static int raid0_stop (mddev_t *mddev)
 {
 	raid0_conf_t *conf = mddev_to_conf(mddev);
 
+	blk_sync_queue(mddev->queue); /* the unplug fn references 'conf'*/
 	kfree (conf->hash_table);
 	conf->hash_table = NULL;
 	kfree (conf->strip_zone);
@@ -338,6 +405,14 @@ static int raid0_make_request (request_queue_t *q, struct bio *bio)
 	mdk_rdev_t *tmp_dev;
 	unsigned long chunk;
 	sector_t block, rsect;
+
+	if (bio_data_dir(bio)==WRITE) {
+		disk_stat_inc(mddev->gendisk, writes);
+		disk_stat_add(mddev->gendisk, write_sectors, bio_sectors(bio));
+	} else {
+		disk_stat_inc(mddev->gendisk, reads);
+		disk_stat_add(mddev->gendisk, read_sectors, bio_sectors(bio));
+	}
 
 	chunk_size = mddev->chunk_size >> 10;
 	chunk_sects = mddev->chunk_size >> 9;

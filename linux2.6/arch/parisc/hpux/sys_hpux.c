@@ -1,23 +1,42 @@
 /*
- * linux/arch/parisc/kernel/sys_hpux.c
+ *    Implements HPUX syscalls.
  *
- * implements HPUX syscalls.
+ *    Copyright (C) 1999 Matthew Wilcox <willy with parisc-linux.org>
+ *    Copyright (C) 2000 Philipp Rumpf
+ *    Copyright (C) 2000 John Marvin <jsm with parisc-linux.org>
+ *    Copyright (C) 2000 Michael Ang <mang with subcarrier.org>
+ *    Copyright (C) 2001 Nathan Neulinger <nneul at umr.edu>
+ *
+ *    This program is free software; you can redistribute it and/or modify
+ *    it under the terms of the GNU General Public License as published by
+ *    the Free Software Foundation; either version 2 of the License, or
+ *    (at your option) any later version.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU General Public License for more details.
+ *
+ *    You should have received a copy of the GNU General Public License
+ *    along with this program; if not, write to the Free Software
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/namei.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/smp_lock.h>
+#include <linux/syscalls.h>
 #include <linux/utsname.h>
-#include <linux/vmalloc.h>
 #include <linux/vfs.h>
+#include <linux/vmalloc.h>
 
 #include <asm/errno.h>
 #include <asm/pgalloc.h>
 #include <asm/uaccess.h>
 
-unsigned long sys_brk(unsigned long addr);
- 
 unsigned long hpux_brk(unsigned long addr)
 {
 	/* Sigh.  Looks like HP/UX libc relies on kernel bugs. */
@@ -43,13 +62,11 @@ int hpux_ptrace(void)
 
 int hpux_wait(int *stat_loc)
 {
-	extern int sys_waitpid(int, int *, int);
 	return sys_waitpid(-1, stat_loc, 0);
 }
 
 int hpux_setpgrp(void)
 {
-	extern int sys_setpgid(int, int);
 	return sys_setpgid(0,0);
 }
 
@@ -117,7 +134,7 @@ struct hpux_ustat {
  *  aid in porting forward if and when sys_ustat() is changed from
  *  its form in kernel 2.2.5.
  */
-static int hpux_ustat(dev_t dev, struct hpux_ustat *ubuf)
+static int hpux_ustat(dev_t dev, struct hpux_ustat __user *ubuf)
 {
 	struct super_block *s;
 	struct hpux_ustat tmp;  /* Changed to hpux_ustat */
@@ -132,14 +149,13 @@ static int hpux_ustat(dev_t dev, struct hpux_ustat *ubuf)
 	if (err)
 		goto out;
 
-	memset(&tmp,0,sizeof(struct hpux_ustat));  /* Changed to hpux_ustat */
+	memset(&tmp,0,sizeof(tmp));
 
 	tmp.f_tfree = (int32_t)sbuf.f_bfree;
 	tmp.f_tinode = (u_int32_t)sbuf.f_ffree;
 	tmp.f_blksize = (u_int32_t)sbuf.f_bsize;  /*  Added this line  */
 
-	/* Changed to hpux_ustat:  */
-	err = copy_to_user(ubuf,&tmp,sizeof(struct hpux_ustat)) ? -EFAULT : 0;
+	err = copy_to_user(ubuf, &tmp, sizeof(tmp)) ? -EFAULT : 0;
 out:
 	return err;
 }
@@ -169,38 +185,62 @@ struct hpux_statfs {
      int16_t f_pad;
 };
 
-/* hpux statfs */
-int hpux_statfs(const char *path, struct hpux_statfs *buf)
+static int vfs_statfs_hpux(struct super_block *sb, struct hpux_statfs *buf)
 {
+	struct kstatfs st;
+	int retval;
+	
+	retval = vfs_statfs(sb, &st);
+	if (retval)
+		return retval;
+
+	memset(buf, 0, sizeof(*buf));
+	buf->f_type = st.f_type;
+	buf->f_bsize = st.f_bsize;
+	buf->f_blocks = st.f_blocks;
+	buf->f_bfree = st.f_bfree;
+	buf->f_bavail = st.f_bavail;
+	buf->f_files = st.f_files;
+	buf->f_ffree = st.f_ffree;
+	buf->f_fsid[0] = st.f_fsid.val[0];
+	buf->f_fsid[1] = st.f_fsid.val[1];
+
+	return 0;
+}
+
+/* hpux statfs */
+asmlinkage long hpux_statfs(const char __user *path,
+						struct hpux_statfs __user *buf)
+{
+	struct nameidata nd;
 	int error;
-	int len;
-	char *kpath;
 
-	len = strlen_user((char *)path); 
-
-	kpath = (char *) kmalloc(len+1, GFP_KERNEL);
-	if ( !kpath ) {
-	printk(KERN_DEBUG "failed to kmalloc kpath\n");
-	return 0;
+	error = user_path_walk(path, &nd);
+	if (!error) {
+		struct hpux_statfs tmp;
+		error = vfs_statfs_hpux(nd.dentry->d_inode->i_sb, &tmp);
+		if (!error && copy_to_user(buf, &tmp, sizeof(tmp)))
+			error = -EFAULT;
+		path_release(&nd);
 	}
+	return error;
+}
 
-	if ( copy_from_user(kpath, (char *)path, len+1) ) {
-	printk(KERN_DEBUG "failed to copy_from_user kpath\n");
-	kfree(kpath);
-	return 0;
-	}
+asmlinkage long hpux_fstatfs(unsigned int fd, struct hpux_statfs __user * buf)
+{
+	struct file *file;
+	struct hpux_statfs tmp;
+	int error;
 
-	printk(KERN_DEBUG "hpux_statfs(\"%s\",-)\n", kpath);
-
-	kfree(kpath);
-
-	/* just fake it, beginning of structures match */
-	extern int sys_statfs(const char *, struct statfs *);
-	error = sys_statfs(path, (struct statfs *) buf);
-
-	/* ignoring rest of statfs struct, but it should be zeros. Need to do 
-		something with f_fsid[1], which is the fstype for sysfs */
-
+	error = -EBADF;
+	file = fget(fd);
+	if (!file)
+		goto out;
+	error = vfs_statfs_hpux(file->f_dentry->d_inode->i_sb, &tmp);
+	if (!error && copy_to_user(buf, &tmp, sizeof(tmp)))
+		error = -EFAULT;
+	fput(file);
+ out:
 	return error;
 }
 
@@ -250,9 +290,6 @@ static int hpux_uname(struct hpux_utsname *name)
 
 	return error;
 }
-
-int sys_sethostname(char *, int);
-int sys_gethostname(char *, int);
 
 /*  Note: HP-UX just uses the old suser() function to check perms
  *  in this system call.  We'll use capable(CAP_SYS_ADMIN).
@@ -659,8 +696,8 @@ static const char *syscall_names[] = {
 	"setdomainname",         
 	"async_daemon",          
 	"getdirentries",          /* 195 */
-	"statfs",                
-	"fstatfs",               
+	NULL,                
+	NULL,               
 	"vfsmount",              
 	NULL,                    
 	"waitpid",                /* 200 */

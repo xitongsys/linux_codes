@@ -110,24 +110,15 @@ void coldfire_profile_tick(int irq, void *dummy, struct pt_regs *regs)
 {
 	/* Reset ColdFire timer2 */
 	mcf_proftp->ter = MCFTIMER_TER_CAP | MCFTIMER_TER_REF;
-
-        if (!user_mode(regs)) {
-                if (prof_buffer && current->pid) {
-                        extern int _stext;
-                        unsigned long ip = instruction_pointer(regs);
-                        ip -= (unsigned long) &_stext;
-                        ip >>= prof_shift;
-                        if (ip < prof_len)
-                                prof_buffer[ip]++;
-                }
-        }
+	if (current->pid)
+		profile_tick(CPU_PROFILING, regs);
 }
 
 /***************************************************************************/
 
 void coldfire_profile_init(void)
 {
-	printk("PROFILE: lodging TIMER2 @ %dHz as profile timer\n", PROFILEHZ);
+	printk(KERN_INFO "PROFILE: lodging TIMER2 @ %dHz as profile timer\n", PROFILEHZ);
 
 	/* Set up TIMER 2 as high speed profile clock */
 	mcf_proftp = (volatile struct mcftimer *) (MCF_MBAR + MCFTIMER_BASE2);

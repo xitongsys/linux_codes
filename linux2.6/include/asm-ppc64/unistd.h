@@ -202,19 +202,19 @@
 #define __NR_vfork		189
 #define __NR_ugetrlimit		190	/* SuS compliant getrlimit */
 #define __NR_readahead		191
-#define __NR_mmap2		192
-#define __NR_truncate64		193
-#define __NR_ftruncate64	194
-#define __NR_stat64		195
-#define __NR_lstat64		196
-#define __NR_fstat64		197
+/* #define __NR_mmap2		192	32bit only */
+/* #define __NR_truncate64	193	32bit only */
+/* #define __NR_ftruncate64	194	32bit only */
+/* #define __NR_stat64		195	32bit only */
+/* #define __NR_lstat64		196	32bit only */
+/* #define __NR_fstat64		197	32bit only */
 #define __NR_pciconfig_read	198
 #define __NR_pciconfig_write	199
 #define __NR_pciconfig_iobase	200
 #define __NR_multiplexer	201
 #define __NR_getdents64		202
 #define __NR_pivot_root		203
-#define __NR_fcntl64		204
+/* #define __NR_fcntl64		204	32bit only */
 #define __NR_madvise		205
 #define __NR_mincore		206
 #define __NR_gettid		207
@@ -236,7 +236,7 @@
 #define __NR_sched_getaffinity	223
 /* 224 currently unused */
 #define __NR_tuxcall		225
-#define __NR_sendfile64		226
+/* #define __NR_sendfile64	226	32bit only */
 #define __NR_io_setup		227
 #define __NR_io_destroy		228
 #define __NR_io_getevents	229
@@ -246,9 +246,9 @@
 #define __NR_fadvise64		233
 #define __NR_exit_group		234
 #define __NR_lookup_dcookie	235
-#define __NR_sys_epoll_create	236
-#define __NR_sys_epoll_ctl	237
-#define __NR_sys_epoll_wait	238
+#define __NR_epoll_create	236
+#define __NR_epoll_ctl		237
+#define __NR_epoll_wait		238
 #define __NR_remap_file_pages	239
 #define __NR_timer_create	240
 #define __NR_timer_settime	241
@@ -264,8 +264,26 @@
 #define __NR_utimes		251
 #define __NR_statfs64		252
 #define __NR_fstatfs64		253
+/* #define __NR_fadvise64_64	254	32bit only */
+#define __NR_rtas		255
+/* Number 256 is reserved for sys_debug_setcontext */
+/* Number 257 is reserved for vserver */
+/* Number 258 is reserved for new sys_remap_file_pages */
+#define __NR_mbind		259
+#define __NR_get_mempolicy	260
+#define __NR_set_mempolicy	261
+#define __NR_mq_open		262
+#define __NR_mq_unlink		263
+#define __NR_mq_timedsend	264
+#define __NR_mq_timedreceive	265
+#define __NR_mq_notify		266
+#define __NR_mq_getsetattr	267
+#define __NR_kexec_load		268
+#define __NR_add_key		269
+#define __NR_request_key	270
+#define __NR_keyctl		271
 
-#define __NR_syscalls		254
+#define __NR_syscalls		272
 #ifdef __KERNEL__
 #define NR_syscalls	__NR_syscalls
 #endif
@@ -287,6 +305,7 @@
 		register unsigned long __sc_5  __asm__ ("r5");		\
 		register unsigned long __sc_6  __asm__ ("r6");		\
 		register unsigned long __sc_7  __asm__ ("r7");		\
+		register unsigned long __sc_8  __asm__ ("r8");		\
 									\
 		__sc_loadargs_##nr(name, args);				\
 		__asm__ __volatile__					\
@@ -295,10 +314,10 @@
 			: "=&r" (__sc_0),				\
 			  "=&r" (__sc_3),  "=&r" (__sc_4),		\
 			  "=&r" (__sc_5),  "=&r" (__sc_6),		\
-			  "=&r" (__sc_7)				\
+			  "=&r" (__sc_7),  "=&r" (__sc_8)		\
 			: __sc_asm_input_##nr				\
 			: "cr0", "ctr", "memory",			\
-			  "r8", "r9", "r10","r11", "r12");		\
+			        "r9", "r10","r11", "r12");		\
 		__sc_ret = __sc_3;					\
 		__sc_err = __sc_0;					\
 	}								\
@@ -326,6 +345,9 @@
 #define __sc_loadargs_5(name, arg1, arg2, arg3, arg4, arg5)		\
 	__sc_loadargs_4(name, arg1, arg2, arg3, arg4);			\
 	__sc_7 = (unsigned long) (arg5)
+#define __sc_loadargs_6(name, arg1, arg2, arg3, arg4, arg5, arg6)	\
+	__sc_loadargs_5(name, arg1, arg2, arg3, arg4, arg5);		\
+	__sc_8 = (unsigned long) (arg6)
 
 #define __sc_asm_input_0 "0" (__sc_0)
 #define __sc_asm_input_1 __sc_asm_input_0, "1" (__sc_3)
@@ -333,6 +355,7 @@
 #define __sc_asm_input_3 __sc_asm_input_2, "3" (__sc_5)
 #define __sc_asm_input_4 __sc_asm_input_3, "4" (__sc_6)
 #define __sc_asm_input_5 __sc_asm_input_4, "5" (__sc_7)
+#define __sc_asm_input_6 __sc_asm_input_5, "6" (__sc_8)
 
 #define _syscall0(type,name)						\
 type name(void)								\
@@ -369,6 +392,11 @@ type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5)	\
 {									\
 	__syscall_nr(5, type, name, arg1, arg2, arg3, arg4, arg5);	\
 }
+#define _syscall6(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4,type5,arg5,type6,arg6) \
+type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5, type6 arg6)	\
+{									\
+	__syscall_nr(6, type, name, arg1, arg2, arg3, arg4, arg5, arg6);	\
+}
 
 #ifdef __KERNEL_SYSCALLS__
 
@@ -383,17 +411,60 @@ type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5)	\
 /*
  * System call prototypes.
  */
-extern pid_t setsid(void);
-extern int write(int fd, const char *buf, off_t count);
-extern int read(int fd, char *buf, off_t count);
-extern off_t lseek(int fd, off_t offset, int count);
-extern int dup(int fd);
-extern int execve(const char *file, char **argv, char **envp);
-extern int open(const char *file, int flag, int mode);
-extern int close(int fd);
-extern pid_t waitpid(pid_t pid, int *wait_stat, int options);
+static inline _syscall3(int, execve, __const__ char *, file, char **, argv,
+			char **,envp)
 
 #endif /* __KERNEL_SYSCALLS__ */
+
+#ifdef __KERNEL__
+
+#include <linux/types.h>
+#include <linux/compiler.h>
+#include <linux/linkage.h>
+
+#define __ARCH_WANT_IPC_PARSE_VERSION
+#define __ARCH_WANT_OLD_READDIR
+#define __ARCH_WANT_STAT64
+#define __ARCH_WANT_SYS_ALARM
+#define __ARCH_WANT_SYS_GETHOSTNAME
+#define __ARCH_WANT_SYS_PAUSE
+#define __ARCH_WANT_SYS_SGETMASK
+#define __ARCH_WANT_SYS_SIGNAL
+#define __ARCH_WANT_SYS_TIME
+#define __ARCH_WANT_COMPAT_SYS_TIME
+#define __ARCH_WANT_SYS_UTIME
+#define __ARCH_WANT_SYS_WAITPID
+#define __ARCH_WANT_SYS_SOCKETCALL
+#define __ARCH_WANT_SYS_FADVISE64
+#define __ARCH_WANT_SYS_GETPGRP
+#define __ARCH_WANT_SYS_LLSEEK
+#define __ARCH_WANT_SYS_NICE
+#define __ARCH_WANT_SYS_OLD_GETRLIMIT
+#define __ARCH_WANT_SYS_OLDUMOUNT
+#define __ARCH_WANT_SYS_SIGPENDING
+#define __ARCH_WANT_SYS_SIGPROCMASK
+#define __ARCH_WANT_SYS_RT_SIGACTION
+
+unsigned long sys_mmap(unsigned long addr, size_t len, unsigned long prot,
+		       unsigned long flags, unsigned long fd, off_t offset);
+struct pt_regs;
+int sys_execve(unsigned long a0, unsigned long a1, unsigned long a2,
+		unsigned long a3, unsigned long a4, unsigned long a5,
+		struct pt_regs *regs);
+int sys_clone(unsigned long clone_flags, unsigned long p2, unsigned long p3,
+		unsigned long p4, unsigned long p5, unsigned long p6,
+		struct pt_regs *regs);
+int sys_fork(unsigned long p1, unsigned long p2, unsigned long p3,
+		unsigned long p4, unsigned long p5, unsigned long p6,
+		struct pt_regs *regs);
+int sys_vfork(unsigned long p1, unsigned long p2, unsigned long p3,
+		unsigned long p4, unsigned long p5, unsigned long p6,
+		struct pt_regs *regs);
+int sys_pipe(int __user *fildes);
+int sys_ptrace(long request, long pid, long addr, long data);
+struct sigaction;
+long sys_rt_sigaction(int sig, const struct sigaction __user *act,
+		      struct sigaction __user *oact, size_t sigsetsize);
 
 /*
  * "Conditional" syscalls
@@ -402,6 +473,8 @@ extern pid_t waitpid(pid_t pid, int *wait_stat, int options);
  * but it doesn't work on all toolchains, so we just do it by hand
  */
 #define cond_syscall(x) asm(".weak\t." #x "\n\t.set\t." #x ",.sys_ni_syscall");
+
+#endif		/* __KERNEL__ */
 
 #endif		/* __ASSEMBLY__ */
 

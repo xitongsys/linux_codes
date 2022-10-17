@@ -16,13 +16,14 @@
  ********************************************************************/
 
 #include <linux/config.h>
+#include <linux/types.h>
 #include <asm/udbg.h>
 #include <stdarg.h>
 
 #define PPCDBG_BITVAL(X)     ((1UL)<<((unsigned long)(X)))
 
 /* Defined below are the bit positions of various debug flags in the
- * debug_switch variable (defined in naca.h).
+ * ppc64_debug_switch variable.
  * -- When adding new values, please enter them into trace names below -- 
  *
  * Values 62 & 63 can be used to stress the hardware page table management
@@ -64,6 +65,8 @@
 
 #define PPCDBG_NUM_FLAGS     64
 
+extern u64 ppc64_debug_switch;
+
 #ifdef WANT_PPCDBG_TAB
 /* A table of debug switch names to allow name lookup in xmon 
  * (and whoever else wants it.
@@ -95,24 +98,11 @@ extern char *trace_names[64];
 #define ppcdebugset(FLAGS) (udbg_ifdebug(FLAGS))
 #define PPCDBG_BINFMT (test_thread_flag(TIF_32BIT) ? PPCDBG_BINFMT32 : PPCDBG_BINFMT64)
 
-#ifdef CONFIG_XMON
-#define PPCDBG_ENTER_DEBUGGER() xmon(0)
-#define PPCDBG_ENTER_DEBUGGER_REGS(X) xmon(X)
-#endif
-
 #else
 #define PPCDBG(...) do {;} while (0)
 #define PPCDBGCALL(FLAGS,FUNCTION) do {;} while (0)
 #define ifppcdebug(...) if (0)
 #define ppcdebugset(FLAGS) (0)
 #endif /* CONFIG_PPCDBG */
-
-#ifndef PPCDBG_ENTER_DEBUGGER
-#define PPCDBG_ENTER_DEBUGGER() do {;} while(0)
-#endif
-
-#ifndef PPCDBG_ENTER_DEBUGGER_REGS
-#define PPCDBG_ENTER_DEBUGGER_REGS(A) do {;} while(0)
-#endif
 
 #endif /*__PPCDEBUG_H */

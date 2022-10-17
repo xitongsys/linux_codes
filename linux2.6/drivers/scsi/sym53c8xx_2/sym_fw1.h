@@ -22,32 +22,19 @@
  *
  *-----------------------------------------------------------------------------
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
- * combined work to also be released under the terms of the GPL, the terms
- * and conditions of this License will apply in addition to those of the
- * GPL with the exception of any terms or conditions of this License that
- * conflict with, or are expressly prohibited by, the GPL.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHORS AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 /*
@@ -234,10 +221,6 @@ struct SYM_FWB_SCR {
 struct SYM_FWZ_SCR {
 	u32 snooptest		[  9];
 	u32 snoopend		[  2];
-#ifdef SYM_OPT_NO_BUS_MEMORY_MAPPING
-	u32 start_ram		[  1];
-	u32 scripta0_ba		[  4];
-#endif
 };
 
 static struct SYM_FWA_SCR SYM_FWA_SCR = {
@@ -1851,24 +1834,5 @@ static struct SYM_FWZ_SCR SYM_FWZ_SCR = {
 	 */
 	SCR_INT,
 		99,
-#ifdef SYM_OPT_NO_BUS_MEMORY_MAPPING
-	/*
-	 *  We may use MEMORY MOVE instructions to load the on chip-RAM,
-	 *  if it happens that mapping PCI memory is not possible.
-	 *  But writing the RAM from the CPU is the preferred method, 
-	 *  since PCI 2.2 seems to disallow PCI self-mastering.
-	 */
-}/*-------------------------< START_RAM >------------------------*/,{
-	/*
-	 *  Load the script into on-chip RAM, 
-	 *  and jump to start point.
-	 */
-	SCR_COPY (sizeof(struct SYM_FWA_SCR)),
-}/*-------------------------< SCRIPTA0_BA >----------------------*/,{
-		0,
-		PADDR_A (start),
-	SCR_JUMP,
-		PADDR_A (init),
-#endif /* SYM_OPT_NO_BUS_MEMORY_MAPPING */
 }/*--------------------------<>----------------------------------*/
 };

@@ -14,23 +14,16 @@
  */
 #include <linux/config.h>
 #include <linux/module.h>
-#include <linux/types.h>
-#include <linux/kernel.h>
 #include <linux/signal.h>
-#include <linux/sched.h>
-#include <linux/mm.h>
 #include <linux/spinlock.h>
 #include <linux/personality.h>
 #include <linux/ptrace.h>
-#include <linux/elf.h>
-#include <linux/interrupt.h>
 #include <linux/kallsyms.h>
 #include <linux/init.h>
 
 #include <asm/atomic.h>
+#include <asm/cacheflush.h>
 #include <asm/io.h>
-#include <asm/pgalloc.h>
-#include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -49,6 +42,17 @@ const char *processor_modes[]=
 };
 
 static const char *handler[]= { "prefetch abort", "data abort", "address exception", "interrupt" };
+
+#ifdef CONFIG_DEBUG_USER
+unsigned int user_debug;
+
+static int __init user_debug_setup(char *str)
+{
+	get_option(&str, &user_debug);
+	return 1;
+}
+__setup("user_debug=", user_debug_setup);
+#endif
 
 void dump_backtrace_entry(unsigned long where, unsigned long from)
 {
@@ -193,9 +197,10 @@ void show_stack(struct task_struct *tsk, unsigned long *sp)
 		asm("mov%? %0, fp" : "=r" (fp));
 
 	c_backtrace(fp, 0x10);
+	barrier();
 }
 
-spinlock_t die_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(die_lock);
 
 /*
  * This function is protected against re-entrancy.
@@ -236,7 +241,7 @@ void die_if_kernel(const char *str, struct pt_regs *regs, int err)
 }
 
 static LIST_HEAD(undef_hook);
-static spinlock_t undef_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(undef_lock);
 
 void register_undef_hook(struct undef_hook *hook)
 {
@@ -258,7 +263,7 @@ asmlinkage void do_undefinstr(struct pt_regs *regs)
 	unsigned int instr;
 	struct undef_hook *hook;
 	siginfo_t info;
-	void *pc;
+	void __user *pc;
 
 	/*
 	 * According to the ARM ARM, PC is 2 or 4 bytes ahead,
@@ -267,11 +272,11 @@ asmlinkage void do_undefinstr(struct pt_regs *regs)
 	 */
 	regs->ARM_pc -= correction;
 
-	pc = (void *)instruction_pointer(regs);
+	pc = (void __user *)instruction_pointer(regs);
 	if (thumb_mode(regs)) {
-		get_user(instr, (u16 *)pc);
+		get_user(instr, (u16 __user *)pc);
 	} else {
-		get_user(instr, (u32 *)pc);
+		get_user(instr, (u32 __user *)pc);
 	}
 
 	spin_lock_irq(&undef_lock);
@@ -287,9 +292,11 @@ asmlinkage void do_undefinstr(struct pt_regs *regs)
 	spin_unlock_irq(&undef_lock);
 
 #ifdef CONFIG_DEBUG_USER
-	printk(KERN_INFO "%s (%d): undefined instruction: pc=%p\n",
-		current->comm, current->pid, pc);
-	dump_instr(regs);
+	if (user_debug & UDBG_UNDEFINED) {
+		printk(KERN_INFO "%s (%d): undefined instruction: pc=%p\n",
+			current->comm, current->pid, pc);
+		dump_instr(regs);
+	}
 #endif
 
 	current->thread.error_code = 0;
@@ -321,19 +328,10 @@ asmlinkage void do_unexp_fiq (struct pt_regs *regs)
  */
 asmlinkage void bad_mode(struct pt_regs *regs, int reason, int proc_mode)
 {
-	unsigned int vectors = vectors_base();
-
 	console_verbose();
 
 	printk(KERN_CRIT "Bad mode in %s handler detected: mode %s\n",
 		handler[reason], processor_modes[proc_mode]);
-
-	/*
-	 * Dump out the vectors and stub routines.  Maybe a better solution
-	 * would be to dump them out only if we detect that they are corrupted.
-	 */
-	dump_mem(KERN_CRIT "Vectors: ", vectors, vectors + 0x40);
-	dump_mem(KERN_CRIT "Stubs: ", vectors + 0x200, vectors + 0x4b8);
 
 	die("Oops - bad mode", regs, 0);
 	local_irq_disable();
@@ -351,15 +349,17 @@ static int bad_syscall(int n, struct pt_regs *regs)
 	}
 
 #ifdef CONFIG_DEBUG_USER
-	printk(KERN_ERR "[%d] %s: obsolete system call %08x.\n",
-		current->pid, current->comm, n);
-	dump_instr(regs);
+	if (user_debug & UDBG_SYSCALL) {
+		printk(KERN_ERR "[%d] %s: obsolete system call %08x.\n",
+			current->pid, current->comm, n);
+		dump_instr(regs);
+	}
 #endif
 
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
 	info.si_code  = ILL_ILLTRP;
-	info.si_addr  = (void *)instruction_pointer(regs) -
+	info.si_addr  = (void __user *)instruction_pointer(regs) -
 			 (thumb_mode(regs) ? 2 : 4);
 
 	force_sig_info(SIGILL, &info, current);
@@ -372,7 +372,7 @@ do_cache_op(unsigned long start, unsigned long end, int flags)
 {
 	struct vm_area_struct *vma;
 
-	if (end < start)
+	if (end < start || flags)
 		return;
 
 	vma = find_vma(current->active_mm, start);
@@ -382,7 +382,7 @@ do_cache_op(unsigned long start, unsigned long end, int flags)
 		if (end > vma->vm_end)
 			end = vma->vm_end;
 
-		flush_cache_range(vma, start, end);
+		flush_cache_user_range(vma, start, end);
 	}
 }
 
@@ -393,6 +393,7 @@ do_cache_op(unsigned long start, unsigned long end, int flags)
 #define NR(x) ((__ARM_NR_##x) - __ARM_NR_BASE)
 asmlinkage int arm_syscall(int no, struct pt_regs *regs)
 {
+	struct thread_info *thread = current_thread_info();
 	siginfo_t info;
 
 	if ((no >> 16) != 0x9f)
@@ -417,7 +418,7 @@ asmlinkage int arm_syscall(int no, struct pt_regs *regs)
 
 	/*
 	 * Flush a region from virtual address 'r0' to virtual address 'r1'
-	 * _inclusive_.  There is no alignment requirement on either address;
+	 * _exclusive_.  There is no alignment requirement on either address;
 	 * user space does not need to know the hardware cache layout.
 	 *
 	 * r2 contains flags.  It should ALWAYS be passed as ZERO until it
@@ -445,6 +446,17 @@ asmlinkage int arm_syscall(int no, struct pt_regs *regs)
 		regs->ARM_cpsr |= MODE32_BIT;
 		return regs->ARM_r0;
 
+	case NR(set_tls):
+		thread->tp_value = regs->ARM_r0;
+		/*
+		 * Our user accessible TLS ptr is located at 0xffff0ffc.
+		 * On SMP read access to this address must raise a fault
+		 * and be emulated from the data abort handler.
+		 * m
+		 */
+		*((unsigned long *)0xffff0ffc) = thread->tp_value;
+		return 0;
+
 	default:
 		/* Calls 9f00xx..9f07ff are defined to return -ENOSYS
 		   if not implemented, rather than raising SIGILL.  This
@@ -459,17 +471,20 @@ asmlinkage int arm_syscall(int no, struct pt_regs *regs)
 	 * experience shows that these seem to indicate that
 	 * something catastrophic has happened
 	 */
-	printk("[%d] %s: arm syscall %d\n", current->pid, current->comm, no);
-	dump_instr(regs);
-	if (user_mode(regs)) {
-		show_regs(regs);
-		c_backtrace(regs->ARM_fp, processor_mode(regs));
+	if (user_debug & UDBG_SYSCALL) {
+		printk("[%d] %s: arm syscall %d\n",
+		       current->pid, current->comm, no);
+		dump_instr(regs);
+		if (user_mode(regs)) {
+			show_regs(regs);
+			c_backtrace(regs->ARM_fp, processor_mode(regs));
+		}
 	}
 #endif
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
 	info.si_code  = ILL_ILLTRP;
-	info.si_addr  = (void *)instruction_pointer(regs) -
+	info.si_addr  = (void __user *)instruction_pointer(regs) -
 			 (thumb_mode(regs) ? 2 : 4);
 
 	force_sig_info(SIGILL, &info, current);
@@ -483,6 +498,7 @@ void __bad_xchg(volatile void *ptr, int size)
 		__builtin_return_address(0), ptr, size);
 	BUG();
 }
+EXPORT_SYMBOL(__bad_xchg);
 
 /*
  * A data abort trap was taken, but we did not handle the instruction.
@@ -495,16 +511,18 @@ baddataabort(int code, unsigned long instr, struct pt_regs *regs)
 	siginfo_t info;
 
 #ifdef CONFIG_DEBUG_USER
-	printk(KERN_ERR "[%d] %s: bad data abort: code %d instr 0x%08lx\n",
-		current->pid, current->comm, code, instr);
-	dump_instr(regs);
-	show_pte(current->mm, addr);
+	if (user_debug & UDBG_BADABORT) {
+		printk(KERN_ERR "[%d] %s: bad data abort: code %d instr 0x%08lx\n",
+			current->pid, current->comm, code, instr);
+		dump_instr(regs);
+		show_pte(current->mm, addr);
+	}
 #endif
 
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
 	info.si_code  = ILL_ILLOPC;
-	info.si_addr  = (void *)addr;
+	info.si_addr  = (void __user *)addr;
 
 	force_sig_info(SIGILL, &info, current);
 	die_if_kernel("unknown data abort code", regs, instr);
@@ -518,12 +536,14 @@ volatile void __bug(const char *file, int line, void *data)
 	printk("\n");
 	*(int *)0 = 0;
 }
+EXPORT_SYMBOL(__bug);
 
 void __readwrite_bug(const char *fn)
 {
-	printk("%s called, but not implemented", fn);
+	printk("%s called, but not implemented\n", fn);
 	BUG();
 }
+EXPORT_SYMBOL(__readwrite_bug);
 
 void __pte_error(const char *file, int line, unsigned long val)
 {
@@ -545,6 +565,7 @@ asmlinkage void __div0(void)
 	printk("Division by zero in kernel.\n");
 	dump_stack();
 }
+EXPORT_SYMBOL(__div0);
 
 void abort(void)
 {
@@ -553,16 +574,13 @@ void abort(void)
 	/* if that doesn't kill us, halt */
 	panic("Oops failed to kill thread");
 }
+EXPORT_SYMBOL(abort);
 
 void __init trap_init(void)
 {
-	extern void __trap_init(unsigned long);
-	unsigned long base = vectors_base();
+	extern void __trap_init(void);
 
-	__trap_init(base);
-	flush_icache_range(base, base + PAGE_SIZE);
-	if (base != 0)
-		printk(KERN_DEBUG "Relocating machine vectors to 0x%08lx\n",
-			base);
+	__trap_init();
+	flush_icache_range(0xffff0000, 0xffff0000 + PAGE_SIZE);
 	modify_domain(DOMAIN_USER, DOMAIN_CLIENT);
 }

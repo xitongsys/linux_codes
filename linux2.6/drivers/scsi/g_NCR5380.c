@@ -107,7 +107,7 @@
 #include <linux/sched.h>
 #include <linux/blkdev.h>
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 #include "g_NCR5380.h"
 #include "NCR5380.h"
 #include <linux/stat.h>
@@ -290,6 +290,7 @@ int __init generic_NCR5380_detect(Scsi_Host_Template * tpnt)
 	static int current_override = 0;
 	int count, i;
 	unsigned int *ports;
+	unsigned long region_size = 16;
 	static unsigned int __initdata ncr_53c400a_ports[] = {
 		0x280, 0x290, 0x300, 0x310, 0x330, 0x340, 0x348, 0x350, 0
 	};
@@ -354,7 +355,7 @@ int __init generic_NCR5380_detect(Scsi_Host_Template * tpnt)
 		if (!(overrides[current_override].NCR5380_map_name))
 			continue;
 
-		ports = 0;
+		ports = NULL;
 		switch (overrides[current_override].board) {
 		case BOARD_NCR5380:
 			flags = FLAG_NO_PSEUDO_DMA;
@@ -420,6 +421,7 @@ int __init generic_NCR5380_detect(Scsi_Host_Template * tpnt)
 			/* Not a 53C400A style setup - just grab */
 			if(!(request_region(overrides[current_override].NCR5380_map_name, NCR5380_region_size, "ncr5380")))
 				continue;
+			region_size = NCR5380_region_size;
 		}
 #else
 		if(!request_mem_region(overrides[current_override].NCR5380_map_name, NCR5380_region_size, "ncr5380"))
@@ -428,7 +430,7 @@ int __init generic_NCR5380_detect(Scsi_Host_Template * tpnt)
 		instance = scsi_register(tpnt, sizeof(struct NCR5380_hostdata));
 		if (instance == NULL) {
 #ifndef CONFIG_SCSI_G_NCR5380_MEM
-			release_region(overrides[current_override].NCR5380_map_name, NCR5380_region_size);
+			release_region(overrides[current_override].NCR5380_map_name, region_size);
 #else
 			release_mem_region(overrides[current_override].NCR5380_map_name, NCR5380_region_size);
 #endif
@@ -436,6 +438,9 @@ int __init generic_NCR5380_detect(Scsi_Host_Template * tpnt)
 		}
 
 		instance->NCR5380_instance_name = overrides[current_override].NCR5380_map_name;
+#ifndef CONFIG_SCSI_G_NCR5380_MEM
+		instance->n_io_port = region_size;
+#endif
 
 		NCR5380_init(instance, flags);
 
@@ -445,7 +450,7 @@ int __init generic_NCR5380_detect(Scsi_Host_Template * tpnt)
 			instance->irq = NCR5380_probe_irq(instance, 0xffff);
 
 		if (instance->irq != SCSI_IRQ_NONE)
-			if (request_irq(instance->irq, generic_NCR5380_intr, SA_INTERRUPT, "NCR5380", NULL)) {
+			if (request_irq(instance->irq, generic_NCR5380_intr, SA_INTERRUPT, "NCR5380", instance)) {
 				printk(KERN_WARNING "scsi%d : IRQ%d not free, interrupts disabled\n", instance->host_no, instance->irq);
 				instance->irq = SCSI_IRQ_NONE;
 			}
@@ -496,15 +501,17 @@ int generic_NCR5380_release_resources(struct Scsi_Host *instance)
 {
 	NCR5380_local_declare();
 	NCR5380_setup(instance);
+	
+	if (instance->irq != SCSI_IRQ_NONE)
+		free_irq(instance->irq, NULL);
+	NCR5380_exit(instance);
 
 #ifndef CONFIG_SCSI_G_NCR5380_MEM
-	release_region(instance->NCR5380_instance_name, NCR5380_region_size);
+	release_region(instance->NCR5380_instance_name, instance->n_io_port);
 #else
 	release_mem_region(instance->NCR5380_instance_name, NCR5380_region_size);
 #endif
 
-	if (instance->irq != SCSI_IRQ_NONE)
-		free_irq(instance->irq, NULL);
 
 	return 0;
 }
@@ -913,13 +920,13 @@ static Scsi_Host_Template driver_template = {
 #include <linux/module.h>
 #include "scsi_module.c"
 
-MODULE_PARM(ncr_irq, "i");
-MODULE_PARM(ncr_dma, "i");
-MODULE_PARM(ncr_addr, "i");
-MODULE_PARM(ncr_5380, "i");
-MODULE_PARM(ncr_53c400, "i");
-MODULE_PARM(ncr_53c400a, "i");
-MODULE_PARM(dtc_3181e, "i");
+module_param(ncr_irq, int, 0);
+module_param(ncr_dma, int, 0);
+module_param(ncr_addr, int, 0);
+module_param(ncr_5380, int, 0);
+module_param(ncr_53c400, int, 0);
+module_param(ncr_53c400a, int, 0);
+module_param(dtc_3181e, int, 0);
 MODULE_LICENSE("GPL");
 
 

@@ -14,7 +14,8 @@
 #define _LINUX_IPV6_ROUTE_H
 
 #define RTF_DEFAULT	0x00010000	/* default - learned via ND	*/
-#define RTF_ALLONLINK	0x00020000	/* fallback, no routers on link	*/
+#define RTF_ALLONLINK	0x00020000	/* (deprecated and will be removed)
+					   fallback, no routers on link */
 #define RTF_ADDRCONF	0x00040000	/* addrconf route - RA		*/
 #define RTF_PREFIX_RT	0x00080000	/* A prefix only route - RA	*/
 
@@ -24,7 +25,6 @@
 #define RTF_CACHE	0x01000000	/* cache entry			*/
 #define RTF_FLOW	0x02000000	/* flow significant route	*/
 #define RTF_POLICY	0x04000000	/* policy route			*/
-#define RTF_NDISC	0x08000000	/* ndisc route			*/
 
 #define RTF_LOCAL	0x80000000
 

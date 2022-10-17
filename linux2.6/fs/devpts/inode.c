@@ -2,7 +2,7 @@
  *
  * linux/fs/devpts/inode.c
  *
- *  Copyright 1998 H. Peter Anvin -- All Rights Reserved
+ *  Copyright 1998-2004 H. Peter Anvin -- All Rights Reserved
  *
  * This file is part of the Linux kernel and is made available under
  * the terms of the GNU General Public License, version 2, or at your
@@ -16,9 +16,29 @@
 #include <linux/sched.h>
 #include <linux/namei.h>
 #include <linux/mount.h>
-#include "xattr.h"
+#include <linux/tty.h>
+#include <linux/devpts_fs.h>
+#include <linux/xattr.h>
 
 #define DEVPTS_SUPER_MAGIC 0x1cd1
+
+extern struct xattr_handler devpts_xattr_security_handler;
+
+static struct xattr_handler *devpts_xattr_handlers[] = {
+#ifdef CONFIG_DEVPTS_FS_SECURITY
+	&devpts_xattr_security_handler,
+#endif
+	NULL
+};
+
+static struct inode_operations devpts_file_inode_operations = {
+#ifdef CONFIG_DEVPTS_FS_XATTR
+	.setxattr	= generic_setxattr,
+	.getxattr	= generic_getxattr,
+	.listxattr	= generic_listxattr,
+	.removexattr	= generic_removexattr,
+#endif
+};
 
 static struct vfsmount *devpts_mnt;
 static struct dentry *devpts_root;
@@ -82,6 +102,8 @@ devpts_fill_super(struct super_block *s, void *data, int silent)
 	s->s_blocksize_bits = 10;
 	s->s_magic = DEVPTS_SUPER_MAGIC;
 	s->s_op = &devpts_sops;
+	s->s_xattr = devpts_xattr_handlers;
+	s->s_time_gran = 1;
 
 	inode = new_inode(s);
 	if (!inode)
@@ -126,25 +148,27 @@ static struct file_system_type devpts_fs_type = {
 
 static struct dentry *get_node(int num)
 {
-	char s[10];
+	char s[12];
 	struct dentry *root = devpts_root;
 	down(&root->d_inode->i_sem);
 	return lookup_one_len(s, root, sprintf(s, "%d", num));
 }
 
-static struct inode_operations devpts_file_inode_operations = {
-	.setxattr	= devpts_setxattr,
-	.getxattr	= devpts_getxattr,
-	.listxattr	= devpts_listxattr,
-	.removexattr	= devpts_removexattr,
-};
-
-void devpts_pty_new(int number, dev_t device)
+int devpts_pty_new(struct tty_struct *tty)
 {
+	int number = tty->index;
+	struct tty_driver *driver = tty->driver;
+	dev_t device = MKDEV(driver->major, driver->minor_start+number);
 	struct dentry *dentry;
 	struct inode *inode = new_inode(devpts_mnt->mnt_sb);
+
+	/* We're supposed to be given the slave end of a pty */
+	BUG_ON(driver->type != TTY_DRIVER_TYPE_PTY);
+	BUG_ON(driver->subtype != PTY_TYPE_SLAVE);
+
 	if (!inode)
-		return;
+		return -ENOMEM;
+
 	inode->i_ino = number+2;
 	inode->i_blksize = 1024;
 	inode->i_uid = config.setuid ? config.uid : current->fsuid;
@@ -152,11 +176,32 @@ void devpts_pty_new(int number, dev_t device)
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 	init_special_inode(inode, S_IFCHR|config.mode, device);
 	inode->i_op = &devpts_file_inode_operations;
+	inode->u.generic_ip = tty;
 
 	dentry = get_node(number);
 	if (!IS_ERR(dentry) && !dentry->d_inode)
 		d_instantiate(dentry, inode);
+
 	up(&devpts_root->d_inode->i_sem);
+
+	return 0;
+}
+
+struct tty_struct *devpts_get_tty(int number)
+{
+	struct dentry *dentry = get_node(number);
+	struct tty_struct *tty;
+
+	tty = NULL;
+	if (!IS_ERR(dentry)) {
+		if (dentry->d_inode)
+			tty = dentry->d_inode->u.generic_ip;
+		dput(dentry);
+	}
+
+	up(&devpts_root->d_inode->i_sem);
+
+	return tty;
 }
 
 void devpts_pty_kill(int number)
@@ -177,10 +222,7 @@ void devpts_pty_kill(int number)
 
 static int __init init_devpts_fs(void)
 {
-	int err = init_devpts_xattr();
-	if (err)
-		return err;
-	err = register_filesystem(&devpts_fs_type);
+	int err = register_filesystem(&devpts_fs_type);
 	if (!err) {
 		devpts_mnt = kern_mount(&devpts_fs_type);
 		if (IS_ERR(devpts_mnt))
@@ -193,7 +235,6 @@ static void __exit exit_devpts_fs(void)
 {
 	unregister_filesystem(&devpts_fs_type);
 	mntput(devpts_mnt);
-	exit_devpts_xattr();
 }
 
 module_init(init_devpts_fs)

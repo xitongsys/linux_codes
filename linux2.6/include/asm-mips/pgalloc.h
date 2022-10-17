@@ -56,9 +56,7 @@ static inline pte_t *pte_alloc_one_kernel(struct mm_struct *mm,
 {
 	pte_t *pte;
 
-	pte = (pte_t *) __get_free_pages(GFP_KERNEL|__GFP_REPEAT, PTE_ORDER);
-	if (pte)
-		clear_page(pte);
+	pte = (pte_t *) __get_free_pages(GFP_KERNEL|__GFP_REPEAT|__GFP_ZERO, PTE_ORDER);
 
 	return pte;
 }
@@ -86,7 +84,6 @@ static inline void pte_free(struct page *pte)
 }
 
 #define __pte_free_tlb(tlb,pte)		tlb_remove_page((tlb),(pte))
-#define __pmd_free_tlb(tlb,x)		do { } while (0)
 
 #ifdef CONFIG_MIPS32
 #define pgd_populate(mm, pmd, pte)	BUG()
@@ -97,6 +94,7 @@ static inline void pte_free(struct page *pte)
  */
 #define pmd_alloc_one(mm, addr)		({ BUG(); ((pmd_t *)2); })
 #define pmd_free(x)			do { } while (0)
+#define __pmd_free_tlb(tlb,x)		do { } while (0)
 #endif
 
 #ifdef CONFIG_MIPS64
@@ -118,13 +116,9 @@ static inline void pmd_free(pmd_t *pmd)
 	free_pages((unsigned long)pmd, PMD_ORDER);
 }
 
-#endif
+#define __pmd_free_tlb(tlb,x)	pmd_free(x)
 
-/*
- * Used for the b0rked handling of kernel pagetables on the 64-bit kernel.
- */
-extern pte_t kptbl[(PAGE_SIZE << PGD_ORDER)/sizeof(pte_t)];
-extern pmd_t kpmdtbl[PTRS_PER_PMD];
+#endif
 
 #define check_pgt_cache()	do { } while (0)
 

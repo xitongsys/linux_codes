@@ -1,5 +1,5 @@
 /*
- *   Copyright (c) International Business Machines Corp., 2000-2002
+ *   Copyright (C) International Business Machines Corp., 2000-2004
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@
  */
 
 #include <linux/fs.h>
+#include <linux/quotaops.h>
 #include "jfs_incore.h"
 #include "jfs_filsys.h"
 #include "jfs_imap.h"
@@ -60,6 +61,17 @@ struct inode *ialloc(struct inode *parent, umode_t mode)
 	} else
 		inode->i_gid = current->fsgid;
 
+	/*
+	 * Allocate inode to quota.
+	 */
+	if (DQUOT_ALLOC_INODE(inode)) {
+		DQUOT_DROP(inode);
+		inode->i_flags |= S_NOQUOTA;
+		inode->i_nlink = 0;
+		iput(inode);
+		return NULL;
+	}
+
 	inode->i_mode = mode;
 	if (S_ISDIR(mode))
 		jfs_inode->mode2 = IDIRECTORY | mode;
@@ -72,7 +84,6 @@ struct inode *ialloc(struct inode *parent, umode_t mode)
 	inode->i_generation = JFS_SBI(sb)->gengen++;
 
 	jfs_inode->cflag = 0;
-	set_cflag(COMMIT_New, inode);
 
 	/* Zero remaining fields */
 	memset(&jfs_inode->acl, 0, sizeof(dxd_t));

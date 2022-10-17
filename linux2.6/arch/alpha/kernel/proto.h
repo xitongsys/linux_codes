@@ -167,9 +167,6 @@ extern void entSys(void);
 extern void entUna(void);
 extern void entDbg(void);
 
-/* process.c */
-extern void cpu_idle(void) __attribute__((noreturn));
-
 /* ptrace.c */
 extern int ptrace_set_bpt (struct task_struct *child);
 extern int ptrace_cancel_bpt (struct task_struct *child);
@@ -203,9 +200,9 @@ extern struct mcheck_info
 	unsigned char extra;
 } __mcheck_info;
 
-#define mcheck_expected(cpu)	((void)(cpu), __mcheck_info.expected)
-#define mcheck_taken(cpu)	((void)(cpu), __mcheck_info.taken)
-#define mcheck_extra(cpu)	((void)(cpu), __mcheck_info.extra)
+#define mcheck_expected(cpu)	(*((void)(cpu), &__mcheck_info.expected))
+#define mcheck_taken(cpu)	(*((void)(cpu), &__mcheck_info.taken))
+#define mcheck_extra(cpu)	(*((void)(cpu), &__mcheck_info.extra))
 #endif
 
 extern void process_mcheck_info(unsigned long vector, unsigned long la_ptr,

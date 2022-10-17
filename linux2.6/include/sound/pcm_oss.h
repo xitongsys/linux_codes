@@ -31,7 +31,7 @@ struct _snd_pcm_oss_setup {
 		     direct:1,
 		     block:1,
 		     nonblock:1,
-		     wholefrag:1,
+		     partialfrag:1,
 		     nosilence:1;
 	unsigned int periods;
 	unsigned int period_size;
@@ -39,10 +39,10 @@ struct _snd_pcm_oss_setup {
 };
 
 typedef struct _snd_pcm_oss_runtime {
-	int params: 1,				/* format/parameter change */
-            prepare: 1,				/* need to prepare the operation */
-            trigger: 1,				/* trigger flag */
-            sync_trigger: 1;			/* sync trigger flag */
+	unsigned params: 1,			/* format/parameter change */
+		 prepare: 1,			/* need to prepare the operation */
+		 trigger: 1,			/* trigger flag */
+		 sync_trigger: 1;		/* sync trigger flag */
 	int rate;				/* requested rate */
 	int format;				/* requested OSS format */
 	unsigned int channels;			/* requested channels */
@@ -50,6 +50,7 @@ typedef struct _snd_pcm_oss_runtime {
 	unsigned int maxfrags;
 	unsigned int subdivision;		/* requested subdivision */
 	size_t period_bytes;			/* requested period size */
+	size_t period_frames;			/* period frames for poll */
 	size_t period_ptr;			/* actual write pointer to period */
 	unsigned int periods;
 	size_t buffer_bytes;			/* requested buffer size */
@@ -67,7 +68,7 @@ typedef struct _snd_pcm_oss_file {
 } snd_pcm_oss_file_t;
 
 typedef struct _snd_pcm_oss_substream {
-	int oss: 1;				/* oss mode */
+	unsigned oss: 1;			/* oss mode */
 	snd_pcm_oss_setup_t *setup;		/* active setup */
 	snd_pcm_oss_file_t *file;
 } snd_pcm_oss_substream_t;

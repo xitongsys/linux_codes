@@ -10,6 +10,7 @@
 
 #define IPT_CONNTRACK_STATE_SNAT (1 << (IP_CT_NUMBER + 1))
 #define IPT_CONNTRACK_STATE_DNAT (1 << (IP_CT_NUMBER + 2))
+#define IPT_CONNTRACK_STATE_UNTRACKED (1 << (IP_CT_NUMBER + 3))
 
 /* flags, invflags: */
 #define IPT_CONNTRACK_STATE	0x01
@@ -21,11 +22,32 @@
 #define IPT_CONNTRACK_STATUS	0x40
 #define IPT_CONNTRACK_EXPIRES	0x80
 
+/* This is exposed to userspace, so remains frozen in time. */
+struct ip_conntrack_old_tuple
+{
+	struct {
+		__u32 ip;
+		union {
+			__u16 all;
+		} u;
+	} src;
+
+	struct {
+		__u32 ip;
+		union {
+			__u16 all;
+		} u;
+
+		/* The protocol. */
+		u16 protonum;
+	} dst;
+};
+
 struct ipt_conntrack_info
 {
 	unsigned int statemask, statusmask;
 
-	struct ip_conntrack_tuple tuple[IP_CT_DIR_MAX];
+	struct ip_conntrack_old_tuple tuple[IP_CT_DIR_MAX];
 	struct in_addr sipmsk[IP_CT_DIR_MAX], dipmsk[IP_CT_DIR_MAX];
 
 	unsigned long expires_min, expires_max;

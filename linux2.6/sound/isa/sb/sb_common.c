@@ -33,12 +33,9 @@
 #include <asm/io.h>
 #include <asm/dma.h>
 
-#define chip_t sb_t
-
 MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>");
 MODULE_DESCRIPTION("ALSA lowlevel driver for Sound Blaster cards");
 MODULE_LICENSE("GPL");
-MODULE_CLASSES("{sound}");
 
 #define BUSY_LOOPS 100000
 
@@ -95,7 +92,7 @@ int snd_sbdsp_reset(sb_t *chip)
 	return -ENODEV;
 }
 
-int snd_sbdsp_version(sb_t * chip)
+static int snd_sbdsp_version(sb_t * chip)
 {
 	unsigned int result = -ENODEV;
 
@@ -185,10 +182,6 @@ static int snd_sbdsp_free(sb_t *chip)
 		release_resource(chip->res_port);
 		kfree_nocheck(chip->res_port);
 	}
-	if (chip->res_alt_port) {
-		release_resource(chip->res_alt_port);
-		kfree_nocheck(chip->res_alt_port);
-	}
 	if (chip->irq >= 0)
 		free_irq(chip->irq, (void *) chip);
 #ifdef CONFIG_ISA
@@ -201,13 +194,13 @@ static int snd_sbdsp_free(sb_t *chip)
 		free_dma(chip->dma16);
 	}
 #endif
-	snd_magic_kfree(chip);
+	kfree(chip);
 	return 0;
 }
 
 static int snd_sbdsp_dev_free(snd_device_t *device)
 {
-	sb_t *chip = snd_magic_cast(sb_t, device->device_data, return -ENXIO);
+	sb_t *chip = device->device_data;
 	return snd_sbdsp_free(chip);
 }
 
@@ -228,7 +221,7 @@ int snd_sbdsp_create(snd_card_t *card,
 
 	snd_assert(r_chip != NULL, return -EINVAL);
 	*r_chip = NULL;
-	chip = snd_magic_kcalloc(sb_t, 0, GFP_KERNEL);
+	chip = kcalloc(1, sizeof(*chip), GFP_KERNEL);
 	if (chip == NULL)
 		return -ENOMEM;
 	spin_lock_init(&chip->reg_lock);
@@ -243,6 +236,7 @@ int snd_sbdsp_create(snd_card_t *card,
 	if (request_irq(irq, irq_handler, hardware == SB_HW_ALS4000 ?
 			SA_INTERRUPT | SA_SHIRQ : SA_INTERRUPT,
 			"SoundBlaster", (void *) chip)) {
+		snd_printk(KERN_ERR "sb: can't grab irq %d\n", irq);
 		snd_sbdsp_free(chip);
 		return -EBUSY;
 	}
@@ -252,12 +246,14 @@ int snd_sbdsp_create(snd_card_t *card,
 		goto __skip_allocation;
 	
 	if ((chip->res_port = request_region(port, 16, "SoundBlaster")) == NULL) {
+		snd_printk(KERN_ERR "sb: can't grab port 0x%lx\n", port);
 		snd_sbdsp_free(chip);
 		return -EBUSY;
 	}
 
 #ifdef CONFIG_ISA
 	if (dma8 >= 0 && request_dma(dma8, "SoundBlaster - 8bit")) {
+		snd_printk(KERN_ERR "sb: can't grab DMA8 %d\n", dma8);
 		snd_sbdsp_free(chip);
 		return -EBUSY;
 	}
@@ -267,6 +263,7 @@ int snd_sbdsp_create(snd_card_t *card,
 			/* no duplex */
 			dma16 = -1;
 		} else if (request_dma(dma16, "SoundBlaster - 16bit")) {
+			snd_printk(KERN_ERR "sb: can't grab DMA16 %d\n", dma16);
 			snd_sbdsp_free(chip);
 			return -EBUSY;
 		}

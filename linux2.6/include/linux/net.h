@@ -21,6 +21,7 @@
 #include <linux/config.h>
 #include <linux/wait.h>
 #include <linux/stringify.h>
+#include <asm/socket.h>
 
 struct poll_table_struct;
 struct inode;
@@ -60,6 +61,34 @@ typedef enum {
 #define SOCK_ASYNC_NOSPACE	0
 #define SOCK_ASYNC_WAITDATA	1
 #define SOCK_NOSPACE		2
+
+#ifndef ARCH_HAS_SOCKET_TYPES
+/** sock_type - Socket types
+ * 
+ * When adding some new socket type please
+ * grep ARCH_HAS_SOCKET_TYPE include/asm-* /socket.h, at least MIPS
+ * overrides this enum for binary compat reasons.
+ * 
+ * @SOCK_STREAM - stream (connection) socket
+ * @SOCK_DGRAM - datagram (conn.less) socket
+ * @SOCK_RAW - raw socket
+ * @SOCK_RDM - reliably-delivered message
+ * @SOCK_SEQPACKET - sequential packet socket 
+ * @SOCK_PACKET - linux specific way of getting packets at the dev level.
+ *		  For writing rarp and other similar things on the user level.
+ */
+enum sock_type {
+	SOCK_STREAM	= 1,
+	SOCK_DGRAM	= 2,
+	SOCK_RAW	= 3,
+	SOCK_RDM	= 4,
+	SOCK_SEQPACKET	= 5,
+	SOCK_PACKET	= 10,
+};
+
+#define SOCK_MAX (SOCK_PACKET + 1)
+
+#endif /* ARCH_HAS_SOCKET_TYPES */
 
 /**
  *  struct socket - general BSD socket
@@ -120,9 +149,9 @@ struct proto_ops {
 	int		(*getsockopt)(struct socket *sock, int level,
 				      int optname, char __user *optval, int __user *optlen);
 	int		(*sendmsg)   (struct kiocb *iocb, struct socket *sock,
-				      struct msghdr *m, int total_len);
+				      struct msghdr *m, size_t total_len);
 	int		(*recvmsg)   (struct kiocb *iocb, struct socket *sock,
-				      struct msghdr *m, int total_len,
+				      struct msghdr *m, size_t total_len,
 				      int flags);
 	int		(*mmap)	     (struct file *file, struct socket *sock,
 				      struct vm_area_struct * vma);
@@ -142,28 +171,35 @@ struct net_proto_family {
 };
 
 struct iovec;
+struct kvec;
 
 extern int	     sock_wake_async(struct socket *sk, int how, int band);
 extern int	     sock_register(struct net_proto_family *fam);
 extern int	     sock_unregister(int family);
-extern struct socket *sock_alloc(void);
 extern int	     sock_create(int family, int type, int proto,
 				 struct socket **res);
+extern int	     sock_create_kern(int family, int type, int proto,
+				      struct socket **res);
+extern int	     sock_create_lite(int family, int type, int proto,
+				      struct socket **res); 
 extern void	     sock_release(struct socket *sock);
 extern int   	     sock_sendmsg(struct socket *sock, struct msghdr *msg,
-				  int len);
+				  size_t len);
 extern int	     sock_recvmsg(struct socket *sock, struct msghdr *msg,
-				  int size, int flags);
-extern int	     sock_readv_writev(int type, struct inode *inode,
-				       struct file *file,
-				       const struct iovec *iov, long count,
-				       long size);
+				  size_t size, int flags);
 extern int 	     sock_map_fd(struct socket *sock);
 extern struct socket *sockfd_lookup(int fd, int *err);
 #define		     sockfd_put(sock) fput(sock->file)
 extern int	     net_ratelimit(void);
 extern unsigned long net_random(void);
 extern void	     net_srandom(unsigned long);
+extern void	     net_random_init(void);
+
+extern int   	     kernel_sendmsg(struct socket *sock, struct msghdr *msg,
+				    struct kvec *vec, size_t num, size_t len);
+extern int   	     kernel_recvmsg(struct socket *sock, struct msghdr *msg,
+				    struct kvec *vec, size_t num,
+				    size_t len, int flags);
 
 #ifndef CONFIG_SMP
 #define SOCKOPS_WRAPPED(name) name
@@ -213,12 +249,12 @@ SOCKCALL_WRAP(name, ioctl, (struct socket *sock, unsigned int cmd, \
 SOCKCALL_WRAP(name, listen, (struct socket *sock, int len), (sock, len)) \
 SOCKCALL_WRAP(name, shutdown, (struct socket *sock, int flags), (sock, flags)) \
 SOCKCALL_WRAP(name, setsockopt, (struct socket *sock, int level, int optname, \
-			 char *optval, int optlen), (sock, level, optname, optval, optlen)) \
+			 char __user *optval, int optlen), (sock, level, optname, optval, optlen)) \
 SOCKCALL_WRAP(name, getsockopt, (struct socket *sock, int level, int optname, \
-			 char *optval, int *optlen), (sock, level, optname, optval, optlen)) \
-SOCKCALL_WRAP(name, sendmsg, (struct kiocb *iocb, struct socket *sock, struct msghdr *m, int len), \
+			 char __user *optval, int __user *optlen), (sock, level, optname, optval, optlen)) \
+SOCKCALL_WRAP(name, sendmsg, (struct kiocb *iocb, struct socket *sock, struct msghdr *m, size_t len), \
 	      (iocb, sock, m, len)) \
-SOCKCALL_WRAP(name, recvmsg, (struct kiocb *iocb, struct socket *sock, struct msghdr *m, int len, int flags), \
+SOCKCALL_WRAP(name, recvmsg, (struct kiocb *iocb, struct socket *sock, struct msghdr *m, size_t len, int flags), \
 	      (iocb, sock, m, len, flags)) \
 SOCKCALL_WRAP(name, mmap, (struct file *file, struct socket *sock, struct vm_area_struct *vma), \
 	      (file, sock, vma)) \

@@ -28,7 +28,7 @@ static struct kobj_map *cdev_map;
 
 #define MAX_PROBE_HASH 255	/* random */
 
-static rwlock_t chrdevs_lock = RW_LOCK_UNLOCKED;
+static DEFINE_RWLOCK(chrdevs_lock);
 
 static struct char_device_struct {
 	struct char_device_struct *next;
@@ -153,7 +153,7 @@ __unregister_chrdev_region(unsigned major, unsigned baseminor, int minorct)
 	return cd;
 }
 
-int register_chrdev_region(dev_t from, unsigned count, char *name)
+int register_chrdev_region(dev_t from, unsigned count, const char *name)
 {
 	struct char_device_struct *cd;
 	dev_t to = from + count;
@@ -178,7 +178,8 @@ fail:
 	return PTR_ERR(cd);
 }
 
-int alloc_chrdev_region(dev_t *dev, unsigned baseminor, unsigned count, char *name)
+int alloc_chrdev_region(dev_t *dev, unsigned baseminor, unsigned count,
+			const char *name)
 {
 	struct char_device_struct *cd;
 	cd = __register_chrdev_region(0, baseminor, count, name);
@@ -206,8 +207,8 @@ int register_chrdev(unsigned int major, const char *name,
 
 	cdev->owner = fops->owner;
 	cdev->ops = fops;
-	strcpy(cdev->kobj.name, name);
-	for (s = strchr(cdev->kobj.name, '/'); s; s = strchr(s, '/'))
+	kobject_set_name(&cdev->kobj, "%s", name);
+	for (s = strchr(kobject_name(&cdev->kobj),'/'); s; s = strchr(s, '/'))
 		*s = '!';
 		
 	err = cdev_add(cdev, MKDEV(cd->major, 0), 256);
@@ -240,7 +241,6 @@ void unregister_chrdev_region(dev_t from, unsigned count)
 int unregister_chrdev(unsigned int major, const char *name)
 {
 	struct char_device_struct *cd;
-	cdev_unmap(MKDEV(major, 0), 256);
 	cd = __unregister_chrdev_region(major, 0, 256);
 	if (cd && cd->cdev)
 		cdev_del(cd->cdev);
@@ -248,7 +248,29 @@ int unregister_chrdev(unsigned int major, const char *name)
 	return 0;
 }
 
-static spinlock_t cdev_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(cdev_lock);
+
+static struct kobject *cdev_get(struct cdev *p)
+{
+	struct module *owner = p->owner;
+	struct kobject *kobj;
+
+	if (owner && !try_module_get(owner))
+		return NULL;
+	kobj = kobject_get(&p->kobj);
+	if (!kobj)
+		module_put(owner);
+	return kobj;
+}
+
+void cdev_put(struct cdev *p)
+{
+	if (p) {
+		kobject_put(&p->kobj);
+		module_put(p->owner);
+	}
+}
+
 /*
  * Called every time a character special file is opened
  */
@@ -266,7 +288,7 @@ int chrdev_open(struct inode * inode, struct file * filp)
 		spin_unlock(&cdev_lock);
 		kobj = kobj_lookup(cdev_map, inode->i_rdev, &idx);
 		if (!kobj)
-			return -ENODEV;
+			return -ENXIO;
 		new = container_of(kobj, struct cdev, kobj);
 		spin_lock(&cdev_lock);
 		p = inode->i_cdev;
@@ -276,9 +298,9 @@ int chrdev_open(struct inode * inode, struct file * filp)
 			list_add(&inode->i_devices, &p->list);
 			new = NULL;
 		} else if (!cdev_get(p))
-			ret = -ENODEV;
+			ret = -ENXIO;
 	} else if (!cdev_get(p))
-		ret = -ENODEV;
+		ret = -ENXIO;
 	spin_unlock(&cdev_lock);
 	cdev_put(new);
 	if (ret)
@@ -286,7 +308,7 @@ int chrdev_open(struct inode * inode, struct file * filp)
 	filp->f_op = fops_get(p->ops);
 	if (!filp->f_op) {
 		cdev_put(p);
-		return -ENODEV;
+		return -ENXIO;
 	}
 	if (filp->f_op->open) {
 		lock_kernel();
@@ -341,46 +363,22 @@ static int exact_lock(dev_t dev, void *data)
 
 int cdev_add(struct cdev *p, dev_t dev, unsigned count)
 {
-	int err = kobject_add(&p->kobj);
-	if (err)
-		return err;
-	err = kobj_map(cdev_map, dev, count, NULL, exact_match, exact_lock, p);
-	if (err)
-		kobject_del(&p->kobj);
-	return err;
+	p->dev = dev;
+	p->count = count;
+	return kobj_map(cdev_map, dev, count, NULL, exact_match, exact_lock, p);
 }
 
-void cdev_unmap(dev_t dev, unsigned count)
+static void cdev_unmap(dev_t dev, unsigned count)
 {
 	kobj_unmap(cdev_map, dev, count);
 }
 
 void cdev_del(struct cdev *p)
 {
-	kobject_del(&p->kobj);
+	cdev_unmap(p->dev, p->count);
 	kobject_put(&p->kobj);
 }
 
-struct kobject *cdev_get(struct cdev *p)
-{
-	struct module *owner = p->owner;
-	struct kobject *kobj;
-
-	if (owner && !try_module_get(owner))
-		return NULL;
-	kobj = kobject_get(&p->kobj);
-	if (!kobj)
-		module_put(owner);
-	return kobj;
-}
-
-void cdev_put(struct cdev *p)
-{
-	if (p) {
-		kobject_put(&p->kobj);
-		module_put(p->owner);
-	}
-}
 
 static decl_subsys(cdev, NULL, NULL);
 
@@ -405,18 +403,12 @@ static struct kobj_type ktype_cdev_dynamic = {
 	.release	= cdev_dynamic_release,
 };
 
-static struct kset kset_dynamic = {
-	.subsys = &cdev_subsys,
-	.kobj = {.name = "major",},
-	.ktype = &ktype_cdev_dynamic,
-};
-
 struct cdev *cdev_alloc(void)
 {
 	struct cdev *p = kmalloc(sizeof(struct cdev), GFP_KERNEL);
 	if (p) {
 		memset(p, 0, sizeof(struct cdev));
-		p->kobj.kset = &kset_dynamic;
+		p->kobj.ktype = &ktype_cdev_dynamic;
 		INIT_LIST_HEAD(&p->list);
 		kobject_init(&p->kobj);
 	}
@@ -425,8 +417,8 @@ struct cdev *cdev_alloc(void)
 
 void cdev_init(struct cdev *cdev, struct file_operations *fops)
 {
+	memset(cdev, 0, sizeof *cdev);
 	INIT_LIST_HEAD(&cdev->list);
-	kobj_set_kset_s(cdev, cdev_subsys);
 	cdev->kobj.ktype = &ktype_cdev_default;
 	kobject_init(&cdev->kobj);
 	cdev->ops = fops;
@@ -434,14 +426,20 @@ void cdev_init(struct cdev *cdev, struct file_operations *fops)
 
 static struct kobject *base_probe(dev_t dev, int *part, void *data)
 {
-	request_module("char-major-%d-%d", MAJOR(dev), MINOR(dev));
+	if (request_module("char-major-%d-%d", MAJOR(dev), MINOR(dev)) > 0)
+		/* Make old-style 2.4 aliases work */
+		request_module("char-major-%d", MAJOR(dev));
 	return NULL;
 }
 
 void __init chrdev_init(void)
 {
-	subsystem_register(&cdev_subsys);
-	kset_register(&kset_dynamic);
+/*
+ * Keep cdev_subsys around because (and only because) the kobj_map code
+ * depends on the rwsem it contains.  We don't make it public in sysfs,
+ * however.
+ */
+	subsystem_init(&cdev_subsys);
 	cdev_map = kobj_map_init(base_probe, &cdev_subsys);
 }
 
@@ -452,10 +450,7 @@ EXPORT_SYMBOL(unregister_chrdev_region);
 EXPORT_SYMBOL(alloc_chrdev_region);
 EXPORT_SYMBOL(cdev_init);
 EXPORT_SYMBOL(cdev_alloc);
-EXPORT_SYMBOL(cdev_get);
-EXPORT_SYMBOL(cdev_put);
 EXPORT_SYMBOL(cdev_del);
 EXPORT_SYMBOL(cdev_add);
-EXPORT_SYMBOL(cdev_unmap);
 EXPORT_SYMBOL(register_chrdev);
 EXPORT_SYMBOL(unregister_chrdev);

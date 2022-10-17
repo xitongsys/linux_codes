@@ -1,6 +1,8 @@
 #ifndef _ALPHA_PGTABLE_H
 #define _ALPHA_PGTABLE_H
 
+#include <asm-generic/4level-fixup.h>
+
 /*
  * This file contains the functions and defines necessary to modify and use
  * the Alpha page table tree.
@@ -83,7 +85,7 @@
 #define __DIRTY_BITS	(_PAGE_DIRTY | _PAGE_KWE | _PAGE_UWE)
 #define __ACCESS_BITS	(_PAGE_ACCESSED | _PAGE_KRE | _PAGE_URE)
 
-#define _PFN_MASK	0xFFFFFFFF00000000
+#define _PFN_MASK	0xFFFFFFFF00000000UL
 
 #define _PAGE_TABLE	(_PAGE_VALID | __DIRTY_BITS | __ACCESS_BITS)
 #define _PAGE_CHG_MASK	(_PFN_MASK | __DIRTY_BITS | __ACCESS_BITS)
@@ -192,7 +194,7 @@ extern unsigned long __zero_page(void);
  * and a page entry and page directory to the page they refer to.
  */
 #ifndef CONFIG_DISCONTIGMEM
-#define page_to_pa(page)	((page - mem_map) << PAGE_SHIFT)
+#define page_to_pa(page)	(((page) - mem_map) << PAGE_SHIFT)
 
 #define pte_pfn(pte)	(pte_val(pte) >> 32)
 #define pte_page(pte)	pfn_to_page(pte_pfn(pte))
@@ -270,10 +272,10 @@ extern inline pte_t pte_mkyoung(pte_t pte)	{ pte_val(pte) |= __ACCESS_BITS; retu
 #define PAGE_DIR_OFFSET(tsk,address) pgd_offset((tsk),(address))
 
 /* to find an entry in a kernel page-table-directory */
-#define pgd_offset_k(address) pgd_offset(&init_mm, address)
+#define pgd_offset_k(address) pgd_offset(&init_mm, (address))
 
 /* to find an entry in a page-table-directory. */
-#define pgd_index(address)	((address >> PGDIR_SHIFT) & (PTRS_PER_PGD - 1))
+#define pgd_index(address)	(((address) >> PGDIR_SHIFT) & (PTRS_PER_PGD-1))
 #define pgd_offset(mm, address)	((mm)->pgd+pgd_index(address))
 
 /* Find an entry in the second-level page table.. */
@@ -327,8 +329,12 @@ extern inline pte_t mk_swap_pte(unsigned long type, unsigned long offset)
 #define kern_addr_valid(addr)	(1)
 #endif
 
-#define io_remap_page_range(vma, start, busaddr, size, prot) \
-    remap_page_range(vma, start, virt_to_phys(__ioremap(busaddr, size)), size, prot)
+#define io_remap_page_range(vma, start, busaddr, size, prot)	\
+({								\
+	void *va = (void __force *)ioremap(busaddr, size);	\
+	unsigned long pfn = virt_to_phys(va) >> PAGE_SHIFT;	\
+	remap_pfn_range(vma, start, pfn, size, prot);		\
+})
 
 #define pte_ERROR(e) \
 	printk("%s:%d: bad pte %016lx.\n", __FILE__, __LINE__, pte_val(e))
@@ -348,7 +354,5 @@ extern void paging_init(void);
 
 /* We have our own get_unmapped_area to cope with ADDR_LIMIT_32BIT.  */
 #define HAVE_ARCH_UNMAPPED_AREA
-
-typedef pte_t *pte_addr_t;
 
 #endif /* _ALPHA_PGTABLE_H */

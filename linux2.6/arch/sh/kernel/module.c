@@ -55,20 +55,22 @@ int module_frob_arch_sections(Elf_Ehdr *hdr,
 #define COPY_UNALIGNED_WORD(sw, tw, align) \
 { \
 	void *__s = &(sw), *__t = &(tw); \
+	unsigned short *__s2 = __s, *__t2 = __t; \
+	unsigned char *__s1 = __s, *__t1 = __t; \
 	switch ((align)) \
 	{ \
 	case 0: \
 		*(unsigned long *) __t = *(unsigned long *) __s; \
 		break; \
 	case 2: \
-		*((unsigned short *) __t)++ = *((unsigned short *) __s)++; \
-		*((unsigned short *) __t) = *((unsigned short *) __s); \
+		*__t2++ = *__s2++; \
+		*__t2 = *__s2; \
 		break; \
 	default: \
-		*((unsigned char *) __t)++ = *((unsigned char *) __s)++; \
-		*((unsigned char *) __t)++ = *((unsigned char *) __s)++; \
-		*((unsigned char *) __t)++ = *((unsigned char *) __s)++; \
-		*((unsigned char *) __t) = *((unsigned char *) __s); \
+		*__t1++ = *__s1++; \
+		*__t1++ = *__s1++; \
+		*__t1++ = *__s1++; \
+		*__t1 = *__s1; \
 		break; \
 	} \
 }
@@ -137,4 +139,8 @@ int module_finalize(const Elf_Ehdr *hdr,
 		    struct module *me)
 {
 	return 0;
+}
+
+void module_arch_cleanup(struct module *mod)
+{
 }

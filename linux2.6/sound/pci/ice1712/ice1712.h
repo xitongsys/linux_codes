@@ -294,13 +294,9 @@ struct _snd_ice1712 {
 	int irq;
 
 	unsigned long port;
-	struct resource *res_port;
 	unsigned long ddma_port;
-	struct resource *res_ddma_port;
 	unsigned long dmapath_port;
-	struct resource *res_dmapath_port;
 	unsigned long profi_port;
-	struct resource *res_profi_port;
 
 	struct pci_dev *pci;
 	snd_card_t *card;
@@ -329,20 +325,24 @@ struct _snd_ice1712 {
 	unsigned int pro_volumes[20];
 	unsigned int omni: 1;		/* Delta Omni I/O */
 	unsigned int vt1724: 1;
+	unsigned int vt1720: 1;
+	unsigned int has_spdif: 1;	/* VT1720/4 - has SPDIF I/O */
+	unsigned int force_pdma4: 1;	/* VT1720/4 - PDMA4 as non-spdif */
+	unsigned int force_rdma1: 1;	/* VT1720/4 - RDMA1 as non-spdif */
 	unsigned int num_total_dacs;	/* total DACs */
-	unsigned char hoontech_boxbits[4];
-	unsigned int hoontech_config;
-	unsigned short hoontech_boxconfig[4];
+	unsigned int num_total_adcs;	/* total ADCs */
 	unsigned int cur_rate;		/* current rate */
+
+	struct semaphore open_mutex;
+	snd_pcm_substream_t *pcm_reserved[4];
 
 	unsigned int akm_codecs;
 	akm4xxx_t *akm;
 	struct snd_ice1712_spdif spdif;
 
 	snd_i2c_bus_t *i2c;		/* I2C bus */
-	snd_i2c_device_t *cs8404;	/* CS8404A I2C device */
 	snd_i2c_device_t *cs8427;	/* CS8427 I2C device */
-	snd_i2c_device_t *i2cdevs[2];	/* additional i2c devices */
+	unsigned int cs8427_timeout;	/* CS8427 reset timeout in HZ/100 */
 	
 	struct ice1712_gpio {
 		unsigned int direction;		/* current direction bits */
@@ -353,11 +353,31 @@ struct _snd_ice1712 {
 		void (*set_dir)(ice1712_t *ice, unsigned int data);
 		void (*set_data)(ice1712_t *ice, unsigned int data);
 		unsigned int (*get_data)(ice1712_t *ice);
+		/* misc operators - move to another place? */
+		void (*set_pro_rate)(ice1712_t *ice, unsigned int rate);
 	} gpio;
 	struct semaphore gpio_mutex;
-};
 
-#define chip_t ice1712_t
+	/* other board-specific data */
+	union {
+		/* additional i2c devices for EWS boards*/
+		snd_i2c_device_t *i2cdevs[3];
+		/* AC97 register cache for Aureon */
+		struct aureon_spec {
+			unsigned short stac9744[64];
+			unsigned int cs8415_mux;
+			unsigned short master[2];
+			unsigned short vol[8];
+		} aureon;
+		/* Hoontech-specific setting */
+		struct hoontech_spec {
+			unsigned char boxbits[4];
+			unsigned int config;
+			unsigned short boxconfig[4];
+		} hoontech;
+	} spec;
+
+};
 
 
 /*
@@ -453,6 +473,8 @@ static inline u8 snd_ice1712_read(ice1712_t * ice, u8 addr)
 struct snd_ice1712_card_info {
 	unsigned int subvendor;
 	char *name;
+	char *model;
+	char *driver;
 	int (*chip_init)(ice1712_t *);
 	int (*build_controls)(ice1712_t *);
 	int no_mpu401: 1;

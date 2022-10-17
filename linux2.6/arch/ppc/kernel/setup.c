@@ -7,6 +7,7 @@
 #include <linux/string.h>
 #include <linux/sched.h>
 #include <linux/init.h>
+#include <linux/kernel.h>
 #include <linux/reboot.h>
 #include <linux/delay.h>
 #include <linux/initrd.h>
@@ -16,6 +17,7 @@
 #include <linux/seq_file.h>
 #include <linux/root_dev.h>
 #include <linux/cpu.h>
+#include <linux/console.h>
 
 #include <asm/residual.h>
 #include <asm/io.h>
@@ -35,7 +37,9 @@
 #include <asm/system.h>
 #include <asm/pmac_feature.h>
 #include <asm/sections.h>
+#include <asm/nvram.h>
 #include <asm/xmon.h>
+#include <asm/ocp.h>
 
 #if defined CONFIG_KGDB
 #include <asm/kgdb.h>
@@ -48,16 +52,10 @@ extern void identify_cpu(unsigned long offset, unsigned long cpu);
 extern void do_cpu_ftr_fixups(unsigned long offset);
 extern void reloc_got2(unsigned long offset);
 
-
-#ifdef CONFIG_KGDB
-extern void kgdb_map_scc(void);
-#endif
-
 extern void ppc6xx_idle(void);
 extern void power4_idle(void);
 
 extern boot_infos_t *boot_infos;
-char saved_command_line[256];
 unsigned char aux_device_present;
 struct ide_machdep_calls ppc_ide_md;
 char *sysmap;
@@ -116,6 +114,9 @@ struct screen_info screen_info = {
 
 void machine_restart(char *cmd)
 {
+#ifdef CONFIG_NVRAM
+	nvram_sync();
+#endif
 	ppc_md.restart(cmd);
 }
 
@@ -123,6 +124,9 @@ EXPORT_SYMBOL(machine_restart);
 
 void machine_power_off(void)
 {
+#ifdef CONFIG_NVRAM
+	nvram_sync();
+#endif
 	ppc_md.power_off();
 }
 
@@ -130,6 +134,9 @@ EXPORT_SYMBOL(machine_power_off);
 
 void machine_halt(void)
 {
+#ifdef CONFIG_NVRAM
+	nvram_sync();
+#endif
 	ppc_md.halt();
 }
 
@@ -219,6 +226,10 @@ int show_cpuinfo(struct seq_file *m, void *v)
 	case 0x1008:	/* 740P/750P ?? */
 		maj = ((pvr >> 8) & 0xFF) - 1;
 		min = pvr & 0xFF;
+		break;
+	case 0x8020:	/* e500 */
+		maj = PVR_MAJ(pvr);
+		min = PVR_MIN(pvr);
 		break;
 	default:
 		maj = (pvr >> 8) & 0xFF;
@@ -412,7 +423,6 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	 * are used for initrd_start and initrd_size,
 	 * otherwise they contain 0xdeadbeef.
 	 */
-	cmd_line[0] = 0;
 	if (r3 >= 0x4000 && r3 < 0x800000 && r4 == 0) {
 		strlcpy(cmd_line, (char *)r3 + KERNELBASE,
 			sizeof(cmd_line));
@@ -468,6 +478,63 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 		break;
 	}
 }
+
+#ifdef CONFIG_SERIAL_CORE_CONSOLE
+extern char *of_stdout_device;
+
+static int __init set_preferred_console(void)
+{
+	struct device_node *prom_stdout;
+	char *name;
+	int offset;
+
+	if (of_stdout_device == NULL)
+		return -ENODEV;
+
+	/* The user has requested a console so this is already set up. */
+	if (strstr(saved_command_line, "console="))
+		return -EBUSY;
+
+	prom_stdout = find_path_device(of_stdout_device);
+	if (!prom_stdout)
+		return -ENODEV;
+
+	name = (char *)get_property(prom_stdout, "name", NULL);
+	if (!name)
+		return -ENODEV;
+
+	if (strcmp(name, "serial") == 0) {
+		int i;
+		u32 *reg = (u32 *)get_property(prom_stdout, "reg", &i);
+		if (i > 8) {
+			switch (reg[1]) {
+				case 0x3f8:
+					offset = 0;
+					break;
+				case 0x2f8:
+					offset = 1;
+					break;
+				case 0x898:
+					offset = 2;
+					break;
+				case 0x890:
+					offset = 3;
+					break;
+				default:
+					/* We dont recognise the serial port */
+					return -ENODEV;
+			}
+		}
+	} else if (strcmp(name, "ch-a") == 0)
+		offset = 0;
+	else if (strcmp(name, "ch-b") == 0)
+		offset = 1;
+	else
+		return -ENODEV;
+	return add_preferred_console("ttyS", offset, NULL);
+}
+console_initcall(set_preferred_console);
+#endif /* CONFIG_SERIAL_CORE_CONSOLE */
 #endif /* CONFIG_PPC_MULTIPLATFORM */
 
 struct bi_record *find_bootinfo(void)
@@ -496,7 +563,7 @@ void parse_bootinfo(struct bi_record *rec)
 		ulong *data = rec->data;
 		switch (rec->tag) {
 		case BI_CMD_LINE:
-			memcpy(cmd_line, (void *)data, rec->size);
+			strlcpy(cmd_line, (void *)data, sizeof(cmd_line));
 			break;
 		case BI_SYSMAP:
 			sysmap = (char *)((data[0] >= (KERNELBASE)) ? data[0] :
@@ -533,7 +600,7 @@ machine_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	     unsigned long r6, unsigned long r7)
 {
 #ifdef CONFIG_CMDLINE
-	strcpy(cmd_line, CONFIG_CMDLINE);
+	strlcpy(cmd_line, CONFIG_CMDLINE, sizeof(cmd_line));
 #endif /* CONFIG_CMDLINE */
 
 #ifdef CONFIG_6xx
@@ -562,25 +629,31 @@ int __init ppc_setup_l2cr(char *str)
 }
 __setup("l2cr=", ppc_setup_l2cr);
 
-#ifdef CONFIG_NVRAM
-/* Generic nvram hooks we now look into ppc_md.nvram_read_val
- * on pmac too ;)
- * //XX Those 2 could be moved to headers
- */
-unsigned char
-nvram_read_byte(int addr)
+#ifdef CONFIG_GENERIC_NVRAM
+
+/* Generic nvram hooks used by drivers/char/gen_nvram.c */
+unsigned char nvram_read_byte(int addr)
 {
 	if (ppc_md.nvram_read_val)
 		return ppc_md.nvram_read_val(addr);
 	return 0xff;
 }
+EXPORT_SYMBOL(nvram_read_byte);
 
-void
-nvram_write_byte(unsigned char val, int addr)
+void nvram_write_byte(unsigned char val, int addr)
 {
 	if (ppc_md.nvram_write_val)
-		ppc_md.nvram_write_val(val, addr);
+		ppc_md.nvram_write_val(addr, val);
 }
+EXPORT_SYMBOL(nvram_write_byte);
+
+void nvram_sync(void)
+{
+	if (ppc_md.nvram_sync)
+		ppc_md.nvram_sync();
+}
+EXPORT_SYMBOL(nvram_sync);
+
 #endif /* CONFIG_NVRAM */
 
 static struct cpu cpu_devices[NR_CPUS];
@@ -609,7 +682,6 @@ arch_initcall(ppc_init);
 /* Warning, IO base is not yet inited */
 void __init setup_arch(char **cmdline_p)
 {
-	extern int panic_timeout;
 	extern char *klimit;
 	extern void do_init_bootmem(void);
 
@@ -627,12 +699,13 @@ void __init setup_arch(char **cmdline_p)
 #ifdef CONFIG_XMON
 	xmon_map_scc();
 	if (strstr(cmd_line, "xmon"))
-		xmon(0);
+		xmon(NULL);
 #endif /* CONFIG_XMON */
 	if ( ppc_md.progress ) ppc_md.progress("setup_arch: enter", 0x3eab);
 
 #if defined(CONFIG_KGDB)
-	kgdb_map_scc();
+	if (ppc_md.kgdb_map_scc)
+		ppc_md.kgdb_map_scc();
 	set_debug_traps();
 	if (strstr(cmd_line, "gdb")) {
 		if (ppc_md.progress)
@@ -664,18 +737,27 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.brk = (unsigned long) klimit;
 
 	/* Save unparsed command line copy for /proc/cmdline */
-	strcpy(saved_command_line, cmd_line);
+	strlcpy(saved_command_line, cmd_line, COMMAND_LINE_SIZE);
 	*cmdline_p = cmd_line;
 
 	/* set up the bootmem stuff with available memory */
 	do_init_bootmem();
 	if ( ppc_md.progress ) ppc_md.progress("setup_arch: bootmem", 0x3eab);
 
+#ifdef CONFIG_PPC_OCP
+	/* Initialize OCP device list */
+	ocp_early_init();
+	if ( ppc_md.progress ) ppc_md.progress("ocp: exit", 0x3eab);
+#endif
+
+#ifdef CONFIG_DUMMY_CONSOLE
+	conswitchp = &dummy_con;
+#endif
+
 	ppc_md.setup_arch();
 	if ( ppc_md.progress ) ppc_md.progress("arch: exit", 0x3eab);
 
 	paging_init();
-	sort_exception_table();
 
 	/* this is for modules since _machine can be a define -- Cort */
 	ppc_md.ppc_machine = _machine;

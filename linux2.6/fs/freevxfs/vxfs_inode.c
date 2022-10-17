@@ -27,8 +27,6 @@
  * SUCH DAMAGE.
  */
 
-#ident "$Id: vxfs_inode.c,v 1.42 2002/01/02 23:51:36 hch Exp hch $"
-
 /*
  * Veritas filesystem driver - inode routines.
  */
@@ -339,16 +337,15 @@ vxfs_read_inode(struct inode *ip)
 }
 
 /**
- * vxfs_put_inode - remove inode from main memory
+ * vxfs_clear_inode - remove inode from main memory
  * @ip:		inode to discard.
  *
  * Description:
- *  vxfs_put_inode() is called on each iput.  If we are the last
- *  link in memory, free the fspriv inode area.
+ *  vxfs_clear_inode() is called on the final iput and frees the private
+ *  inode area.
  */
 void
-vxfs_put_inode(struct inode *ip)
+vxfs_clear_inode(struct inode *ip)
 {
-	if (atomic_read(&ip->i_count) == 1)
-		kmem_cache_free(vxfs_inode_cachep, ip->u.generic_ip);
+	kmem_cache_free(vxfs_inode_cachep, ip->u.generic_ip);
 }

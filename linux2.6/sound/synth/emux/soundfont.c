@@ -30,10 +30,11 @@
 #include <linux/slab.h>
 #include <sound/core.h>
 #include <sound/soundfont.h>
+#include <sound/seq_oss_legacy.h>
 
 /* Prototypes for static functions */
 
-static int open_patch(snd_sf_list_t *sflist, const char *data, int count, int client);
+static int open_patch(snd_sf_list_t *sflist, const char __user *data, int count, int client);
 static snd_soundfont_t *newsf(snd_sf_list_t *sflist, int type, char *name);
 static int is_identical_font(snd_soundfont_t *sf, int type, unsigned char *name);
 static int close_patch(snd_sf_list_t *sflist);
@@ -43,14 +44,14 @@ static snd_sf_zone_t *sf_zone_new(snd_sf_list_t *sflist, snd_soundfont_t *sf);
 static void set_sample_counter(snd_sf_list_t *sflist, snd_soundfont_t *sf, snd_sf_sample_t *sp);
 static snd_sf_sample_t *sf_sample_new(snd_sf_list_t *sflist, snd_soundfont_t *sf);
 static void sf_sample_delete(snd_sf_list_t *sflist, snd_soundfont_t *sf, snd_sf_sample_t *sp);
-static int load_map(snd_sf_list_t *sflist, const void *data, int count);
-static int load_info(snd_sf_list_t *sflist, const void *data, long count);
+static int load_map(snd_sf_list_t *sflist, const void __user *data, int count);
+static int load_info(snd_sf_list_t *sflist, const void __user *data, long count);
 static int remove_info(snd_sf_list_t *sflist, snd_soundfont_t *sf, int bank, int instr);
 static void init_voice_info(soundfont_voice_info_t *avp);
 static void init_voice_parm(soundfont_voice_parm_t *pp);
 static snd_sf_sample_t *set_sample(snd_soundfont_t *sf, soundfont_voice_info_t *avp);
 static snd_sf_sample_t *find_sample(snd_soundfont_t *sf, int sample_id);
-static int load_data(snd_sf_list_t *sflist, const void *data, long count);
+static int load_data(snd_sf_list_t *sflist, const void __user *data, long count);
 static void rebuild_presets(snd_sf_list_t *sflist);
 static void add_preset(snd_sf_list_t *sflist, snd_sf_zone_t *cur);
 static void delete_preset(snd_sf_list_t *sflist, snd_sf_zone_t *zp);
@@ -63,15 +64,14 @@ static void snd_sf_clear(snd_sf_list_t *sflist);
 /*
  * lock access to sflist
  */
-static int
-lock_preset(snd_sf_list_t *sflist, int nonblock)
+static void
+lock_preset(snd_sf_list_t *sflist)
 {
-	if (nonblock) {
-		if (down_trylock(&sflist->presets_mutex))
-			return -EBUSY;
-	} else 
-		down(&sflist->presets_mutex);
-	return 0;
+	unsigned long flags;
+	down(&sflist->presets_mutex);
+	spin_lock_irqsave(&sflist->lock, flags);
+	sflist->presets_locked = 1;
+	spin_unlock_irqrestore(&sflist->lock, flags);
 }
 
 
@@ -81,6 +81,10 @@ lock_preset(snd_sf_list_t *sflist, int nonblock)
 static void
 unlock_preset(snd_sf_list_t *sflist)
 {
+	unsigned long flags;
+	spin_lock_irqsave(&sflist->lock, flags);
+	sflist->presets_locked = 0;
+	spin_unlock_irqrestore(&sflist->lock, flags);
 	up(&sflist->presets_mutex);
 }
 
@@ -111,7 +115,7 @@ snd_soundfont_close_check(snd_sf_list_t *sflist, int client)
  * it wants to do with it.
  */
 int
-snd_soundfont_load(snd_sf_list_t *sflist, const void *data, long count, int client)
+snd_soundfont_load(snd_sf_list_t *sflist, const void __user *data, long count, int client)
 {
 	soundfont_patch_info_t patch;
 	unsigned long flags;
@@ -142,7 +146,7 @@ snd_soundfont_load(snd_sf_list_t *sflist, const void *data, long count, int clie
 
 	if (patch.type == SNDRV_SFNT_OPEN_PATCH) {
 		/* grab sflist to open */
-		lock_preset(sflist, 0);
+		lock_preset(sflist);
 		rc = open_patch(sflist, data, count, client);
 		unlock_preset(sflist);
 		return rc;
@@ -156,7 +160,7 @@ snd_soundfont_load(snd_sf_list_t *sflist, const void *data, long count, int clie
 	}
 	spin_unlock_irqrestore(&sflist->lock, flags);
 
-	lock_preset(sflist, 0);
+	lock_preset(sflist);
 	rc = -EINVAL;
 	switch (patch.type) {
 	case SNDRV_SFNT_LOAD_INFO:
@@ -211,7 +215,7 @@ is_special_type(int type)
 
 /* open patch; create sf list */
 static int
-open_patch(snd_sf_list_t *sflist, const char *data, int count, int client)
+open_patch(snd_sf_list_t *sflist, const char __user *data, int count, int client)
 {
 	soundfont_open_parm_t parm;
 	snd_soundfont_t *sf;
@@ -236,8 +240,10 @@ open_patch(snd_sf_list_t *sflist, const char *data, int count, int client)
 		return -ENOMEM;
 	}
 
+	spin_lock_irqsave(&sflist->lock, flags);
 	sflist->open_client = client;
 	sflist->currsf = sf;
+	spin_unlock_irqrestore(&sflist->lock, flags);
 
 	return 0;
 }
@@ -260,7 +266,7 @@ newsf(snd_sf_list_t *sflist, int type, char *name)
 	}
 
 	/* not found -- create a new one */
-	sf = (snd_soundfont_t*)snd_kcalloc(sizeof(*sf), GFP_KERNEL);
+	sf = kcalloc(1, sizeof(*sf), GFP_KERNEL);
 	if (sf == NULL)
 		return NULL;
 	sf->id = sflist->fonts_size;
@@ -295,8 +301,12 @@ is_identical_font(snd_soundfont_t *sf, int type, unsigned char *name)
 static int
 close_patch(snd_sf_list_t *sflist)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&sflist->lock, flags);
 	sflist->currsf = NULL;
 	sflist->open_client = -1;
+	spin_unlock_irqrestore(&sflist->lock, flags);
 
 	rebuild_presets(sflist);
 
@@ -336,7 +346,7 @@ sf_zone_new(snd_sf_list_t *sflist, snd_soundfont_t *sf)
 {
 	snd_sf_zone_t *zp;
 
-	if ((zp = snd_kcalloc(sizeof(*zp), GFP_KERNEL)) == NULL)
+	if ((zp = kcalloc(1, sizeof(*zp), GFP_KERNEL)) == NULL)
 		return NULL;
 	zp->next = sf->zones;
 	sf->zones = zp;
@@ -367,7 +377,7 @@ sf_sample_new(snd_sf_list_t *sflist, snd_soundfont_t *sf)
 {
 	snd_sf_sample_t *sp;
 
-	if ((sp = snd_kcalloc(sizeof(*sp), GFP_KERNEL)) == NULL)
+	if ((sp = kcalloc(1, sizeof(*sp), GFP_KERNEL)) == NULL)
 		return NULL;
 
 	sp->next = sf->samples;
@@ -394,7 +404,7 @@ sf_sample_delete(snd_sf_list_t *sflist, snd_soundfont_t *sf, snd_sf_sample_t *sp
 
 /* load voice map */
 static int
-load_map(snd_sf_list_t *sflist, const void *data, int count)
+load_map(snd_sf_list_t *sflist, const void __user *data, int count)
 {
 	snd_sf_zone_t *zp, *prevp;
 	snd_soundfont_t *sf;
@@ -490,7 +500,7 @@ remove_info(snd_sf_list_t *sflist, snd_soundfont_t *sf, int bank, int instr)
  * open soundfont.
  */
 static int
-load_info(snd_sf_list_t *sflist, const void *data, long count)
+load_info(snd_sf_list_t *sflist, const void __user *data, long count)
 {
 	snd_soundfont_t *sf;
 	snd_sf_zone_t *zone;
@@ -674,7 +684,7 @@ find_sample(snd_soundfont_t *sf, int sample_id)
  * routine.
  */
 static int
-load_data(snd_sf_list_t *sflist, const void *data, long count)
+load_data(snd_sf_list_t *sflist, const void __user *data, long count)
 {
 	snd_soundfont_t *sf;
 	soundfont_sample_info_t sample_info;
@@ -912,7 +922,7 @@ int snd_sf_vol_table[128] = {
 
 /* load GUS patch */
 static int
-load_guspatch(snd_sf_list_t *sflist, const char *data, long count, int client)
+load_guspatch(snd_sf_list_t *sflist, const char __user *data, long count, int client)
 {
 	struct patch_info patch;
 	snd_soundfont_t *sf;
@@ -1085,11 +1095,11 @@ load_guspatch(snd_sf_list_t *sflist, const char *data, long count, int client)
 
 /* load GUS patch */
 int
-snd_soundfont_load_guspatch(snd_sf_list_t *sflist, const char *data,
+snd_soundfont_load_guspatch(snd_sf_list_t *sflist, const char __user *data,
 			    long count, int client)
 {
 	int rc;
-	lock_preset(sflist, 0);
+	lock_preset(sflist);
 	rc = load_guspatch(sflist, data, count, client);
 	unlock_preset(sflist);
 	return rc;
@@ -1196,17 +1206,23 @@ snd_soundfont_search_zone(snd_sf_list_t *sflist, int *notep, int vel,
 			  snd_sf_zone_t **table, int max_layers)
 {
 	int nvoices;
+	unsigned long flags;
 
-	if (lock_preset(sflist, 1))
+	/* this function is supposed to be called atomically,
+	 * so we check the lock.  if it's busy, just returns 0 to
+	 * tell the caller the busy state
+	 */
+	spin_lock_irqsave(&sflist->lock, flags);
+	if (sflist->presets_locked) {
+		spin_unlock_irqrestore(&sflist->lock, flags);
 		return 0;
-
+	}
 	nvoices = search_zones(sflist, notep, vel, preset, bank, table, max_layers, 0);
 	if (! nvoices) {
 		if (preset != def_preset || bank != def_bank)
 			nvoices = search_zones(sflist, notep, vel, def_preset, def_bank, table, max_layers, 0);
 	}
-	unlock_preset(sflist);
-
+	spin_unlock_irqrestore(&sflist->lock, flags);
 	return nvoices;
 }
 
@@ -1346,7 +1362,7 @@ snd_sf_new(snd_sf_callback_t *callback, snd_util_memhdr_t *hdr)
 {
 	snd_sf_list_t *sflist;
 
-	if ((sflist = snd_kcalloc(sizeof(snd_sf_list_t), GFP_KERNEL)) == NULL)
+	if ((sflist = kcalloc(1, sizeof(*sflist), GFP_KERNEL)) == NULL)
 		return NULL;
 
 	init_MUTEX(&sflist->presets_mutex);
@@ -1370,7 +1386,7 @@ snd_sf_free(snd_sf_list_t *sflist)
 	if (sflist == NULL)
 		return;
 	
-	lock_preset(sflist, 0);
+	lock_preset(sflist);
 	if (sflist->callback.sample_reset)
 		sflist->callback.sample_reset(sflist->callback.private_data);
 	snd_sf_clear(sflist);
@@ -1386,7 +1402,7 @@ snd_sf_free(snd_sf_list_t *sflist)
 int
 snd_soundfont_remove_samples(snd_sf_list_t *sflist)
 {
-	lock_preset(sflist, 0);
+	lock_preset(sflist);
 	if (sflist->callback.sample_reset)
 		sflist->callback.sample_reset(sflist->callback.private_data);
 	snd_sf_clear(sflist);
@@ -1406,8 +1422,7 @@ snd_soundfont_remove_unlocked(snd_sf_list_t *sflist)
 	snd_sf_zone_t *zp, *nextzp;
 	snd_sf_sample_t *sp, *nextsp;
 
-	if (lock_preset(sflist, 1))
-		return -EBUSY;
+	lock_preset(sflist);
 
 	if (sflist->callback.sample_reset)
 		sflist->callback.sample_reset(sflist->callback.private_data);
@@ -1445,11 +1460,3 @@ snd_soundfont_remove_unlocked(snd_sf_list_t *sflist)
 	return 0;
 }
 
-/*
- * Return the used memory size (in words)
- */
-int
-snd_soundfont_mem_used(snd_sf_list_t *sflist)
-{
-	return sflist->mem_used;
-}

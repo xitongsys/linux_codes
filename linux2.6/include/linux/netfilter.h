@@ -10,6 +10,7 @@
 #include <linux/wait.h>
 #include <linux/list.h>
 #endif
+#include <linux/compiler.h>
 
 /* Responses from hook functions. */
 #define NF_DROP 0
@@ -64,11 +65,11 @@ struct nf_sockopt_ops
 	/* Non-inclusive ranges: use 0/0/NULL to never get called. */
 	int set_optmin;
 	int set_optmax;
-	int (*set)(struct sock *sk, int optval, void *user, unsigned int len);
+	int (*set)(struct sock *sk, int optval, void __user *user, unsigned int len);
 
 	int get_optmin;
 	int get_optmax;
-	int (*get)(struct sock *sk, int optval, void *user, int *len);
+	int (*get)(struct sock *sk, int optval, void __user *user, int *len);
 
 	/* Number of users inside set() or get(). */
 	unsigned int use;
@@ -99,6 +100,24 @@ void nf_unregister_sockopt(struct nf_sockopt_ops *reg);
 
 extern struct list_head nf_hooks[NPROTO][NF_MAX_HOOKS];
 
+typedef void nf_logfn(unsigned int hooknum,
+		      const struct sk_buff *skb,
+		      const struct net_device *in,
+		      const struct net_device *out,
+		      const char *prefix);
+
+/* Function to register/unregister log function. */
+int nf_log_register(int pf, nf_logfn *logfn);
+void nf_log_unregister(int pf, nf_logfn *logfn);
+
+/* Calls the registered backend logging function */
+void nf_log_packet(int pf,
+		   unsigned int hooknum,
+		   const struct sk_buff *skb,
+		   const struct net_device *in,
+		   const struct net_device *out,
+		   const char *fmt, ...);
+                   
 /* Activate hook; either okfn or kfree_skb called, unless a hook
    returns NF_STOLEN (in which case, it's up to the hook to deal with
    the consequences).
@@ -138,9 +157,9 @@ int nf_hook_slow(int pf, unsigned int hook, struct sk_buff *skb,
 		 int (*okfn)(struct sk_buff *), int thresh);
 
 /* Call setsockopt() */
-int nf_setsockopt(struct sock *sk, int pf, int optval, char *opt, 
+int nf_setsockopt(struct sock *sk, int pf, int optval, char __user *opt, 
 		  int len);
-int nf_getsockopt(struct sock *sk, int pf, int optval, char *opt,
+int nf_getsockopt(struct sock *sk, int pf, int optval, char __user *opt,
 		  int *len);
 
 /* Packet queuing */
@@ -153,17 +172,15 @@ extern void nf_reinject(struct sk_buff *skb,
 			struct nf_info *info,
 			unsigned int verdict);
 
-extern void (*ip_ct_attach)(struct sk_buff *, struct nf_ct_info *);
-
-#ifdef CONFIG_NETFILTER_DEBUG
-extern void nf_dump_skb(int pf, struct sk_buff *skb);
-#endif
+extern void (*ip_ct_attach)(struct sk_buff *, struct sk_buff *);
+extern void nf_ct_attach(struct sk_buff *, struct sk_buff *);
 
 /* FIXME: Before cache is ever used, this must be implemented for real. */
 extern void nf_invalidate_cache(int pf);
 
 #else /* !CONFIG_NETFILTER */
 #define NF_HOOK(pf, hook, skb, indev, outdev, okfn) (okfn)(skb)
+static inline void nf_ct_attach(struct sk_buff *new, struct sk_buff *skb) {}
 #endif /*CONFIG_NETFILTER*/
 
 #endif /*__KERNEL__*/

@@ -38,6 +38,7 @@
 #include <linux/termios.h>
 #include <linux/tty.h>
 #include <linux/interrupt.h>
+#include <linux/device.h>		/* for MODULE_ALIAS_CHARDEV_MAJOR */
 
 #include <asm/uaccess.h>
 
@@ -51,7 +52,7 @@
 
 static int  ircomm_tty_open(struct tty_struct *tty, struct file *filp);
 static void ircomm_tty_close(struct tty_struct * tty, struct file *filp);
-static int  ircomm_tty_write(struct tty_struct * tty, int from_user,
+static int  ircomm_tty_write(struct tty_struct * tty,
 			     const unsigned char *buf, int count);
 static int  ircomm_tty_write_room(struct tty_struct *tty);
 static void ircomm_tty_throttle(struct tty_struct *tty);
@@ -63,6 +64,7 @@ static void ircomm_tty_wait_until_sent(struct tty_struct *tty, int timeout);
 static void ircomm_tty_hangup(struct tty_struct *tty);
 static void ircomm_tty_do_softint(void *private_);
 static void ircomm_tty_shutdown(struct ircomm_tty_cb *self);
+static void ircomm_tty_stop(struct tty_struct *tty);
 
 static int ircomm_tty_data_indication(void *instance, void *sap,
 				      struct sk_buff *skb);
@@ -85,7 +87,9 @@ static struct tty_operations ops = {
 	.write_room      = ircomm_tty_write_room,
 	.chars_in_buffer = ircomm_tty_chars_in_buffer,
 	.flush_buffer    = ircomm_tty_flush_buffer,
-	.ioctl           = ircomm_tty_ioctl,
+	.ioctl           = ircomm_tty_ioctl,	/* ircomm_tty_ioctl.c */
+	.tiocmget        = ircomm_tty_tiocmget,	/* ircomm_tty_ioctl.c */
+	.tiocmset        = ircomm_tty_tiocmset,	/* ircomm_tty_ioctl.c */
 	.throttle        = ircomm_tty_throttle,
 	.unthrottle      = ircomm_tty_unthrottle,
 	.send_xchar      = ircomm_tty_send_xchar,
@@ -105,7 +109,7 @@ static struct tty_operations ops = {
  *    Init IrCOMM TTY layer/driver
  *
  */
-int __init ircomm_tty_init(void)
+static int __init ircomm_tty_init(void)
 {
 	driver = alloc_tty_driver(IRCOMM_TTY_PORTS);
 	if (!driver)
@@ -156,7 +160,7 @@ static void __exit __ircomm_tty_cleanup(struct ircomm_tty_cb *self)
  *    Remove IrCOMM TTY layer/driver
  *
  */
-void __exit ircomm_tty_cleanup(void)
+static void __exit ircomm_tty_cleanup(void)
 {
 	int ret;
 
@@ -181,15 +185,15 @@ void __exit ircomm_tty_cleanup(void)
 static int ircomm_tty_startup(struct ircomm_tty_cb *self)
 {
 	notify_t notify;
-	int ret;
+	int ret = -ENODEV;
 
 	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
 
 	ASSERT(self != NULL, return -1;);
 	ASSERT(self->magic == IRCOMM_TTY_MAGIC, return -1;);
 
-	/* Already open */
-	if (self->flags & ASYNC_INITIALIZED) {
+	/* Check if already open */
+	if (test_and_set_bit(ASYNC_B_INITIALIZED, &self->flags)) {
 		IRDA_DEBUG(2, "%s(), already open so break out!\n", __FUNCTION__ );
 		return 0;
 	}
@@ -213,7 +217,7 @@ static int ircomm_tty_startup(struct ircomm_tty_cb *self)
 					   self->line);
 	}
 	if (!self->ircomm)
-		return -ENODEV;
+		goto err;
 
 	self->slsap_sel = self->ircomm->slsap_sel;
 
@@ -221,12 +225,13 @@ static int ircomm_tty_startup(struct ircomm_tty_cb *self)
 	ret = ircomm_tty_attach_cable(self);
 	if (ret < 0) {
 		ERROR("%s(), error attaching cable!\n", __FUNCTION__);
-		return ret;
+		goto err;
 	}
 
-	self->flags |= ASYNC_INITIALIZED;
-
 	return 0;
+err:
+	clear_bit(ASYNC_B_INITIALIZED, &self->flags);
+	return ret;
 }
 
 /*
@@ -299,7 +304,8 @@ static int ircomm_tty_block_til_ready(struct ircomm_tty_cb *self,
 		
 		current->state = TASK_INTERRUPTIBLE;
 		
-		if (tty_hung_up_p(filp) || !(self->flags & ASYNC_INITIALIZED)){
+		if (tty_hung_up_p(filp) ||
+		    !test_bit(ASYNC_B_INITIALIZED, &self->flags)) {
 			retval = (self->flags & ASYNC_HUP_NOTIFY) ?
 					-EAGAIN : -ERESTARTSYS;
 			break;
@@ -310,7 +316,7 @@ static int ircomm_tty_block_til_ready(struct ircomm_tty_cb *self,
 		 * specified, we cannot return before the IrCOMM link is
 		 * ready 
 		 */
- 		if (!(self->flags & ASYNC_CLOSING) &&
+ 		if (!test_bit(ASYNC_B_CLOSING, &self->flags) &&
  		    (do_clocal || (self->settings.dce & IRCOMM_CD)) &&
 		    self->state == IRCOMM_TTY_READY)
 		{
@@ -425,7 +431,7 @@ static int ircomm_tty_open(struct tty_struct *tty, struct file *filp)
 	 * If the port is the middle of closing, bail out now
 	 */
 	if (tty_hung_up_p(filp) ||
-	    (self->flags & ASYNC_CLOSING)) {
+	    test_bit(ASYNC_B_CLOSING, &self->flags)) {
 
 		/* Hm, why are we blocking on ASYNC_CLOSING if we
 		 * do return -EAGAIN/-ERESTARTSYS below anyway?
@@ -435,7 +441,7 @@ static int ircomm_tty_open(struct tty_struct *tty, struct file *filp)
 		 * probably better sleep uninterruptible?
 		 */
 
-		if (wait_event_interruptible(self->close_wait, !(self->flags&ASYNC_CLOSING))) {
+		if (wait_event_interruptible(self->close_wait, !test_bit(ASYNC_B_CLOSING, &self->flags))) {
 			WARNING("%s - got signal while blocking on ASYNC_CLOSING!\n",
 				__FUNCTION__);
 			return -ERESTARTSYS;
@@ -530,11 +536,13 @@ static void ircomm_tty_close(struct tty_struct *tty, struct file *filp)
 		IRDA_DEBUG(0, "%s(), open count > 0\n", __FUNCTION__ );
 		return;
 	}
-	self->flags |= ASYNC_CLOSING;
+
+	/* Hum... Should be test_and_set_bit ??? - Jean II */
+	set_bit(ASYNC_B_CLOSING, &self->flags);
 
 	/* We need to unlock here (we were unlocking at the end of this
 	 * function), because tty_wait_until_sent() may schedule.
-	 * I don't know if the rest should be locked somehow,
+	 * I don't know if the rest should be protected somehow,
 	 * so someone should check. - Jean II */
 	spin_unlock_irqrestore(&self->spinlock, flags);
 
@@ -554,7 +562,7 @@ static void ircomm_tty_close(struct tty_struct *tty, struct file *filp)
 		tty->ldisc.flush_buffer(tty);
 
 	tty->closing = 0;
-	self->tty = 0;
+	self->tty = NULL;
 
 	if (self->blocked_open) {
 		if (self->close_delay) {
@@ -655,14 +663,14 @@ static void ircomm_tty_do_softint(void *private_)
 }
 
 /*
- * Function ircomm_tty_write (tty, from_user, buf, count)
+ * Function ircomm_tty_write (tty, buf, count)
  *
  *    This routine is called by the kernel to write a series of characters
  *    to the tty device. The characters may come from user space or kernel
  *    space. This routine will return the number of characters actually
  *    accepted for writing. This routine is mandatory.
  */
-static int ircomm_tty_write(struct tty_struct *tty, int from_user,
+static int ircomm_tty_write(struct tty_struct *tty,
 			    const unsigned char *ubuf, int count)
 {
 	struct ircomm_tty_cb *self = (struct ircomm_tty_cb *) tty->driver_data;
@@ -706,19 +714,8 @@ static int ircomm_tty_write(struct tty_struct *tty, int from_user,
 	if (count < 1)
 		return 0;
 
-	/* Additional copy to avoid copy_from_user() under spinlock.
-	 * We tradeoff this extra copy to allow to pack more the
-	 * IrCOMM frames. This is advantageous because the IrDA link
-	 * is the bottleneck. */
-	if (from_user) {
-		kbuf = kmalloc(count, GFP_KERNEL);
-		if (kbuf == NULL)
-			return -ENOMEM;
-		if (copy_from_user(kbuf, ubuf, count))
-			return -EFAULT;
-	} else
-		/* The buffer is already in kernel space */
-		kbuf = (unsigned char *) ubuf;
+	/* The buffer is already in kernel space */
+	kbuf = (unsigned char *) ubuf;
 
 	/* Protect our manipulation of self->tx_skb and related */
 	spin_lock_irqsave(&self->spinlock, flags);
@@ -789,9 +786,6 @@ static int ircomm_tty_write(struct tty_struct *tty, int from_user,
 	}
 
 	spin_unlock_irqrestore(&self->spinlock, flags);
-
-	if (from_user)
-		kfree(kbuf);
 
 	/*     
 	 * Schedule a new thread which will transmit the frame as soon
@@ -866,7 +860,7 @@ static void ircomm_tty_wait_until_sent(struct tty_struct *tty, int timeout)
 	orig_jiffies = jiffies;
 
 	/* Set poll time to 200 ms */
-	poll_time = IRDA_MIN(timeout, MSECS_TO_JIFFIES(200));
+	poll_time = IRDA_MIN(timeout, msecs_to_jiffies(200));
 
 	spin_lock_irqsave(&self->spinlock, flags);
 	while (self->tx_skb && self->tx_skb->len) {
@@ -978,9 +972,11 @@ static void ircomm_tty_shutdown(struct ircomm_tty_cb *self)
 	ASSERT(self->magic == IRCOMM_TTY_MAGIC, return;);
 
 	IRDA_DEBUG(0, "%s()\n", __FUNCTION__ );
-	
-	if (!(self->flags & ASYNC_INITIALIZED))
+
+	if (!test_and_clear_bit(ASYNC_B_INITIALIZED, &self->flags))
 		return;
+
+	ircomm_tty_detach_cable(self);
 
 	spin_lock_irqsave(&self->spinlock, flags);
 
@@ -998,13 +994,10 @@ static void ircomm_tty_shutdown(struct ircomm_tty_cb *self)
 		self->tx_skb = NULL;
 	}
 
-	ircomm_tty_detach_cable(self);
-
 	if (self->ircomm) {
 		ircomm_close(self->ircomm);
 		self->ircomm = NULL;
 	}
-	self->flags &= ~ASYNC_INITIALIZED;
 
 	spin_unlock_irqrestore(&self->spinlock, flags);
 }
@@ -1035,7 +1028,7 @@ static void ircomm_tty_hangup(struct tty_struct *tty)
 	/* I guess we need to lock here - Jean II */
 	spin_lock_irqsave(&self->spinlock, flags);
 	self->flags &= ~ASYNC_NORMAL_ACTIVE;
-	self->tty = 0;
+	self->tty = NULL;
 	self->open_count = 0;
 	spin_unlock_irqrestore(&self->spinlock, flags);
 
@@ -1072,7 +1065,7 @@ void ircomm_tty_start(struct tty_struct *tty)
  *     This routine notifies the tty driver that it should stop outputting
  *     characters to the tty device. 
  */
-void ircomm_tty_stop(struct tty_struct *tty) 
+static void ircomm_tty_stop(struct tty_struct *tty) 
 {
 	struct ircomm_tty_cb *self = (struct ircomm_tty_cb *) tty->driver_data;
 
@@ -1408,6 +1401,7 @@ done:
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("IrCOMM serial TTY driver");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_CHARDEV_MAJOR(IRCOMM_TTY_MAJOR);
 
 module_init(ircomm_tty_init);
 module_exit(ircomm_tty_cleanup);

@@ -47,8 +47,10 @@
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/moduleparam.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/netfilter_ipv4/ip_nat.h>
+#include <linux/netfilter_ipv4/ip_conntrack_helper.h>
 #include <linux/netfilter_ipv4/ip_nat_helper.h>
 #include <linux/ip.h>
 #include <net/checksum.h>
@@ -64,7 +66,7 @@ MODULE_DESCRIPTION("Basic SNMP Application Layer Gateway");
 #define NOCT1(n) (u_int8_t )((n) & 0xff)
 
 static int debug;
-static spinlock_t snmp_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(snmp_lock);
 
 /* 
  * Application layer address mapping mimics the NAT mapping, but 
@@ -252,7 +254,7 @@ static unsigned char asn1_header_decode(struct asn1_ctx *ctx,
 	if (def)
 		*eoc = ctx->pointer + len;
 	else
-		*eoc = 0;
+		*eoc = NULL;
 	return 1;
 }
 
@@ -862,96 +864,6 @@ static unsigned char snmp_request_decode(struct asn1_ctx *ctx,
 	return 1;
 }
 
-static unsigned char snmp_trap_decode(struct asn1_ctx *ctx,
-                                      struct snmp_v1_trap *trap,
-                                      const struct oct1_map *map,
-                                      u_int16_t *check)
-{
-	unsigned int cls, con, tag, len;
-	unsigned char *end;
-
-	if (!asn1_header_decode(ctx, &end, &cls, &con, &tag))
-		return 0;
-		
-	if (cls != ASN1_UNI || con != ASN1_PRI || tag != ASN1_OJI)
-		return 0;
-	
-	if (!asn1_oid_decode(ctx, end, &trap->id, &trap->id_len))
-		return 0;
-		
-	if (!asn1_header_decode(ctx, &end, &cls, &con, &tag))
-		goto err_id_free;
-
-	if (!((cls == ASN1_APL && con == ASN1_PRI && tag == SNMP_IPA) ||
-	      (cls == ASN1_UNI && con == ASN1_PRI && tag == ASN1_OTS)))
-		goto err_id_free;
-	
-	if (!asn1_octets_decode(ctx, end, (unsigned char **)&trap->ip_address, &len))
-		goto err_id_free;
-	
-	/* IPv4 only */
-	if (len != 4)
-		goto err_addr_free;
-	
-	mangle_address(ctx->begin, ctx->pointer - 4, map, check);
-	
-	if (!asn1_header_decode(ctx, &end, &cls, &con, &tag))
-		goto err_addr_free;
-		
-	if (cls != ASN1_UNI || con != ASN1_PRI || tag != ASN1_INT)
-		goto err_addr_free;;
-		
-	if (!asn1_uint_decode(ctx, end, &trap->general))
-		goto err_addr_free;;
-		
-	if (!asn1_header_decode(ctx, &end, &cls, &con, &tag))
-		goto err_addr_free;
-	
-	if (cls != ASN1_UNI || con != ASN1_PRI || tag != ASN1_INT)
-		goto err_addr_free;
-		
-	if (!asn1_uint_decode(ctx, end, &trap->specific))
-		goto err_addr_free;
-		
-	if (!asn1_header_decode(ctx, &end, &cls, &con, &tag))
-		goto err_addr_free;
-		
-	if (!((cls == ASN1_APL && con == ASN1_PRI && tag == SNMP_TIT) ||
-	      (cls == ASN1_UNI && con == ASN1_PRI && tag == ASN1_INT)))
-		goto err_addr_free;
-		
-	if (!asn1_ulong_decode(ctx, end, &trap->time))
-		goto err_addr_free;
-		
-	return 1;
-
-err_id_free:
-	kfree(trap->id);
-
-err_addr_free:
-	kfree((unsigned long *)trap->ip_address);
-	
-	return 0;
-}
-
-/*****************************************************************************
- *
- * Misc. routines
- *
- *****************************************************************************/
-
-static void hex_dump(unsigned char *buf, size_t len)
-{
-	size_t i;
-	
-	for (i = 0; i < len; i++) {
-		if (i && !(i % 16))
-			printk("\n");
-		printk("%02x ", *(buf + i));
-	}
-	printk("\n");
-}
-
 /* 
  * Fast checksum update for possibly oddly-aligned UDP byte, from the
  * code example in the draft.
@@ -1021,6 +933,96 @@ static inline void mangle_address(unsigned char *begin,
 			printk(KERN_DEBUG "bsalg: mapped %u.%u.%u.%u to "
 			       "%u.%u.%u.%u\n", NIPQUAD(old), NIPQUAD(*addr));
 	}
+}
+
+static unsigned char snmp_trap_decode(struct asn1_ctx *ctx,
+                                      struct snmp_v1_trap *trap,
+                                      const struct oct1_map *map,
+                                      u_int16_t *check)
+{
+	unsigned int cls, con, tag, len;
+	unsigned char *end;
+
+	if (!asn1_header_decode(ctx, &end, &cls, &con, &tag))
+		return 0;
+		
+	if (cls != ASN1_UNI || con != ASN1_PRI || tag != ASN1_OJI)
+		return 0;
+	
+	if (!asn1_oid_decode(ctx, end, &trap->id, &trap->id_len))
+		return 0;
+		
+	if (!asn1_header_decode(ctx, &end, &cls, &con, &tag))
+		goto err_id_free;
+
+	if (!((cls == ASN1_APL && con == ASN1_PRI && tag == SNMP_IPA) ||
+	      (cls == ASN1_UNI && con == ASN1_PRI && tag == ASN1_OTS)))
+		goto err_id_free;
+	
+	if (!asn1_octets_decode(ctx, end, (unsigned char **)&trap->ip_address, &len))
+		goto err_id_free;
+	
+	/* IPv4 only */
+	if (len != 4)
+		goto err_addr_free;
+	
+	mangle_address(ctx->begin, ctx->pointer - 4, map, check);
+	
+	if (!asn1_header_decode(ctx, &end, &cls, &con, &tag))
+		goto err_addr_free;
+		
+	if (cls != ASN1_UNI || con != ASN1_PRI || tag != ASN1_INT)
+		goto err_addr_free;
+		
+	if (!asn1_uint_decode(ctx, end, &trap->general))
+		goto err_addr_free;
+		
+	if (!asn1_header_decode(ctx, &end, &cls, &con, &tag))
+		goto err_addr_free;
+	
+	if (cls != ASN1_UNI || con != ASN1_PRI || tag != ASN1_INT)
+		goto err_addr_free;
+		
+	if (!asn1_uint_decode(ctx, end, &trap->specific))
+		goto err_addr_free;
+		
+	if (!asn1_header_decode(ctx, &end, &cls, &con, &tag))
+		goto err_addr_free;
+		
+	if (!((cls == ASN1_APL && con == ASN1_PRI && tag == SNMP_TIT) ||
+	      (cls == ASN1_UNI && con == ASN1_PRI && tag == ASN1_INT)))
+		goto err_addr_free;
+		
+	if (!asn1_ulong_decode(ctx, end, &trap->time))
+		goto err_addr_free;
+		
+	return 1;
+
+err_id_free:
+	kfree(trap->id);
+
+err_addr_free:
+	kfree((unsigned long *)trap->ip_address);
+	
+	return 0;
+}
+
+/*****************************************************************************
+ *
+ * Misc. routines
+ *
+ *****************************************************************************/
+
+static void hex_dump(unsigned char *buf, size_t len)
+{
+	size_t i;
+	
+	for (i = 0; i < len; i++) {
+		if (i && !(i % 16))
+			printk("\n");
+		printk("%02x ", *(buf + i));
+	}
+	printk("\n");
 }
 
 /*
@@ -1202,9 +1204,7 @@ static int snmp_parse_mangle(unsigned char *msg,
  * SNMP translation routine.
  */
 static int snmp_translate(struct ip_conntrack *ct,
-                          struct ip_nat_info *info,
                           enum ip_conntrack_info ctinfo,
-                          unsigned int hooknum,
                           struct sk_buff **pskb)
 {
 	struct iphdr *iph = (*pskb)->nh.iph;
@@ -1233,98 +1233,86 @@ static int snmp_translate(struct ip_conntrack *ct,
 	
 	if (!snmp_parse_mangle((unsigned char *)udph + sizeof(struct udphdr),
 	                       paylen, &map, &udph->check)) {
-		printk(KERN_WARNING "bsalg: parser failed\n");
+		if (net_ratelimit())
+			printk(KERN_WARNING "bsalg: parser failed\n");
 		return NF_DROP;
 	}
 	return NF_ACCEPT;
 }
 
-/* 
- * NAT helper function, packets arrive here from NAT code.
- */
-static unsigned int nat_help(struct ip_conntrack *ct,
-			     struct ip_conntrack_expect *exp,
-                             struct ip_nat_info *info,
-                             enum ip_conntrack_info ctinfo,
-                             unsigned int hooknum,
-                             struct sk_buff **pskb)
+/* We don't actually set up expectations, just adjust internal IP
+ * addresses if this is being NATted */
+static int help(struct sk_buff **pskb,
+		struct ip_conntrack *ct,
+		enum ip_conntrack_info ctinfo)
 {
 	int dir = CTINFO2DIR(ctinfo);
+	unsigned int ret;
 	struct iphdr *iph = (*pskb)->nh.iph;
 	struct udphdr *udph = (struct udphdr *)((u_int32_t *)iph + iph->ihl);
 
-	spin_lock_bh(&snmp_lock);
-	
-	/*
-	 * Translate snmp replies on pre-routing (DNAT) and snmp traps
-	 * on post routing (SNAT).
-	 */
-	if (!((dir == IP_CT_DIR_REPLY && hooknum == NF_IP_PRE_ROUTING &&
-			udph->source == ntohs(SNMP_PORT)) ||
-	      (dir == IP_CT_DIR_ORIGINAL && hooknum == NF_IP_POST_ROUTING &&
-	      		udph->dest == ntohs(SNMP_TRAP_PORT)))) {
-		spin_unlock_bh(&snmp_lock);
+	/* SNMP replies and originating SNMP traps get mangled */
+	if (udph->source == ntohs(SNMP_PORT) && dir != IP_CT_DIR_REPLY)
 		return NF_ACCEPT;
-	}
+	if (udph->dest == ntohs(SNMP_TRAP_PORT) && dir != IP_CT_DIR_ORIGINAL)
+		return NF_ACCEPT;
 
-	if (debug > 1) {
-		printk(KERN_DEBUG "bsalg: dir=%s hook=%d manip=%s len=%d "
-		       "src=%u.%u.%u.%u:%u dst=%u.%u.%u.%u:%u "
-		       "osrc=%u.%u.%u.%u odst=%u.%u.%u.%u "
-		       "rsrc=%u.%u.%u.%u rdst=%u.%u.%u.%u "
-		       "\n", 
-		       dir == IP_CT_DIR_REPLY ? "reply" : "orig", hooknum, 
-		       HOOK2MANIP(hooknum) == IP_NAT_MANIP_SRC ? "snat" :
-		       "dnat", (*pskb)->len,
-		       NIPQUAD(iph->saddr), ntohs(udph->source),
-		       NIPQUAD(iph->daddr), ntohs(udph->dest),
-		       NIPQUAD(ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.ip),
-		       NIPQUAD(ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.dst.ip),
-		       NIPQUAD(ct->tuplehash[IP_CT_DIR_REPLY].tuple.src.ip),
-		       NIPQUAD(ct->tuplehash[IP_CT_DIR_REPLY].tuple.dst.ip));
-	}
-	
+	/* No NAT? */
+	if (!(ct->status & IPS_NAT_MASK))
+		return NF_ACCEPT;
+
 	/* 
 	 * Make sure the packet length is ok.  So far, we were only guaranteed
 	 * to have a valid length IP header plus 8 bytes, which means we have
 	 * enough room for a UDP header.  Just verify the UDP length field so we
 	 * can mess around with the payload.
 	 */
-	 if (ntohs(udph->len) == (*pskb)->len - (iph->ihl << 2)) {
-	 	int ret = snmp_translate(ct, info, ctinfo, hooknum, pskb);
-	 	spin_unlock_bh(&snmp_lock);
-	 	return ret;
+	if (ntohs(udph->len) != (*pskb)->len - (iph->ihl << 2)) {
+		 if (net_ratelimit())
+			 printk(KERN_WARNING "SNMP: dropping malformed packet "
+				"src=%u.%u.%u.%u dst=%u.%u.%u.%u\n",
+				NIPQUAD(iph->saddr), NIPQUAD(iph->daddr));
+		 return NF_DROP;
 	}
-	
-	if (net_ratelimit())
-		printk(KERN_WARNING "bsalg: dropping malformed packet "
-		       "src=%u.%u.%u.%u dst=%u.%u.%u.%u\n",
-		       NIPQUAD(iph->saddr), NIPQUAD(iph->daddr));
+
+	if (!skb_ip_make_writable(pskb, (*pskb)->len))
+		return NF_DROP;
+
+	spin_lock_bh(&snmp_lock);
+	ret = snmp_translate(ct, ctinfo, pskb);
 	spin_unlock_bh(&snmp_lock);
-	return NF_DROP;
+	return ret;
 }
 
-static struct ip_nat_helper snmp = { 
-	{ NULL, NULL },
-	"snmp",
-	0,
-	THIS_MODULE,
-	{ { 0, { .udp = { __constant_htons(SNMP_PORT) } } },
-	  { 0, { 0 }, IPPROTO_UDP } },
-	{ { 0, { .udp = { 0xFFFF } } },
-	  { 0, { 0 }, 0xFFFF } },
-	nat_help, NULL };
- 
-static struct ip_nat_helper snmp_trap = { 
-	{ NULL, NULL },
-	"snmp_trap",
-	0,
-	THIS_MODULE,
-	{ { 0, { .udp = { __constant_htons(SNMP_TRAP_PORT) } } },
-	  { 0, { 0 }, IPPROTO_UDP } },
-	{ { 0, { .udp = { 0xFFFF } } },
-	  { 0, { 0 }, 0xFFFF } },
-	nat_help, NULL };
+static struct ip_conntrack_helper snmp_helper = {
+	.max_expected = 0,
+	.timeout = 180,
+	.me = THIS_MODULE,
+	.help = help,
+	.name = "snmp",
+
+	.tuple = { .src = { .u = { __constant_htons(SNMP_PORT) } },
+		   .dst = { .protonum = IPPROTO_UDP },
+	},
+	.mask = { .src = { .u = { 0xFFFF } },
+		 .dst = { .protonum = 0xFF },
+	},
+};
+
+static struct ip_conntrack_helper snmp_trap_helper = {
+	.max_expected = 0,
+	.timeout = 180,
+	.me = THIS_MODULE,
+	.help = help,
+	.name = "snmp_trap",
+
+	.tuple = { .src = { .u = { __constant_htons(SNMP_TRAP_PORT) } },
+		   .dst = { .protonum = IPPROTO_UDP },
+	},
+	.mask = { .src = { .u = { 0xFFFF } },
+		 .dst = { .protonum = 0xFF },
+	},
+};
 
 /*****************************************************************************
  *
@@ -1336,12 +1324,12 @@ static int __init init(void)
 {
 	int ret = 0;
 
-	ret = ip_nat_helper_register(&snmp);
+	ret = ip_conntrack_helper_register(&snmp_helper);
 	if (ret < 0)
 		return ret;
-	ret = ip_nat_helper_register(&snmp_trap);
+	ret = ip_conntrack_helper_register(&snmp_trap_helper);
 	if (ret < 0) {
-		ip_nat_helper_unregister(&snmp);
+		ip_conntrack_helper_unregister(&snmp_helper);
 		return ret;
 	}
 	return ret;
@@ -1349,12 +1337,11 @@ static int __init init(void)
 
 static void __exit fini(void)
 {
-	ip_nat_helper_unregister(&snmp);
-	ip_nat_helper_unregister(&snmp_trap);
-	synchronize_net();
+	ip_conntrack_helper_unregister(&snmp_helper);
+	ip_conntrack_helper_unregister(&snmp_trap_helper);
 }
 
 module_init(init);
 module_exit(fini);
 
-MODULE_PARM(debug, "i");
+module_param(debug, bool, 0600);

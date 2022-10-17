@@ -114,7 +114,6 @@ int snd_info_minor_register(void)
 
 	memset(snd_sndstat_strings, 0, sizeof(snd_sndstat_strings));
 	if ((entry = snd_info_create_module_entry(THIS_MODULE, "sndstat", snd_oss_root)) != NULL) {
-		entry->content = SNDRV_INFO_CONTENT_TEXT;
 		entry->c.text.read_size = 2048;
 		entry->c.text.read = snd_sndstat_proc_read;
 		if (snd_info_register(entry) < 0) {
@@ -132,18 +131,6 @@ int snd_info_minor_unregister(void)
 		snd_info_unregister(snd_sndstat_proc_entry);
 		snd_sndstat_proc_entry = NULL;
 	}
-	return 0;
-}
-
-#else
-
-int snd_info_minor_register(void)
-{
-	return 0;
-}
-
-int snd_info_minor_unregister(void)
-{
 	return 0;
 }
 

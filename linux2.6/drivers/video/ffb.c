@@ -362,61 +362,6 @@ struct ffb_par {
 	struct list_head	list;
 };
 
-#undef FFB_DO_DEBUG_LOG
-
-#ifdef FFB_DO_DEBUG_LOG
-#define FFB_DEBUG_LOG_ENTS	32
-static struct ffb_log {
-	int op;
-#define OP_FILLRECT	1
-#define OP_IMAGEBLIT	2
-
-	int depth, x, y, w, h;
-} ffb_debug_log[FFB_DEBUG_LOG_ENTS];
-static int ffb_debug_log_ent;
-
-static void ffb_do_log(unsigned long unused)
-{
-	int i;
-
-	for (i = 0; i < FFB_DEBUG_LOG_ENTS; i++) {
-		struct ffb_log *p = &ffb_debug_log[i];
-
-		printk("FFB_LOG: OP[%s] depth(%d) x(%d) y(%d) w(%d) h(%d)\n",
-		       (p->op == OP_FILLRECT ? "FILLRECT" : "IMAGEBLIT"),
-		       p->depth, p->x, p->y, p->w, p->h);
-	}
-}
-static struct timer_list ffb_log_timer =
-	TIMER_INITIALIZER(ffb_do_log, 0, 0);
-
-static void ffb_log(int op, int depth, int x, int y, int w, int h)
-{
-	if (ffb_debug_log_ent < FFB_DEBUG_LOG_ENTS) {
-		struct ffb_log *p = &ffb_debug_log[ffb_debug_log_ent];
-
-		if (ffb_debug_log_ent != 0 &&
-		    p[-1].op == op && p[-1].depth == depth)
-			return;
-		p->op = op;
-		p->depth = depth;
-		p->x = x;
-		p->y = y;
-		p->w = w;
-		p->h = h;
-
-		if (++ffb_debug_log_ent == FFB_DEBUG_LOG_ENTS) {
-			ffb_log_timer.expires = jiffies + 2;
-			add_timer(&ffb_log_timer);
-		}
-	}
-}
-#else
-#define ffb_log(a,b,c,d,e,f)	do { } while(0)
-#endif
-
-#undef FORCE_WAIT_EVERY_ROP
-
 static void FFBFifo(struct ffb_par *par, int n)
 {
 	struct ffb_fbc *fbc;
@@ -466,6 +411,7 @@ static __inline__ void ffb_rop(struct ffb_par *par, u32 rop)
 static void ffb_switch_from_graph(struct ffb_par *par)
 {
 	struct ffb_fbc *fbc = par->fbc;
+	struct ffb_dac *dac = par->dac;
 	unsigned long flags;
 
 	spin_lock_irqsave(&par->lock, flags);
@@ -478,10 +424,18 @@ static void ffb_switch_from_graph(struct ffb_par *par)
 	upa_writel(0x2000707f, &fbc->fbc);
 	upa_writel(par->rop_cache, &fbc->rop);
 	upa_writel(0xffffffff, &fbc->pmask);
-	upa_writel((0 << 16) | (32 << 0), &fbc->fontinc);
+	upa_writel((1 << 16) | (0 << 0), &fbc->fontinc);
 	upa_writel(par->fg_cache, &fbc->fg);
 	upa_writel(par->bg_cache, &fbc->bg);
 	FFBWait(par);
+
+	/* Disable cursor.  */
+	upa_writel(0x100, &dac->type2);
+	if (par->dac_rev <= 2)
+		upa_writel(0, &dac->value2);
+	else
+		upa_writel(3, &dac->value2);
+
 	spin_unlock_irqrestore(&par->lock, flags);
 }
 
@@ -517,8 +471,6 @@ static void ffb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 	if (rect->rop != ROP_COPY && rect->rop != ROP_XOR)
 		BUG();
 
-	ffb_log(OP_FILLRECT, 0, rect->dx, rect->dy, rect->width, rect->height);
-
 	fg = ((u32 *)info->pseudo_palette)[rect->color];
 
 	spin_lock_irqsave(&par->lock, flags);
@@ -539,9 +491,6 @@ static void ffb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 	upa_writel(rect->dx, &fbc->bx);
 	upa_writel(rect->height, &fbc->bh);
 	upa_writel(rect->width, &fbc->bw);
-#ifdef FORCE_WAIT_EVERY_ROP
-	FFBWait(par);
-#endif
 
 	spin_unlock_irqrestore(&par->lock, flags);
 }
@@ -563,7 +512,7 @@ ffb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 	unsigned long flags;
 
 	if (area->dx != area->sx ||
-	    area->dy == area->dy) {
+	    area->dy == area->sy) {
 		cfb_copyarea(info, area);
 		return;
 	}
@@ -600,10 +549,7 @@ static void ffb_imageblit(struct fb_info *info, const struct fb_image *image)
 	unsigned long flags;
 	u32 fg, bg, xy;
 	u64 fgbg;
-	int i, width;
-
-	ffb_log(OP_IMAGEBLIT, image->depth,
-		image->dx, image->dy, image->width, image->height);
+	int i, width, stride;
 
 	if (image->depth > 1) {
 		cfb_imageblit(info, image);
@@ -614,6 +560,8 @@ static void ffb_imageblit(struct fb_info *info, const struct fb_image *image)
 	bg = ((u32 *)info->pseudo_palette)[image->bg_color];
 	fgbg = ((u64) fg << 32) | (u64) bg;
 	xy = (image->dy << 16) | image->dx;
+	width = image->width;
+	stride = ((width + 7) >> 3);
 
 	spin_lock_irqsave(&par->lock, flags);
 
@@ -623,55 +571,49 @@ static void ffb_imageblit(struct fb_info *info, const struct fb_image *image)
 		*(u64 *)&par->fg_cache = fgbg;
 	}
 
-	ffb_rop(par, FFB_ROP_NEW);
+	if (width >= 32) {
+		FFBFifo(par, 1);
+		upa_writel(32, &fbc->fontw);
+	}
 
-	for (i = 0; i < image->height; i++) {
-		width = image->width;
+	while (width >= 32) {
+		const u8 *next_data = data + 4;
 
 		FFBFifo(par, 1);
 		upa_writel(xy, &fbc->fontxy);
-		xy += (1 << 16);
+		xy += (32 << 0);
 
-		while (width >= 32) {
-			u32 val;
-
-			FFBFifo(par, 2);
-			upa_writel(32, &fbc->fontw);
-
-			val = ((u32)data[0] << 24) |
-			      ((u32)data[1] << 16) |
-			      ((u32)data[2] <<  8) |
-			      ((u32)data[3] <<  0);
+		for (i = 0; i < image->height; i++) {
+			u32 val = (((u32)data[0] << 24) |
+				   ((u32)data[1] << 16) |
+				   ((u32)data[2] <<  8) |
+				   ((u32)data[3] <<  0));
+			FFBFifo(par, 1);
 			upa_writel(val, &fbc->font);
 
-			data += 4;
-			width -= 32;
+			data += stride;
 		}
 
-		if (width) {
-			u32 val;
+		data = next_data;
+		width -= 32;
+	}
 
-			FFBFifo(par, 2);
-			upa_writel(width, &fbc->fontw);
-			if (width <= 8) {
-				val = (u32) data[0] << 24;
-				data += 1;
-			} else if (width <= 16) {
-				val = ((u32) data[0] << 24) |
-				      ((u32) data[1] << 16);
-				data += 2;
-			} else {
-				val = ((u32) data[0] << 24) |
-				      ((u32) data[1] << 16) |
-				      ((u32) data[2] <<  8);
-				data += 3;
-			}
+	if (width) {
+		FFBFifo(par, 2);
+		upa_writel(width, &fbc->fontw);
+		upa_writel(xy, &fbc->fontxy);
+
+		for (i = 0; i < image->height; i++) {
+			u32 val = (((u32)data[0] << 24) |
+				   ((u32)data[1] << 16) |
+				   ((u32)data[2] <<  8) |
+				   ((u32)data[3] <<  0));
+			FFBFifo(par, 1);
 			upa_writel(val, &fbc->font);
+
+			data += stride;
 		}
 	}
-#ifdef FORCE_WAIT_EVERY_ROP
-	FFBWait(par);
-#endif
 
 	spin_unlock_irqrestore(&par->lock, flags);
 }
@@ -734,7 +676,7 @@ ffb_blank(int blank, struct fb_info *info)
 	FFBWait(par);
 
 	switch (blank) {
-	case 0: /* Unblanking */
+	case FB_BLANK_UNBLANK: /* Unblanking */
 		upa_writel(0x6000, &dac->type);
 		tmp = (upa_readl(&dac->value) | 0x1);
 		upa_writel(0x6000, &dac->type);
@@ -742,10 +684,10 @@ ffb_blank(int blank, struct fb_info *info)
 		par->flags &= ~FFB_FLAG_BLANKED;
 		break;
 
-	case 1: /* Normal blanking */
-	case 2: /* VESA blank (vsync off) */
-	case 3: /* VESA blank (hsync off) */
-	case 4: /* Poweroff */
+	case FB_BLANK_NORMAL: /* Normal blanking */
+	case FB_BLANK_VSYNC_SUSPEND: /* VESA blank (vsync off) */
+	case FB_BLANK_HSYNC_SUSPEND: /* VESA blank (hsync off) */
+	case FB_BLANK_POWERDOWN: /* Poweroff */
 		upa_writel(0x6000, &dac->type);
 		tmp = (upa_readl(&dac->value) & ~0x1);
 		upa_writel(0x6000, &dac->type);
@@ -760,34 +702,142 @@ ffb_blank(int blank, struct fb_info *info)
 }
 
 static struct sbus_mmap_map ffb_mmap_map[] = {
-	{ FFB_SFB8R_VOFF,	FFB_SFB8R_POFF,		0x0400000 },
-	{ FFB_SFB8G_VOFF,	FFB_SFB8G_POFF,		0x0400000 },
-	{ FFB_SFB8B_VOFF,	FFB_SFB8B_POFF,		0x0400000 },
-	{ FFB_SFB8X_VOFF,	FFB_SFB8X_POFF,		0x0400000 },
-	{ FFB_SFB32_VOFF,	FFB_SFB32_POFF,		0x1000000 },
-	{ FFB_SFB64_VOFF,	FFB_SFB64_POFF,		0x2000000 },
-	{ FFB_FBC_REGS_VOFF,	FFB_FBC_REGS_POFF,	0x0002000 },
-	{ FFB_BM_FBC_REGS_VOFF,	FFB_BM_FBC_REGS_POFF,	0x0002000 },
-	{ FFB_DFB8R_VOFF,	FFB_DFB8R_POFF,		0x0400000 },
-	{ FFB_DFB8G_VOFF,	FFB_DFB8G_POFF,		0x0400000 },
-	{ FFB_DFB8B_VOFF,	FFB_DFB8B_POFF,		0x0400000 },
-	{ FFB_DFB8X_VOFF,	FFB_DFB8X_POFF,		0x0400000 },
-	{ FFB_DFB24_VOFF,	FFB_DFB24_POFF,		0x1000000 },
-	{ FFB_DFB32_VOFF,	FFB_DFB32_POFF,		0x1000000 },
-	{ FFB_FBC_KREGS_VOFF,	FFB_FBC_KREGS_POFF,	0x0002000 },
-	{ FFB_DAC_VOFF,		FFB_DAC_POFF,		0x0002000 },
-	{ FFB_PROM_VOFF,	FFB_PROM_POFF,		0x0010000 },
-	{ FFB_EXP_VOFF,		FFB_EXP_POFF,		0x0002000 },
-	{ FFB_DFB422A_VOFF,	FFB_DFB422A_POFF,	0x0800000 },
-	{ FFB_DFB422AD_VOFF,	FFB_DFB422AD_POFF,	0x0800000 },
-	{ FFB_DFB24B_VOFF,	FFB_DFB24B_POFF,	0x1000000 },
-	{ FFB_DFB422B_VOFF,	FFB_DFB422B_POFF,	0x0800000 },
-	{ FFB_DFB422BD_VOFF,	FFB_DFB422BD_POFF,	0x0800000 },
-	{ FFB_SFB16Z_VOFF,	FFB_SFB16Z_POFF,	0x0800000 },
-	{ FFB_SFB8Z_VOFF,	FFB_SFB8Z_POFF,		0x0800000 },
-	{ FFB_SFB422_VOFF,	FFB_SFB422_POFF,	0x0800000 },
-	{ FFB_SFB422D_VOFF,	FFB_SFB422D_POFF,	0x0800000 },
-	{ 0,			0,			0	  }
+	{
+		.voff	= FFB_SFB8R_VOFF,
+		.poff	= FFB_SFB8R_POFF,
+		.size	= 0x0400000
+	},
+	{
+		.voff	= FFB_SFB8G_VOFF,
+		.poff	= FFB_SFB8G_POFF,
+		.size	= 0x0400000
+	},
+	{
+		.voff	= FFB_SFB8B_VOFF,
+		.poff	= FFB_SFB8B_POFF,
+		.size	= 0x0400000
+	},
+	{
+		.voff	= FFB_SFB8X_VOFF,
+		.poff	= FFB_SFB8X_POFF,
+		.size	= 0x0400000
+	},
+	{
+		.voff	= FFB_SFB32_VOFF,
+		.poff	= FFB_SFB32_POFF,
+		.size	= 0x1000000
+	},
+	{
+		.voff	= FFB_SFB64_VOFF,
+		.poff	= FFB_SFB64_POFF,
+		.size	= 0x2000000
+	},
+	{
+		.voff	= FFB_FBC_REGS_VOFF,
+		.poff	= FFB_FBC_REGS_POFF,
+		.size	= 0x0002000
+	},
+	{
+		.voff	= FFB_BM_FBC_REGS_VOFF,
+		.poff	= FFB_BM_FBC_REGS_POFF,
+		.size	= 0x0002000
+	},
+	{
+		.voff	= FFB_DFB8R_VOFF,
+		.poff	= FFB_DFB8R_POFF,
+		.size	= 0x0400000
+	},
+	{
+		.voff	= FFB_DFB8G_VOFF,
+		.poff	= FFB_DFB8G_POFF,
+		.size	= 0x0400000
+	},
+	{
+		.voff	= FFB_DFB8B_VOFF,
+		.poff	= FFB_DFB8B_POFF,
+		.size	= 0x0400000
+	},
+	{
+		.voff	= FFB_DFB8X_VOFF,
+		.poff	= FFB_DFB8X_POFF,
+		.size	= 0x0400000
+	},
+	{
+		.voff	= FFB_DFB24_VOFF,
+		.poff	= FFB_DFB24_POFF,
+		.size	= 0x1000000
+	},
+	{
+		.voff	= FFB_DFB32_VOFF,
+		.poff	= FFB_DFB32_POFF,
+		.size	= 0x1000000
+	},
+	{
+		.voff	= FFB_FBC_KREGS_VOFF,
+		.poff	= FFB_FBC_KREGS_POFF,
+		.size	= 0x0002000
+	},
+	{
+		.voff	= FFB_DAC_VOFF,
+		.poff	= FFB_DAC_POFF,
+		.size	= 0x0002000
+	},
+	{
+		.voff	= FFB_PROM_VOFF,
+		.poff	= FFB_PROM_POFF,
+		.size	= 0x0010000
+	},
+	{
+		.voff	= FFB_EXP_VOFF,
+		.poff	= FFB_EXP_POFF,
+		.size	= 0x0002000
+	},
+	{
+		.voff	= FFB_DFB422A_VOFF,
+		.poff	= FFB_DFB422A_POFF,
+		.size	= 0x0800000
+	},
+	{
+		.voff	= FFB_DFB422AD_VOFF,
+		.poff	= FFB_DFB422AD_POFF,
+		.size	= 0x0800000
+	},
+	{
+		.voff	= FFB_DFB24B_VOFF,
+		.poff	= FFB_DFB24B_POFF,
+		.size	= 0x1000000
+	},
+	{
+		.voff	= FFB_DFB422B_VOFF,
+		.poff	= FFB_DFB422B_POFF,
+		.size	= 0x0800000
+	},
+	{
+		.voff	= FFB_DFB422BD_VOFF,
+		.poff	= FFB_DFB422BD_POFF,
+		.size	= 0x0800000
+	},
+	{
+		.voff	= FFB_SFB16Z_VOFF,
+		.poff	= FFB_SFB16Z_POFF,
+		.size	= 0x0800000
+	},
+	{
+		.voff	= FFB_SFB8Z_VOFF,
+		.poff	= FFB_SFB8Z_POFF,
+		.size	= 0x0800000
+	},
+	{
+		.voff	= FFB_SFB422_VOFF,
+		.poff	= FFB_SFB422_POFF,
+		.size	= 0x0800000
+	},
+	{
+		.voff	= FFB_SFB422D_VOFF,
+		.poff	= FFB_SFB422D_POFF,
+		.size	= 0x0800000
+	},
+	{ .size = 0 }
 };
 
 static int ffb_mmap(struct fb_info *info, struct file *file, struct vm_area_struct *vma)
@@ -910,10 +960,15 @@ static void ffb_init_one(int node, int parent)
 	all->par.prom_node = node;
 	all->par.prom_parent_node = parent;
 
-	all->info.flags = FBINFO_FLAG_DEFAULT;
+	/* Don't mention copyarea, so SCROLL_REDRAW is always
+	 * used.  It is the fastest on this chip.
+	 */
+	all->info.flags = (FBINFO_DEFAULT |
+			   /* FBINFO_HWACCEL_COPYAREA | */
+			   FBINFO_HWACCEL_FILLRECT |
+			   FBINFO_HWACCEL_IMAGEBLIT);
 	all->info.fbops = &ffb_ops;
 	all->info.screen_base = (char *) all->par.physbase + FFB_DFB24_POFF;
-	all->info.currcon = -1;
 	all->info.par = &all->par;
 	all->info.pseudo_palette = all->pseudo_palette;
 
@@ -993,6 +1048,9 @@ int __init ffb_init(void)
 {
 	int root;
 
+	if (fb_get_options("ffb", NULL))
+		return -ENODEV;
+
 	ffb_scan_siblings(prom_root_node);
 
 	root = prom_getchild(prom_root_node);
@@ -1023,8 +1081,9 @@ ffb_setup(char *arg)
 	return 0;
 }
 
-#ifdef MODULE
 module_init(ffb_init);
+
+#ifdef MODULE
 module_exit(ffb_exit);
 #endif
 

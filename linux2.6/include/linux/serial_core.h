@@ -16,9 +16,9 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
- *  $Id: serial_core.h,v 1.49 2002/07/20 18:06:32 rmk Exp $
  */
+#ifndef LINUX_SERIAL_CORE_H
+#define LINUX_SERIAL_CORE_H
 
 /*
  * The type definitions.  These are from Ted Ts'o's serial.h
@@ -38,7 +38,8 @@
 #define PORT_16850	12
 #define PORT_RSA	13
 #define PORT_NS16550A	14
-#define PORT_MAX_8250	14	/* max port ID */
+#define PORT_XSCALE	15
+#define PORT_MAX_8250	15	/* max port ID */
 
 /*
  * ARM specific type numbers.  These are not currently guaranteed
@@ -46,6 +47,7 @@
  * separate so any additions to the old serial.c that occur before
  * we are merged can be easily merged here.
  */
+#define PORT_PXA	31
 #define PORT_AMBA	32
 #define PORT_CLPS711X	33
 #define PORT_SA1100	34
@@ -59,14 +61,6 @@
 /* NEC v850.  */
 #define PORT_V850E_UART	40
 
-/* NEC PC-9800 */
-#define PORT_8251_PC98	41
-#define PORT_19K_PC98	42
-#define PORT_FIFO_PC98	43
-#define PORT_VFAST_PC98	44
-#define PORT_PC9861	45
-#define PORT_PC9801_101	46
-
 /* DZ */
 #define PORT_DZ		47
 
@@ -77,16 +71,54 @@
 #define PORT_MAC_ZILOG	50	/* m68k : not yet implemented */
 #define PORT_PMAC_ZILOG	51
 
+/* SH-SCI */
+#define PORT_SCI	52
+#define PORT_SCIF	53
+#define PORT_IRDA	54
+
+/* Samsung S3C2410 SoC and derivatives thereof */
+#define PORT_S3C2410    55
+
+/* SGI IP22 aka Indy / Challenge S / Indigo 2 */
+#define PORT_IP22ZILOG	56
+
+/* Sharp LH7a40x -- an ARM9 SoC series */
+#define PORT_LH7A40X	57
+
+/* PPC CPM type number */
+#define PORT_CPM        58
+
+/* MPC52xx type numbers */
+#define PORT_MPC52xx	59
+
+/* IBM icom */
+#define PORT_ICOM	60
+
+/* Samsung S3C2440 SoC */
+#define PORT_S3C2440	61
+
+/* Motorola i.MX SoC */
+#define PORT_IMX	62
+
+/* Marvell MPSC */
+#define PORT_MPSC	63
+
+/* TXX9 type number */
+#define PORT_TXX9       64
+
 #ifdef __KERNEL__
 
 #include <linux/config.h>
 #include <linux/interrupt.h>
 #include <linux/circ_buf.h>
 #include <linux/spinlock.h>
+#include <linux/sched.h>
+#include <linux/tty.h>
 
 struct uart_port;
 struct uart_info;
 struct serial_struct;
+struct device;
 
 /*
  * This structure describes all the operations that can be
@@ -151,7 +183,7 @@ struct uart_icount {
 struct uart_port {
 	spinlock_t		lock;			/* port lock */
 	unsigned int		iobase;			/* in/out[bwl] */
-	char			*membase;		/* read/write[bwl] */
+	unsigned char __iomem	*membase;		/* read/write[bwl] */
 	unsigned int		irq;			/* irq number */
 	unsigned int		uartclk;		/* base uart clock */
 	unsigned char		fifosize;		/* tx fifo size */
@@ -162,6 +194,7 @@ struct uart_port {
 #define UPIO_PORT		(0)
 #define UPIO_HUB6		(1)
 #define UPIO_MEM		(2)
+#define UPIO_MEM32		(3)
 
 	unsigned int		read_status_mask;	/* driver specific */
 	unsigned int		ignore_status_mask;	/* driver specific */
@@ -175,7 +208,6 @@ struct uart_port {
 
 	unsigned int		flags;
 
-#define UPF_HUP_NOTIFY		(1 << 0)
 #define UPF_FOURPORT		(1 << 1)
 #define UPF_SAK			(1 << 2)
 #define UPF_SPD_MASK		(0x1030)
@@ -195,7 +227,6 @@ struct uart_port {
 #define UPF_CONS_FLOW		(1 << 23)
 #define UPF_SHARE_IRQ		(1 << 24)
 #define UPF_BOOT_AUTOCONF	(1 << 28)
-#define UPF_RESOURCES		(1 << 30)
 #define UPF_IOREMAP		(1 << 31)
 
 #define UPF_CHANGE_MASK		(0x17fff)
@@ -208,6 +239,7 @@ struct uart_port {
 	unsigned int		custom_divisor;
 	unsigned int		line;			/* port index */
 	unsigned long		mapbase;		/* for ioremap */
+	struct device		*dev;			/* parent device */
 	unsigned char		hub6;			/* this should be in the 8250 driver */
 	unsigned char		unused[3];
 };
@@ -218,11 +250,11 @@ struct uart_port {
  * within.
  */
 struct uart_state {
-	unsigned int		close_delay;
-	unsigned int		closing_wait;
+	unsigned int		close_delay;		/* msec */
+	unsigned int		closing_wait;		/* msec */
 
 #define USF_CLOSING_WAIT_INF	(0)
-#define USF_CLOSING_WAIT_NONE	(65535)
+#define USF_CLOSING_WAIT_NONE	(~0U)
 
 	int			count;
 	int			pm_state;
@@ -232,7 +264,7 @@ struct uart_state {
 	struct semaphore	sem;
 };
 
-#define UART_XMIT_SIZE 1024
+#define UART_XMIT_SIZE	PAGE_SIZE
 /*
  * This is the state information which is only valid when the port
  * is open; it may be freed by the core driver once the device has
@@ -253,9 +285,6 @@ struct uart_info {
 #define UIF_CTS_FLOW		(1 << 26)
 #define UIF_NORMAL_ACTIVE	(1 << 29)
 #define UIF_INITIALIZED		(1 << 31)
-
-	unsigned char		*tmpbuf;
-	struct semaphore	tmpbuf_sem;
 
 	int			blocked_open;
 
@@ -444,3 +473,5 @@ uart_handle_cts_change(struct uart_port *port, unsigned int status)
 					 !((cflag) & CLOCAL))
 
 #endif
+
+#endif /* LINUX_SERIAL_CORE_H */

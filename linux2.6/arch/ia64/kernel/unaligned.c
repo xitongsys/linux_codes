@@ -1,7 +1,7 @@
 /*
  * Architecture-specific unaligned trap handling.
  *
- * Copyright (C) 1999-2002 Hewlett-Packard Co
+ * Copyright (C) 1999-2002, 2004 Hewlett-Packard Co
  *	Stephane Eranian <eranian@hpl.hp.com>
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  *
@@ -740,6 +740,7 @@ static int
 emulate_load_int (unsigned long ifa, load_store_t ld, struct pt_regs *regs)
 {
 	unsigned int len = 1 << ld.x6_sz;
+	unsigned long val = 0;
 
 	/*
 	 * r0, as target, doesn't need to be checked because Illegal Instruction
@@ -750,21 +751,18 @@ emulate_load_int (unsigned long ifa, load_store_t ld, struct pt_regs *regs)
 	 */
 
 	/*
-	 * ldX.a we don't try to emulate anything but we must invalidate the ALAT entry.
+	 * ldX.a we will emulate load and also invalidate the ALAT entry.
 	 * See comment below for explanation on how we handle ldX.a
 	 */
-	if (ld.x6_op != 0x2) {
-		unsigned long val = 0;
 
-		if (len != 2 && len != 4 && len != 8) {
-			DPRINT("unknown size: x6=%d\n", ld.x6_sz);
-			return -1;
-		}
-		/* this assumes little-endian byte-order: */
-		if (copy_from_user(&val, (void *) ifa, len))
-		    return -1;
-		setreg(ld.r1, val, 0, regs);
+	if (len != 2 && len != 4 && len != 8) {
+		DPRINT("unknown size: x6=%d\n", ld.x6_sz);
+		return -1;
 	}
+	/* this assumes little-endian byte-order: */
+	if (copy_from_user(&val, (void __user *) ifa, len))
+		return -1;
+	setreg(ld.r1, val, 0, regs);
 
 	/*
 	 * check for updates on any kind of loads
@@ -817,7 +815,7 @@ emulate_load_int (unsigned long ifa, load_store_t ld, struct pt_regs *regs)
 	 *		store & shift to temporary;
 	 *		r1=temporary
 	 *
-	 *	  So int this case, you would get the right value is r1 but the wrong info in
+	 *	  So in this case, you would get the right value is r1 but the wrong info in
 	 *	  the ALAT.  Notice that you could do it in reverse to finish with address 3
 	 *	  but you would still get the size wrong.  To get the size right, one needs to
 	 *	  execute exactly the same kind of load. You could do it from a aligned
@@ -826,9 +824,12 @@ emulate_load_int (unsigned long ifa, load_store_t ld, struct pt_regs *regs)
 	 *	  So no matter what, it is not possible to emulate an advanced load
 	 *	  correctly. But is that really critical ?
 	 *
+	 *	  We will always convert ld.a into a normal load with ALAT invalidated.  This
+	 *	  will enable compiler to do optimization where certain code path after ld.a
+	 *	  is not required to have ld.c/chk.a, e.g., code path with no intervening stores.
 	 *
-	 *	  Now one has to look at how ld.a is used, one must either do a ld.c.* or
-	 *	  chck.a.* to reuse the value stored in the ALAT. Both can "fail" (meaning no
+	 *	  If there is a store after the advanced load, one must either do a ld.c.* or
+	 *	  chk.a.* to reuse the value stored in the ALAT. Both can "fail" (meaning no
 	 *	  entry found in ALAT), and that's perfectly ok because:
 	 *
 	 *		- ld.c.*, if the entry is not present a  normal load is executed
@@ -836,19 +837,8 @@ emulate_load_int (unsigned long ifa, load_store_t ld, struct pt_regs *regs)
 	 *
 	 *	  In either case, the load can be potentially retried in another form.
 	 *
-	 *	  So it's okay NOT to do any actual load on an unaligned ld.a. However the ALAT
-	 *	  must be invalidated for the register (so that's chck.a.*,ld.c.* don't pick up
-	 *	  a stale entry later) The register base update MUST also be performed.
-	 *
-	 *	  Now what is the content of the register and its NaT bit in the case we don't
-	 *	  do the load ?  EAS2.4, says (in case an actual load is needed)
-	 *
-	 *		- r1 = [r3], Nat = 0 if succeeds
-	 *		- r1 = 0 Nat = 0 if trying to access non-speculative memory
-	 *
-	 *	  For us, there is nothing to do, because both ld.c.* and chk.a.* are going to
-	 *	  retry and thus eventually reload the register thereby changing Nat and
-	 *	  register content.
+	 *	  ALAT must be invalidated for the register (so that chk.a or ld.c don't pick
+	 *	  up a stale entry later). The register base update MUST also be performed.
 	 */
 
 	/*
@@ -879,7 +869,7 @@ emulate_store_int (unsigned long ifa, load_store_t ld, struct pt_regs *regs)
 	 *
 	 * extract the value to be stored
 	 */
-	getreg(ld.imm, &r2, 0, regs);
+	getreg(ld.imm, &r2, NULL, regs);
 
 	/*
 	 * we rely on the macros in unaligned.h for now i.e.,
@@ -897,7 +887,7 @@ emulate_store_int (unsigned long ifa, load_store_t ld, struct pt_regs *regs)
 	}
 
 	/* this assumes little-endian byte-order: */
-	if (copy_to_user((void *) ifa, &r2, len))
+	if (copy_to_user((void __user *) ifa, &r2, len))
 		return -1;
 
 	/*
@@ -1046,8 +1036,8 @@ emulate_load_floatpair (unsigned long ifa, load_store_t ld, struct pt_regs *regs
 		 * This assumes little-endian byte-order.  Note that there is no "ldfpe"
 		 * instruction:
 		 */
-		if (copy_from_user(&fpr_init[0], (void *) ifa, len)
-		    || copy_from_user(&fpr_init[1], (void *) (ifa + len), len))
+		if (copy_from_user(&fpr_init[0], (void __user *) ifa, len)
+		    || copy_from_user(&fpr_init[1], (void __user *) (ifa + len), len))
 			return -1;
 
 		DPRINT("ld.r1=%d ld.imm=%d x6_sz=%d\n", ld.r1, ld.imm, ld.x6_sz);
@@ -1148,7 +1138,7 @@ emulate_load_float (unsigned long ifa, load_store_t ld, struct pt_regs *regs)
 	 * See comments in ldX for descriptions on how the various loads are handled.
 	 */
 	if (ld.x6_op != 0x2) {
-		if (copy_from_user(&fpr_init, (void *) ifa, len))
+		if (copy_from_user(&fpr_init, (void __user *) ifa, len))
 			return -1;
 
 		DPRINT("ld.r1=%d x6_sz=%d\n", ld.r1, ld.x6_sz);
@@ -1240,7 +1230,7 @@ emulate_store_float (unsigned long ifa, load_store_t ld, struct pt_regs *regs)
 	DDUMP("fpr_init =", &fpr_init, len);
 	DDUMP("fpr_final =", &fpr_final, len);
 
-	if (copy_to_user((void *) ifa, &fpr_final, len))
+	if (copy_to_user((void __user *) ifa, &fpr_final, len))
 		return -1;
 
 	/*
@@ -1328,7 +1318,7 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 	 * handler into reading an arbitrary kernel addresses...
 	 */
 	if (!user_mode(regs))
-		eh = SEARCH_EXCEPTION_TABLE(regs);
+		eh = search_exception_tables(regs->cr_iip + ia64_psr(regs)->ri);
 	if (user_mode(regs) || eh) {
 		if ((current->thread.flags & IA64_THREAD_UAC_SIGBUS) != 0)
 			goto force_sigbus;
@@ -1347,7 +1337,7 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 			 * be holding locks...
 			 */
 			if (user_mode(regs))
-				tty_write_message(current->tty, buf);
+				tty_write_message(current->signal->tty, buf);
 			buf[len-1] = '\0';	/* drop '\r' */
 			printk(KERN_WARNING "%s", buf);	/* watch for command names containing %s */
 		}
@@ -1361,7 +1351,7 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 	DPRINT("iip=%lx ifa=%lx isr=%lx (ei=%d, sp=%d)\n",
 	       regs->cr_iip, ifa, regs->cr_ipsr, ipsr->ri, ipsr->it);
 
-	if (__copy_from_user(bundle, (void *) regs->cr_iip, 16))
+	if (__copy_from_user(bundle, (void __user *) regs->cr_iip, 16))
 		goto failure;
 
 	/*
@@ -1496,7 +1486,7 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 	/* something went wrong... */
 	if (!user_mode(regs)) {
 		if (eh) {
-			handle_exception(regs, eh);
+			ia64_handle_exception(regs, eh);
 			goto done;
 		}
 		die_if_kernel("error during unaligned kernel access\n", regs, ret);
@@ -1506,7 +1496,7 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 	si.si_signo = SIGBUS;
 	si.si_errno = 0;
 	si.si_code = BUS_ADRALN;
-	si.si_addr = (void *) ifa;
+	si.si_addr = (void __user *) ifa;
 	si.si_flags = 0;
 	si.si_isr = 0;
 	si.si_imm = 0;

@@ -1,4 +1,11 @@
 /* Kernel module to match AH parameters. */
+/* (C) 1999-2000 Yon Uriarte <yon@astaro.de>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/ip.h>
@@ -36,23 +43,26 @@ match(const struct sk_buff *skb,
       int offset,
       int *hotdrop)
 {
-	struct ip_auth_hdr ah;
+	struct ip_auth_hdr _ahdr, *ah;
 	const struct ipt_ah *ahinfo = matchinfo;
 
 	/* Must not be a fragment. */
 	if (offset)
 		return 0;
 
-	if (skb_copy_bits(skb, skb->nh.iph->ihl*4, &ah, sizeof(ah)) < 0) {
+	ah = skb_header_pointer(skb, skb->nh.iph->ihl * 4,
+				sizeof(_ahdr), &_ahdr);
+	if (ah == NULL) {
 		/* We've been asked to examine this packet, and we
-		   can't.  Hence, no choice but to drop. */
+		 * can't.  Hence, no choice but to drop.
+		 */
 		duprintf("Dropping evil AH tinygram.\n");
 		*hotdrop = 1;
 		return 0;
 	}
 
 	return spi_match(ahinfo->spis[0], ahinfo->spis[1],
-			 ntohl(ah.spi),
+			 ntohl(ah->spi),
 			 !!(ahinfo->invflags & IPT_AH_INV_SPI));
 }
 

@@ -36,6 +36,7 @@
 #include <net/ipip.h>
 #include <net/arp.h>
 #include <net/checksum.h>
+#include <net/dsfield.h>
 #include <net/inet_ecn.h>
 #include <net/xfrm.h>
 
@@ -151,7 +152,7 @@ static struct ip_tunnel *tunnels[4][HASH_SIZE];
 #define tunnels_l	(tunnels[1])
 #define tunnels_wc	(tunnels[0])
 
-static rwlock_t ipgre_lock = RW_LOCK_UNLOCKED;
+static DEFINE_RWLOCK(ipgre_lock);
 
 /* Given src, dst and key, find appropriate for input tunnel. */
 
@@ -280,7 +281,7 @@ static struct ip_tunnel * ipgre_tunnel_locate(struct ip_tunnel_parm *parms, int 
 	nt->parms = *parms;
 
 	if (register_netdevice(dev) < 0) {
-		kfree(dev);
+		free_netdev(dev);
 		goto failed;
 	}
 
@@ -303,7 +304,7 @@ static void ipgre_tunnel_uninit(struct net_device *dev)
 }
 
 
-void ipgre_err(struct sk_buff *skb, u32 info)
+static void ipgre_err(struct sk_buff *skb, u32 info)
 {
 #ifndef I_WISH_WORLD_WERE_PERFECT
 
@@ -533,11 +534,9 @@ static inline void ipgre_ecn_decapsulate(struct iphdr *iph, struct sk_buff *skb)
 {
 	if (INET_ECN_is_ce(iph->tos)) {
 		if (skb->protocol == htons(ETH_P_IP)) {
-			if (INET_ECN_is_not_ce(skb->nh.iph->tos))
-				IP_ECN_set_ce(skb->nh.iph);
+			IP_ECN_set_ce(skb->nh.iph);
 		} else if (skb->protocol == htons(ETH_P_IPV6)) {
-			if (INET_ECN_is_not_ce(ip6_get_dsfield(skb->nh.ipv6h)))
-				IP6_ECN_set_ce(skb->nh.ipv6h);
+			IP6_ECN_set_ce(skb->nh.ipv6h);
 		}
 	}
 }
@@ -549,11 +548,11 @@ ipgre_ecn_encapsulate(u8 tos, struct iphdr *old_iph, struct sk_buff *skb)
 	if (skb->protocol == htons(ETH_P_IP))
 		inner = old_iph->tos;
 	else if (skb->protocol == htons(ETH_P_IPV6))
-		inner = ip6_get_dsfield((struct ipv6hdr*)old_iph);
+		inner = ipv6_get_dsfield((struct ipv6hdr *)old_iph);
 	return INET_ECN_encapsulate(tos, inner);
 }
 
-int ipgre_rcv(struct sk_buff *skb)
+static int ipgre_rcv(struct sk_buff *skb)
 {
 	struct iphdr *iph;
 	u8     *h;
@@ -605,13 +604,24 @@ int ipgre_rcv(struct sk_buff *skb)
 	if ((tunnel = ipgre_tunnel_lookup(iph->saddr, iph->daddr, key)) != NULL) {
 		secpath_reset(skb);
 
+		skb->protocol = *(u16*)(h + 2);
+		/* WCCP version 1 and 2 protocol decoding.
+		 * - Change protocol to IP
+		 * - When dealing with WCCPv2, Skip extra 4 bytes in GRE header
+		 */
+		if (flags == 0 &&
+		    skb->protocol == __constant_htons(ETH_P_WCCP)) {
+			skb->protocol = __constant_htons(ETH_P_IP);
+			if ((*(h + offset) & 0xF0) != 0x40) 
+				offset += 4;
+		}
+
 		skb->mac.raw = skb->nh.raw;
 		skb->nh.raw = __pskb_pull(skb, offset);
 		memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
 		if (skb->ip_summed == CHECKSUM_HW)
 			skb->csum = csum_sub(skb->csum,
 					     csum_partial(skb->mac.raw, skb->nh.raw-skb->mac.raw, 0));
-		skb->protocol = *(u16*)(h + 2);
 		skb->pkt_type = PACKET_HOST;
 #ifdef CONFIG_NET_IPGRE_BROADCAST
 		if (MULTICAST(iph->daddr)) {
@@ -643,13 +653,7 @@ int ipgre_rcv(struct sk_buff *skb)
 		skb->dev = tunnel->dev;
 		dst_release(skb->dst);
 		skb->dst = NULL;
-#ifdef CONFIG_NETFILTER
-		nf_conntrack_put(skb->nfct);
-		skb->nfct = NULL;
-#ifdef CONFIG_NETFILTER_DEBUG
-		skb->nf_debug = 0;
-#endif
-#endif
+		nf_reset(skb);
 		ipgre_ecn_decapsulate(iph, skb);
 		netif_rx(skb);
 		read_unlock(&ipgre_lock);
@@ -877,13 +881,7 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 		}
 	}
 
-#ifdef CONFIG_NETFILTER
-	nf_conntrack_put(skb->nfct);
-	skb->nfct = NULL;
-#ifdef CONFIG_NETFILTER_DEBUG
-	skb->nf_debug = 0;
-#endif
-#endif
+	nf_reset(skb);
 
 	IPTUNNEL_XMIT();
 	tunnel->recursion--;
@@ -1240,7 +1238,7 @@ int __init ipgre_fb_tunnel_init(struct net_device *dev)
 }
 
 
-static struct inet_protocol ipgre_protocol = {
+static struct net_protocol ipgre_protocol = {
 	.handler	=	ipgre_rcv,
 	.err_handler	=	ipgre_err,
 };
@@ -1250,9 +1248,9 @@ static struct inet_protocol ipgre_protocol = {
  *	And now the modules code and kernel interface.
  */
 
-int __init ipgre_init(void)
+static int __init ipgre_init(void)
 {
-	int err = -EINVAL;
+	int err;
 
 	printk(KERN_INFO "GRE over IPv4 tunneling driver\n");
 
@@ -1265,22 +1263,23 @@ int __init ipgre_init(void)
 					   ipgre_tunnel_setup);
 	if (!ipgre_fb_tunnel_dev) {
 		err = -ENOMEM;
-		goto fail;
+		goto err1;
 	}
 
 	ipgre_fb_tunnel_dev->init = ipgre_fb_tunnel_init;
 
 	if ((err = register_netdev(ipgre_fb_tunnel_dev)))
-		goto fail;
+		goto err2;
 out:
 	return err;
-fail:
+err2:
+	free_netdev(ipgre_fb_tunnel_dev);
+err1:
 	inet_del_protocol(&ipgre_protocol, IPPROTO_GRE);
-	kfree(ipgre_fb_tunnel_dev);
 	goto out;
 }
 
-void ipgre_fini(void)
+static void ipgre_fini(void)
 {
 	if (inet_del_protocol(&ipgre_protocol, IPPROTO_GRE) < 0)
 		printk(KERN_INFO "ipgre close: can't remove protocol\n");
@@ -1288,8 +1287,6 @@ void ipgre_fini(void)
 	unregister_netdev(ipgre_fb_tunnel_dev);
 }
 
-#ifdef MODULE
 module_init(ipgre_init);
-#endif
 module_exit(ipgre_fini);
 MODULE_LICENSE("GPL");

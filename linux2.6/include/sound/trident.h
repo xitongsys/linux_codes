@@ -54,13 +54,6 @@
 #define TRIDENT_DEVICE_ID_NX		((PCI_VENDOR_ID_TRIDENT<<16)|PCI_DEVICE_ID_TRIDENT_4DWAVE_NX)
 #define TRIDENT_DEVICE_ID_SI7018	((PCI_VENDOR_ID_SI<<16)|PCI_DEVICE_ID_SI_7018)
 
-/* Trident chipsets have 1GB memory limit */
-#ifdef __alpha__
-#define TRIDENT_DMA_TYPE        SNDRV_DMA_TYPE_PCI_16MB
-#else
-#define TRIDENT_DMA_TYPE        SNDRV_DMA_TYPE_PCI
-#endif
-
 #define SNDRV_SEQ_DEV_ID_TRIDENT			"trident-synth"
 
 #define SNDRV_TRIDENT_VOICE_TYPE_PCM		0
@@ -308,11 +301,9 @@ typedef struct {
 	unsigned int * entries;		/* 16k-aligned TLB table */
 	dma_addr_t entries_dmaaddr;	/* 16k-aligned PCI address to TLB table */
 	unsigned long * shadow_entries;	/* shadow entries with virtual addresses */
-	void * buffer;			/* pointer for table calloc */
-	dma_addr_t buffer_dmaaddr;	/* not accessible PCI BUS physical address */
+	struct snd_dma_buffer buffer;
 	snd_util_memhdr_t * memhdr;	/* page allocation list */
-	void * silent_page;		/* silent page */
-	dma_addr_t silent_page_dmaaddr; /* not accessible PCI BUS physical address */
+	struct snd_dma_buffer silent_page;
 } snd_trident_tlb_t;
 
 struct _snd_trident_voice {
@@ -407,7 +398,6 @@ struct _snd_trident {
         unsigned char  bDMAStart;
 
 	unsigned long port;
-	struct resource *res_port;
 	unsigned long midi_port;
 
 	unsigned int spurious_irq_count;
@@ -435,6 +425,8 @@ struct _snd_trident {
 	spinlock_t event_lock;
 	spinlock_t voice_alloc;
 
+	struct snd_dma_device dma_dev;
+
 	struct pci_dev *pci;
 	snd_card_t *card;
 	snd_pcm_t *pcm;		/* ADC/DAC PCM */
@@ -443,6 +435,7 @@ struct _snd_trident {
 	snd_rawmidi_t *rmidi;
 	snd_seq_device_t *seq_dev;
 
+	ac97_bus_t *ac97_bus;
 	ac97_t *ac97;
 	ac97_t *ac97_sec;
 
@@ -464,33 +457,23 @@ int snd_trident_create(snd_card_t * card,
 		       int pcm_spdif_device,
 		       int max_wavetable_size,
 		       trident_t ** rtrident);
-int snd_trident_free(trident_t *trident);
 void snd_trident_gameport(trident_t *trident);
 
 int snd_trident_pcm(trident_t * trident, int device, snd_pcm_t **rpcm);
 int snd_trident_foldback_pcm(trident_t * trident, int device, snd_pcm_t **rpcm);
 int snd_trident_spdif_pcm(trident_t * trident, int device, snd_pcm_t **rpcm);
 int snd_trident_attach_synthesizer(trident_t * trident);
-int snd_trident_detach_synthesizer(trident_t * trident);
 snd_trident_voice_t *snd_trident_alloc_voice(trident_t * trident, int type, int client, int port);
 void snd_trident_free_voice(trident_t * trident, snd_trident_voice_t *voice);
 void snd_trident_start_voice(trident_t * trident, unsigned int voice);
 void snd_trident_stop_voice(trident_t * trident, unsigned int voice);
 void snd_trident_write_voice_regs(trident_t * trident, snd_trident_voice_t *voice);
-void snd_trident_clear_voices(trident_t * trident, unsigned short v_min, unsigned short v_max);
 
 /* TLB memory allocation */
 snd_util_memblk_t *snd_trident_alloc_pages(trident_t *trident, snd_pcm_substream_t *substream);
 int snd_trident_free_pages(trident_t *trident, snd_util_memblk_t *blk);
 snd_util_memblk_t *snd_trident_synth_alloc(trident_t *trident, unsigned int size);
 int snd_trident_synth_free(trident_t *trident, snd_util_memblk_t *blk);
-int snd_trident_synth_bzero(trident_t *trident, snd_util_memblk_t *blk, int offset, int size);
-int snd_trident_synth_copy_from_user(trident_t *trident, snd_util_memblk_t *blk, int offset, const char *data, int size);
-
-/* Power Management */
-#ifdef CONFIG_PM
-void snd_trident_suspend(trident_t *trident);
-void snd_trident_resume(trident_t *trident);
-#endif
+int snd_trident_synth_copy_from_user(trident_t *trident, snd_util_memblk_t *blk, int offset, const char __user *data, int size);
 
 #endif /* __SOUND_TRIDENT_H */

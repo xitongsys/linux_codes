@@ -60,10 +60,12 @@ struct elf_prpsinfo32
 
 #include <linux/time.h>
 
-#define jiffies_to_timeval jiffies_to_compat_timeval
+#undef cputime_to_timeval
+#define cputime_to_timeval cputime_to_compat_timeval
 static __inline__ void
-jiffies_to_compat_timeval(unsigned long jiffies, struct compat_timeval *value)
+cputime_to_compat_timeval(const cputime_t cputime, struct compat_timeval *value)
 {
+	unsigned long jiffies = cputime_to_jiffies(cputime);
 	value->tv_usec = (jiffies % HZ) * (1000000L / HZ);
 	value->tv_sec = jiffies / HZ;
 }
@@ -72,8 +74,5 @@ extern void start_thread32(struct pt_regs *, unsigned long, unsigned long);
 #undef start_thread
 #define start_thread start_thread32
 #define init_elf_binfmt init_elf32_binfmt
-
-#undef CONFIG_BINFMT_ELF
-#define CONFIG_BINFMT_ELF 1
 
 #include "../../../fs/binfmt_elf.c"

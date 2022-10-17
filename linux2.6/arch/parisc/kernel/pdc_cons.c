@@ -1,6 +1,35 @@
-/*
- *  linux/arch/parisc/kernel/pdc_console.c
+/* 
+ *    PDC Console support - ie use firmware to dump text via boot console
  *
+ *    Copyright (C) 1999-2003 Matthew Wilcox <willy at parisc-linux.org>
+ *    Copyright (C) 2000 Martin K Petersen <mkp at mkp.net>
+ *    Copyright (C) 2000 John Marvin <jsm at parisc-linux.org>
+ *    Copyright (C) 2000-2003 Paul Bame <bame at parisc-linux.org>
+ *    Copyright (C) 2000 Philipp Rumpf <prumpf with tux.org>
+ *    Copyright (C) 2000 Michael Ang <mang with subcarrier.org>
+ *    Copyright (C) 2000 Grant Grundler <grundler with parisc-linux.org>
+ *    Copyright (C) 2001-2002 Ryan Bradetich <rbrad at parisc-linux.org>
+ *    Copyright (C) 2001 Helge Deller <deller at parisc-linux.org>
+ *    Copyright (C) 2001 Thomas Bogendoerfer <tsbogend at parisc-linux.org>
+ *    Copyright (C) 2002 Randolph Chung <tausq with parisc-linux.org>
+ *
+ *
+ *    This program is free software; you can redistribute it and/or modify
+ *    it under the terms of the GNU General Public License as published by
+ *    the Free Software Foundation; either version 2 of the License, or
+ *    (at your option) any later version.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU General Public License for more details.
+ *
+ *    You should have received a copy of the GNU General Public License
+ *    along with this program; if not, write to the Free Software
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ */
+
+/*
  *  The PDC console is a simple console, which can be used for debugging 
  *  boot related problems on HP PA-RISC machines.
  *
@@ -42,6 +71,19 @@ void pdc_outc(unsigned char c)
 	pdc_iodc_outc(c);
 }
 
+void pdc_printf(const char *fmt, ...)
+{
+	va_list args;
+	char buf[1024];
+	int i, len;
+
+	va_start(args, fmt);
+	len = vscnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
+
+	for (i = 0; i < len; i++)
+		pdc_iodc_outc(buf[i]);
+}
 
 int pdc_console_poll_key(struct console *co)
 {
@@ -61,16 +103,6 @@ static struct tty_driver * pdc_console_device (struct console *c, int *index)
 	*index = c->index ? c->index-1 : fg_console;
 	return &console_driver;
 }
-
-#elif defined(CONFIG_SERIAL_MUX)
-#warning CONFIG_SERIAL_MUX
-#define PDC_CONSOLE_DEVICE pdc_console_device
-#warning "FIXME - should be: static struct tty_driver * pdc_console_device (struct console *c, int *index)"
-static kdev_t pdc_console_device (struct console *c, int *index)
-{
-        return mk_kdev(MUX_MAJOR, 0);
-}
-
 #else
 #define PDC_CONSOLE_DEVICE NULL
 #endif
@@ -105,7 +137,7 @@ static void pdc_console_init_force(void)
 
 void __init pdc_console_init(void)
 {
-#if defined(EARLY_BOOTUP_DEBUG) || defined(CONFIG_PDC_CONSOLE) || defined(CONFIG_SERIAL_MUX)
+#if defined(EARLY_BOOTUP_DEBUG) || defined(CONFIG_PDC_CONSOLE)
 	pdc_console_init_force();
 #endif
 #ifdef EARLY_BOOTUP_DEBUG

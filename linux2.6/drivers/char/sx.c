@@ -251,11 +251,13 @@
 #define PCI_DEVICE_ID_SPECIALIX_SX_XIO_IO8 0x2000
 #endif
 
+#ifdef CONFIG_PCI
 static struct pci_device_id sx_pci_tbl[] = {
 	{ PCI_VENDOR_ID_SPECIALIX, PCI_DEVICE_ID_SPECIALIX_SX_XIO_IO8, PCI_ANY_ID, PCI_ANY_ID },
 	{ 0 }
 };
 MODULE_DEVICE_TABLE(pci, sx_pci_tbl);
+#endif /* CONFIG_PCI */
 
 /* Configurable options: 
    (Don't be too sure that it'll work if you toggle them) */
@@ -458,9 +460,27 @@ static inline int sx_paranoia_check(struct sx_port const * port,
 
 
 #ifdef DEBUG
-static void my_hd (unsigned char *addr, int len)
+static void my_hd_io(void __iomem *p, int len)
 {
 	int i, j, ch;
+	unsigned char __iomem *addr = p;
+
+	for (i=0;i<len;i+=16) {
+		printk ("%p ", addr+i);
+		for (j=0;j<16;j++) {
+			printk ("%02x %s", readb(addr+j+i), (j==7)?" ":"");
+		}
+		for (j=0;j<16;j++) {
+			ch = readb(addr+j+i);
+			printk ("%c", (ch < 0x20)?'.':((ch > 0x7f)?'.':ch));
+		}
+		printk ("\n");
+	}
+}
+static void my_hd(void *p, int len)
+{
+	int i, j, ch;
+	unsigned char *addr = p;
 
 	for (i=0;i<len;i+=16) {
 		printk ("%p ", addr+i);
@@ -509,13 +529,13 @@ static int sx_busy_wait_eq (struct sx_board *board,
 
 	func_enter ();
 
-	for (i=0; i < TIMEOUT_1 > 0;i++) 
+	for (i=0; i < TIMEOUT_1 ;i++)
 		if ((read_sx_byte (board, offset) & mask) == correctval) {
 			func_exit ();
 			return 1;
 		}
 
-	for (i=0; i < TIMEOUT_2 > 0;i++) {
+	for (i=0; i < TIMEOUT_2 ;i++) {
 		if ((read_sx_byte (board, offset) & mask) == correctval) {
 			func_exit ();
 			return 1;
@@ -535,13 +555,13 @@ static int sx_busy_wait_neq (struct sx_board *board,
 
 	func_enter ();
 
-	for (i=0; i < TIMEOUT_1 > 0;i++) 
+	for (i=0; i < TIMEOUT_1 ;i++)
 		if ((read_sx_byte (board, offset) & mask) != badval) {
 			func_exit ();
 			return 1;
 		}
 
-	for (i=0; i < TIMEOUT_2 > 0;i++) {
+	for (i=0; i < TIMEOUT_2 ;i++) {
 		if ((read_sx_byte (board, offset) & mask) != badval) {
 			func_exit ();
 			return 1;
@@ -1044,12 +1064,9 @@ static void sx_transmit_chars (struct sx_port *port)
 	}
 
 	if ((port->gs.xmit_cnt <= port->gs.wakeup_chars) && port->gs.tty) {
-		if ((port->gs.tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    port->gs.tty->ldisc.write_wakeup)
-			(port->gs.tty->ldisc.write_wakeup)(port->gs.tty);
+		tty_wakeup(port->gs.tty);
 		sx_dprintk (SX_DEBUG_TRANSMIT, "Waking up.... ldisc (%d)....\n",
 		            port->gs.wakeup_chars); 
-		wake_up_interruptible(&port->gs.tty->write_wait);
 	}
 
 	clear_bit (SX_PORT_TRANSMIT_LOCK, &port->locks);
@@ -1420,7 +1437,7 @@ static int sx_open  (struct tty_struct * tty, struct file * filp)
 
 	line = tty->index;
 	sx_dprintk (SX_DEBUG_OPEN, "%d: opening line %d. tty=%p ctty=%p, np=%d)\n", 
-	            current->pid, line, tty, current->tty, sx_nports);
+	            current->pid, line, tty, current->signal->tty, sx_nports);
 
 	if ((line < 0) || (line >= SX_NPORTS) || (line >= sx_nports))
 		return -ENODEV;
@@ -1453,11 +1470,10 @@ static int sx_open  (struct tty_struct * tty, struct file * filp)
 
 #if 0
 	if (sx_debug & SX_DEBUG_OPEN)
-		my_hd ((unsigned char *)port, sizeof (*port));
+		my_hd (port, sizeof (*port));
 #else
 	if (sx_debug & SX_DEBUG_OPEN)
-		my_hd ((unsigned char *)port->board->base + port->ch_base, 
-		       sizeof (*port));
+		my_hd_io (port->board->base + port->ch_base, sizeof (*port));
 #endif
 
 	if (sx_send_command (port, HS_LOPEN, -1, HS_IDLE_OPEN) != 1) {
@@ -1500,7 +1516,7 @@ static void sx_close (void *ptr)
 	sx_send_command (port, HS_CLOSE, 0, 0);
 
 	while (to-- && (sx_read_channel_byte (port, hi_hstat) != HS_IDLE_CLOSED)) {
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		schedule_timeout (1);
 		if (signal_pending (current))
 				break;
@@ -1592,7 +1608,8 @@ static int sx_fw_ioctl (struct inode *inode, struct file *filp,
                         unsigned int cmd, unsigned long arg)
 {
 	int rc = 0;
-	int *descr = (int *)arg, i;
+	int __user *descr = (int __user *)arg;
+	int i;
 	static struct sx_board *board = NULL;
 	int nbytes, offset;
 	unsigned long data;
@@ -1668,14 +1685,14 @@ static int sx_fw_ioctl (struct inode *inode, struct file *filp,
 		get_user (data,	 descr++);
 		while (nbytes && data) {
 			for (i=0;i<nbytes;i += SX_CHUNK_SIZE) {
-				if (copy_from_user(tmp, (char *)data + i, 
+				if (copy_from_user(tmp, (char __user *)data+i, 
 						   (i + SX_CHUNK_SIZE >
 						    nbytes) ? nbytes - i :
 						   	      SX_CHUNK_SIZE)) {
 					kfree (tmp);
 					return -EFAULT;
 				}
-				memcpy_toio    ((char *) (board->base2 + offset + i), tmp, 
+				memcpy_toio(board->base2 + offset + i, tmp, 
 				                (i+SX_CHUNK_SIZE>nbytes)?nbytes-i:SX_CHUNK_SIZE);
 			}
 
@@ -1743,11 +1760,38 @@ static void sx_break (struct tty_struct * tty, int flag)
 }
 
 
+static int sx_tiocmget(struct tty_struct *tty, struct file *file)
+{
+	struct sx_port *port = tty->driver_data;
+	return sx_getsignals(port);
+}
+
+static int sx_tiocmset(struct tty_struct *tty, struct file *file,
+		       unsigned int set, unsigned int clear)
+{
+	struct sx_port *port = tty->driver_data;
+	int rts = -1, dtr = -1;
+
+	if (set & TIOCM_RTS)
+		rts = 1;
+	if (set & TIOCM_DTR)
+		dtr = 1;
+	if (clear & TIOCM_RTS)
+		rts = 0;
+	if (clear & TIOCM_DTR)
+		dtr = 0;
+
+	sx_setsignals(port, dtr, rts);
+	sx_reconfigure_port(port);
+	return 0;
+}
+
 static int sx_ioctl (struct tty_struct * tty, struct file * filp, 
                      unsigned int cmd, unsigned long arg)
 {
 	int rc;
 	struct sx_port *port = tty->driver_data;
+	void __user *argp = (void __user *)arg;
 	int ival;
 
 	/* func_enter2(); */
@@ -1756,52 +1800,20 @@ static int sx_ioctl (struct tty_struct * tty, struct file * filp,
 	switch (cmd) {
 	case TIOCGSOFTCAR:
 		rc = put_user(((tty->termios->c_cflag & CLOCAL) ? 1 : 0),
-		              (unsigned int *) arg);
+		              (unsigned __user *) argp);
 		break;
 	case TIOCSSOFTCAR:
-		if ((rc = get_user(ival, (unsigned int *) arg)) == 0) {
+		if ((rc = get_user(ival, (unsigned __user *) argp)) == 0) {
 			tty->termios->c_cflag =
 				(tty->termios->c_cflag & ~CLOCAL) |
 				(ival ? CLOCAL : 0);
 		}
 		break;
 	case TIOCGSERIAL:
-		if ((rc = verify_area(VERIFY_WRITE, (void *) arg,
-		                      sizeof(struct serial_struct))) == 0)
-			rc = gs_getserial(&port->gs, (struct serial_struct *) arg);
+		rc = gs_getserial(&port->gs, argp);
 		break;
 	case TIOCSSERIAL:
-		if ((rc = verify_area(VERIFY_READ, (void *) arg,
-		                      sizeof(struct serial_struct))) == 0)
-			rc = gs_setserial(&port->gs, (struct serial_struct *) arg);
-		break;
-	case TIOCMGET:
-		if ((rc = verify_area(VERIFY_WRITE, (void *) arg,
-		                      sizeof(unsigned int))) == 0) {
-			ival = sx_getsignals(port);
-			put_user(ival, (unsigned int *) arg);
-		}
-		break;
-	case TIOCMBIS:
-		if ((rc = get_user(ival, (unsigned int *) arg)) == 0) {
-			sx_setsignals(port, ((ival & TIOCM_DTR) ? 1 : -1),
-			                     ((ival & TIOCM_RTS) ? 1 : -1));
-			sx_reconfigure_port(port);
-		}
-		break;
-	case TIOCMBIC:
-		if ((rc = get_user(ival, (unsigned int *) arg)) == 0) {
-			sx_setsignals(port, ((ival & TIOCM_DTR) ? 0 : -1),
-			                     ((ival & TIOCM_RTS) ? 0 : -1));
-			sx_reconfigure_port(port);
-		}
-		break;
-	case TIOCMSET:
-		if ((rc = get_user(ival, (unsigned int *) arg)) == 0) {
-			sx_setsignals(port, ((ival & TIOCM_DTR) ? 1 : 0),
-			                     ((ival & TIOCM_RTS) ? 1 : 0));
-			sx_reconfigure_port(port);
-		}
+		rc = gs_setserial(&port->gs, argp);
 		break;
 	default:
 		rc = -ENOIOCTLCMD;
@@ -1897,9 +1909,9 @@ static int sx_init_board (struct sx_board *board)
 	/* Ok. So now the processor on the card is running. It gathered
 	   some info for us... */
 	sx_dprintk (SX_DEBUG_INIT, "The sxcard structure:\n");
-	if (sx_debug & SX_DEBUG_INIT) my_hd ((char *)(board->base), 0x10);
+	if (sx_debug & SX_DEBUG_INIT) my_hd_io (board->base, 0x10);
 	sx_dprintk (SX_DEBUG_INIT, "the first sx_module structure:\n");
-	if (sx_debug & SX_DEBUG_INIT) my_hd ((char *)(board->base + 0x80), 0x30);
+	if (sx_debug & SX_DEBUG_INIT) my_hd_io (board->base + 0x80, 0x30);
 
 	sx_dprintk (SX_DEBUG_INIT, 
 	            "init_status: %x, %dk memory, firmware V%x.%02x,\n", 
@@ -2052,18 +2064,18 @@ static int probe_sx (struct sx_board *board)
 	func_enter();
 
 	if (!IS_CF_BOARD (board)) {    
-		sx_dprintk (SX_DEBUG_PROBE, "Going to verify vpd prom at %lx.\n", 
+		sx_dprintk (SX_DEBUG_PROBE, "Going to verify vpd prom at %p.\n", 
 		            board->base + SX_VPD_ROM);
 
 		if (sx_debug & SX_DEBUG_PROBE)
-			my_hd ((char *)(board->base + SX_VPD_ROM), 0x40);
+			my_hd_io(board->base + SX_VPD_ROM, 0x40);
 
 		p = (char *) &vpdp;
 		for (i=0;i< sizeof (struct vpd_prom);i++)
 			*p++ = read_sx_byte (board, SX_VPD_ROM + i*2);
 
 		if (sx_debug & SX_DEBUG_PROBE)
-			my_hd ((char *)&vpdp, 0x20);
+			my_hd (&vpdp, 0x20);
 
 		sx_dprintk (SX_DEBUG_PROBE, "checking identifier...\n");
 
@@ -2093,8 +2105,8 @@ static int probe_sx (struct sx_board *board)
 		}
 
 		if (((vpdp.uniqid >> 24) & SX_UNIQUEID_MASK) == SX_ISA_UNIQUEID1) {
-			if (board->base & 0x8000) {
-				printk (KERN_WARNING "sx: Warning: There may be hardware problems with the card at %lx.\n", board->base);
+			if (board->hw_base & 0x8000) {
+				printk (KERN_WARNING "sx: Warning: There may be hardware problems with the card at %lx.\n", board->hw_base);
 				printk (KERN_WARNING "sx: Read sx.txt for more info.\n");
 			}
 		}
@@ -2126,11 +2138,11 @@ static int probe_si (struct sx_board *board)
 	int i;
 
 	func_enter();
-	sx_dprintk (SX_DEBUG_PROBE, "Going to verify SI signature hw %lx at %lx.\n", board->hw_base,
+	sx_dprintk (SX_DEBUG_PROBE, "Going to verify SI signature hw %lx at %p.\n", board->hw_base,
 	            board->base + SI2_ISA_ID_BASE);
 
 	if (sx_debug & SX_DEBUG_PROBE)
-		my_hd ((char *)(board->base + SI2_ISA_ID_BASE), 0x8);
+		my_hd_io(board->base + SI2_ISA_ID_BASE, 0x8);
 
 	if (!IS_EISA_BOARD(board)) {
 	  if( IS_SI1_BOARD(board) ) 
@@ -2217,6 +2229,8 @@ static struct tty_operations sx_ops = {
 	.stop = gs_stop,
 	.start = gs_start,
 	.hangup = gs_hangup,
+	.tiocmget = sx_tiocmget,
+	.tiocmset = sx_tiocmset,
 };
 
 static int sx_init_drivers(void)
@@ -2362,7 +2376,7 @@ static void __exit sx_release_drivers(void)
 static void fix_sx_pci (struct pci_dev *pdev, struct sx_board *board)
 {
 	unsigned int hwbase;
-	unsigned long rebase;
+	void __iomem *rebase;
 	unsigned int t;
 
 #define CNTRL_REG_OFFSET        0x50
@@ -2370,13 +2384,13 @@ static void fix_sx_pci (struct pci_dev *pdev, struct sx_board *board)
 
 	pci_read_config_dword(pdev, PCI_BASE_ADDRESS_0, &hwbase);
 	hwbase &= PCI_BASE_ADDRESS_MEM_MASK;
-	rebase = (ulong) ioremap(hwbase, 0x80);
+	rebase = ioremap(hwbase, 0x80);
 	t = readl (rebase + CNTRL_REG_OFFSET);
 	if (t != CNTRL_REG_GOODVALUE) {
 		printk (KERN_DEBUG "sx: performing cntrl reg fix: %08x -> %08x\n", t, CNTRL_REG_GOODVALUE); 
 		writel (CNTRL_REG_GOODVALUE, rebase + CNTRL_REG_OFFSET);
 	}
-	iounmap ((char *) rebase);
+	iounmap(rebase);
 }
 #endif
 
@@ -2444,7 +2458,7 @@ static int __init sx_init(void)
 		else
 			board->hw_base = pci_resource_start (pdev, 2);
 		board->base2 = 
-		board->base = (ulong) ioremap(board->hw_base, WINDOW_LEN (board));
+		board->base = ioremap(board->hw_base, WINDOW_LEN (board));
 		if (!board->base) {
 			printk(KERN_ERR "ioremap failed\n");
 			/* XXX handle error */
@@ -2456,14 +2470,14 @@ static int __init sx_init(void)
 
 		board->irq = pdev->irq;
 
-		sx_dprintk (SX_DEBUG_PROBE, "Got a specialix card: %x/%lx(%d) %x.\n", 
+		sx_dprintk (SX_DEBUG_PROBE, "Got a specialix card: %x/%p(%d) %x.\n", 
 			    tint, boards[found].base, board->irq, board->flags);
 
 		if (probe_sx (board)) {
 			found++;
 			fix_sx_pci (pdev, board);
 		} else 
-			iounmap ((char *) (board->base));
+			iounmap(board->base);
 	}
 #endif
 
@@ -2471,7 +2485,7 @@ static int __init sx_init(void)
 		board = &boards[found];
 		board->hw_base = sx_probe_addrs[i];
 		board->base2 =
-		board->base = (ulong) ioremap(board->hw_base, SX_WINDOW_LEN);
+		board->base = ioremap(board->hw_base, SX_WINDOW_LEN);
 		board->flags &= ~SX_BOARD_TYPE;
 		board->flags |=	SX_ISA_BOARD;
 		board->irq = sx_irqmask?-1:0;
@@ -2479,7 +2493,7 @@ static int __init sx_init(void)
 		if (probe_sx (board)) {
 			found++;
 		} else {
-			iounmap ((char *) (board->base));
+			iounmap(board->base);
 		}
 	}
 
@@ -2487,7 +2501,7 @@ static int __init sx_init(void)
 		board = &boards[found];
 		board->hw_base = si_probe_addrs[i];
 		board->base2 =
-		board->base = (ulong) ioremap(board->hw_base, SI2_ISA_WINDOW_LEN);
+		board->base = ioremap(board->hw_base, SI2_ISA_WINDOW_LEN);
 		board->flags &= ~SX_BOARD_TYPE;
 		board->flags |=  SI_ISA_BOARD;
 		board->irq = sx_irqmask ?-1:0;
@@ -2495,14 +2509,14 @@ static int __init sx_init(void)
 		if (probe_si (board)) {
 			found++;
 		} else {
-			iounmap ((char *) (board->base));
+			iounmap (board->base);
 		}
 	}
 	for (i=0;i<NR_SI1_ADDRS;i++) {
 		board = &boards[found];
 		board->hw_base = si1_probe_addrs[i];
 		board->base2 =
-		board->base = (ulong) ioremap(board->hw_base, SI1_ISA_WINDOW_LEN);
+		board->base = ioremap(board->hw_base, SI1_ISA_WINDOW_LEN);
 		board->flags &= ~SX_BOARD_TYPE;
 		board->flags |=  SI1_ISA_BOARD;
 		board->irq = sx_irqmask ?-1:0;
@@ -2510,7 +2524,7 @@ static int __init sx_init(void)
 		if (probe_si (board)) {
 			found++;
 		} else {
-			iounmap ((char *) (board->base));
+			iounmap (board->base);
 		}
 	}
 
@@ -2530,10 +2544,10 @@ static int __init sx_init(void)
 
 			board->hw_base = (((inb(0xc01+eisa_slot) << 8) + inb(0xc00+eisa_slot)) << 16);
 			board->base2 =
-			board->base = (ulong) ioremap(board->hw_base, SI2_EISA_WINDOW_LEN);
+			board->base = ioremap(board->hw_base, SI2_EISA_WINDOW_LEN);
 
 			sx_dprintk(SX_DEBUG_PROBE, "IO hw_base address: %lx\n", board->hw_base);
-			sx_dprintk(SX_DEBUG_PROBE, "base: %lx\n", board->base);
+			sx_dprintk(SX_DEBUG_PROBE, "base: %p\n", board->base);
 			board->irq = inb(board->eisa_base+0xc02)>>4; 
 			sx_dprintk(SX_DEBUG_PROBE, "IRQ: %d\n", board->irq);
 			
@@ -2562,7 +2576,7 @@ static void __exit sx_exit (void)
 	for (i = 0; i < SX_NBOARDS; i++) {
 		board = &boards[i];
 		if (board->flags & SX_BOARD_INITIALIZED) {
-			sx_dprintk (SX_DEBUG_CLEANUP, "Cleaning up board at %lx\n", board->base);
+			sx_dprintk (SX_DEBUG_CLEANUP, "Cleaning up board at %p\n", board->base);
 			/* The board should stop messing with us.
 			   (actually I mean the interrupt) */
 			sx_reset (board);
@@ -2571,11 +2585,11 @@ static void __exit sx_exit (void)
 
 			/* It is safe/allowed to del_timer a non-active timer */
 			del_timer (& board->timer);
-			iounmap ((char *) (board->base));
+			iounmap(board->base);
 		}
 	}
 	if (misc_deregister(&sx_fw_device) < 0) {
-		printk (KERN_INFO "sx: couldn't deregister firmware loader device\n");
+		printk (KERN_INFO "sx: couldn't deregister firmware loader devic\n");
 	}
 	sx_dprintk (SX_DEBUG_CLEANUP, "Cleaning up drivers (%d)\n", sx_initialized);
 	if (sx_initialized)

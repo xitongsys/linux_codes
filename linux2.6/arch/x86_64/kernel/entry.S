@@ -34,14 +34,13 @@
 #include <asm/smp.h>
 #include <asm/cache.h>
 #include <asm/errno.h>
+#include <asm/dwarf2.h>
 #include <asm/calling.h>
 #include <asm/offset.h>
 #include <asm/msr.h>
 #include <asm/unistd.h>
 #include <asm/thread_info.h>
 #include <asm/hw_irq.h>
-#include <asm/errno.h>
-#include <asm/dwarf2.h>
 
 	.code64
 
@@ -82,26 +81,57 @@
 	/* push in order ss, rsp, eflags, cs, rip */
 	xorq %rax, %rax
 	pushq %rax /* ss */
+	CFI_ADJUST_CFA_OFFSET	8
 	pushq %rax /* rsp */
+	CFI_ADJUST_CFA_OFFSET	8
+	CFI_OFFSET	rip,0
 	pushq $(1<<9) /* eflags - interrupts on */
+	CFI_ADJUST_CFA_OFFSET	8
 	pushq $__KERNEL_CS /* cs */
+	CFI_ADJUST_CFA_OFFSET	8
 	pushq \child_rip /* rip */
+	CFI_ADJUST_CFA_OFFSET	8
+	CFI_OFFSET	rip,0
 	pushq	%rax /* orig rax */
+	CFI_ADJUST_CFA_OFFSET	8
 	.endm
 
 	.macro UNFAKE_STACK_FRAME
 	addq $8*6, %rsp
+	CFI_ADJUST_CFA_OFFSET	-(6*8)
 	.endm
 
+	.macro	CFI_DEFAULT_STACK
+	CFI_ADJUST_CFA_OFFSET  (SS)
+	CFI_OFFSET	r15,R15-SS
+	CFI_OFFSET	r14,R14-SS
+	CFI_OFFSET	r13,R13-SS
+	CFI_OFFSET	r12,R12-SS
+	CFI_OFFSET	rbp,RBP-SS
+	CFI_OFFSET	rbx,RBX-SS
+	CFI_OFFSET	r11,R11-SS
+	CFI_OFFSET	r10,R10-SS
+	CFI_OFFSET	r9,R9-SS
+	CFI_OFFSET	r8,R8-SS
+	CFI_OFFSET	rax,RAX-SS
+	CFI_OFFSET	rcx,RCX-SS
+	CFI_OFFSET	rdx,RDX-SS
+	CFI_OFFSET	rsi,RSI-SS
+	CFI_OFFSET	rdi,RDI-SS
+	CFI_OFFSET	rsp,RSP-SS
+	CFI_OFFSET	rip,RIP-SS
+	.endm
 /*
  * A newly forked process directly context switches into this.
  */ 	
 /* rdi:	prev */	
 ENTRY(ret_from_fork)
+	CFI_STARTPROC
+	CFI_DEFAULT_STACK
 	call schedule_tail
 	GET_THREAD_INFO(%rcx)
-	bt $TIF_SYSCALL_TRACE,threadinfo_flags(%rcx)
-	jc rff_trace
+	testl $(_TIF_SYSCALL_TRACE|_TIF_SYSCALL_AUDIT),threadinfo_flags(%rcx)
+	jnz rff_trace
 rff_action:	
 	RESTORE_REST
 	testl $3,CS-ARGOFFSET(%rsp)	# from kernel_thread?
@@ -112,9 +142,10 @@ rff_action:
 	jmp ret_from_sys_call
 rff_trace:
 	movq %rsp,%rdi
-	call syscall_trace
+	call syscall_trace_leave
 	GET_THREAD_INFO(%rcx)	
 	jmp rff_action
+	CFI_ENDPROC
 
 /*
  * System call entry. Upto 6 arguments in registers are supported.
@@ -144,6 +175,7 @@ rff_trace:
  */ 			 		
 
 ENTRY(system_call)
+	CFI_STARTPROC
 	swapgs
 	movq	%rsp,%gs:pda_oldrsp 
 	movq	%gs:pda_kernelstack,%rsp
@@ -152,8 +184,8 @@ ENTRY(system_call)
 	movq  %rax,ORIG_RAX-ARGOFFSET(%rsp) 
 	movq  %rcx,RIP-ARGOFFSET(%rsp)  
 	GET_THREAD_INFO(%rcx)
-	bt    $TIF_SYSCALL_TRACE,threadinfo_flags(%rcx) 
-	jc    tracesys
+	testl $(_TIF_SYSCALL_TRACE|_TIF_SYSCALL_AUDIT),threadinfo_flags(%rcx)
+	jnz tracesys
 	cmpq $__NR_syscall_max,%rax
 	ja badsys
 	movq %r10,%rcx
@@ -193,7 +225,7 @@ sysret_careful:
 	/* Handle a signal */ 
 sysret_signal:
 	sti
-	testl $(_TIF_SIGPENDING|_TIF_NOTIFY_RESUME),%edx
+	testl $(_TIF_SIGPENDING|_TIF_NOTIFY_RESUME|_TIF_SINGLESTEP),%edx
 	jz    1f
 
 	/* Really a signal */
@@ -211,7 +243,7 @@ tracesys:
 	movq $-ENOSYS,RAX(%rsp)
 	FIXUP_TOP_OF_STACK %rdi
 	movq %rsp,%rdi
-	call syscall_trace
+	call syscall_trace_enter
 	LOAD_ARGS ARGOFFSET  /* reload args from stack in case ptrace changed it */
 	RESTORE_REST
 	cmpq $__NR_syscall_max,%rax
@@ -221,7 +253,7 @@ tracesys:
 	movq %rax,RAX-ARGOFFSET(%rsp)
 1:	SAVE_REST
 	movq %rsp,%rdi
-	call syscall_trace
+	call syscall_trace_leave
 	RESTORE_TOP_OF_STACK %rbx
 	RESTORE_REST
 	jmp ret_from_sys_call
@@ -264,17 +296,19 @@ int_very_careful:
 	sti
 	SAVE_REST
 	/* Check for syscall exit trace */	
-	bt $TIF_SYSCALL_TRACE,%edx
-	jnc int_signal
+	testl $(_TIF_SYSCALL_TRACE|_TIF_SYSCALL_AUDIT|_TIF_SINGLESTEP),%edx
+	jz int_signal
 	pushq %rdi
 	leaq 8(%rsp),%rdi	# &ptregs -> arg1	
-	call syscall_trace
+	call syscall_trace_leave
 	popq %rdi
 	btr  $TIF_SYSCALL_TRACE,%edi
+	btr  $TIF_SYSCALL_AUDIT,%edi
+	btr  $TIF_SINGLESTEP,%edi
 	jmp int_restore_rest
 	
 int_signal:
-	testl $(_TIF_NOTIFY_RESUME|_TIF_SIGPENDING),%edx
+	testl $(_TIF_NOTIFY_RESUME|_TIF_SIGPENDING|_TIF_SINGLESTEP),%edx
 	jz 1f
 	movq %rsp,%rdi		# &ptregs -> arg1
 	xorl %esi,%esi		# oldset -> arg2
@@ -283,27 +317,31 @@ int_signal:
 int_restore_rest:
 	RESTORE_REST
 	jmp int_with_check
+	CFI_ENDPROC
 		
 /* 
  * Certain special system calls that need to save a complete full stack frame.
  */ 								
 	
-	.macro PTREGSCALL label,func
+	.macro PTREGSCALL label,func,arg
 	.globl \label
 \label:
 	leaq	\func(%rip),%rax
+	leaq    -ARGOFFSET+8(%rsp),\arg /* 8 for return address */
 	jmp	ptregscall_common
 	.endm
 
-	PTREGSCALL stub_clone, sys_clone
-	PTREGSCALL stub_fork, sys_fork
-	PTREGSCALL stub_vfork, sys_vfork
-	PTREGSCALL stub_rt_sigsuspend, sys_rt_sigsuspend
-	PTREGSCALL stub_sigaltstack, sys_sigaltstack
-	PTREGSCALL stub_iopl, sys_iopl
+	PTREGSCALL stub_clone, sys_clone, %r8
+	PTREGSCALL stub_fork, sys_fork, %rdi
+	PTREGSCALL stub_vfork, sys_vfork, %rdi
+	PTREGSCALL stub_rt_sigsuspend, sys_rt_sigsuspend, %rdx
+	PTREGSCALL stub_sigaltstack, sys_sigaltstack, %rdx
+	PTREGSCALL stub_iopl, sys_iopl, %rsi
 
 ENTRY(ptregscall_common)
+	CFI_STARTPROC
 	popq %r11
+	CFI_ADJUST_CFA_OFFSET	-8
 	SAVE_REST
 	movq %r11, %r15
 	FIXUP_TOP_OF_STACK %r11
@@ -312,10 +350,14 @@ ENTRY(ptregscall_common)
 	movq %r15, %r11
 	RESTORE_REST
 	pushq %r11
+	CFI_ADJUST_CFA_OFFSET	8
 	ret
+	CFI_ENDPROC
 	
 ENTRY(stub_execve)
+	CFI_STARTPROC
 	popq %r11
+	CFI_ADJUST_CFA_OFFSET	-8
 	SAVE_REST
 	movq %r11, %r15
 	FIXUP_TOP_OF_STACK %r11
@@ -330,22 +372,27 @@ ENTRY(stub_execve)
 	ret
 
 exec_32bit:
+	CFI_ADJUST_CFA_OFFSET	REST_SKIP
 	movq %rax,RAX(%rsp)
 	RESTORE_REST
 	jmp int_ret_from_sys_call
+	CFI_ENDPROC
 	
 /*
  * sigreturn is special because it needs to restore all registers on return.
  * This cannot be done with SYSRET, so use the IRET return path instead.
  */                
 ENTRY(stub_rt_sigreturn)
+	CFI_STARTPROC
 	addq $8, %rsp		
 	SAVE_REST
+	movq %rsp,%rdi
 	FIXUP_TOP_OF_STACK %r11
 	call sys_rt_sigreturn
 	movq %rax,RAX(%rsp) # fixme, this could be done at the higher layer
 	RESTORE_REST
 	jmp int_ret_from_sys_call
+	CFI_ENDPROC
 
 /* 
  * Interrupt entry/exit.
@@ -357,10 +404,20 @@ ENTRY(stub_rt_sigreturn)
 
 /* 0(%rsp): interrupt number */ 
 	.macro interrupt func
+	CFI_STARTPROC	simple
+	CFI_DEF_CFA	rsp,(SS-RDI)
+	CFI_REL_OFFSET	rsp,(RSP-ORIG_RAX)
+	CFI_REL_OFFSET	rip,(RIP-ORIG_RAX)
 	cld
-#ifdef CONFIG_X86_REMOTE_DEBUG
+#ifdef CONFIG_DEBUG_INFO
 	SAVE_ALL	
 	movq %rsp,%rdi
+	/*
+	 * Setup a stack frame pointer.  This allows gdb to trace
+	 * back to the original stack.
+	 */
+	movq %rsp,%rbp
+	CFI_DEF_CFA_REGISTER	rbp
 #else		
 	SAVE_ARGS
 	leaq -ARGOFFSET(%rsp),%rdi	# arg1 for handler
@@ -382,6 +439,9 @@ ret_from_intr:
 	popq  %rdi
 	cli	
 	subl $1,%gs:pda_irqcount
+#ifdef CONFIG_DEBUG_INFO
+	movq RBP(%rdi),%rbp
+#endif
 	leaq ARGOFFSET(%rdi),%rsp
 exit_intr:	 	
 	GET_THREAD_INFO(%rcx)
@@ -432,7 +492,7 @@ retint_careful:
 	jmp retint_check
 	
 retint_signal:
-	testl $(_TIF_SIGPENDING|_TIF_NOTIFY_RESUME),%edx
+	testl $(_TIF_SIGPENDING|_TIF_NOTIFY_RESUME|_TIF_SINGLESTEP),%edx
 	jz    retint_swapgs
 	sti
 	SAVE_REST
@@ -465,6 +525,7 @@ retint_kernel:
 	movl $0,threadinfo_preempt_count(%rcx) 
 	jmp exit_intr
 #endif	
+	CFI_ENDPROC
 	
 /*
  * APIC interrupts.
@@ -473,7 +534,11 @@ retint_kernel:
 	pushq $\num-256
 	interrupt \func
 	jmp ret_from_intr
+	CFI_ENDPROC
 	.endm
+
+ENTRY(thermal_interrupt)
+	apicinterrupt THERMAL_APIC_VECTOR,smp_thermal_interrupt
 
 #ifdef CONFIG_SMP	
 ENTRY(reschedule_interrupt)
@@ -513,29 +578,66 @@ ENTRY(spurious_interrupt)
 	jmp error_entry
 	.endm
 
+	/* error code is on the stack already */
+	/* handle NMI like exceptions that can happen everywhere */
+	.macro paranoidentry sym
+	SAVE_ALL
+	cld
+	movl $1,%ebx
+	movl  $MSR_GS_BASE,%ecx
+	rdmsr
+	testl %edx,%edx
+	js    1f
+	swapgs
+	xorl  %ebx,%ebx
+1:	movq %rsp,%rdi
+	movq ORIG_RAX(%rsp),%rsi
+	movq $-1,ORIG_RAX(%rsp)
+	call \sym
+	.endm
+	
 /*
  * Exception entry point. This expects an error code/orig_rax on the stack
  * and the exception handler in %rax.	
  */ 		  				
 ENTRY(error_entry)
+	CFI_STARTPROC	simple
+	CFI_DEF_CFA	rsp,(SS-RDI)
+	CFI_REL_OFFSET	rsp,(RSP-RDI)
+	CFI_REL_OFFSET	rip,(RIP-RDI)
 	/* rdi slot contains rax, oldrax contains error code */
 	cld	
 	subq  $14*8,%rsp
+	CFI_ADJUST_CFA_OFFSET	(14*8)
 	movq %rsi,13*8(%rsp)
+	CFI_REL_OFFSET	rsi,RSI
 	movq 14*8(%rsp),%rsi	/* load rax from rdi slot */
 	movq %rdx,12*8(%rsp)
+	CFI_REL_OFFSET	rdx,RDX
 	movq %rcx,11*8(%rsp)
+	CFI_REL_OFFSET	rcx,RCX
 	movq %rsi,10*8(%rsp)	/* store rax */ 
+	CFI_REL_OFFSET	rax,RAX
 	movq %r8, 9*8(%rsp)
+	CFI_REL_OFFSET	r8,R8
 	movq %r9, 8*8(%rsp)
+	CFI_REL_OFFSET	r9,R9
 	movq %r10,7*8(%rsp)
+	CFI_REL_OFFSET	r10,R10
 	movq %r11,6*8(%rsp)
+	CFI_REL_OFFSET	r11,R11
 	movq %rbx,5*8(%rsp) 
+	CFI_REL_OFFSET	rbx,RBX
 	movq %rbp,4*8(%rsp) 
+	CFI_REL_OFFSET	rbp,RBP
 	movq %r12,3*8(%rsp) 
+	CFI_REL_OFFSET	r12,R12
 	movq %r13,2*8(%rsp) 
+	CFI_REL_OFFSET	r13,R13
 	movq %r14,1*8(%rsp) 
+	CFI_REL_OFFSET	r14,R14
 	movq %r15,(%rsp) 
+	CFI_REL_OFFSET	r15,R15
 	xorl %ebx,%ebx	
 	testl $3,CS(%rsp)
 	je  error_kernelspace
@@ -547,6 +649,7 @@ error_sti:
 	movq ORIG_RAX(%rsp),%rsi	/* get error code */ 
 	movq $-1,ORIG_RAX(%rsp)
 	call *%rax
+	/* ebx:	no swapgs flag (1: don't need swapgs, 0: need it) */	 
 error_exit:		
 	movl %ebx,%eax		
 	RESTORE_REST
@@ -561,6 +664,7 @@ error_exit:
 	swapgs 
 	RESTORE_ARGS 0,8,0						
 	iretq
+	CFI_ENDPROC
 
 error_kernelspace:
 	incl %ebx
@@ -615,6 +719,7 @@ bad_gs:
  *	rdi: fn, rsi: arg, rdx: flags
  */
 ENTRY(kernel_thread)
+	CFI_STARTPROC
 	FAKE_STACK_FRAME $child_rip
 	SAVE_ALL
 
@@ -642,6 +747,8 @@ ENTRY(kernel_thread)
 	RESTORE_ALL
 	UNFAKE_STACK_FRAME
 	ret
+	CFI_ENDPROC
+
 	
 child_rip:
 	/*
@@ -671,6 +778,7 @@ child_rip:
  *	rdi: name, rsi: argv, rdx: envp, fake frame on the stack
  */
 ENTRY(execve)
+	CFI_STARTPROC
 	FAKE_STACK_FRAME $0
 	SAVE_ALL	
 	call sys_execve
@@ -681,6 +789,7 @@ ENTRY(execve)
 	RESTORE_ARGS
 	UNFAKE_STACK_FRAME
 	ret
+	CFI_ENDPROC
 
 ENTRY(page_fault)
 	errorentry do_page_fault
@@ -692,45 +801,57 @@ ENTRY(simd_coprocessor_error)
 	zeroentry do_simd_coprocessor_error	
 
 ENTRY(device_not_available)
-	pushq $-1	#error code
-	SAVE_ALL
-	movl  $1,%ebx
-	testl $3,CS(%rsp)
-	je 1f
-	xorl %ebx,%ebx
-	swapgs
-1:	movq  %cr0,%rax
-	leaq  math_state_restore(%rip),%rcx
-	leaq  math_emulate(%rip),%rdx
-	testl $0x4,%eax
-	cmoveq %rcx,%rdx
-	call  *%rdx
-	jmp  error_exit
+	zeroentry math_state_restore
 
+	/* runs on exception stack */
 ENTRY(debug)
-	zeroentry do_debug
+	CFI_STARTPROC
+	pushq $0
+	CFI_ADJUST_CFA_OFFSET 8		
+	paranoidentry do_debug
+	/* switch back to process stack to restore the state ptrace touched */
+	movq %rax,%rsp	
+	testl $3,CS(%rsp)
+	jnz   paranoid_userspace	
+	jmp paranoid_exit
+	CFI_ENDPROC
 
+	/* runs on exception stack */	
 ENTRY(nmi)
+	CFI_STARTPROC
 	pushq $-1
-	SAVE_ALL
-        /* NMI could happen inside the critical section of a swapgs,
-           so it is needed to use this expensive way to check. */
-        movl  $MSR_GS_BASE,%ecx
-        rdmsr
-        xorl  %ebx,%ebx
-        testl %edx,%edx
-        js    1f
-	swapgs
-	movl $1,%ebx
-1:	movq %rsp,%rdi # regs -> arg1
-	call do_nmi
-	/* XXX: should do preemption checks here */
+	CFI_ADJUST_CFA_OFFSET 8		
+	paranoidentry do_nmi
+	/* ebx:	no swapgs flag */
+paranoid_exit:
+	testl %ebx,%ebx				/* swapgs needed? */
+	jnz paranoid_restore
+paranoid_swapgs:	
 	cli
-	testl %ebx,%ebx
-	jz 2f
 	swapgs
-2:	RESTORE_ALL 8
+paranoid_restore:	
+	RESTORE_ALL 8
 	iretq
+paranoid_userspace:	
+	cli
+	GET_THREAD_INFO(%rcx)
+	movl threadinfo_flags(%rcx),%edx
+	testl $_TIF_NEED_RESCHED,%edx
+	jnz paranoid_resched
+	testl $(_TIF_SIGPENDING|_TIF_NOTIFY_RESUME|_TIF_SINGLESTEP),%edx
+	jnz paranoid_signal
+	jmp paranoid_swapgs
+paranoid_resched:		
+	sti
+	call schedule
+	jmp paranoid_exit
+paranoid_signal:		
+	sti
+	xorl %esi,%esi /* oldset */
+	movq %rsp,%rdi /* &pt_regs */
+	call do_notify_resume
+	jmp paranoid_exit
+	CFI_ENDPROC
 	
 ENTRY(int3)
 	zeroentry do_int3	
@@ -750,8 +871,15 @@ ENTRY(coprocessor_segment_overrun)
 ENTRY(reserved)
 	zeroentry do_reserved
 
+	/* runs on exception stack */
 ENTRY(double_fault)
-	errorentry do_double_fault	
+	CFI_STARTPROC
+	paranoidentry do_double_fault
+	movq %rax,%rsp
+	testl $3,CS(%rsp)
+	jnz paranoid_userspace		
+	jmp paranoid_exit
+	CFI_ENDPROC
 
 ENTRY(invalid_TSS)
 	errorentry do_invalid_TSS
@@ -759,8 +887,15 @@ ENTRY(invalid_TSS)
 ENTRY(segment_not_present)
 	errorentry do_segment_not_present
 
+	/* runs on exception stack */
 ENTRY(stack_segment)
-	errorentry do_stack_segment
+	CFI_STARTPROC
+	paranoidentry do_stack_segment
+	movq %rax,%rsp
+	testl $3,CS(%rsp)
+	jnz paranoid_userspace
+	jmp paranoid_exit
+	CFI_ENDPROC
 
 ENTRY(general_protection)
 	errorentry do_general_protection
@@ -774,8 +909,16 @@ ENTRY(divide_error)
 ENTRY(spurious_interrupt_bug)
 	zeroentry do_spurious_interrupt_bug
 
+#ifdef CONFIG_X86_MCE
+	/* runs on exception stack */
 ENTRY(machine_check)
-       zeroentry do_machine_check      
+	CFI_STARTPROC
+	pushq $0
+	CFI_ADJUST_CFA_OFFSET 8	
+	paranoidentry do_machine_check
+	jmp paranoid_exit
+	CFI_ENDPROC
+#endif
 
 ENTRY(call_debug)
        zeroentry do_call_debug

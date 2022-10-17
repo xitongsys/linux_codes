@@ -18,12 +18,8 @@
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.		     */
 /* ------------------------------------------------------------------------- */
 
-/* With some changes from Kyösti Mälkki <kmalkki@cc.hut.fi> and even
-   Frodo Looijaard <frodol@dds.nl> */
-
-/* $Id: i2c-algo-bit.c,v 1.44 2003/01/21 08:08:16 kmalkki Exp $ */
-
-/* #define DEBUG 1 */
+/* With some changes from Frodo Looijaard <frodol@dds.nl>, Kyösti Mälkki
+   <kmalkki@cc.hut.fi> and Jean Delvare <khali@linux-fr.org> */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -87,8 +83,10 @@ static inline int sclhi(struct i2c_algo_bit_data *adap)
 	setscl(adap,1);
 
 	/* Not all adapters have scl sense line... */
-	if (adap->getscl == NULL )
+	if (adap->getscl == NULL ) {
+		udelay(adap->udelay);
 		return 0;
+	}
 
 	start=jiffies;
 	while (! getscl(adap) ) {	
@@ -222,68 +220,72 @@ static int i2c_inb(struct i2c_adapter *i2c_adap)
  */
 static int test_bus(struct i2c_algo_bit_data *adap, char* name) {
 	int scl,sda;
+
+	if (adap->getscl==NULL)
+		printk(KERN_INFO "i2c-algo-bit.o: Testing SDA only, "
+			"SCL is not readable.\n");
+
 	sda=getsda(adap);
-	if (adap->getscl==NULL) {
-		printk(KERN_WARNING "i2c-algo-bit.o: Warning: Adapter can't read from clock line - skipping test.\n");
-		return 0;		
-	}
-	scl=getscl(adap);
-	printk(KERN_INFO "i2c-algo-bit.o: Adapter: %s scl: %d  sda: %d -- testing...\n",
-	       name,getscl(adap),getsda(adap));
+	scl=(adap->getscl==NULL?1:getscl(adap));
+	printk(KERN_DEBUG "i2c-algo-bit.o: (0) scl=%d, sda=%d\n",scl,sda);
 	if (!scl || !sda ) {
-		printk(KERN_INFO " i2c-algo-bit.o: %s seems to be busy.\n",name);
+		printk(KERN_WARNING "i2c-algo-bit.o: %s seems to be busy.\n", name);
 		goto bailout;
 	}
+
 	sdalo(adap);
-	printk(KERN_DEBUG "i2c-algo-bit.o:1 scl: %d  sda: %d \n",getscl(adap),
-	       getsda(adap));
-	if ( 0 != getsda(adap) ) {
-		printk(KERN_WARNING "i2c-algo-bit.o: %s SDA stuck high!\n",name);
-		sdahi(adap);
+	sda=getsda(adap);
+	scl=(adap->getscl==NULL?1:getscl(adap));
+	printk(KERN_DEBUG "i2c-algo-bit.o: (1) scl=%d, sda=%d\n",scl,sda);
+	if ( 0 != sda ) {
+		printk(KERN_WARNING "i2c-algo-bit.o: SDA stuck high!\n");
 		goto bailout;
 	}
-	if ( 0 == getscl(adap) ) {
-		printk(KERN_WARNING "i2c-algo-bit.o: %s SCL unexpected low while pulling SDA low!\n",
-			name);
+	if ( 0 == scl ) {
+		printk(KERN_WARNING "i2c-algo-bit.o: SCL unexpected low "
+			"while pulling SDA low!\n");
 		goto bailout;
 	}		
+
 	sdahi(adap);
-	printk(KERN_DEBUG "i2c-algo-bit.o:2 scl: %d  sda: %d \n",getscl(adap),
-	       getsda(adap));
-	if ( 0 == getsda(adap) ) {
-		printk(KERN_WARNING "i2c-algo-bit.o: %s SDA stuck low!\n",name);
-		sdahi(adap);
+	sda=getsda(adap);
+	scl=(adap->getscl==NULL?1:getscl(adap));
+	printk(KERN_DEBUG "i2c-algo-bit.o: (2) scl=%d, sda=%d\n",scl,sda);
+	if ( 0 == sda ) {
+		printk(KERN_WARNING "i2c-algo-bit.o: SDA stuck low!\n");
 		goto bailout;
 	}
-	if ( 0 == getscl(adap) ) {
-		printk(KERN_WARNING "i2c-algo-bit.o: %s SCL unexpected low while SDA high!\n",
-		       name);
-	goto bailout;
+	if ( 0 == scl ) {
+		printk(KERN_WARNING "i2c-algo-bit.o: SCL unexpected low "
+			"while pulling SDA high!\n");
+		goto bailout;
 	}
+
 	scllo(adap);
-	printk(KERN_DEBUG "i2c-algo-bit.o:3 scl: %d  sda: %d \n",getscl(adap),
-	       getsda(adap));
-	if ( 0 != getscl(adap) ) {
-		printk(KERN_WARNING "i2c-algo-bit.o: %s SCL stuck high!\n",name);
-		sclhi(adap);
+	sda=getsda(adap);
+	scl=(adap->getscl==NULL?0:getscl(adap));
+	printk(KERN_DEBUG "i2c-algo-bit.o: (3) scl=%d, sda=%d\n",scl,sda);
+	if ( 0 != scl ) {
+		printk(KERN_WARNING "i2c-algo-bit.o: SCL stuck high!\n");
 		goto bailout;
 	}
-	if ( 0 == getsda(adap) ) {
-		printk(KERN_WARNING "i2c-algo-bit.o: %s SDA unexpected low while pulling SCL low!\n",
-			name);
+	if ( 0 == sda ) {
+		printk(KERN_WARNING "i2c-algo-bit.o: SDA unexpected low "
+			"while pulling SCL low!\n");
 		goto bailout;
 	}
+	
 	sclhi(adap);
-	printk(KERN_DEBUG "i2c-algo-bit.o:4 scl: %d  sda: %d \n",getscl(adap),
-	       getsda(adap));
-	if ( 0 == getscl(adap) ) {
-		printk(KERN_WARNING "i2c-algo-bit.o: %s SCL stuck low!\n",name);
-		sclhi(adap);
+	sda=getsda(adap);
+	scl=(adap->getscl==NULL?1:getscl(adap));
+	printk(KERN_DEBUG "i2c-algo-bit.o: (4) scl=%d, sda=%d\n",scl,sda);
+	if ( 0 == scl ) {
+		printk(KERN_WARNING "i2c-algo-bit.o: SCL stuck low!\n");
 		goto bailout;
 	}
-	if ( 0 == getsda(adap) ) {
-		printk(KERN_WARNING "i2c-algo-bit.o: %s SDA unexpected low while SCL high!\n",
-			name);
+	if ( 0 == sda ) {
+		printk(KERN_WARNING "i2c-algo-bit.o: SDA unexpected low "
+			"while pulling SCL high!\n");
 		goto bailout;
 	}
 	printk(KERN_INFO "i2c-algo-bit.o: %s passed test.\n",name);
@@ -379,7 +381,13 @@ static inline int readbytes(struct i2c_adapter *i2c_adap, struct i2c_msg *msg)
 			break;
 		}
 
-		if ( count > 1 ) {		/* send ack */
+		temp++;
+		count--;
+
+		if (msg->flags & I2C_M_NO_RD_ACK)
+			continue;
+
+		if ( count > 0 ) {		/* send ack */
 			sdalo(adap);
 			DEBPROTO(printk(" Am "));
 		} else {
@@ -393,8 +401,6 @@ static inline int readbytes(struct i2c_adapter *i2c_adap, struct i2c_msg *msg)
 		};
 		scllo(adap);
 		sdahi(adap);
-		temp++;
-		count--;
 	}
 	return rdcount;
 }
@@ -505,8 +511,8 @@ static int bit_xfer(struct i2c_adapter *i2c_adap,
 
 static u32 bit_func(struct i2c_adapter *adap)
 {
-	return I2C_FUNC_SMBUS_EMUL | I2C_FUNC_10BIT_ADDR | 
-	       I2C_FUNC_PROTOCOL_MANGLING;
+	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL | 
+	       I2C_FUNC_10BIT_ADDR | I2C_FUNC_PROTOCOL_MANGLING;
 }
 
 
@@ -559,8 +565,8 @@ MODULE_AUTHOR("Simon G. Vogl <simon@tk.uni-linz.ac.at>");
 MODULE_DESCRIPTION("I2C-Bus bit-banging algorithm");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(bit_test, "i");
-MODULE_PARM(i2c_debug,"i");
+module_param(bit_test, bool, 0);
+module_param(i2c_debug, int, S_IRUGO | S_IWUSR);
 
 MODULE_PARM_DESC(bit_test, "Test the lines of the bus to see if it is stuck");
 MODULE_PARM_DESC(i2c_debug,

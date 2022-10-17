@@ -51,10 +51,12 @@ extern unsigned int saa7146_debug;
 #define DEB_INT(x)  if (0!=(DEBUG_VARIABLE&0x20)) { DEBUG_PROLOG; printk x; } /* interrupt debug messages */
 #define DEB_CAP(x)  if (0!=(DEBUG_VARIABLE&0x40)) { DEBUG_PROLOG; printk x; } /* capture debug messages */
 
-#define IER_DISABLE(x,y) \
+#define SAA7146_IER_DISABLE(x,y) \
 	saa7146_write(x, IER, saa7146_read(x, IER) & ~(y));
-#define IER_ENABLE(x,y) \
+#define SAA7146_IER_ENABLE(x,y) \
 	saa7146_write(x, IER, saa7146_read(x, IER) | (y));
+#define SAA7146_ISR_CLEAR(x,y) \
+	saa7146_write(x, ISR, (y));
 
 struct saa7146_dev;
 struct saa7146_extension;
@@ -67,6 +69,8 @@ struct saa7146_pgtable {
 	dma_addr_t	dma;
 	/* used for offsets for u,v planes for planar capture modes */
 	unsigned long	offset;
+	/* used for custom pagetables (used for example by budget dvb cards) */
+	struct scatterlist *slist;
 };
 
 struct saa7146_pci_extension_data {
@@ -87,6 +91,7 @@ struct saa7146_extension
 {
 	char	name[32];		/* name of the device */
 #define SAA7146_USE_I2C_IRQ	0x1
+#define SAA7146_I2C_SHORT_DELAY	0x2
 	int	flags;
 	
 	/* pairs of subvendor and subdevice ids for
@@ -120,7 +125,7 @@ struct saa7146_dev
        	spinlock_t                 	slock;
         struct semaphore           	lock;
 
-	unsigned char			*mem;		/* pointer to mapped IO memory */
+	unsigned char			__iomem *mem;	/* pointer to mapped IO memory */
 	int				revision;	/* chip revision; needed for bug-workarounds*/
 
 	/* pci-device & irq stuff*/
@@ -162,9 +167,10 @@ int saa7146_unregister_extension(struct saa7146_extension*);
 struct saa7146_format* format_by_fourcc(struct saa7146_dev *dev, int fourcc);
 int saa7146_pgtable_alloc(struct pci_dev *pci, struct saa7146_pgtable *pt);
 void saa7146_pgtable_free(struct pci_dev *pci, struct saa7146_pgtable *pt);
-void saa7146_pgtable_build_single(struct pci_dev *pci, struct saa7146_pgtable *pt, struct scatterlist *list, int length );
+int saa7146_pgtable_build_single(struct pci_dev *pci, struct saa7146_pgtable *pt, struct scatterlist *list, int length );
 char *saa7146_vmalloc_build_pgtable(struct pci_dev *pci, long length, struct saa7146_pgtable *pt);
 void saa7146_setgpio(struct saa7146_dev *dev, int port, u32 data);
+int saa7146_wait_for_debi_done(struct saa7146_dev *dev, int nobusyloop);
 
 /* some memory sizes */
 #define SAA7146_I2C_MEM		( 1*PAGE_SIZE)
@@ -186,6 +192,9 @@ void saa7146_setgpio(struct saa7146_dev *dev, int port, u32 data);
 #define SAA7146_GPIO_IRQHL 0x30
 #define SAA7146_GPIO_OUTLO 0x40
 #define SAA7146_GPIO_OUTHI 0x50
+
+/* debi defines */
+#define DEBINOSWAP 0x000e0000
 
 /* define for the register programming sequencer (rps) */
 #define CMD_NOP		0x00000000  /* No operation */

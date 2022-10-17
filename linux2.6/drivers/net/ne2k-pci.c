@@ -69,8 +69,6 @@ KERN_INFO "  http://www.scyld.com/network/ne2k-pci.html\n";
 #if defined(__powerpc__)
 #define inl_le(addr)  le32_to_cpu(inl(addr))
 #define inw_le(addr)  le16_to_cpu(inw(addr))
-#define insl insl_ns
-#define outsl outsl_ns
 #endif
 
 #define PFX DRV_NAME ": "
@@ -79,9 +77,9 @@ MODULE_AUTHOR("Donald Becker / Paul Gortmaker");
 MODULE_DESCRIPTION("PCI NE2000 clone driver");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(debug, "i");
-MODULE_PARM(options, "1-" __MODULE_STRING(MAX_UNITS) "i");
-MODULE_PARM(full_duplex, "1-" __MODULE_STRING(MAX_UNITS) "i");
+module_param(debug, int, 0);
+module_param_array(options, int, NULL, 0);
+module_param_array(full_duplex, int, NULL, 0);
 MODULE_PARM_DESC(debug, "debug level (1-2)");
 MODULE_PARM_DESC(options, "Bit 5: full duplex");
 MODULE_PARM_DESC(full_duplex, "full duplex setting(s) (1)");
@@ -115,6 +113,7 @@ enum ne2k_pci_chipsets {
 	CH_Winbond_W89C940F,
 	CH_Holtek_HT80232,
 	CH_Holtek_HT80229,
+	CH_Winbond_89C940_8c4a,
 };
 
 
@@ -132,7 +131,8 @@ static struct {
 	{"Winbond W89C940F", 0},
 	{"Holtek HT80232", ONLY_16BIT_IO | HOLTEK_FDX},
 	{"Holtek HT80229", ONLY_32BIT_IO | HOLTEK_FDX | STOP_PG_0x60 },
-	{0,}
+	{"Winbond W89C940(misprogrammed)", 0},
+	{NULL,}
 };
 
 
@@ -147,6 +147,7 @@ static struct pci_device_id ne2k_pci_tbl[] = {
 	{ 0x1050, 0x5a5a, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_Winbond_W89C940F },
 	{ 0x12c3, 0x0058, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_Holtek_HT80232 },
 	{ 0x12c3, 0x5598, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_Holtek_HT80229 },
+	{ 0x8c4a, 0x1980, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_Winbond_89C940_8c4a },
 	{ 0, }
 };
 MODULE_DEVICE_TABLE(pci, ne2k_pci_tbl);
@@ -356,6 +357,9 @@ static int __devinit ne2k_pci_init_one (struct pci_dev *pdev,
 	dev->open = &ne2k_pci_open;
 	dev->stop = &ne2k_pci_close;
 	dev->ethtool_ops = &ne2k_pci_ethtool_ops;
+#ifdef CONFIG_NET_POLL_CONTROLLER
+	dev->poll_controller = ei_poll;
+#endif
 	NS8390_init(dev, 0);
 
 	i = register_netdev(dev);
@@ -529,8 +533,12 @@ static void ne2k_pci_block_input(struct net_device *dev, int count,
 		insl(NE_BASE + NE_DATAPORT, buf, count>>2);
 		if (count & 3) {
 			buf += count & ~3;
-			if (count & 2)
-				*((u16*)buf)++ = le16_to_cpu(inw(NE_BASE + NE_DATAPORT));
+			if (count & 2) {
+				u16 *b = (u16 *)buf;
+
+				*b++ = le16_to_cpu(inw(NE_BASE + NE_DATAPORT));
+				buf = (char *)b;
+			}
 			if (count & 1)
 				*buf = inb(NE_BASE + NE_DATAPORT);
 		}
@@ -590,8 +598,12 @@ static void ne2k_pci_block_output(struct net_device *dev, int count,
 		outsl(NE_BASE + NE_DATAPORT, buf, count>>2);
 		if (count & 3) {
 			buf += count & ~3;
-			if (count & 2)
-				outw(cpu_to_le16(*((u16*)buf)++), NE_BASE + NE_DATAPORT);
+			if (count & 2) {
+				u16 *b = (u16 *)buf;
+
+				outw(cpu_to_le16(*b++), NE_BASE + NE_DATAPORT);
+				buf = (char *)b;
+			}
 		}
 	}
 
@@ -641,12 +653,43 @@ static void __devexit ne2k_pci_remove_one (struct pci_dev *pdev)
 	pci_set_drvdata(pdev, NULL);
 }
 
+#ifdef CONFIG_PM
+static int ne2k_pci_suspend (struct pci_dev *pdev, u32 state)
+{
+	struct net_device *dev = pci_get_drvdata (pdev);
+
+	netif_device_detach(dev);
+	pci_save_state(pdev);
+	pci_set_power_state(pdev, state);
+
+	return 0;
+}
+
+static int ne2k_pci_resume (struct pci_dev *pdev)
+{
+	struct net_device *dev = pci_get_drvdata (pdev);
+
+	pci_set_power_state(pdev, 0);
+	pci_restore_state(pdev);
+	NS8390_init(dev, 1);
+	netif_device_attach(dev);
+
+	return 0;
+}
+
+#endif /* CONFIG_PM */
+
 
 static struct pci_driver ne2k_driver = {
 	.name		= DRV_NAME,
 	.probe		= ne2k_pci_init_one,
 	.remove		= __devexit_p(ne2k_pci_remove_one),
 	.id_table	= ne2k_pci_tbl,
+#ifdef CONFIG_PM
+	.suspend	= ne2k_pci_suspend,
+	.resume		= ne2k_pci_resume,
+#endif /* CONFIG_PM */
+
 };
 
 

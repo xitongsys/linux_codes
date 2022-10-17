@@ -164,7 +164,7 @@ unsigned long pdma_size;
 volatile int doing_pdma = 0;
 
 /* This is software state */
-char *pdma_base = 0;
+char *pdma_base = NULL;
 unsigned long pdma_areasize;
 
 /* Common routines to all controller types on the Sparc. */
@@ -173,7 +173,7 @@ static void sun_fd_disable_dma(void)
 	doing_pdma = 0;
 	if (pdma_base) {
 		mmu_unlockarea(pdma_base, pdma_areasize);
-		pdma_base = 0;
+		pdma_base = NULL;
 	}
 }
 
@@ -320,10 +320,9 @@ static void sun_pci_fd_lde_broken_outb(unsigned char val, unsigned long port)
 
 static void sun_pci_fd_enable_dma(void)
 {
-	if ((NULL == sun_pci_dma_pending.buf) 	||
+	BUG_ON((NULL == sun_pci_dma_pending.buf) 	||
 	    (0	  == sun_pci_dma_pending.len) 	||
-	    (0	  == sun_pci_dma_pending.direction))
-		BUG();
+	    (0	  == sun_pci_dma_pending.direction));
 
 	sun_pci_dma_current.buf = sun_pci_dma_pending.buf;
 	sun_pci_dma_current.len = sun_pci_dma_pending.len;
@@ -614,7 +613,7 @@ static unsigned long __init sun_floppy_init(void)
 	} else {
 #ifdef CONFIG_PCI
 		struct linux_ebus *ebus;
-		struct linux_ebus_device *edev = 0;
+		struct linux_ebus_device *edev = NULL;
 		unsigned long config = 0;
 		unsigned long auxio_reg;
 

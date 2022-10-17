@@ -4,6 +4,7 @@
 
 #include <linux/slab.h>
 #include <linux/devfs_fs_kernel.h>
+#include <asm/atomic.h>
 #include <asm/semaphore.h>
 #include "hosts.h"
 
@@ -11,9 +12,13 @@
 struct hpsb_packet {
         /* This struct is basically read-only for hosts with the exception of
          * the data buffer contents and xnext - see below. */
-        struct list_head list;
 
-        /* This can be used for host driver internal linking. */
+	/* This can be used for host driver internal linking.
+	 *
+	 * NOTE: This must be left in init state when the driver is done
+	 * with it (e.g. by using list_del_init()), since the core does
+	 * some sanity checks to make sure the packet is not on a
+	 * driver_list when free'ing it. */
 	struct list_head driver_list;
 
         nodeid_t node_id;
@@ -26,10 +31,9 @@ struct hpsb_packet {
          * queued   = queued for sending
          * pending  = sent, waiting for response
          * complete = processing completed, successful or not
-         * incoming = incoming packet
          */
-        enum { 
-                hpsb_unused, hpsb_queued, hpsb_pending, hpsb_complete, hpsb_incoming 
+        enum {
+                hpsb_unused, hpsb_queued, hpsb_pending, hpsb_complete
         } __attribute__((packed)) state;
 
         /* These are core internal. */
@@ -39,11 +43,6 @@ struct hpsb_packet {
 
         unsigned expect_response:1;
         unsigned no_waiter:1;
-
-        /* Data big endianness flag - may vary from request to request.  The
-         * header is always in machine byte order.
-         * Not really used currently.  */
-        unsigned data_be:1;
 
         /* Speed to transmit with: 0 = 100Mbps, 1 = 200Mbps, 2 = 400Mbps */
         unsigned speed_code:2;
@@ -64,13 +63,15 @@ struct hpsb_packet {
         struct hpsb_host *host;
         unsigned int generation;
 
-        /* Very core internal, don't care. */
-        struct semaphore state_change;
+	atomic_t refcnt;
 
 	/* Function (and possible data to pass to it) to call when this
 	 * packet is completed.  */
 	void (*complete_routine)(void *);
 	void *complete_data;
+
+	/* XXX This is just a hack at the moment */
+	struct sk_buff *skb;
 
         /* Store jiffies for implementing bus timeouts. */
         unsigned long sendtime;
@@ -90,8 +91,8 @@ static inline struct hpsb_packet *driver_packet(struct list_head *l)
 void abort_timedouts(unsigned long __opaque);
 void abort_requests(struct hpsb_host *host);
 
-struct hpsb_packet *alloc_hpsb_packet(size_t data_size);
-void free_hpsb_packet(struct hpsb_packet *packet);
+struct hpsb_packet *hpsb_alloc_packet(size_t data_size);
+void hpsb_free_packet(struct hpsb_packet *packet);
 
 
 /*
@@ -100,22 +101,28 @@ void free_hpsb_packet(struct hpsb_packet *packet);
  *
  * Use the functions, not the variable.
  */
-#include <asm/atomic.h>
-
 static inline unsigned int get_hpsb_generation(struct hpsb_host *host)
 {
         return atomic_read(&host->generation);
 }
 
 /*
- * Send a PHY configuration packet.
+ * Send a PHY configuration packet, return 0 on success, negative
+ * errno on failure.
  */
 int hpsb_send_phy_config(struct hpsb_host *host, int rootid, int gapcnt);
 
 /*
- * Queue packet for transmitting, return 0 for failure.
+ * Queue packet for transmitting, return 0 on success, negative errno
+ * on failure.
  */
 int hpsb_send_packet(struct hpsb_packet *packet);
+
+/*
+ * Queue packet for transmitting, and block until the transaction
+ * completes. Return 0 on success, negative errno on failure.
+ */
+int hpsb_send_packet_and_wait(struct hpsb_packet *packet);
 
 /* Initiate bus reset on the given host.  Returns 1 if bus reset already in
  * progress, 0 otherwise. */
@@ -138,7 +145,7 @@ int hpsb_bus_reset(struct hpsb_host *host);
  */
 void hpsb_selfid_received(struct hpsb_host *host, quadlet_t sid);
 
-/* 
+/*
  * Notify completion of SelfID stage to the core and report new physical ID
  * and whether host is root now.
  */
@@ -176,9 +183,9 @@ void hpsb_packet_received(struct hpsb_host *host, quadlet_t *data, size_t size,
  * task-specific interfaces (raw1394, video1394, dv1394, etc) in
  * blocks of 16.
  *
- * The core ieee1394.o modules handles the initial open() for all
- * character devices on major 171; it then dispatches to the
- * appropriate task-specific driver.
+ * The core ieee1394.o module allocates the device number region
+ * 171:0-255, the various drivers must then cdev_add() their cdev
+ * objects to handle their respective sub-regions.
  *
  * Minor device number block allocations:
  *
@@ -199,31 +206,22 @@ void hpsb_packet_received(struct hpsb_host *host, quadlet_t *data, size_t size,
 #define IEEE1394_MINOR_BLOCK_AMDTP         3
 #define IEEE1394_MINOR_BLOCK_EXPERIMENTAL 15
 
+#define IEEE1394_CORE_DEV		MKDEV(IEEE1394_MAJOR, 0)
+#define IEEE1394_RAW1394_DEV		MKDEV(IEEE1394_MAJOR, IEEE1394_MINOR_BLOCK_RAW1394 * 16)
+#define IEEE1394_VIDEO1394_DEV		MKDEV(IEEE1394_MAJOR, IEEE1394_MINOR_BLOCK_VIDEO1394 * 16)
+#define IEEE1394_DV1394_DEV		MKDEV(IEEE1394_MAJOR, IEEE1394_MINOR_BLOCK_DV1394 * 16)
+#define IEEE1394_AMDTP_DEV		MKDEV(IEEE1394_MAJOR, IEEE1394_MINOR_BLOCK_AMDTP * 16)
+#define IEEE1394_EXPERIMENTAL_DEV	MKDEV(IEEE1394_MAJOR, IEEE1394_MINOR_BLOCK_EXPERIMENTAL * 16)
+
 /* return the index (within a minor number block) of a file */
 static inline unsigned char ieee1394_file_to_instance(struct file *file)
 {
-	unsigned char minor = iminor(file->f_dentry->d_inode);
-	
-	/* return lower 4 bits */
-	return minor & 0xF;
+	return file->f_dentry->d_inode->i_cindex;
 }
 
-/* 
- * Task-specific drivers should call ieee1394_register_chardev() to
- * request a block of 16 minor numbers.
- *
- * Returns 0 if the request was successful, -EBUSY if the block was
- * already taken.
- */
-
-int  ieee1394_register_chardev(int blocknum,           /* 0-15 */
-			       struct module *module,  /* THIS_MODULE */
-			       struct file_operations *file_ops);
-
-/* release a block of minor numbers */
-void ieee1394_unregister_chardev(int blocknum);
 
 /* Our sysfs bus entry */
 extern struct bus_type ieee1394_bus_type;
+extern struct class hpsb_host_class;
 
 #endif /* _IEEE1394_CORE_H */

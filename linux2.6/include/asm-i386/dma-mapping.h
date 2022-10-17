@@ -1,7 +1,11 @@
 #ifndef _ASM_I386_DMA_MAPPING_H
 #define _ASM_I386_DMA_MAPPING_H
 
+#include <linux/mm.h>
+
 #include <asm/cache.h>
+#include <asm/io.h>
+#include <asm/scatterlist.h>
 
 #define dma_alloc_noncoherent(d, s, h, f) dma_alloc_coherent(d, s, h, f)
 #define dma_free_noncoherent(d, s, v, h) dma_free_coherent(d, s, v, h)
@@ -51,7 +55,7 @@ dma_map_page(struct device *dev, struct page *page, unsigned long offset,
 	     size_t size, enum dma_data_direction direction)
 {
 	BUG_ON(direction == DMA_NONE);
-	return (dma_addr_t)(page_to_pfn(page)) * PAGE_SIZE + offset;
+	return page_to_phys(page) + offset;
 }
 
 static inline void
@@ -70,26 +74,50 @@ dma_unmap_sg(struct device *dev, struct scatterlist *sg, int nhwentries,
 }
 
 static inline void
-dma_sync_single(struct device *dev, dma_addr_t dma_handle, size_t size,
-		enum dma_data_direction direction)
+dma_sync_single_for_cpu(struct device *dev, dma_addr_t dma_handle, size_t size,
+			enum dma_data_direction direction)
+{
+}
+
+static inline void
+dma_sync_single_for_device(struct device *dev, dma_addr_t dma_handle, size_t size,
+			enum dma_data_direction direction)
 {
 	flush_write_buffers();
 }
 
 static inline void
-dma_sync_single_range(struct device *dev, dma_addr_t dma_handle,
-		      unsigned long offset, size_t size,
-		      enum dma_data_direction direction)
+dma_sync_single_range_for_cpu(struct device *dev, dma_addr_t dma_handle,
+			      unsigned long offset, size_t size,
+			      enum dma_data_direction direction)
+{
+}
+
+static inline void
+dma_sync_single_range_for_device(struct device *dev, dma_addr_t dma_handle,
+				 unsigned long offset, size_t size,
+				 enum dma_data_direction direction)
 {
 	flush_write_buffers();
 }
 
+static inline void
+dma_sync_sg_for_cpu(struct device *dev, struct scatterlist *sg, int nelems,
+		    enum dma_data_direction direction)
+{
+}
 
 static inline void
-dma_sync_sg(struct device *dev, struct scatterlist *sg, int nelems,
-		 enum dma_data_direction direction)
+dma_sync_sg_for_device(struct device *dev, struct scatterlist *sg, int nelems,
+		    enum dma_data_direction direction)
 {
 	flush_write_buffers();
+}
+
+static inline int
+dma_mapping_error(dma_addr_t dma_addr)
+{
+	return 0;
 }
 
 static inline int
@@ -133,5 +161,17 @@ dma_cache_sync(void *vaddr, size_t size,
 {
 	flush_write_buffers();
 }
+
+#define ARCH_HAS_DMA_DECLARE_COHERENT_MEMORY
+extern int
+dma_declare_coherent_memory(struct device *dev, dma_addr_t bus_addr,
+			    dma_addr_t device_addr, size_t size, int flags);
+
+extern void
+dma_release_declared_memory(struct device *dev);
+
+extern void *
+dma_mark_declared_memory_occupied(struct device *dev,
+				  dma_addr_t device_addr, size_t size);
 
 #endif

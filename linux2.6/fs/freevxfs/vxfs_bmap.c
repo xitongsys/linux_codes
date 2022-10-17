@@ -27,8 +27,6 @@
  * SUCH DAMAGE.
  */
 
-#ident "$Id: vxfs_bmap.c,v 1.25 2002/01/02 23:36:55 hch Exp hch $"
-
 /*
  * Veritas filesystem driver - filesystem to disk block mapping.
  */
@@ -169,7 +167,9 @@ vxfs_bmap_indir(struct inode *ip, long indir, int size, long block)
 
 			printk(KERN_INFO "\n\nTYPED_DEV4 detected!\n");
 			printk(KERN_INFO "block: %Lu\tsize: %Ld\tdev: %d\n",
-				typ4->vd4_block, typ4->vd4_size, typ4->vd4_dev);
+			       (unsigned long long) typ4->vd4_block,
+			       (unsigned long long) typ4->vd4_size,
+			       typ4->vd4_dev);
 			goto fail;
 		}
 		default:
@@ -230,7 +230,9 @@ vxfs_bmap_typed(struct inode *ip, long iblock)
 
 			printk(KERN_INFO "\n\nTYPED_DEV4 detected!\n");
 			printk(KERN_INFO "block: %Lu\tsize: %Ld\tdev: %d\n",
-				typ4->vd4_block, typ4->vd4_size, typ4->vd4_dev);
+			       (unsigned long long) typ4->vd4_block,
+			       (unsigned long long) typ4->vd4_size,
+			       typ4->vd4_dev);
 			return 0;
 		}
 		default:

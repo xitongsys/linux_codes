@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -73,9 +73,12 @@ acpi_ut_release_to_cache (
 	ACPI_FUNCTION_ENTRY ();
 
 
+	cache_info = &acpi_gbl_memory_lists[list_id];
+
+#ifdef ACPI_ENABLE_OBJECT_CACHE
+
 	/* If walk cache is full, just free this wallkstate object */
 
-	cache_info = &acpi_gbl_memory_lists[list_id];
 	if (cache_info->cache_depth >= cache_info->max_cache_depth) {
 		ACPI_MEM_FREE (object);
 		ACPI_MEM_TRACKING (cache_info->total_freed++);
@@ -101,6 +104,14 @@ acpi_ut_release_to_cache (
 
 		(void) acpi_ut_release_mutex (ACPI_MTX_CACHES);
 	}
+
+#else
+
+	/* Object cache is disabled; just free the object */
+
+	ACPI_MEM_FREE (object);
+	ACPI_MEM_TRACKING (cache_info->total_freed++);
+#endif
 }
 
 
@@ -130,6 +141,9 @@ acpi_ut_acquire_from_cache (
 
 
 	cache_info = &acpi_gbl_memory_lists[list_id];
+
+#ifdef ACPI_ENABLE_OBJECT_CACHE
+
 	if (ACPI_FAILURE (acpi_ut_acquire_mutex (ACPI_MTX_CACHES))) {
 		return (NULL);
 	}
@@ -174,10 +188,19 @@ acpi_ut_acquire_from_cache (
 		ACPI_MEM_TRACKING (cache_info->total_allocated++);
 	}
 
+#else
+
+	/* Object cache is disabled; just allocate the object */
+
+	object = ACPI_MEM_CALLOCATE (cache_info->object_size);
+	ACPI_MEM_TRACKING (cache_info->total_allocated++);
+#endif
+
 	return (object);
 }
 
 
+#ifdef ACPI_ENABLE_OBJECT_CACHE
 /******************************************************************************
  *
  * FUNCTION:    acpi_ut_delete_generic_cache
@@ -212,6 +235,7 @@ acpi_ut_delete_generic_cache (
 		cache_info->cache_depth--;
 	}
 }
+#endif
 
 
 /*******************************************************************************
@@ -259,13 +283,13 @@ acpi_ut_validate_buffer (
  *
  * FUNCTION:    acpi_ut_initialize_buffer
  *
- * PARAMETERS:  required_length     - Length needed
- *              Buffer              - Buffer to be validated
+ * PARAMETERS:  Buffer              - Buffer to be validated
+ *              required_length     - Length needed
  *
  * RETURN:      Status
  *
  * DESCRIPTION: Validate that the buffer is of the required length or
- *              allocate a new buffer.
+ *              allocate a new buffer.  Returned buffer is always zeroed.
  *
  ******************************************************************************/
 
@@ -305,24 +329,25 @@ acpi_ut_initialize_buffer (
 
 		/* Allocate a new buffer with local interface to allow tracking */
 
-		buffer->pointer = ACPI_MEM_ALLOCATE (required_length);
+		buffer->pointer = ACPI_MEM_CALLOCATE (required_length);
 		if (!buffer->pointer) {
 			return (AE_NO_MEMORY);
 		}
-
-		/* Clear the buffer */
-
-		ACPI_MEMSET (buffer->pointer, 0, required_length);
 		break;
 
 
 	default:
 
-		/* Validate the size of the buffer */
+		/* Existing buffer: Validate the size of the buffer */
 
 		if (buffer->length < required_length) {
 			status = AE_BUFFER_OVERFLOW;
+			break;
 		}
+
+		/* Clear the buffer */
+
+		ACPI_MEMSET (buffer->pointer, 0, required_length);
 		break;
 	}
 
@@ -472,7 +497,7 @@ acpi_ut_allocate_and_track (
 	acpi_status                     status;
 
 
-	allocation = acpi_ut_allocate (size + sizeof (struct acpi_debug_mem_block), component,
+	allocation = acpi_ut_allocate (size + sizeof (struct acpi_debug_mem_header), component,
 			  module, line);
 	if (!allocation) {
 		return (NULL);
@@ -518,7 +543,7 @@ acpi_ut_callocate_and_track (
 	acpi_status                     status;
 
 
-	allocation = acpi_ut_callocate (size + sizeof (struct acpi_debug_mem_block), component,
+	allocation = acpi_ut_callocate (size + sizeof (struct acpi_debug_mem_header), component,
 			  module, line);
 	if (!allocation) {
 		/* Report allocation error */
@@ -603,7 +628,8 @@ acpi_ut_free_and_track (
  *
  * FUNCTION:    acpi_ut_find_allocation
  *
- * PARAMETERS:  Allocation             - Address of allocated memory
+ * PARAMETERS:  list_id                 - Memory list to search
+ *              Allocation              - Address of allocated memory
  *
  * RETURN:      A list element if found; NULL otherwise.
  *
@@ -646,7 +672,8 @@ acpi_ut_find_allocation (
  *
  * FUNCTION:    acpi_ut_track_allocation
  *
- * PARAMETERS:  Allocation          - Address of allocated memory
+ * PARAMETERS:  list_id             - Memory list to search
+ *              Allocation          - Address of allocated memory
  *              Size                - Size of the allocation
  *              alloc_type          - MEM_MALLOC or MEM_CALLOC
  *              Component           - Component type of caller
@@ -710,6 +737,7 @@ acpi_ut_track_allocation (
 	allocation->line      = line;
 
 	ACPI_STRNCPY (allocation->module, module, ACPI_MAX_MODULE_NAME);
+	allocation->module[ACPI_MAX_MODULE_NAME-1] = 0;
 
 	/* Insert at list head */
 
@@ -733,7 +761,8 @@ unlock_and_exit:
  *
  * FUNCTION:    acpi_ut_remove_allocation
  *
- * PARAMETERS:  Allocation          - Address of allocated memory
+ * PARAMETERS:  list_id             - Memory list to search
+ *              Allocation          - Address of allocated memory
  *              Component           - Component type of caller
  *              Module              - Source file name of caller
  *              Line                - Line number of caller
@@ -813,7 +842,7 @@ acpi_ut_remove_allocation (
  * DESCRIPTION: Print some info about the outstanding allocations.
  *
  ******************************************************************************/
-
+#ifdef ACPI_FUTURE_USAGE
 void
 acpi_ut_dump_allocation_info (
 	void)
@@ -859,6 +888,7 @@ acpi_ut_dump_allocation_info (
 */
 	return_VOID;
 }
+#endif  /*  ACPI_FUTURE_USAGE  */
 
 
 /*******************************************************************************
@@ -902,71 +932,30 @@ acpi_ut_dump_allocations (
 
 			descriptor = ACPI_CAST_PTR (union acpi_descriptor, &element->user_space);
 			if (descriptor->descriptor_id != ACPI_DESC_TYPE_CACHED) {
-				acpi_os_printf ("%p Len %04X %9.9s-%d ",
+				acpi_os_printf ("%p Len %04X %9.9s-%d [%s] ",
 						 descriptor, element->size, element->module,
-						 element->line);
+						 element->line, acpi_ut_get_descriptor_name (descriptor));
 
-				/* Most of the elements will be internal objects. */
+				/* Most of the elements will be Operand objects. */
 
 				switch (ACPI_GET_DESCRIPTOR_TYPE (descriptor)) {
 				case ACPI_DESC_TYPE_OPERAND:
-					acpi_os_printf ("obj_type %12.12s R%hd",
+					acpi_os_printf ("%12.12s R%hd",
 							acpi_ut_get_type_name (descriptor->object.common.type),
 							descriptor->object.common.reference_count);
 					break;
 
 				case ACPI_DESC_TYPE_PARSER:
-					acpi_os_printf ("parse_obj aml_opcode %04hX",
+					acpi_os_printf ("aml_opcode %04hX",
 							descriptor->op.asl.aml_opcode);
 					break;
 
 				case ACPI_DESC_TYPE_NAMED:
-					acpi_os_printf ("Node %4.4s",
-							descriptor->node.name.ascii);
-					break;
-
-				case ACPI_DESC_TYPE_STATE:
-					acpi_os_printf ("Untyped state_obj");
-					break;
-
-				case ACPI_DESC_TYPE_STATE_UPDATE:
-					acpi_os_printf ("UPDATE state_obj");
-					break;
-
-				case ACPI_DESC_TYPE_STATE_PACKAGE:
-					acpi_os_printf ("PACKAGE state_obj");
-					break;
-
-				case ACPI_DESC_TYPE_STATE_CONTROL:
-					acpi_os_printf ("CONTROL state_obj");
-					break;
-
-				case ACPI_DESC_TYPE_STATE_RPSCOPE:
-					acpi_os_printf ("ROOT-PARSE-SCOPE state_obj");
-					break;
-
-				case ACPI_DESC_TYPE_STATE_PSCOPE:
-					acpi_os_printf ("PARSE-SCOPE state_obj");
-					break;
-
-				case ACPI_DESC_TYPE_STATE_WSCOPE:
-					acpi_os_printf ("WALK-SCOPE state_obj");
-					break;
-
-				case ACPI_DESC_TYPE_STATE_RESULT:
-					acpi_os_printf ("RESULT state_obj");
-					break;
-
-				case ACPI_DESC_TYPE_STATE_NOTIFY:
-					acpi_os_printf ("NOTIFY state_obj");
-					break;
-
-				case ACPI_DESC_TYPE_STATE_THREAD:
-					acpi_os_printf ("THREAD state_obj");
+					acpi_os_printf ("%4.4s",
+							acpi_ut_get_node_name (&descriptor->node));
 					break;
 
 				default:
-					/* All types should appear above */
 					break;
 				}
 

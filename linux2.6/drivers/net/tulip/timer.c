@@ -8,29 +8,30 @@
 	This software may be used and distributed according to the terms
 	of the GNU General Public License, incorporated herein by reference.
 
-	Please refer to Documentation/DocBook/tulip.{pdf,ps,html}
+	Please refer to Documentation/DocBook/tulip-user.{pdf,ps,html}
 	for more information on this driver, or visit the project
 	Web page at http://sourceforge.net/projects/tulip/
 
 */
 
+#include <linux/pci.h>
 #include "tulip.h"
 
 
 void tulip_timer(unsigned long data)
 {
 	struct net_device *dev = (struct net_device *)data;
-	struct tulip_private *tp = (struct tulip_private *)dev->priv;
-	long ioaddr = dev->base_addr;
-	u32 csr12 = inl(ioaddr + CSR12);
+	struct tulip_private *tp = netdev_priv(dev);
+	void __iomem *ioaddr = tp->base_addr;
+	u32 csr12 = ioread32(ioaddr + CSR12);
 	int next_tick = 2*HZ;
 
 	if (tulip_debug > 2) {
 		printk(KERN_DEBUG "%s: Media selection tick, %s, status %8.8x mode"
 			   " %8.8x SIA %8.8x %8.8x %8.8x %8.8x.\n",
-			   dev->name, medianame[dev->if_port], inl(ioaddr + CSR5),
-			   inl(ioaddr + CSR6), csr12, inl(ioaddr + CSR13),
-			   inl(ioaddr + CSR14), inl(ioaddr + CSR15));
+			   dev->name, medianame[dev->if_port], ioread32(ioaddr + CSR5),
+			   ioread32(ioaddr + CSR6), csr12, ioread32(ioaddr + CSR13),
+			   ioread32(ioaddr + CSR14), ioread32(ioaddr + CSR15));
 	}
 	switch (tp->chip_id) {
 	case DC21140:
@@ -38,6 +39,7 @@ void tulip_timer(unsigned long data)
 	case MX98713:
 	case COMPEX9881:
 	case DM910X:
+	case ULI526X:
 	default: {
 		struct medialeaf *mleaf;
 		unsigned char *p;
@@ -48,7 +50,7 @@ void tulip_timer(unsigned long data)
 			if (tulip_debug > 2)
 				printk(KERN_DEBUG "%s: network media monitor CSR6 %8.8x "
 					   "CSR12 0x%2.2x.\n",
-					   dev->name, inl(ioaddr + CSR6), csr12 & 0xff);
+					   dev->name, ioread32(ioaddr + CSR6), csr12 & 0xff);
 			break;
 		}
 		mleaf = &tp->mtable->mleaf[tp->cur_index];
@@ -135,13 +137,13 @@ void tulip_timer(unsigned long data)
 void mxic_timer(unsigned long data)
 {
 	struct net_device *dev = (struct net_device *)data;
-	struct tulip_private *tp = (struct tulip_private *)dev->priv;
-	long ioaddr = dev->base_addr;
+	struct tulip_private *tp = netdev_priv(dev);
+	void __iomem *ioaddr = tp->base_addr;
 	int next_tick = 60*HZ;
 
 	if (tulip_debug > 3) {
 		printk(KERN_INFO"%s: MXIC negotiation status %8.8x.\n", dev->name,
-			   inl(ioaddr + CSR12));
+			   ioread32(ioaddr + CSR12));
 	}
 	if (next_tick) {
 		mod_timer(&tp->timer, RUN_AT(next_tick));
@@ -152,17 +154,22 @@ void mxic_timer(unsigned long data)
 void comet_timer(unsigned long data)
 {
 	struct net_device *dev = (struct net_device *)data;
-	struct tulip_private *tp = (struct tulip_private *)dev->priv;
-	long ioaddr = dev->base_addr;
+	struct tulip_private *tp = netdev_priv(dev);
 	int next_tick = 60*HZ;
 
 	if (tulip_debug > 1)
 		printk(KERN_DEBUG "%s: Comet link status %4.4x partner capability "
 			   "%4.4x.\n",
-			   dev->name, inl(ioaddr + 0xB8), inl(ioaddr + 0xC8));
+			   dev->name,
+			   tulip_mdio_read(dev, tp->phys[0], 1),
+			   tulip_mdio_read(dev, tp->phys[0], 5));
 	/* mod_timer synchronizes us with potential add_timer calls
 	 * from interrupts.
 	 */
+	if (tulip_check_duplex(dev) < 0)
+		{ netif_carrier_off(dev); }
+	else
+		{ netif_carrier_on(dev); }
 	mod_timer(&tp->timer, RUN_AT(next_tick));
 }
 

@@ -25,16 +25,14 @@
 #include <sound/pcm.h>
 #include <sound/timer.h>
 
-#define chip_t snd_pcm_substream_t
-
 /*
  *  Timer functions
  */
 
 /* Greatest common divisor */
-static int gcd(int a, int b)
+static unsigned long gcd(unsigned long a, unsigned long b)
 {
-	int r;
+	unsigned long r;
 	if (a < b) {
 		r = a;
 		a = b;
@@ -49,7 +47,7 @@ static int gcd(int a, int b)
 
 void snd_pcm_timer_resolution_change(snd_pcm_substream_t *substream)
 {
-	unsigned int rate, mult, fsize, l;
+	unsigned long rate, mult, fsize, l, post;
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	
         mult = 1000000000;
@@ -63,19 +61,24 @@ void snd_pcm_timer_resolution_change(snd_pcm_substream_t *substream)
 	l = gcd(rate, fsize);
 	rate /= l;
 	fsize /= l;
+	post = 1;
 	while ((mult * fsize) / fsize != mult) {
 		mult /= 2;
-		rate /= 2;
+		post *= 2;
 	}
-	snd_assert(rate != 0, return);
-	runtime->timer_resolution = mult * fsize / rate;
+	if (rate == 0) {
+		snd_printk(KERN_ERR "pcm timer resolution out of range (rate = %u, period_size = %lu)\n", runtime->rate, runtime->period_size);
+		runtime->timer_resolution = -1;
+		return;
+	}
+	runtime->timer_resolution = (mult * fsize / rate) * post;
 }
 
 static unsigned long snd_pcm_timer_resolution(snd_timer_t * timer)
 {
 	snd_pcm_substream_t * substream;
 	
-	substream = snd_magic_cast(snd_pcm_substream_t, timer->private_data, return -ENXIO);
+	substream = timer->private_data;
 	return substream->runtime ? substream->runtime->timer_resolution : 0;
 }
 
@@ -119,7 +122,7 @@ static struct _snd_timer_hardware snd_pcm_timer =
 
 static void snd_pcm_timer_free(snd_timer_t *timer)
 {
-	snd_pcm_substream_t *substream = snd_magic_cast(snd_pcm_substream_t, timer->private_data, return);
+	snd_pcm_substream_t *substream = timer->private_data;
 	substream->timer = NULL;
 }
 

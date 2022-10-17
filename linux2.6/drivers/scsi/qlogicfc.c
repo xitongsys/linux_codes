@@ -64,7 +64,7 @@
 #include <asm/io.h>
 #include <asm/irq.h>
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 
 #define pci64_dma_hi32(a) ((u32) (0xffffffff & (((u64)(a))>>32)))
 #define pci64_dma_lo32(a) ((u32) (0xffffffff & (((u64)(a)))))
@@ -100,6 +100,7 @@
 
 #define DEFAULT_LOOP_COUNT	1000000000
 
+#define ISP_TIMEOUT (2*HZ)
 /* End Configuration section ************************************************ */
 
 #include <linux/module.h>
@@ -411,7 +412,7 @@ static unsigned short risc_code_addr01 = 0x1000 ;
    if that mbox should be copied as input.  For example 0x2 would mean
    only copy mbox1. */
 
-const u_char mbox_param[] =
+static const u_char mbox_param[] =
 {
 	0x01,			/* MBOX_NO_OP */
 	0x1f,			/* MBOX_LOAD_RAM */
@@ -814,9 +815,11 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 	   some time before recognizing it is attached to a fabric */
 
 #if ISP2x00_FABRIC
-	for (wait_time = jiffies + 5 * HZ; time_before(jiffies, wait_time);) {
-		barrier();
-		cpu_relax();
+	if (hosts) {
+		for (wait_time = jiffies + 5 * HZ; time_before(jiffies, wait_time);) {
+			barrier();
+			cpu_relax();
+		}
 	}
 #endif
 
@@ -1305,7 +1308,7 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 		cmd->control_flags = cpu_to_le16(CFLAG_READ);
 
 	if (Cmnd->device->tagged_supported) {
-		if ((jiffies - hostdata->tag_ages[Cmnd->device->id]) > (2 * SCSI_TIMEOUT)) {
+		if ((jiffies - hostdata->tag_ages[Cmnd->device->id]) > (2 * ISP_TIMEOUT)) {
 			cmd->control_flags |= cpu_to_le16(CFLAG_ORDERED_TAG);
 			hostdata->tag_ages[Cmnd->device->id] = jiffies;
 		} else
@@ -1778,7 +1781,7 @@ int isp2x00_reset(Scsi_Cmnd * Cmnd, unsigned int reset_flags)
 
 	LEAVE("isp2x00_reset");
 
-	return return_status;;
+	return return_status;
 }
 
 

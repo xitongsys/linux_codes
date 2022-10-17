@@ -78,15 +78,12 @@ struct rxrpc_transport
 	volatile char		error_rcvd;	/* T if received ICMP error outstanding */
 };
 
-extern struct list_head rxrpc_transports;
-
 extern int rxrpc_create_transport(unsigned short port,
 				  struct rxrpc_transport **_trans);
 
 static inline void rxrpc_get_transport(struct rxrpc_transport *trans)
 {
-	if (atomic_read(&trans->usage) <= 0)
-		BUG();
+	BUG_ON(atomic_read(&trans->usage) <= 0);
 	atomic_inc(&trans->usage);
 	//printk("rxrpc_get_transport(%p{u=%d})\n",
 	//       trans, atomic_read(&trans->usage));
@@ -105,7 +102,5 @@ extern void rxrpc_trans_receive_packet(struct rxrpc_transport *trans);
 extern int rxrpc_trans_immediate_abort(struct rxrpc_transport *trans,
 				       struct rxrpc_message *msg,
 				       int error);
-
-extern void rxrpc_clear_transport(struct rxrpc_transport *trans);
 
 #endif /* _LINUX_RXRPC_TRANSPORT_H */

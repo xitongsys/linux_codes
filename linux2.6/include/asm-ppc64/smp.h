@@ -22,21 +22,26 @@
 #include <linux/cpumask.h>
 #include <linux/kernel.h>
 
-#ifdef CONFIG_SMP
-
 #ifndef __ASSEMBLY__
 
 #include <asm/paca.h>
 
-extern void smp_message_pass(int target, int msg, unsigned long data, int wait);
-extern void smp_send_tlb_invalidate(int);
-extern void smp_send_xmon_break(int cpu);
+extern int boot_cpuid;
+extern int boot_cpuid_phys;
+
+extern void cpu_die(void) __attribute__((noreturn));
+
+#ifdef CONFIG_SMP
+
+extern void smp_send_debugger_break(int cpu);
 struct pt_regs;
 extern void smp_message_recv(int, struct pt_regs *);
 
-#define cpu_possible(cpu)	paca[cpu].active
 
-#define smp_processor_id() (get_paca()->xPacaIndex)
+#define __smp_processor_id() (get_paca()->paca_index)
+#define hard_smp_processor_id() (get_paca()->hw_cpu_id)
+
+extern cpumask_t cpu_sibling_map[NR_CPUS];
 
 /* Since OpenPIC has only 4 IPIs, we use slightly different message numbers.
  *
@@ -44,13 +49,36 @@ extern void smp_message_recv(int, struct pt_regs *);
  * in /proc/interrupts will be wrong!!! --Troy */
 #define PPC_MSG_CALL_FUNCTION   0
 #define PPC_MSG_RESCHEDULE      1
+/* This is unused now */
+#if 0
 #define PPC_MSG_MIGRATE_TASK    2
-#define PPC_MSG_XMON_BREAK      3
+#endif
+#define PPC_MSG_DEBUGGER_BREAK  3
 
 void smp_init_iSeries(void);
 void smp_init_pSeries(void);
 
+extern int __cpu_disable(void);
+extern void __cpu_die(unsigned int cpu);
+#endif /* CONFIG_SMP */
+
+#define get_hard_smp_processor_id(CPU) (paca[(CPU)].hw_cpu_id)
+#define set_hard_smp_processor_id(CPU, VAL) \
+	do { (paca[(CPU)].hw_cpu_id = (VAL)); } while (0)
+
+extern int smt_enabled_at_boot;
+
+extern int smp_mpic_probe(void);
+extern void smp_mpic_setup_cpu(int cpu);
+extern void smp_mpic_message_pass(int target, int msg);
+extern void smp_generic_kick_cpu(int nr);
+
+extern void smp_generic_give_timebase(void);
+extern void smp_generic_take_timebase(void);
+
+extern struct smp_ops_t *smp_ops;
+
 #endif /* __ASSEMBLY__ */
-#endif /* !(CONFIG_SMP) */
+
 #endif /* !(_PPC64_SMP_H) */
 #endif /* __KERNEL__ */

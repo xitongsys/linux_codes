@@ -56,7 +56,7 @@ pci_update_resource(struct pci_dev *dev, struct resource *res, int resno)
 	if (resno < 6) {
 		reg = PCI_BASE_ADDRESS_0 + 4 * resno;
 	} else if (resno == PCI_ROM_RESOURCE) {
-		new |= res->flags & PCI_ROM_ADDRESS_ENABLE;
+		new |= res->flags & IORESOURCE_ROM_ENABLE;
 		reg = dev->rom_base_reg;
 	} else {
 		/* Hmm, non-standard resource. */
@@ -84,19 +84,28 @@ pci_update_resource(struct pci_dev *dev, struct resource *res, int resno)
 			       pci_name(dev), resno, new, check);
 		}
 	}
+	res->flags &= ~IORESOURCE_UNSET;
+	DBGC((KERN_INFO "PCI: moved device %s resource %d (%lx) to %x\n",
+		dev->slot_name, resno, res->flags,
+		new & ~PCI_REGION_FLAG_MASK));
 }
 
 int __init
 pci_claim_resource(struct pci_dev *dev, int resource)
 {
 	struct resource *res = &dev->resource[resource];
-	struct resource *root = pci_find_parent_resource(dev, res);
+	struct resource *root = NULL;
 	char *dtype = resource < PCI_BRIDGE_RESOURCES ? "device" : "bridge";
 	int err;
 
+	if (res->flags & IORESOURCE_IO)
+		root = &ioport_resource;
+	if (res->flags & IORESOURCE_MEM)
+		root = &iomem_resource;
+
 	err = -EINVAL;
 	if (root != NULL)
-		err = request_resource(root, res);
+		err = insert_resource(root, res);
 
 	if (err) {
 		printk(KERN_ERR "PCI: %s region %d of %s %s [%lx:%lx]\n",
@@ -139,8 +148,9 @@ int pci_assign_resource(struct pci_dev *dev, int resno)
 	}
 
 	if (ret) {
-		printk(KERN_ERR "PCI: Failed to allocate resource %d(%lx-%lx) for %s\n",
-		       resno, res->start, res->end, pci_name(dev));
+		printk(KERN_ERR "PCI: Failed to allocate %s resource #%d:%lx@%lx for %s\n",
+		       res->flags & IORESOURCE_IO ? "I/O" : "mem",
+		       resno, size, res->start, pci_name(dev));
 	} else if (resno < PCI_BRIDGE_RESOURCES) {
 		pci_update_resource(dev, res, resno);
 	}

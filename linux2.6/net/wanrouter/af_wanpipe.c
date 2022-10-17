@@ -158,7 +158,7 @@ static void dbg_kfree(void * v, int line) {
 
 /* List of all wanpipe sockets. */
 HLIST_HEAD(wanpipe_sklist);
-static rwlock_t wanpipe_sklist_lock = RW_LOCK_UNLOCKED;
+static DEFINE_RWLOCK(wanpipe_sklist_lock);
 
 atomic_t wanpipe_socks_nr;
 static unsigned long wanpipe_tx_critical;
@@ -552,7 +552,7 @@ static int wanpipe_sendmsg(struct kiocb *iocb, struct socket *sock,
 	if (sk->sk_state != WANSOCK_CONNECTED)
 		return -ENOTCONN;	
 
-	if (msg->msg_flags&~MSG_DONTWAIT) 
+	if (msg->msg_flags & ~(MSG_DONTWAIT|MSG_CMSG_COMPAT)) 
 		return(-EINVAL);
 
 	/* it was <=, now one can send
@@ -591,14 +591,14 @@ static int wanpipe_sendmsg(struct kiocb *iocb, struct socket *sock,
   		return -EMSGSIZE;
 	}
 
-	skb = sock_alloc_send_skb(sk, len+dev->hard_header_len+15, 
+	skb = sock_alloc_send_skb(sk, len + LL_RESERVED_SPACE(dev),
 				msg->msg_flags & MSG_DONTWAIT, &err);
 
 	if (skb==NULL){
 		goto out_unlock;
 	}
 		
-	skb_reserve(skb, (dev->hard_header_len+15)&~15);
+	skb_reserve(skb, LL_RESERVED_SPACE(dev));
 	skb->nh.raw = skb->data;
 
 	/* Returns -EFAULT on error */
@@ -1765,13 +1765,7 @@ static int wanpipe_ioctl(struct socket *sock, unsigned int cmd, unsigned long ar
 	switch(cmd) 
 	{
 		case SIOCGSTAMP:
-			if (!sk->sk_stamp.tv_sec)
-				return -ENOENT;
-			err = -EFAULT;
-			if (!copy_to_user((void *)arg, &sk->sk_stamp,
-			    sizeof(struct timeval)))
-				err = 0;
-			return err;
+			return sock_get_timestamp(sk, (struct timeval __user *)arg);
 
 		case SIOC_WANPIPE_CHECK_TX:
 
@@ -1838,7 +1832,7 @@ static int wanpipe_ioctl(struct socket *sock, unsigned int cmd, unsigned long ar
 #endif
 
 		default:
-			return dev_ioctl(cmd,(void *) arg);
+			return dev_ioctl(cmd,(void __user *) arg);
 	}
 	/*NOTREACHED*/
 }
@@ -2429,7 +2423,6 @@ static int wanpipe_accept(struct socket *sock, struct socket *newsock, int flags
 	write_unlock(&wanpipe_sklist_lock);
 	clear_bit(1,&wanpipe_tx_critical);
 
-	newsk->sk_pair = NULL;
 	newsk->sk_socket = newsock;
 	newsk->sk_sleep = &newsock->wait;
 

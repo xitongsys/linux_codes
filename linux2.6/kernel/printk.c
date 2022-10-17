@@ -30,6 +30,7 @@
 #include <linux/smp.h>
 #include <linux/security.h>
 #include <linux/bootmem.h>
+#include <linux/syscalls.h>
 
 #include <asm/uaccess.h>
 
@@ -62,13 +63,22 @@ int oops_in_progress;
  */
 static DECLARE_MUTEX(console_sem);
 struct console *console_drivers;
+/*
+ * This is used for debugging the mess that is the VT code by
+ * keeping track if we have the console semaphore held. It's
+ * definitely not the perfect debug tool (we don't know if _WE_
+ * hold it are racing, but it helps tracking those weird code
+ * path in the console code where we end up in places I want
+ * locked without the console sempahore held
+ */
+static int console_locked;
 
 /*
  * logbuf_lock protects log_buf, log_start, log_end, con_start and logged_chars
  * It is also used in interesting ways to provide interlocking in
  * release_console_sem().
  */
-static spinlock_t logbuf_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(logbuf_lock);
 
 static char __log_buf[__LOG_BUF_LEN];
 static char *log_buf = __log_buf;
@@ -86,7 +96,20 @@ static unsigned long con_start;	/* Index into log_buf: next char to be sent to c
 static unsigned long log_end;	/* Index into log_buf: most-recently-written-char + 1 */
 static unsigned long logged_chars; /* Number of chars produced since last read+clear operation */
 
-struct console_cmdline console_cmdline[MAX_CMDLINECONSOLES];
+/*
+ *	Array of consoles built from command line options (console=)
+ */
+struct console_cmdline
+{
+	char	name[8];			/* Name of the driver	    */
+	int	index;				/* Minor dev. to use	    */
+	char	*options;			/* Options for the driver   */
+};
+
+#define MAX_CMDLINECONSOLES 8
+
+static struct console_cmdline console_cmdline[MAX_CMDLINECONSOLES];
+static int selected_console = -1;
 static int preferred_console = -1;
 
 /* Flag: console code may call schedule() */
@@ -97,10 +120,9 @@ static int console_may_schedule;
  */
 static int __init console_setup(char *str)
 {
-	struct console_cmdline *c;
-	char name[sizeof(c->name)];
+	char name[sizeof(console_cmdline[0].name)];
 	char *s, *options;
-	int i, idx;
+	int idx;
 
 	/*
 	 *	Decode str into name, index, options.
@@ -120,10 +142,31 @@ static int __init console_setup(char *str)
 		strcpy(name, "ttyS1");
 #endif
 	for(s = name; *s; s++)
-		if (*s >= '0' && *s <= '9')
+		if ((*s >= '0' && *s <= '9') || *s == ',')
 			break;
 	idx = simple_strtoul(s, NULL, 10);
 	*s = 0;
+
+	add_preferred_console(name, idx, options);
+	return 1;
+}
+
+__setup("console=", console_setup);
+
+/**
+ * add_preferred_console - add a device to the list of preferred consoles.
+ *
+ * The last preferred console added will be used for kernel messages
+ * and stdin/out/err for init.  Normally this is used by console_setup
+ * above to handle user-supplied console arguments; however it can also
+ * be used by arch-specific code either to override the user or more
+ * commonly to provide a default console (ie from PROM variables) when
+ * the user has not supplied one.
+ */
+int __init add_preferred_console(char *name, int idx, char *options)
+{
+	struct console_cmdline *c;
+	int i;
 
 	/*
 	 *	See if this tty is not yet registered, and
@@ -132,25 +175,27 @@ static int __init console_setup(char *str)
 	for(i = 0; i < MAX_CMDLINECONSOLES && console_cmdline[i].name[0]; i++)
 		if (strcmp(console_cmdline[i].name, name) == 0 &&
 			  console_cmdline[i].index == idx) {
-				preferred_console = i;
-				return 1;
+				selected_console = i;
+				return 0;
 		}
 	if (i == MAX_CMDLINECONSOLES)
-		return 1;
-	preferred_console = i;
+		return -E2BIG;
+	selected_console = i;
 	c = &console_cmdline[i];
 	memcpy(c->name, name, sizeof(c->name));
+	c->name[sizeof(c->name) - 1] = 0;
 	c->options = options;
 	c->index = idx;
-	return 1;
+	return 0;
 }
-
-__setup("console=", console_setup);
 
 static int __init log_buf_len_setup(char *str)
 {
 	unsigned long size = memparse(str, &str);
+	unsigned long flags;
 
+	if (size)
+		size = roundup_pow_of_two(size);
 	if (size > log_buf_len) {
 		unsigned long start, dest_idx, offset;
 		char * new_log_buf;
@@ -161,7 +206,7 @@ static int __init log_buf_len_setup(char *str)
 			goto out;
 		}
 
-		spin_lock_irq(&logbuf_lock);
+		spin_lock_irqsave(&logbuf_lock, flags);
 		log_buf_len = size;
 		log_buf = new_log_buf;
 
@@ -175,7 +220,7 @@ static int __init log_buf_len_setup(char *str)
 		log_start -= offset;
 		con_start -= offset;
 		log_end -= offset;
-		spin_unlock_irq(&logbuf_lock);
+		spin_unlock_irqrestore(&logbuf_lock, flags);
 
 		printk("log_buf_len: %d\n", log_buf_len);
 	}
@@ -199,6 +244,7 @@ __setup("log_buf_len=", log_buf_len_setup);
  * 	7 -- Enable printk's to console
  *	8 -- Set level of messages printed to console
  *	9 -- Return number of unread characters in the log buffer
+ *     10 -- Return size of the log buffer
  */
 int do_syslog(int type, char __user * buf, int len)
 {
@@ -238,6 +284,7 @@ int do_syslog(int type, char __user * buf, int len)
 			error = __put_user(c,buf);
 			buf++;
 			i++;
+			cond_resched();
 			spin_lock_irq(&logbuf_lock);
 		}
 		spin_unlock_irq(&logbuf_lock);
@@ -279,6 +326,7 @@ int do_syslog(int type, char __user * buf, int len)
 			c = LOG_BUF(j);
 			spin_unlock_irq(&logbuf_lock);
 			error = __put_user(c,&buf[count-1-i]);
+			cond_resched();
 			spin_lock_irq(&logbuf_lock);
 		}
 		spin_unlock_irq(&logbuf_lock);
@@ -294,6 +342,7 @@ int do_syslog(int type, char __user * buf, int len)
 					error = -EFAULT;
 					break;
 				}
+				cond_resched();
 			}
 		}
 		break;
@@ -317,6 +366,9 @@ int do_syslog(int type, char __user * buf, int len)
 		break;
 	case 9:		/* Number of chars in the log buffer */
 		error = log_end - log_start;
+		break;
+	case 10:	/* Size of the log buffer */
+		error = log_buf_len;
 		break;
 	default:
 		error = -EINVAL;
@@ -427,6 +479,27 @@ static void emit_log_char(char c)
 }
 
 /*
+ * Zap console related locks when oopsing. Only zap at most once
+ * every 10 seconds, to leave time for slow consoles to print a
+ * full oops.
+ */
+static void zap_locks(void)
+{
+	static unsigned long oops_timestamp;
+
+	if (time_after_eq(jiffies, oops_timestamp) &&
+			!time_after(jiffies, oops_timestamp + 30*HZ))
+		return;
+
+	oops_timestamp = jiffies;
+
+	/* If a crash is occurring, make sure we can't deadlock */
+	spin_lock_init(&logbuf_lock);
+	/* And make sure that we print immediately */
+	init_MUTEX(&console_sem);
+}
+
+/*
  * This is printk.  It can be called from any context.  We want it to work.
  * 
  * We try to grab the console_sem.  If we succeed, it's easy - we log the output and
@@ -442,26 +515,31 @@ static void emit_log_char(char c)
 asmlinkage int printk(const char *fmt, ...)
 {
 	va_list args;
+	int r;
+
+	va_start(args, fmt);
+	r = vprintk(fmt, args);
+	va_end(args);
+
+	return r;
+}
+
+asmlinkage int vprintk(const char *fmt, va_list args)
+{
 	unsigned long flags;
 	int printed_len;
 	char *p;
 	static char printk_buf[1024];
 	static int log_level_unknown = 1;
 
-	if (oops_in_progress) {
-		/* If a crash is occurring, make sure we can't deadlock */
-		spin_lock_init(&logbuf_lock);
-		/* And make sure that we print immediately */
-		init_MUTEX(&console_sem);
-	}
+	if (unlikely(oops_in_progress))
+		zap_locks();
 
 	/* This stops the holder of console_sem just where we want him */
 	spin_lock_irqsave(&logbuf_lock, flags);
 
 	/* Emit the output into the temporary buffer */
-	va_start(args, fmt);
-	printed_len = vsnprintf(printk_buf, sizeof(printk_buf), fmt, args);
-	va_end(args);
+	printed_len = vscnprintf(printk_buf, sizeof(printk_buf), fmt, args);
 
 	/*
 	 * Copy the output into log_buf.  If the caller didn't provide
@@ -481,7 +559,8 @@ asmlinkage int printk(const char *fmt, ...)
 			log_level_unknown = 1;
 	}
 
-	if (!cpu_online(smp_processor_id())) {
+	if (!cpu_online(smp_processor_id()) &&
+	    system_state != SYSTEM_RUNNING) {
 		/*
 		 * Some console drivers may assume that per-cpu resources have
 		 * been allocated.  So don't allow them to be called by this
@@ -492,6 +571,7 @@ asmlinkage int printk(const char *fmt, ...)
 		goto out;
 	}
 	if (!down_trylock(&console_sem)) {
+		console_locked = 1;
 		/*
 		 * We own the drivers.  We can drop the spinlock and let
 		 * release_console_sem() print the text
@@ -511,6 +591,7 @@ out:
 	return printed_len;
 }
 EXPORT_SYMBOL(printk);
+EXPORT_SYMBOL(vprintk);
 
 /**
  * acquire_console_sem - lock the console system for exclusive use.
@@ -525,9 +606,26 @@ void acquire_console_sem(void)
 	if (in_interrupt())
 		BUG();
 	down(&console_sem);
+	console_locked = 1;
 	console_may_schedule = 1;
 }
 EXPORT_SYMBOL(acquire_console_sem);
+
+int try_acquire_console_sem(void)
+{
+	if (down_trylock(&console_sem))
+		return -1;
+	console_locked = 1;
+	console_may_schedule = 0;
+	return 0;
+}
+EXPORT_SYMBOL(try_acquire_console_sem);
+
+int is_console_locked(void)
+{
+	return console_locked;
+}
+EXPORT_SYMBOL(is_console_locked);
 
 /**
  * release_console_sem - unlock the console system
@@ -557,15 +655,18 @@ void release_console_sem(void)
 		_con_start = con_start;
 		_log_end = log_end;
 		con_start = log_end;		/* Flush */
-		spin_unlock_irqrestore(&logbuf_lock, flags);
+		spin_unlock(&logbuf_lock);
 		call_console_drivers(_con_start, _log_end);
+		local_irq_restore(flags);
 	}
+	console_locked = 0;
 	console_may_schedule = 0;
 	up(&console_sem);
 	spin_unlock_irqrestore(&logbuf_lock, flags);
 	if (wake_klogd && !oops_in_progress && waitqueue_active(&log_wait))
 		wake_up_interruptible(&log_wait);
 }
+EXPORT_SYMBOL(release_console_sem);
 
 /** console_conditional_schedule - yield the CPU if required
  *
@@ -575,12 +676,10 @@ void release_console_sem(void)
  *
  * Must be called within acquire_console_sem().
  */
-void console_conditional_schedule(void)
+void __sched console_conditional_schedule(void)
 {
-	if (console_may_schedule && need_resched()) {
-		set_current_state(TASK_RUNNING);
-		schedule();
-	}
+	if (console_may_schedule)
+		cond_resched();
 }
 EXPORT_SYMBOL(console_conditional_schedule);
 
@@ -601,6 +700,7 @@ void console_unblank(void)
 	 */
 	if (down_trylock(&console_sem) != 0)
 		return;
+	console_locked = 1;
 	console_may_schedule = 0;
 	for (c = console_drivers; c != NULL; c = c->next)
 		if ((c->flags & CON_ENABLED) && c->unblank)
@@ -608,6 +708,47 @@ void console_unblank(void)
 	release_console_sem();
 }
 EXPORT_SYMBOL(console_unblank);
+
+/*
+ * Return the console tty driver structure and its associated index
+ */
+struct tty_driver *console_device(int *index)
+{
+	struct console *c;
+	struct tty_driver *driver = NULL;
+
+	acquire_console_sem();
+	for (c = console_drivers; c != NULL; c = c->next) {
+		if (!c->device)
+			continue;
+		driver = c->device(c, index);
+		if (driver)
+			break;
+	}
+	release_console_sem();
+	return driver;
+}
+
+/*
+ * Prevent further output on the passed console device so that (for example)
+ * serial drivers can disable console output before suspending a port, and can
+ * re-enable output afterwards.
+ */
+void console_stop(struct console *console)
+{
+	acquire_console_sem();
+	console->flags &= ~CON_ENABLED;
+	release_console_sem();
+}
+EXPORT_SYMBOL(console_stop);
+
+void console_start(struct console *console)
+{
+	acquire_console_sem();
+	console->flags |= CON_ENABLED;
+	release_console_sem();
+}
+EXPORT_SYMBOL(console_start);
 
 /*
  * The console driver calls this routine during kernel initialization
@@ -619,6 +760,9 @@ void register_console(struct console * console)
 {
 	int     i;
 	unsigned long flags;
+
+	if (preferred_console < 0)
+		preferred_console = selected_console;
 
 	/*
 	 *	See if we want to use this console driver. If we
@@ -710,7 +854,7 @@ int unregister_console(struct console * console)
 	 * would prevent fbcon from taking over.
 	 */
 	if (console_drivers == NULL)
-		preferred_console = -1;
+		preferred_console = selected_console;
 		
 
 	release_console_sem();
@@ -728,6 +872,55 @@ EXPORT_SYMBOL(unregister_console);
 void tty_write_message(struct tty_struct *tty, char *msg)
 {
 	if (tty && tty->driver->write)
-		tty->driver->write(tty, 0, msg, strlen(msg));
+		tty->driver->write(tty, msg, strlen(msg));
 	return;
 }
+
+/*
+ * printk rate limiting, lifted from the networking subsystem.
+ *
+ * This enforces a rate limit: not more than one kernel message
+ * every printk_ratelimit_jiffies to make a denial-of-service
+ * attack impossible.
+ */
+int __printk_ratelimit(int ratelimit_jiffies, int ratelimit_burst)
+{
+	static DEFINE_SPINLOCK(ratelimit_lock);
+	static unsigned long toks = 10*5*HZ;
+	static unsigned long last_msg;
+	static int missed;
+	unsigned long flags;
+	unsigned long now = jiffies;
+
+	spin_lock_irqsave(&ratelimit_lock, flags);
+	toks += now - last_msg;
+	last_msg = now;
+	if (toks > (ratelimit_burst * ratelimit_jiffies))
+		toks = ratelimit_burst * ratelimit_jiffies;
+	if (toks >= ratelimit_jiffies) {
+		int lost = missed;
+		missed = 0;
+		toks -= ratelimit_jiffies;
+		spin_unlock_irqrestore(&ratelimit_lock, flags);
+		if (lost)
+			printk(KERN_WARNING "printk: %d messages suppressed.\n", lost);
+		return 1;
+	}
+	missed++;
+	spin_unlock_irqrestore(&ratelimit_lock, flags);
+	return 0;
+}
+EXPORT_SYMBOL(__printk_ratelimit);
+
+/* minimum time in jiffies between messages */
+int printk_ratelimit_jiffies = 5*HZ;
+
+/* number of messages we send before ratelimiting */
+int printk_ratelimit_burst = 10;
+
+int printk_ratelimit(void)
+{
+	return __printk_ratelimit(printk_ratelimit_jiffies,
+				printk_ratelimit_burst);
+}
+EXPORT_SYMBOL(printk_ratelimit);

@@ -1,6 +1,6 @@
 /*
  *   ALSA sequencer Timer
- *   Copyright (c) 1998-1999 by Frank van de Pol <fvdpol@home.nl>
+ *   Copyright (c) 1998-1999 by Frank van de Pol <fvdpol@coil.demon.nl>
  *                              Jaroslav Kysela <perex@suse.cz>
  *
  *
@@ -59,7 +59,7 @@ seq_timer_t *snd_seq_timer_new(void)
 {
 	seq_timer_t *tmr;
 	
-	tmr = snd_kcalloc(sizeof(seq_timer_t), GFP_KERNEL);
+	tmr = kcalloc(1, sizeof(*tmr), GFP_KERNEL);
 	if (tmr == NULL) {
 		snd_printd("malloc failed for snd_seq_timer_new() \n");
 		return NULL;
@@ -335,7 +335,7 @@ static int initialize_timer(seq_timer_t *tmr)
 		if (! r && t->hw.c_resolution)
 			r = t->hw.c_resolution(t);
 		if (r) {
-			tmr->ticks = (unsigned int)(tmr->preferred_resolution / r);
+			tmr->ticks = (unsigned int)(1000000000uL / (r * tmr->preferred_resolution));
 			if (! tmr->ticks)
 				tmr->ticks = 1;
 		}

@@ -52,40 +52,36 @@
 #define ACPI_ENABLE_IRQS()  local_irq_enable()
 #define ACPI_FLUSH_CPU_CACHE()	wbinvd()
 
-/*
- * A brief explanation as GNU inline assembly is a bit hairy
- *  %0 is the output parameter in RAX ("=a")
- *  %1 and %2 are the input parameters in RCX ("c")
- *  and an immediate value ("i") respectively
- *  All actual register references are preceded with "%%" as in "%%edx"
- *  Immediate values in the assembly are preceded by "$" as in "$0x1"
- *  The final asm parameter are the operation altered non-output registers.
- */
+
+static inline int
+__acpi_acquire_global_lock (unsigned int *lock)
+{
+	unsigned int old, new, val;
+	do {
+		old = *lock;
+		new = (((old & ~0x3) + 2) + ((old >> 1) & 0x1));
+		val = cmpxchg(lock, old, new);
+	} while (unlikely (val != old));
+	return (new < 3) ? -1 : 0;
+}
+
+static inline int
+__acpi_release_global_lock (unsigned int *lock)
+{
+	unsigned int old, new, val;
+	do {
+		old = *lock;
+		new = old & ~0x3;
+		val = cmpxchg(lock, old, new);
+	} while (unlikely (val != old));
+	return old & 0x1;
+}
+
 #define ACPI_ACQUIRE_GLOBAL_LOCK(GLptr, Acq) \
-	do { \
-		unsigned long dummy; \
-		asm("1:     movl (%2),%%eax;" \
-			"movl   %%eax,%%edx;" \
-			"andq   %2,%%rdx;" \
-			"btsl   $0x1,%%edx;" \
-			"adcl   $0x0,%%edx;" \
-			"lock;  cmpxchgl %%edx,(%1);" \
-			"jnz    1b;" \
-			"cmpb   $0x3,%%dl;" \
-			"sbbl   %%eax,%%eax" \
-			:"=a"(Acq),"=c"(dummy):"c"(GLptr),"i"(~1L):"dx"); \
-	} while(0)
+	((Acq) = __acpi_acquire_global_lock((unsigned int *) GLptr))
+
 #define ACPI_RELEASE_GLOBAL_LOCK(GLptr, Acq) \
-	do { \
-		unsigned long dummy; \
-		asm("1:     movl (%2),%%eax;" \
-			"movl   %%eax,%%edx;" \
-			"andq   %2,%%rdx;" \
-			"lock;  cmpxchgl %%edx,(%1);" \
-			"jnz    1b;" \
-			"andl   $0x1,%%eax" \
-			:"=a"(Acq),"=c"(dummy):"c"(GLptr),"i"(~3L):"dx"); \
-	} while(0)
+	((Acq) = __acpi_release_global_lock((unsigned int *) GLptr))
 
 /*
  * Math helper asm macros
@@ -103,26 +99,55 @@
         :"=r"(n_hi), "=r"(n_lo)     \
         :"0"(n_hi), "1"(n_lo))
 
+/*
+ * Refer Intel ACPI _PDC support document for bit definitions
+ */
+#define ACPI_PDC_EST_CAPABILITY_SMP 	0xa
+#define ACPI_PDC_EST_CAPABILITY_MSR	0x1
 
-#ifndef CONFIG_ACPI_BOOT
-#define acpi_lapic 0
-#define acpi_ioapic 0
-#else
-#ifdef CONFIG_X86_LOCAL_APIC
+#ifdef CONFIG_ACPI_BOOT
 extern int acpi_lapic;
-#else
-#define acpi_lapic 0
-#endif
-#ifdef CONFIG_X86_IO_APIC
 extern int acpi_ioapic;
-#else
-#define acpi_ioapic 0
-#endif
+extern int acpi_noirq;
+extern int acpi_strict;
+extern int acpi_disabled;
+extern int acpi_pci_disabled;
+extern int acpi_ht;
+static inline void disable_acpi(void) 
+{ 
+	acpi_disabled = 1; 
+	acpi_ht = 0; 
+	acpi_pci_disabled = 1;
+	acpi_noirq = 1;
+}
 
 /* Fixmap pages to reserve for ACPI boot-time tables (see fixmap.h) */
 #define FIX_ACPI_PAGES 4
 
-#endif /*CONFIG_ACPI_BOOT*/
+extern int acpi_gsi_to_irq(u32 gsi, unsigned int *irq);
+
+#else	/* !CONFIG_ACPI_BOOT */
+#define acpi_lapic 0
+#define acpi_ioapic 0
+#endif /* !CONFIG_ACPI_BOOT */
+
+extern int acpi_numa;
+extern int acpi_scan_nodes(unsigned long start, unsigned long end);
+#define NR_NODE_MEMBLKS (MAX_NUMNODES*2)
+
+#ifdef CONFIG_ACPI_PCI
+static inline void acpi_noirq_set(void) { acpi_noirq = 1; }
+static inline void acpi_disable_pci(void) 
+{
+	acpi_pci_disabled = 1; 
+	acpi_noirq_set();
+}
+extern int acpi_irq_balance_set(char *str);
+#else
+static inline void acpi_noirq_set(void) { }
+static inline void acpi_disable_pci(void) { }
+static inline int acpi_irq_balance_set(char *str) { return 0; }
+#endif
 
 #ifdef CONFIG_ACPI_SLEEP
 
@@ -141,10 +166,11 @@ extern void acpi_reserve_bootmem(void);
 #define boot_cpu_physical_apicid boot_cpu_id
 
 extern int acpi_disabled;
+extern int acpi_pci_disabled;
 
-#define dmi_broken (0)
-#define BROKEN_ACPI_Sx		0x0001
-#define BROKEN_INIT_AFTER_S1	0x0002
+extern u8 x86_acpiid_to_apicid[];
+
+extern int acpi_skip_timer_override;
 
 #endif /*__KERNEL__*/
 

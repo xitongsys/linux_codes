@@ -25,7 +25,7 @@ static struct rpc_authops *	auth_flavors[RPC_AUTH_MAXFLAVOR] = {
 	NULL,			/* others can be loadable modules */
 };
 
-u32
+static u32
 pseudoflavor_to_flavor(u32 flavor) {
 	if (flavor >= RPC_AUTH_MAXFLAVOR)
 		return RPC_AUTH_GSS;
@@ -61,6 +61,7 @@ rpcauth_unregister(struct rpc_authops *ops)
 struct rpc_auth *
 rpcauth_create(rpc_authflavor_t pseudoflavor, struct rpc_clnt *clnt)
 {
+	struct rpc_auth		*auth;
 	struct rpc_authops	*ops;
 	u32			flavor = pseudoflavor_to_flavor(pseudoflavor);
 
@@ -68,19 +69,27 @@ rpcauth_create(rpc_authflavor_t pseudoflavor, struct rpc_clnt *clnt)
 		return NULL;
 	if (!try_module_get(ops->owner))
 		return NULL;
-	clnt->cl_auth = ops->create(clnt, pseudoflavor);
-	return clnt->cl_auth;
+	auth = ops->create(clnt, pseudoflavor);
+	if (!auth)
+		return NULL;
+	atomic_set(&auth->au_count, 1);
+	if (clnt->cl_auth)
+		rpcauth_destroy(clnt->cl_auth);
+	clnt->cl_auth = auth;
+	return auth;
 }
 
 void
 rpcauth_destroy(struct rpc_auth *auth)
 {
+	if (!atomic_dec_and_test(&auth->au_count))
+		return;
 	auth->au_ops->destroy(auth);
 	module_put(auth->au_ops->owner);
 	kfree(auth);
 }
 
-static spinlock_t rpc_credcache_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(rpc_credcache_lock);
 
 /*
  * Initialize RPC credential cache
@@ -205,8 +214,6 @@ retry:
 	list_for_each_safe(pos, next, &auth->au_credcache[nr]) {
 		struct rpc_cred *entry;
 	       	entry = list_entry(pos, struct rpc_cred, cr_hash);
-		if (entry->cr_flags & RPCAUTH_CRED_DEAD)
-			continue;
 		if (rpcauth_prune_expired(entry, &free))
 			continue;
 		if (entry->cr_ops->crmatch(acred, entry, taskflags)) {
@@ -246,34 +253,41 @@ retry:
 struct rpc_cred *
 rpcauth_lookupcred(struct rpc_auth *auth, int taskflags)
 {
-	struct auth_cred acred = {
-		.uid = current->fsuid,
-		.gid = current->fsgid,
-		.ngroups = current->ngroups,
-		.groups = current->groups,
-	};
+	struct auth_cred acred;
+	struct rpc_cred *ret;
+
+	get_group_info(current->group_info);
+	acred.uid = current->fsuid;
+	acred.gid = current->fsgid;
+	acred.group_info = current->group_info;
+
 	dprintk("RPC:     looking up %s cred\n",
 		auth->au_ops->au_name);
-	return rpcauth_lookup_credcache(auth, &acred, taskflags);
+	ret = rpcauth_lookup_credcache(auth, &acred, taskflags);
+	put_group_info(current->group_info);
+	return ret;
 }
 
 struct rpc_cred *
 rpcauth_bindcred(struct rpc_task *task)
 {
 	struct rpc_auth *auth = task->tk_auth;
-	struct auth_cred acred = {
-		.uid = current->fsuid,
-		.gid = current->fsgid,
-		.ngroups = current->ngroups,
-		.groups = current->groups,
-	};
+	struct auth_cred acred;
+	struct rpc_cred *ret;
+
+	get_group_info(current->group_info);
+	acred.uid = current->fsuid;
+	acred.gid = current->fsgid;
+	acred.group_info = current->group_info;
 
 	dprintk("RPC: %4d looking up %s cred\n",
 		task->tk_pid, task->tk_auth->au_ops->au_name);
 	task->tk_msg.rpc_cred = rpcauth_lookup_credcache(auth, &acred, task->tk_flags);
 	if (task->tk_msg.rpc_cred == 0)
 		task->tk_status = -ENOMEM;
-	return task->tk_msg.rpc_cred;
+	ret = task->tk_msg.rpc_cred;
+	put_group_info(current->group_info);
+	return ret;
 }
 
 void
@@ -290,9 +304,6 @@ put_rpccred(struct rpc_cred *cred)
 {
 	if (!atomic_dec_and_lock(&cred->cr_count, &rpc_credcache_lock))
 		return;
-
-	if ((cred->cr_flags & RPCAUTH_CRED_DEAD) && !list_empty(&cred->cr_hash))
-		list_del_init(&cred->cr_hash);
 
 	if (list_empty(&cred->cr_hash)) {
 		spin_unlock(&rpc_credcache_lock);
@@ -340,6 +351,35 @@ rpcauth_checkverf(struct rpc_task *task, u32 *p)
 }
 
 int
+rpcauth_wrap_req(struct rpc_task *task, kxdrproc_t encode, void *rqstp,
+		u32 *data, void *obj)
+{
+	struct rpc_cred *cred = task->tk_msg.rpc_cred;
+
+	dprintk("RPC: %4d using %s cred %p to wrap rpc data\n",
+			task->tk_pid, cred->cr_auth->au_ops->au_name, cred);
+	if (cred->cr_ops->crwrap_req)
+		return cred->cr_ops->crwrap_req(task, encode, rqstp, data, obj);
+	/* By default, we encode the arguments normally. */
+	return encode(rqstp, data, obj);
+}
+
+int
+rpcauth_unwrap_resp(struct rpc_task *task, kxdrproc_t decode, void *rqstp,
+		u32 *data, void *obj)
+{
+	struct rpc_cred *cred = task->tk_msg.rpc_cred;
+
+	dprintk("RPC: %4d using %s cred %p to unwrap rpc data\n",
+			task->tk_pid, cred->cr_auth->au_ops->au_name, cred);
+	if (cred->cr_ops->crunwrap_resp)
+		return cred->cr_ops->crunwrap_resp(task, decode, rqstp,
+						   data, obj);
+	/* By default, we decode the arguments normally. */
+	return decode(rqstp, data, obj);
+}
+
+int
 rpcauth_refreshcred(struct rpc_task *task)
 {
 	struct rpc_auth	*auth = task->tk_auth;
@@ -367,11 +407,4 @@ rpcauth_uptodatecred(struct rpc_task *task)
 {
 	return !(task->tk_msg.rpc_cred) ||
 		(task->tk_msg.rpc_cred->cr_flags & RPCAUTH_CRED_UPTODATE);
-}
-
-int
-rpcauth_deadcred(struct rpc_task *task)
-{
-	return !(task->tk_msg.rpc_cred) ||
-		(task->tk_msg.rpc_cred->cr_flags & RPCAUTH_CRED_DEAD);
 }

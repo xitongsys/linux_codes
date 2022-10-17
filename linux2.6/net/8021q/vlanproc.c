@@ -220,7 +220,7 @@ int vlan_proc_rem_dev(struct net_device *vlandev)
 	}
 
 #ifdef VLAN_DEBUG
-	printk(VLAN_DBG __FUNCTION__ ": dev: %p\n", vlandev);
+	printk(VLAN_DBG "%s: dev: %p\n", __FUNCTION__, vlandev);
 #endif
 
 	/** NOTE:  This will consume the memory pointed to by dent, it seems. */
@@ -239,7 +239,7 @@ int vlan_proc_rem_dev(struct net_device *vlandev)
  */
 
 /* starting at dev, find a VLAN device */
-struct net_device *vlan_skip(struct net_device *dev) 
+static struct net_device *vlan_skip(struct net_device *dev) 
 {
 	while (dev && !(dev->priv_flags & IFF_802_1Q_VLAN)) 
 		dev = dev->next;
@@ -305,7 +305,7 @@ static int vlandev_seq_show(struct seq_file *seq, void *offset)
 	struct net_device *vlandev = (struct net_device *) seq->private;
 	const struct vlan_dev_info *dev_info = VLAN_DEV_INFO(vlandev);
 	struct net_device_stats *stats;
-	static const char *fmt = "%30s %12lu\n";
+	static const char fmt[] = "%30s %12lu\n";
 	int i;
 
 	if ((vlandev == NULL) || (!(vlandev->priv_flags & IFF_802_1Q_VLAN)))

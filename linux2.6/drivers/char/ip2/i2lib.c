@@ -141,7 +141,7 @@ fatality(i2eBordStrPtr pB )
 //* Code *
 //********
 
-inline int
+static inline int
 i2Validate ( i2ChanStrPtr pCh )
 {
 	//ip2trace(pCh->port_index, ITRC_VERIFY,ITRC_ENTER,2,pCh->validity,
@@ -1249,7 +1249,7 @@ i2RetryFlushOutput(i2ChanStrPtr pCh)
 
 	}
 	if ( old_flags & STOPFL_FLAG ) {
-		if ( 1 == i2QueueCommands(PTYPE_INLINE, pCh, 0, 1, CMD_STOPFL) > 0 ) {
+		if (1 == i2QueueCommands(PTYPE_INLINE, pCh, 0, 1, CMD_STOPFL)) {
 			old_flags = 0;	// Success - clear flags
 		}
 

@@ -39,7 +39,7 @@
 #endif
 
 struct hlist_head vcc_hash[VCC_HTABLE_SIZE];
-rwlock_t vcc_sklist_lock = RW_LOCK_UNLOCKED;
+DEFINE_RWLOCK(vcc_sklist_lock);
 
 void __vcc_insert_socket(struct sock *sk)
 {
@@ -57,7 +57,7 @@ void vcc_insert_socket(struct sock *sk)
 	write_unlock_irq(&vcc_sklist_lock);
 }
 
-void vcc_remove_socket(struct sock *sk)
+static void vcc_remove_socket(struct sock *sk)
 {
 	write_lock_irq(&vcc_sklist_lock);
 	sk_del_node_init(sk);
@@ -86,7 +86,6 @@ static struct sk_buff *alloc_tx(struct atm_vcc *vcc,unsigned int size)
 EXPORT_SYMBOL(vcc_hash);
 EXPORT_SYMBOL(vcc_sklist_lock);
 EXPORT_SYMBOL(vcc_insert_socket);
-EXPORT_SYMBOL(vcc_remove_socket);
 
 static void vcc_sock_destruct(struct sock *sk)
 {
@@ -148,7 +147,7 @@ int vcc_create(struct socket *sock, int protocol, int family)
 	sk->sk_state_change = vcc_def_wakeup;
 	sk->sk_write_space = vcc_write_space;
 
-	vcc = atm_sk(sk) = kmalloc(sizeof(*vcc), GFP_KERNEL);
+	vcc = sk->sk_protinfo = kmalloc(sizeof(*vcc), GFP_KERNEL);
 	if (!vcc) {
 		sk_free(sk);
 		return -ENOMEM;
@@ -178,6 +177,7 @@ static void vcc_destroy_socket(struct sock *sk)
 	struct atm_vcc *vcc = atm_sk(sk);
 	struct sk_buff *skb;
 
+	set_bit(ATM_VF_CLOSE, &vcc->flags);
 	clear_bit(ATM_VF_READY, &vcc->flags);
 	if (vcc->dev) {
 		if (vcc->dev->ops->close)
@@ -187,7 +187,7 @@ static void vcc_destroy_socket(struct sock *sk)
 
 		vcc_remove_socket(sk);	/* no more receive */
 
-		while ((skb = skb_dequeue(&vcc->sk->sk_receive_queue))) {
+		while ((skb = skb_dequeue(&vcc->sk->sk_receive_queue)) != NULL) {
 			atm_return(vcc,skb->truesize);
 			kfree_skb(skb);
 		}
@@ -216,6 +216,7 @@ int vcc_release(struct socket *sock)
 void vcc_release_async(struct atm_vcc *vcc, int reply)
 {
 	set_bit(ATM_VF_CLOSE, &vcc->flags);
+	vcc->sk->sk_shutdown |= RCV_SHUTDOWN;
 	vcc->sk->sk_err = -reply;
 	clear_bit(ATM_VF_WAITING, &vcc->flags);
 	vcc->sk->sk_state_change(vcc->sk);
@@ -463,7 +464,7 @@ int vcc_connect(struct socket *sock, int itf, short vpi, int vci)
 
 
 int vcc_recvmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
-		int size, int flags)
+		size_t size, int flags)
 {
 	struct sock *sk = sock->sk;
 	struct atm_vcc *vcc;
@@ -476,9 +477,8 @@ int vcc_recvmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
 		return -EOPNOTSUPP;
 	vcc = ATM_SD(sock);
 	if (test_bit(ATM_VF_RELEASED,&vcc->flags) ||
-	    test_bit(ATM_VF_CLOSE,&vcc->flags))
-		return -sk->sk_err;
-	if (!test_bit(ATM_VF_READY, &vcc->flags))
+	    test_bit(ATM_VF_CLOSE,&vcc->flags) ||
+	    !test_bit(ATM_VF_READY, &vcc->flags))
 		return 0;
 
 	skb = skb_recv_datagram(sk, flags, flags & MSG_DONTWAIT, &error);
@@ -503,14 +503,14 @@ int vcc_recvmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
 
 
 int vcc_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *m,
-		int total_len)
+		size_t total_len)
 {
 	struct sock *sk = sock->sk;
 	DEFINE_WAIT(wait);
 	struct atm_vcc *vcc;
 	struct sk_buff *skb;
 	int eff,error;
-	const void *buff;
+	const void __user *buff;
 	int size;
 
 	lock_sock(sk);
@@ -530,12 +530,10 @@ int vcc_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *m,
 	size = m->msg_iov->iov_len;
 	vcc = ATM_SD(sock);
 	if (test_bit(ATM_VF_RELEASED, &vcc->flags) ||
-	    test_bit(ATM_VF_CLOSE, &vcc->flags)) {
-		error = -sk->sk_err;
-		goto out;
-	}
-	if (!test_bit(ATM_VF_READY, &vcc->flags)) {
+	    test_bit(ATM_VF_CLOSE, &vcc->flags) ||
+	    !test_bit(ATM_VF_READY, &vcc->flags)) {
 		error = -EPIPE;
+		send_sig(SIGPIPE, current, 0);
 		goto out;
 	}
 	if (!size) {
@@ -561,12 +559,10 @@ int vcc_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *m,
 			break;
 		}
 		if (test_bit(ATM_VF_RELEASED,&vcc->flags) ||
-		    test_bit(ATM_VF_CLOSE,&vcc->flags)) {
-			error = -sk->sk_err;
-			break;
-		}
-		if (!test_bit(ATM_VF_READY,&vcc->flags)) {
+		    test_bit(ATM_VF_CLOSE,&vcc->flags) ||
+		    !test_bit(ATM_VF_READY,&vcc->flags)) {
 			error = -EPIPE;
+			send_sig(SIGPIPE, current, 0);
 			break;
 		}
 		prepare_to_wait(sk->sk_sleep, &wait, TASK_INTERRUPTIBLE);
@@ -681,7 +677,7 @@ static int check_qos(struct atm_qos *qos)
 }
 
 int vcc_setsockopt(struct socket *sock, int level, int optname,
-		   char *optval, int optlen)
+		   char __user *optval, int optlen)
 {
 	struct atm_vcc *vcc;
 	unsigned long value;
@@ -709,7 +705,7 @@ int vcc_setsockopt(struct socket *sock, int level, int optname,
 				return 0;
 			}
 		case SO_SETCLP:
-			if (get_user(value,(unsigned long *) optval))
+			if (get_user(value,(unsigned long __user *)optval))
 				return -EFAULT;
 			if (value) vcc->atm_options |= ATM_ATMOPT_CLP;
 			else vcc->atm_options &= ~ATM_ATMOPT_CLP;
@@ -724,7 +720,7 @@ int vcc_setsockopt(struct socket *sock, int level, int optname,
 
 
 int vcc_getsockopt(struct socket *sock, int level, int optname,
-		   char *optval, int *optlen)
+		   char __user *optval, int __user *optlen)
 {
 	struct atm_vcc *vcc;
 	int len;
@@ -743,7 +739,7 @@ int vcc_getsockopt(struct socket *sock, int level, int optname,
 			    -EFAULT : 0;
 		case SO_SETCLP:
 			return put_user(vcc->atm_options & ATM_ATMOPT_CLP ? 1 :
-			  0,(unsigned long *) optval) ? -EFAULT : 0;
+			  0,(unsigned long __user *)optval) ? -EFAULT : 0;
 		case SO_ATMPVC:
 			{
 				struct sockaddr_atmpvc pvc;

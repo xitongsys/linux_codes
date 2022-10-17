@@ -174,7 +174,7 @@ ncp_force_unlink(struct inode *dir, struct dentry* dentry)
 {
         int res=0x9c,res2;
 	struct nw_modify_dos_info info;
-	__u32 old_nwattr;
+	__le32 old_nwattr;
 	struct inode *inode;
 
 	memset(&info, 0, sizeof(info));
@@ -211,8 +211,8 @@ ncp_force_rename(struct inode *old_dir, struct dentry* old_dentry, char *_old_na
 	struct nw_modify_dos_info info;
         int res=0x90,res2;
 	struct inode *old_inode = old_dentry->d_inode;
-	__u32 old_nwattr = NCP_FINFO(old_inode)->nwattr;
-	__u32 new_nwattr = 0; /* shut compiler warning */
+	__le32 old_nwattr = NCP_FINFO(old_inode)->nwattr;
+	__le32 new_nwattr = 0; /* shut compiler warning */
 	int old_nwattr_changed = 0;
 	int new_nwattr_changed = 0;
 
@@ -270,8 +270,8 @@ __ncp_lookup_validate(struct dentry * dentry, struct nameidata *nd)
 	struct dentry *parent;
 	struct inode *dir;
 	struct ncp_entry_info finfo;
-	int res, val = 0, len = dentry->d_name.len + 1;
-	__u8 __name[len];
+	int res, val = 0, len;
+	__u8 __name[NCP_MAXPATHLEN + 1];
 
 	parent = dget_parent(dentry);
 	dir = parent->d_inode;
@@ -298,14 +298,15 @@ __ncp_lookup_validate(struct dentry * dentry, struct nameidata *nd)
 		dentry->d_parent->d_name.name, dentry->d_name.name,
 		NCP_GET_AGE(dentry));
 
+	len = sizeof(__name);
 	if (ncp_is_server_root(dir)) {
 		res = ncp_io2vol(server, __name, &len, dentry->d_name.name,
-						len-1, 1);
+				 dentry->d_name.len, 1);
 		if (!res)
 			res = ncp_lookup_volume(server, __name, &(finfo.i));
 	} else {
 		res = ncp_io2vol(server, __name, &len, dentry->d_name.name,
-						len-1, !ncp_preserve_case(dir));
+				 dentry->d_name.len, !ncp_preserve_case(dir));
 		if (!res)
 			res = ncp_obtain_info(server, dir, __name, &(finfo.i));
 	}
@@ -394,8 +395,7 @@ static time_t ncp_obtain_mtime(struct dentry *dentry)
 	if (ncp_obtain_info(server, inode, NULL, &i))
 		return 0;
 
-	return ncp_date_dos2unix(le16_to_cpu(i.modifyTime),
-						le16_to_cpu(i.modifyDate));
+	return ncp_date_dos2unix(i.modifyTime, i.modifyDate);
 }
 
 static int ncp_readdir(struct file *filp, void *dirent, filldir_t filldir)
@@ -559,9 +559,9 @@ ncp_fill_cache(struct file *filp, void *dirent, filldir_t filldir,
 	int valid = 0;
 	int hashed = 0;
 	ino_t ino = 0;
-	__u8 __name[256];
+	__u8 __name[NCP_MAXPATHLEN + 1];
 
-	qname.len = 256;
+	qname.len = sizeof(__name);
 	if (ncp_vol2io(NCP_SERVER(inode), __name, &qname.len,
 			entry->i.entryName, entry->i.nameLen,
 			!ncp_preserve_entry_case(inode, entry->i.NSCreator)))
@@ -761,18 +761,23 @@ ncp_do_readdir(struct file *filp, void *dirent, filldir_t filldir,
 int ncp_conn_logged_in(struct super_block *sb)
 {
 	struct ncp_server* server = NCP_SBP(sb);
-	struct nw_info_struct i;
-	int result, len = strlen(server->m.mounted_vol) + 1;
-	__u8 __name[len];
+	int result;
 
 	if (ncp_single_volume(server)) {
+		int len;
 		struct dentry* dent;
+		__u32 volNumber;
+		__le32 dirEntNum;
+		__le32 DosDirNum;
+		__u8 __name[NCP_MAXPATHLEN + 1];
 
-		result = -ENOENT;
-		if (ncp_io2vol(server, __name, &len, server->m.mounted_vol,
-								len-1, 1))
+		len = sizeof(__name);
+		result = ncp_io2vol(server, __name, &len, server->m.mounted_vol,
+				    strlen(server->m.mounted_vol), 1);
+		if (result)
 			goto out;
-		if (ncp_lookup_volume(server, __name, &i)) {
+		result = -ENOENT;
+		if (ncp_get_volume_root(server, __name, &volNumber, &dirEntNum, &DosDirNum)) {
 			PPRINTK("ncp_conn_logged_in: %s not found\n",
 				server->m.mounted_vol);
 			goto out;
@@ -781,9 +786,9 @@ int ncp_conn_logged_in(struct super_block *sb)
 		if (dent) {
 			struct inode* ino = dent->d_inode;
 			if (ino) {
-				NCP_FINFO(ino)->volNumber = i.volNumber;
-				NCP_FINFO(ino)->dirEntNum = i.dirEntNum;
-				NCP_FINFO(ino)->DosDirNum = i.DosDirNum;
+				NCP_FINFO(ino)->volNumber = volNumber;
+				NCP_FINFO(ino)->dirEntNum = dirEntNum;
+				NCP_FINFO(ino)->DosDirNum = DosDirNum;
 			} else {
 				DPRINTK("ncpfs: sb->s_root->d_inode == NULL!\n");
 			}
@@ -802,8 +807,8 @@ static struct dentry *ncp_lookup(struct inode *dir, struct dentry *dentry, struc
 	struct ncp_server *server = NCP_SERVER(dir);
 	struct inode *inode = NULL;
 	struct ncp_entry_info finfo;
-	int error, res, len = dentry->d_name.len + 1;
-	__u8 __name[len];
+	int error, res, len;
+	__u8 __name[NCP_MAXPATHLEN + 1];
 
 	lock_kernel();
 	error = -EIO;
@@ -813,14 +818,15 @@ static struct dentry *ncp_lookup(struct inode *dir, struct dentry *dentry, struc
 	PPRINTK("ncp_lookup: server lookup for %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
 
+	len = sizeof(__name);
 	if (ncp_is_server_root(dir)) {
 		res = ncp_io2vol(server, __name, &len, dentry->d_name.name,
-						len-1, 1);
+				 dentry->d_name.len, 1);
 		if (!res)
 			res = ncp_lookup_volume(server, __name, &(finfo.i));
 	} else {
 		res = ncp_io2vol(server, __name, &len, dentry->d_name.name,
-						len-1, !ncp_preserve_case(dir));
+				 dentry->d_name.len, !ncp_preserve_case(dir));
 		if (!res)
 			res = ncp_obtain_info(server, dir, __name, &(finfo.i));
 	}
@@ -881,24 +887,26 @@ out_close:
 }
 
 int ncp_create_new(struct inode *dir, struct dentry *dentry, int mode,
-		   dev_t rdev, int attributes)
+		   dev_t rdev, __le32 attributes)
 {
 	struct ncp_server *server = NCP_SERVER(dir);
 	struct ncp_entry_info finfo;
-	int error, result, len = dentry->d_name.len + 1;
+	int error, result, len;
 	int opmode;
-	__u8 __name[len];
+	__u8 __name[NCP_MAXPATHLEN + 1];
 	
 	PPRINTK("ncp_create_new: creating %s/%s, mode=%x\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name, mode);
+
 	error = -EIO;
 	lock_kernel();
 	if (!ncp_conn_valid(server))
 		goto out;
 
 	ncp_age_dentry(server, dentry);
+	len = sizeof(__name);
 	error = ncp_io2vol(server, __name, &len, dentry->d_name.name,
-						len-1, !ncp_preserve_case(dir));
+			   dentry->d_name.len, !ncp_preserve_case(dir));
 	if (error)
 		goto out;
 
@@ -952,25 +960,28 @@ static int ncp_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 {
 	struct ncp_entry_info finfo;
 	struct ncp_server *server = NCP_SERVER(dir);
-	int error, len = dentry->d_name.len + 1;
-	__u8 __name[len];
+	int error, len;
+	__u8 __name[NCP_MAXPATHLEN + 1];
 
 	DPRINTK("ncp_mkdir: making %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
+
 	error = -EIO;
 	lock_kernel();
 	if (!ncp_conn_valid(server))
 		goto out;
 
 	ncp_age_dentry(server, dentry);
+	len = sizeof(__name);
 	error = ncp_io2vol(server, __name, &len, dentry->d_name.name,
-						len-1, !ncp_preserve_case(dir));
+			   dentry->d_name.len, !ncp_preserve_case(dir));
 	if (error)
 		goto out;
 
 	error = -EACCES;
 	if (ncp_open_create_file_or_subdir(server, dir, __name,
-					   OC_MODE_CREATE, aDIR, 0xffff,
+					   OC_MODE_CREATE, aDIR,
+					   cpu_to_le16(0xffff),
 					   &finfo) == 0)
 	{
 		if (ncp_is_nfs_extras(server, finfo.volume)) {
@@ -992,8 +1003,8 @@ out:
 static int ncp_rmdir(struct inode *dir, struct dentry *dentry)
 {
 	struct ncp_server *server = NCP_SERVER(dir);
-	int error, result, len = dentry->d_name.len + 1;
-	__u8 __name[len];
+	int error, result, len;
+	__u8 __name[NCP_MAXPATHLEN + 1];
 
 	DPRINTK("ncp_rmdir: removing %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
@@ -1007,8 +1018,9 @@ static int ncp_rmdir(struct inode *dir, struct dentry *dentry)
 	if (!d_unhashed(dentry))
 		goto out;
 
+	len = sizeof(__name);
 	error = ncp_io2vol(server, __name, &len, dentry->d_name.name,
-						len-1, !ncp_preserve_case(dir));
+			   dentry->d_name.len, !ncp_preserve_case(dir));
 	if (error)
 		goto out;
 
@@ -1110,9 +1122,8 @@ static int ncp_rename(struct inode *old_dir, struct dentry *old_dentry,
 {
 	struct ncp_server *server = NCP_SERVER(old_dir);
 	int error;
-	int old_len = old_dentry->d_name.len + 1;
-	int new_len = new_dentry->d_name.len + 1;
-	__u8 __old_name[old_len], __new_name[new_len];
+	int old_len, new_len;
+	__u8 __old_name[NCP_MAXPATHLEN + 1], __new_name[NCP_MAXPATHLEN + 1];
 
 	DPRINTK("ncp_rename: %s/%s to %s/%s\n",
 		old_dentry->d_parent->d_name.name, old_dentry->d_name.name,
@@ -1126,15 +1137,17 @@ static int ncp_rename(struct inode *old_dir, struct dentry *old_dentry,
 	ncp_age_dentry(server, old_dentry);
 	ncp_age_dentry(server, new_dentry);
 
+	old_len = sizeof(__old_name);
 	error = ncp_io2vol(server, __old_name, &old_len,
-					old_dentry->d_name.name, old_len-1,
-					!ncp_preserve_case(old_dir));
+			   old_dentry->d_name.name, old_dentry->d_name.len,
+			   !ncp_preserve_case(old_dir));
 	if (error)
 		goto out;
 
+	new_len = sizeof(__new_name);
 	error = ncp_io2vol(server, __new_name, &new_len,
-					new_dentry->d_name.name, new_len-1,
-					!ncp_preserve_case(new_dir));
+			   new_dentry->d_name.name, new_dentry->d_name.len,
+			   !ncp_preserve_case(new_dir));
 	if (error)
 		goto out;
 
@@ -1202,8 +1215,9 @@ static int local2utc(int time)
 
 /* Convert a MS-DOS time/date pair to a UNIX date (seconds since 1 1 70). */
 int
-ncp_date_dos2unix(unsigned short time, unsigned short date)
+ncp_date_dos2unix(__le16 t, __le16 d)
 {
+	unsigned short time = le16_to_cpu(t), date = le16_to_cpu(d);
 	int month, year, secs;
 
 	/* first subtract and mask after that... Otherwise, if
@@ -1220,13 +1234,14 @@ ncp_date_dos2unix(unsigned short time, unsigned short date)
 
 /* Convert linear UNIX date to a MS-DOS time/date pair. */
 void
-ncp_date_unix2dos(int unix_date, unsigned short *time, unsigned short *date)
+ncp_date_unix2dos(int unix_date, __le16 *time, __le16 *date)
 {
 	int day, year, nl_day, month;
 
 	unix_date = utc2local(unix_date);
-	*time = (unix_date % 60) / 2 + (((unix_date / 60) % 60) << 5) +
-	    (((unix_date / 3600) % 24) << 11);
+	*time = cpu_to_le16(
+		(unix_date % 60) / 2 + (((unix_date / 60) % 60) << 5) +
+		(((unix_date / 3600) % 24) << 11));
 	day = unix_date / 86400 - 3652;
 	year = day / 365;
 	if ((year + 3) / 4 + 365 * year > day)
@@ -1241,5 +1256,5 @@ ncp_date_unix2dos(int unix_date, unsigned short *time, unsigned short *date)
 			if (day_n[month] > nl_day)
 				break;
 	}
-	*date = nl_day - day_n[month - 1] + 1 + (month << 5) + (year << 9);
+	*date = cpu_to_le16(nl_day - day_n[month - 1] + 1 + (month << 5) + (year << 9));
 }

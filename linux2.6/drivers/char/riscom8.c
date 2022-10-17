@@ -45,6 +45,7 @@
 #include <linux/fcntl.h>
 #include <linux/major.h>
 #include <linux/init.h>
+#include <linux/delay.h>
 
 #include <asm/uaccess.h>
 
@@ -75,10 +76,6 @@
 	 ASYNC_SPD_HI       | ASYNC_SPEED_VHI    | ASYNC_SESSION_LOCKOUT | \
 	 ASYNC_PGRP_LOCKOUT | ASYNC_CALLOUT_NOHUP)
 
-#ifndef MIN
-#define MIN(a,b) ((a) < (b) ? (a) : (b))
-#endif
-
 #define RS_EVENT_WRITE_WAKEUP	0
 
 static struct riscom_board * IRQ_to_board[16];
@@ -107,7 +104,7 @@ static struct riscom_board rc_board[RC_NBOARD] =  {
 };
 
 static struct riscom_port rc_port[RC_NBOARD * RC_NPORT];
-		
+
 /* RISCom/8 I/O ports addresses (without address translation) */
 static unsigned short rc_ioport[] =  {
 #if 1	
@@ -483,7 +480,7 @@ static inline void rc_transmit(struct riscom_board const * bp)
 				rc_out(bp, CD180_TDR, CD180_C_SBRK);
 				port->COR2 &= ~COR2_ETC;
 			}
-			count = MIN(port->break_length, 0xff);
+			count = min_t(int, port->break_length, 0xff);
 			rc_out(bp, CD180_TDR, CD180_C_ESC);
 			rc_out(bp, CD180_TDR, CD180_C_DELAY);
 			rc_out(bp, CD180_TDR, count);
@@ -1118,8 +1115,7 @@ static void rc_close(struct tty_struct * tty, struct file * filp)
 		 */
 		timeout = jiffies+HZ;
 		while(port->IER & IER_TXEMPTY)  {
-			current->state = TASK_INTERRUPTIBLE;
- 			schedule_timeout(port->timeout);
+			msleep_interruptible(jiffies_to_msecs(port->timeout));
 			if (time_after(jiffies, timeout))
 				break;
 		}
@@ -1127,15 +1123,14 @@ static void rc_close(struct tty_struct * tty, struct file * filp)
 	rc_shutdown_port(bp, port);
 	if (tty->driver->flush_buffer)
 		tty->driver->flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	tty_ldisc_flush(tty);
+
 	tty->closing = 0;
 	port->event = 0;
-	port->tty = 0;
+	port->tty = NULL;
 	if (port->blocked_open) {
 		if (port->close_delay) {
-			current->state = TASK_INTERRUPTIBLE;
-			schedule_timeout(port->close_delay);
+			msleep_interruptible(jiffies_to_msecs(port->close_delay));
 		}
 		wake_up_interruptible(&port->open_wait);
 	}
@@ -1144,7 +1139,7 @@ static void rc_close(struct tty_struct * tty, struct file * filp)
 out:	restore_flags(flags);
 }
 
-static int rc_write(struct tty_struct * tty, int from_user, 
+static int rc_write(struct tty_struct * tty, 
 		    const unsigned char *buf, int count)
 {
 	struct riscom_port *port = (struct riscom_port *)tty->driver_data;
@@ -1161,54 +1156,23 @@ static int rc_write(struct tty_struct * tty, int from_user,
 		return 0;
 
 	save_flags(flags);
-	if (from_user) {
-		down(&tmp_buf_sem);
-		while (1) {
-			cli();		
-			c = MIN(count, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
-					   SERIAL_XMIT_SIZE - port->xmit_head));
-			if (c <= 0)
-				break;
-
-			c -= copy_from_user(tmp_buf, buf, c);
-			if (!c) {
-				if (!total)
-					total = -EFAULT;
-				break;
-			}
-
-			cli();
-			c = MIN(c, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
-				       SERIAL_XMIT_SIZE - port->xmit_head));
-			memcpy(port->xmit_buf + port->xmit_head, tmp_buf, c);
-			port->xmit_head = (port->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
-			port->xmit_cnt += c;
+	while (1) {
+		cli();		
+		c = min_t(int, count, min(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
+					  SERIAL_XMIT_SIZE - port->xmit_head));
+		if (c <= 0) {
 			restore_flags(flags);
-
-			buf += c;
-			count -= c;
-			total += c;
+			break;
 		}
-		up(&tmp_buf_sem);
-	} else {
-		while (1) {
-			cli();		
-			c = MIN(count, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
-					   SERIAL_XMIT_SIZE - port->xmit_head));
-			if (c <= 0) {
-				restore_flags(flags);
-				break;
-			}
 
-			memcpy(port->xmit_buf + port->xmit_head, buf, c);
-			port->xmit_head = (port->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
-			port->xmit_cnt += c;
-			restore_flags(flags);
+		memcpy(port->xmit_buf + port->xmit_head, buf, c);
+		port->xmit_head = (port->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
+		port->xmit_cnt += c;
+		restore_flags(flags);
 
-			buf += c;
-			count -= c;
-			total += c;
-		}
+		buf += c;
+		count -= c;
+		total += c;
 	}
 
 	cli();
@@ -1301,17 +1265,19 @@ static void rc_flush_buffer(struct tty_struct *tty)
 	restore_flags(flags);
 	
 	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 }
 
-static int rc_get_modem_info(struct riscom_port * port, unsigned int *value)
+static int rc_tiocmget(struct tty_struct *tty, struct file *file)
 {
+	struct riscom_port *port = (struct riscom_port *)tty->driver_data;
 	struct riscom_board * bp;
 	unsigned char status;
 	unsigned int result;
 	unsigned long flags;
+
+	if (rc_paranoia_check(port, tty->name, __FUNCTION__))
+		return -ENODEV;
 
 	bp = port_Board(port);
 	save_flags(flags); cli();
@@ -1324,41 +1290,32 @@ static int rc_get_modem_info(struct riscom_port * port, unsigned int *value)
 		| ((status & MSVR_CD)  ? TIOCM_CAR : 0)
 		| ((status & MSVR_DSR) ? TIOCM_DSR : 0)
 		| ((status & MSVR_CTS) ? TIOCM_CTS : 0);
-	return put_user(result, value);
+	return result;
 }
 
-static int rc_set_modem_info(struct riscom_port * port, unsigned int cmd,
-			     unsigned int *value)
+static int rc_tiocmset(struct tty_struct *tty, struct file *file,
+		       unsigned int set, unsigned int clear)
 {
-	unsigned int arg;
+	struct riscom_port *port = (struct riscom_port *)tty->driver_data;
 	unsigned long flags;
-	struct riscom_board *bp = port_Board(port);
+	struct riscom_board *bp;
 
-	if (get_user(arg, value))
-		return -EFAULT;
-	switch (cmd) {
-	 case TIOCMBIS: 
-		if (arg & TIOCM_RTS) 
-			port->MSVR |= MSVR_RTS;
-		if (arg & TIOCM_DTR)
-			bp->DTR &= ~(1u << port_No(port));
-		break;
-	case TIOCMBIC:
-		if (arg & TIOCM_RTS)
-			port->MSVR &= ~MSVR_RTS;
-		if (arg & TIOCM_DTR)
-			bp->DTR |= (1u << port_No(port));
-		break;
-	case TIOCMSET:
-		port->MSVR = (arg & TIOCM_RTS) ? (port->MSVR | MSVR_RTS) : 
-					         (port->MSVR & ~MSVR_RTS);
-		bp->DTR = arg & TIOCM_DTR ? (bp->DTR &= ~(1u << port_No(port))) :
-					    (bp->DTR |=  (1u << port_No(port)));
-		break;
-	 default:
-		return -EINVAL;
-	}
+	if (rc_paranoia_check(port, tty->name, __FUNCTION__))
+		return -ENODEV;
+
+	bp = port_Board(port);
+
 	save_flags(flags); cli();
+	if (set & TIOCM_RTS)
+		port->MSVR |= MSVR_RTS;
+	if (set & TIOCM_DTR)
+		bp->DTR &= ~(1u << port_No(port));
+
+	if (clear & TIOCM_RTS)
+		port->MSVR &= ~MSVR_RTS;
+	if (clear & TIOCM_DTR)
+		bp->DTR |= (1u << port_No(port));
+
 	rc_out(bp, CD180_CAR, port_No(port));
 	rc_out(bp, CD180_MSVR, port->MSVR);
 	rc_out(bp, RC_DTR, bp->DTR);
@@ -1385,7 +1342,7 @@ static inline void rc_send_break(struct riscom_port * port, unsigned long length
 }
 
 static inline int rc_set_serial_info(struct riscom_port * port,
-				     struct serial_struct * newinfo)
+				     struct serial_struct __user * newinfo)
 {
 	struct serial_struct tmp;
 	struct riscom_board *bp = port_Board(port);
@@ -1432,7 +1389,7 @@ static inline int rc_set_serial_info(struct riscom_port * port,
 }
 
 static inline int rc_get_serial_info(struct riscom_port * port,
-				     struct serial_struct * retinfo)
+				     struct serial_struct __user *retinfo)
 {
 	struct serial_struct tmp;
 	struct riscom_board *bp = port_Board(port);
@@ -1455,6 +1412,7 @@ static int rc_ioctl(struct tty_struct * tty, struct file * filp,
 		    
 {
 	struct riscom_port *port = (struct riscom_port *)tty->driver_data;
+	void __user *argp = (void __user *)arg;
 	int retval;
 				
 	if (rc_paranoia_check(port, tty->name, "rc_ioctl"))
@@ -1477,24 +1435,18 @@ static int rc_ioctl(struct tty_struct * tty, struct file * filp,
 		rc_send_break(port, arg ? arg*(HZ/10) : HZ/4);
 		break;
 	 case TIOCGSOFTCAR:
-		return put_user(C_CLOCAL(tty) ? 1 : 0, (unsigned int *) arg);
+		return put_user(C_CLOCAL(tty) ? 1 : 0, (unsigned __user *)argp);
 	 case TIOCSSOFTCAR:
-		if (get_user(arg,(unsigned int *) arg))
+		if (get_user(arg,(unsigned __user *) argp))
 			return -EFAULT;
 		tty->termios->c_cflag =
 			((tty->termios->c_cflag & ~CLOCAL) |
 			(arg ? CLOCAL : 0));
 		break;
-	 case TIOCMGET:
-		return rc_get_modem_info(port, (unsigned int *) arg);
-	 case TIOCMBIS:
-	 case TIOCMBIC:
-	 case TIOCMSET:
-		return rc_set_modem_info(port, cmd, (unsigned int *) arg);
 	 case TIOCGSERIAL:	
-		return rc_get_serial_info(port, (struct serial_struct *) arg);
+		return rc_get_serial_info(port, argp);
 	 case TIOCSSERIAL:	
-		return rc_set_serial_info(port, (struct serial_struct *) arg);
+		return rc_set_serial_info(port, argp);
 	 default:
 		return -ENOIOCTLCMD;
 	}
@@ -1618,7 +1570,7 @@ static void rc_hangup(struct tty_struct * tty)
 	port->event = 0;
 	port->count = 0;
 	port->flags &= ~ASYNC_NORMAL_ACTIVE;
-	port->tty = 0;
+	port->tty = NULL;
 	wake_up_interruptible(&port->open_wait);
 }
 
@@ -1654,9 +1606,7 @@ static void do_softint(void *private_)
 		return;
 
 	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event)) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
+		tty_wakeup(tty);
 		wake_up_interruptible(&tty->write_wait);
 	}
 }
@@ -1677,6 +1627,8 @@ static struct tty_operations riscom_ops = {
 	.stop = rc_stop,
 	.start = rc_start,
 	.hangup = rc_hangup,
+	.tiocmget = rc_tiocmget,
+	.tiocmset = rc_tiocmset,
 };
 
 static inline int rc_init_drivers(void)
@@ -1696,6 +1648,7 @@ static inline int rc_init_drivers(void)
 	memset(IRQ_to_board, 0, sizeof(IRQ_to_board));
 	riscom_driver->owner = THIS_MODULE;
 	riscom_driver->name = "ttyL";
+	riscom_driver->devfs_name = "tts/L";
 	riscom_driver->major = RISCOM8_NORMAL_MAJOR;
 	riscom_driver->type = TTY_DRIVER_TYPE_SERIAL;
 	riscom_driver->subtype = SERIAL_TYPE_NORMAL;

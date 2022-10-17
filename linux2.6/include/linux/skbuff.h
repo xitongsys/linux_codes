@@ -27,6 +27,7 @@
 #include <linux/highmem.h>
 #include <linux/poll.h>
 #include <linux/net.h>
+#include <net/checksum.h>
 
 #define HAVE_ALLOC_SKB		/* For the drivers to know */
 #define HAVE_ALIGNABLE_SKB	/* Ditto 8)		   */
@@ -88,14 +89,12 @@
 #define NET_CALLER(arg) __builtin_return_address(0)
 #endif
 
+struct net_device;
+
 #ifdef CONFIG_NETFILTER
 struct nf_conntrack {
 	atomic_t use;
 	void (*destroy)(struct nf_conntrack *);
-};
-
-struct nf_ct_info {
-	struct nf_conntrack *master;
 };
 
 #ifdef CONFIG_BRIDGE_NETFILTER
@@ -107,7 +106,7 @@ struct nf_bridge_info {
 	struct net_device *netoutdev;
 #endif
 	unsigned int mask;
-	unsigned long hh[32 / sizeof(unsigned long)];
+	unsigned long data[32 / sizeof(unsigned long)];
 };
 #endif
 
@@ -155,6 +154,7 @@ struct skb_shared_info {
  *	@sk: Socket we are owned by
  *	@stamp: Time we arrived
  *	@dev: Device we arrived on/are leaving by
+ *	@input_dev: Device we arrived on
  *      @real_dev: The real device we are using
  *	@h: Transport layer header
  *	@nh: Network layer header
@@ -163,6 +163,7 @@ struct skb_shared_info {
  *	@cb: Control buffer. Free for use by every layer. Put private vars here
  *	@len: Length of actual data
  *	@data_len: Data length
+ *	@mac_len: Length of link layer header
  *	@csum: Checksum
  *	@__unused: Dead field, may be reused
  *	@cloned: Head may be cloned (check refcnt to be sure)
@@ -181,6 +182,7 @@ struct skb_shared_info {
  *	@nfmark: Can be used for communication between hooks
  *	@nfcache: Cache info
  *	@nfct: Associated connection, if any
+ *	@nfctinfo: Relationship of this skb to the connection
  *	@nf_debug: Netfilter debugging
  *	@nf_bridge: Saved data about a bridged frame - see br_netfilter.c
  *      @private: Data which is private to the HIPPI implementation
@@ -196,6 +198,7 @@ struct sk_buff {
 	struct sock		*sk;
 	struct timeval		stamp;
 	struct net_device	*dev;
+	struct net_device	*input_dev;
 	struct net_device	*real_dev;
 
 	union {
@@ -204,6 +207,7 @@ struct sk_buff {
 		struct icmphdr	*icmph;
 		struct igmphdr	*igmph;
 		struct iphdr	*ipiph;
+		struct ipv6hdr	*ipv6h;
 		unsigned char	*raw;
 	} h;
 
@@ -215,7 +219,6 @@ struct sk_buff {
 	} nh;
 
 	union {
-	  	struct ethhdr	*ethernet;
 	  	unsigned char 	*raw;
 	} mac;
 
@@ -228,10 +231,11 @@ struct sk_buff {
 	 * want to keep them across layers you have to do a skb_clone()
 	 * first. This is owned by whoever has the skb queued ATM.
 	 */
-	char			cb[48];
+	char			cb[40];
 
 	unsigned int		len,
 				data_len,
+				mac_len,
 				csum;
 	unsigned char		local_df,
 				cloned,
@@ -245,7 +249,8 @@ struct sk_buff {
 #ifdef CONFIG_NETFILTER
         unsigned long		nfmark;
 	__u32			nfcache;
-	struct nf_ct_info	*nfct;
+	__u32			nfctinfo;
+	struct nf_conntrack	*nfct;
 #ifdef CONFIG_NETFILTER_DEBUG
         unsigned int		nf_debug;
 #endif
@@ -259,8 +264,14 @@ struct sk_buff {
 	} private;
 #endif
 #ifdef CONFIG_NET_SCHED
-       __u32			tc_index;               /* traffic control index */
+       __u32			tc_index;        /* traffic control index */
+#ifdef CONFIG_NET_CLS_ACT
+	__u32           tc_verd;               /* traffic control verdict */
+	__u32           tc_classid;            /* traffic control classid */
 #endif
+
+#endif
+
 
 	/* These elements must be at the end, see alloc_skb() for details.  */
 	unsigned int		truesize;
@@ -270,9 +281,6 @@ struct sk_buff {
 				*tail,
 				*end;
 };
-
-#define SK_WMEM_MAX	65535
-#define SK_RMEM_MAX	65535
 
 #ifdef __KERNEL__
 /*
@@ -284,6 +292,8 @@ struct sk_buff {
 
 extern void	       __kfree_skb(struct sk_buff *skb);
 extern struct sk_buff *alloc_skb(unsigned int size, int priority);
+extern struct sk_buff *alloc_skb_from_cache(kmem_cache_t *cp,
+					    unsigned int size, int priority);
 extern void	       kfree_skbmem(struct sk_buff *skb);
 extern struct sk_buff *skb_clone(struct sk_buff *skb, int priority);
 extern struct sk_buff *skb_copy(const struct sk_buff *skb, int priority);
@@ -343,15 +353,11 @@ static inline struct sk_buff *skb_get(struct sk_buff *skb)
  */
 static inline void kfree_skb(struct sk_buff *skb)
 {
-	if (atomic_read(&skb->users) == 1 || atomic_dec_and_test(&skb->users))
-		__kfree_skb(skb);
-}
-
-/* Use this if you didn't touch the skb state [for fast switching] */
-static inline void kfree_skb_fast(struct sk_buff *skb)
-{
-	if (atomic_read(&skb->users) == 1 || atomic_dec_and_test(&skb->users))
-		kfree_skbmem(skb);
+	if (likely(atomic_read(&skb->users) == 1))
+		smp_rmb();
+	else if (likely(!atomic_dec_and_test(&skb->users)))
+		return;
+	__kfree_skb(skb);
 }
 
 /**
@@ -511,6 +517,7 @@ static inline void skb_queue_head_init(struct sk_buff_head *list)
  *
  *	A buffer cannot be placed on two lists at the same time.
  */
+extern void skb_queue_head(struct sk_buff_head *list, struct sk_buff *newsk);
 static inline void __skb_queue_head(struct sk_buff_head *list,
 				    struct sk_buff *newsk)
 {
@@ -525,28 +532,6 @@ static inline void __skb_queue_head(struct sk_buff_head *list,
 	next->prev  = prev->next = newsk;
 }
 
-
-/**
- *	skb_queue_head - queue a buffer at the list head
- *	@list: list to use
- *	@newsk: buffer to queue
- *
- *	Queue a buffer at the start of the list. This function takes the
- *	list lock and can be used safely with other locking &sk_buff functions
- *	safely.
- *
- *	A buffer cannot be placed on two lists at the same time.
- */
-static inline void skb_queue_head(struct sk_buff_head *list,
-				  struct sk_buff *newsk)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&list->lock, flags);
-	__skb_queue_head(list, newsk);
-	spin_unlock_irqrestore(&list->lock, flags);
-}
-
 /**
  *	__skb_queue_tail - queue a buffer at the list tail
  *	@list: list to use
@@ -557,6 +542,7 @@ static inline void skb_queue_head(struct sk_buff_head *list,
  *
  *	A buffer cannot be placed on two lists at the same time.
  */
+extern void skb_queue_tail(struct sk_buff_head *list, struct sk_buff *newsk);
 static inline void __skb_queue_tail(struct sk_buff_head *list,
 				   struct sk_buff *newsk)
 {
@@ -571,26 +557,6 @@ static inline void __skb_queue_tail(struct sk_buff_head *list,
 	next->prev  = prev->next = newsk;
 }
 
-/**
- *	skb_queue_tail - queue a buffer at the list tail
- *	@list: list to use
- *	@newsk: buffer to queue
- *
- *	Queue a buffer at the tail of the list. This function takes the
- *	list lock and can be used safely with other locking &sk_buff functions
- *	safely.
- *
- *	A buffer cannot be placed on two lists at the same time.
- */
-static inline void skb_queue_tail(struct sk_buff_head *list,
-				  struct sk_buff *newsk)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&list->lock, flags);
-	__skb_queue_tail(list, newsk);
-	spin_unlock_irqrestore(&list->lock, flags);
-}
 
 /**
  *	__skb_dequeue - remove from the head of the queue
@@ -600,6 +566,7 @@ static inline void skb_queue_tail(struct sk_buff_head *list,
  *	so must be used with appropriate locks held only. The head item is
  *	returned or %NULL if the list is empty.
  */
+extern struct sk_buff *skb_dequeue(struct sk_buff_head *list);
 static inline struct sk_buff *__skb_dequeue(struct sk_buff_head *list)
 {
 	struct sk_buff *next, *prev, *result;
@@ -619,30 +586,11 @@ static inline struct sk_buff *__skb_dequeue(struct sk_buff_head *list)
 	return result;
 }
 
-/**
- *	skb_dequeue - remove from the head of the queue
- *	@list: list to dequeue from
- *
- *	Remove the head of the list. The list lock is taken so the function
- *	may be used safely with other locking list functions. The head item is
- *	returned or %NULL if the list is empty.
- */
-
-static inline struct sk_buff *skb_dequeue(struct sk_buff_head *list)
-{
-	unsigned long flags;
-	struct sk_buff *result;
-
-	spin_lock_irqsave(&list->lock, flags);
-	result = __skb_dequeue(list);
-	spin_unlock_irqrestore(&list->lock, flags);
-	return result;
-}
 
 /*
  *	Insert a packet on a list.
  */
-
+extern void        skb_insert(struct sk_buff *old, struct sk_buff *newsk);
 static inline void __skb_insert(struct sk_buff *newsk,
 				struct sk_buff *prev, struct sk_buff *next,
 				struct sk_buff_head *list)
@@ -654,58 +602,20 @@ static inline void __skb_insert(struct sk_buff *newsk,
 	list->qlen++;
 }
 
-/**
- *	skb_insert	-	insert a buffer
- *	@old: buffer to insert before
- *	@newsk: buffer to insert
- *
- *	Place a packet before a given packet in a list. The list locks are taken
- *	and this function is atomic with respect to other list locked calls
- *	A buffer cannot be placed on two lists at the same time.
- */
-
-static inline void skb_insert(struct sk_buff *old, struct sk_buff *newsk)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&old->list->lock, flags);
-	__skb_insert(newsk, old->prev, old, old->list);
-	spin_unlock_irqrestore(&old->list->lock, flags);
-}
-
 /*
  *	Place a packet after a given packet in a list.
  */
-
+extern void	   skb_append(struct sk_buff *old, struct sk_buff *newsk);
 static inline void __skb_append(struct sk_buff *old, struct sk_buff *newsk)
 {
 	__skb_insert(newsk, old, old->next, old->list);
-}
-
-/**
- *	skb_append	-	append a buffer
- *	@old: buffer to insert after
- *	@newsk: buffer to insert
- *
- *	Place a packet after a given packet in a list. The list locks are taken
- *	and this function is atomic with respect to other list locked calls.
- *	A buffer cannot be placed on two lists at the same time.
- */
-
-
-static inline void skb_append(struct sk_buff *old, struct sk_buff *newsk)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&old->list->lock, flags);
-	__skb_append(old, newsk);
-	spin_unlock_irqrestore(&old->list->lock, flags);
 }
 
 /*
  * remove sk_buff from list. _Must_ be called atomically, and with
  * the list known..
  */
+extern void	   skb_unlink(struct sk_buff *skb);
 static inline void __skb_unlink(struct sk_buff *skb, struct sk_buff_head *list)
 {
 	struct sk_buff *next, *prev;
@@ -719,31 +629,6 @@ static inline void __skb_unlink(struct sk_buff *skb, struct sk_buff_head *list)
 	prev->next = next;
 }
 
-/**
- *	skb_unlink	-	remove a buffer from a list
- *	@skb: buffer to remove
- *
- *	Place a packet after a given packet in a list. The list locks are taken
- *	and this function is atomic with respect to other list locked calls
- *
- *	Works even without knowing the list it is sitting on, which can be
- *	handy at times. It also means that THE LIST MUST EXIST when you
- *	unlink. Thus a list must have its contents unlinked before it is
- *	destroyed.
- */
-static inline void skb_unlink(struct sk_buff *skb)
-{
-	struct sk_buff_head *list = skb->list;
-
-	if (list) {
-		unsigned long flags;
-
-		spin_lock_irqsave(&list->lock, flags);
-		if (skb->list == list)
-			__skb_unlink(skb, skb->list);
-		spin_unlock_irqrestore(&list->lock, flags);
-	}
-}
 
 /* XXX: more streamlined implementation */
 
@@ -755,6 +640,7 @@ static inline void skb_unlink(struct sk_buff *skb)
  *	so must be used with appropriate locks held only. The tail item is
  *	returned or %NULL if the list is empty.
  */
+extern struct sk_buff *skb_dequeue_tail(struct sk_buff_head *list);
 static inline struct sk_buff *__skb_dequeue_tail(struct sk_buff_head *list)
 {
 	struct sk_buff *skb = skb_peek_tail(list);
@@ -763,24 +649,6 @@ static inline struct sk_buff *__skb_dequeue_tail(struct sk_buff_head *list)
 	return skb;
 }
 
-/**
- *	skb_dequeue - remove from the head of the queue
- *	@list: list to dequeue from
- *
- *	Remove the head of the list. The list lock is taken so the function
- *	may be used safely with other locking list functions. The tail item is
- *	returned or %NULL if the list is empty.
- */
-static inline struct sk_buff *skb_dequeue_tail(struct sk_buff_head *list)
-{
-	unsigned long flags;
-	struct sk_buff *result;
-
-	spin_lock_irqsave(&list->lock, flags);
-	result = __skb_dequeue_tail(list);
-	spin_unlock_irqrestore(&list->lock, flags);
-	return result;
-}
 
 static inline int skb_is_nonlinear(const struct sk_buff *skb)
 {
@@ -801,13 +669,15 @@ static inline int skb_pagelen(const struct sk_buff *skb)
 	return len + skb_headlen(skb);
 }
 
-static inline void skb_fill_page_desc(struct sk_buff *skb, int i, struct page *page, int off, int size)
+static inline void skb_fill_page_desc(struct sk_buff *skb, int i,
+				      struct page *page, int off, int size)
 {
 	skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
-	frag->page = page;
-	frag->page_offset = off;
-	frag->size = size;
-	skb_shinfo(skb)->nr_frags = i+1;
+
+	frag->page		  = page;
+	frag->page_offset	  = off;
+	frag->size		  = size;
+	skb_shinfo(skb)->nr_frags = i + 1;
 }
 
 #define SKB_PAGE_ASSERT(skb) 	BUG_ON(skb_shinfo(skb)->nr_frags)
@@ -871,7 +741,7 @@ static inline unsigned char *skb_push(struct sk_buff *skb, unsigned int len)
 	return skb->data;
 }
 
-static inline char *__skb_pull(struct sk_buff *skb, unsigned int len)
+static inline unsigned char *__skb_pull(struct sk_buff *skb, unsigned int len)
 {
 	skb->len -= len;
 	BUG_ON(skb->len < skb->data_len);
@@ -895,7 +765,7 @@ static inline unsigned char *skb_pull(struct sk_buff *skb, unsigned int len)
 
 extern unsigned char *__pskb_pull_tail(struct sk_buff *skb, int delta);
 
-static inline char *__pskb_pull(struct sk_buff *skb, unsigned int len)
+static inline unsigned char *__pskb_pull(struct sk_buff *skb, unsigned int len)
 {
 	if (len > skb_headlen(skb) &&
 	    !__pskb_pull_tail(skb, len-skb_headlen(skb)))
@@ -953,6 +823,30 @@ static inline void skb_reserve(struct sk_buff *skb, unsigned int len)
 	skb->data += len;
 	skb->tail += len;
 }
+
+/*
+ * CPUs often take a performance hit when accessing unaligned memory
+ * locations. The actual performance hit varies, it can be small if the
+ * hardware handles it or large if we have to take an exception and fix it
+ * in software.
+ *
+ * Since an ethernet header is 14 bytes network drivers often end up with
+ * the IP header at an unaligned offset. The IP header can be aligned by
+ * shifting the start of the packet by 2 bytes. Drivers should do this
+ * with:
+ *
+ * skb_reserve(NET_IP_ALIGN);
+ *
+ * The downside to this alignment of the IP header is that the DMA is now
+ * unaligned. On some architectures the cost of an unaligned DMA is high
+ * and this cost outweighs the gains made by aligning the IP header.
+ * 
+ * Since this trade off varies between architectures, we allow NET_IP_ALIGN
+ * to be overridden.
+ */
+#ifndef NET_IP_ALIGN
+#define NET_IP_ALIGN	2
+#endif
 
 extern int ___pskb_trim(struct sk_buff *skb, unsigned int len, int realloc);
 
@@ -1012,21 +906,6 @@ static inline void skb_orphan(struct sk_buff *skb)
 }
 
 /**
- *	skb_queue_purge - empty a list
- *	@list: list to empty
- *
- *	Delete all buffers on an &sk_buff list. Each buffer is removed from
- *	the list and one reference dropped. This function takes the list
- *	lock and is atomic with respect to other list locking functions.
- */
-static inline void skb_queue_purge(struct sk_buff_head *list)
-{
-	struct sk_buff *skb;
-	while ((skb = skb_dequeue(list)) != NULL)
-		kfree_skb(skb);
-}
-
-/**
  *	__skb_queue_purge - empty a list
  *	@list: list to empty
  *
@@ -1034,6 +913,7 @@ static inline void skb_queue_purge(struct sk_buff_head *list)
  *	the list and one reference dropped. This function does not take the
  *	list lock and the caller must hold the relevant locks to use it.
  */
+extern void skb_queue_purge(struct sk_buff_head *list);
 static inline void __skb_queue_purge(struct sk_buff_head *list)
 {
 	struct sk_buff *skb;
@@ -1053,6 +933,7 @@ static inline void __skb_queue_purge(struct sk_buff_head *list)
  *
  *	%NULL is returned in there is no free memory.
  */
+#ifndef CONFIG_HAVE_ARCH_DEV_ALLOC_SKB
 static inline struct sk_buff *__dev_alloc_skb(unsigned int length,
 					      int gfp_mask)
 {
@@ -1061,6 +942,9 @@ static inline struct sk_buff *__dev_alloc_skb(unsigned int length,
 		skb_reserve(skb, 16);
 	return skb;
 }
+#else
+extern struct sk_buff *__dev_alloc_skb(unsigned int length, int gfp_mask);
+#endif
 
 /**
  *	dev_alloc_skb - allocate an skbuff for sending
@@ -1123,6 +1007,39 @@ static inline struct sk_buff *skb_padto(struct sk_buff *skb, unsigned int len)
 	return skb_pad(skb, len-size);
 }
 
+static inline int skb_add_data(struct sk_buff *skb,
+			       char __user *from, int copy)
+{
+	const int off = skb->len;
+
+	if (skb->ip_summed == CHECKSUM_NONE) {
+		int err = 0;
+		unsigned int csum = csum_and_copy_from_user(from,
+							    skb_put(skb, copy),
+							    copy, 0, &err);
+		if (!err) {
+			skb->csum = csum_block_add(skb->csum, csum, off);
+			return 0;
+		}
+	} else if (!copy_from_user(skb_put(skb, copy), from, copy))
+		return 0;
+
+	__skb_trim(skb, off);
+	return -EFAULT;
+}
+
+static inline int skb_can_coalesce(struct sk_buff *skb, int i,
+				   struct page *page, int off)
+{
+	if (i) {
+		struct skb_frag_struct *frag = &skb_shinfo(skb)->frags[i - 1];
+
+		return page == frag->page &&
+		       off == frag->page_offset + frag->size;
+	}
+	return 0;
+}
+
 /**
  *	skb_linearize - convert paged skb to linear one
  *	@skb: buffer to linarize
@@ -1132,7 +1049,7 @@ static inline struct sk_buff *skb_padto(struct sk_buff *skb, unsigned int len)
  *	is returned and the old skb data released.
  */
 extern int __skb_linearize(struct sk_buff *skb, int gfp);
-static inline int __deprecated skb_linearize(struct sk_buff *skb, int gfp)
+static inline int skb_linearize(struct sk_buff *skb, int gfp)
 {
 	return __skb_linearize(skb, gfp);
 }
@@ -1156,23 +1073,18 @@ static inline void kunmap_skb_frag(void *vaddr)
 }
 
 #define skb_queue_walk(queue, skb) \
-		for (skb = (queue)->next, prefetch(skb->next);	\
-		     (skb != (struct sk_buff *)(queue));	\
-		     skb = skb->next, prefetch(skb->next))
+		for (skb = (queue)->next;					\
+		     prefetch(skb->next), (skb != (struct sk_buff *)(queue));	\
+		     skb = skb->next)
 
 
 extern struct sk_buff *skb_recv_datagram(struct sock *sk, unsigned flags,
 					 int noblock, int *err);
 extern unsigned int    datagram_poll(struct file *file, struct socket *sock,
 				     struct poll_table_struct *wait);
-extern int	       skb_copy_datagram(const struct sk_buff *from,
-					 int offset, char *to, int size);
 extern int	       skb_copy_datagram_iovec(const struct sk_buff *from,
 					       int offset, struct iovec *to,
 					       int size);
-extern int	       skb_copy_and_csum_datagram(const struct sk_buff *skb,
-						  int offset, u8 *to, int len,
-						  unsigned int *csump);
 extern int	       skb_copy_and_csum_datagram_iovec(const
 							struct sk_buff *skb,
 							int hlen,
@@ -1186,20 +1098,66 @@ extern unsigned int    skb_copy_and_csum_bits(const struct sk_buff *skb,
 					      int offset, u8 *to, int len,
 					      unsigned int csum);
 extern void	       skb_copy_and_csum_dev(const struct sk_buff *skb, u8 *to);
+extern void	       skb_split(struct sk_buff *skb,
+				 struct sk_buff *skb1, const u32 len);
+
+static inline void *skb_header_pointer(const struct sk_buff *skb, int offset,
+				       int len, void *buffer)
+{
+	int hlen = skb_headlen(skb);
+
+	if (offset + len <= hlen)
+		return skb->data + offset;
+
+	if (skb_copy_bits(skb, offset, buffer, len) < 0)
+		return NULL;
+
+	return buffer;
+}
 
 extern void skb_init(void);
 extern void skb_add_mtu(int mtu);
 
+struct skb_iter {
+	/* Iteration functions set these */
+	unsigned char *data;
+	unsigned int len;
+
+	/* Private to iteration */
+	unsigned int nextfrag;
+	struct sk_buff *fraglist;
+};
+
+/* Keep iterating until skb_iter_next returns false. */
+extern void skb_iter_first(const struct sk_buff *skb, struct skb_iter *i);
+extern int skb_iter_next(const struct sk_buff *skb, struct skb_iter *i);
+/* Call this if aborting loop before !skb_iter_next */
+extern void skb_iter_abort(const struct sk_buff *skb, struct skb_iter *i);
+
 #ifdef CONFIG_NETFILTER
-static inline void nf_conntrack_put(struct nf_ct_info *nfct)
+static inline void nf_conntrack_put(struct nf_conntrack *nfct)
 {
-	if (nfct && atomic_dec_and_test(&nfct->master->use))
-		nfct->master->destroy(nfct->master);
+	if (nfct && atomic_dec_and_test(&nfct->use))
+		nfct->destroy(nfct);
 }
-static inline void nf_conntrack_get(struct nf_ct_info *nfct)
+static inline void nf_conntrack_get(struct nf_conntrack *nfct)
 {
 	if (nfct)
-		atomic_inc(&nfct->master->use);
+		atomic_inc(&nfct->use);
+}
+static inline void nf_reset(struct sk_buff *skb)
+{
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#ifdef CONFIG_NETFILTER_DEBUG
+	skb->nf_debug = 0;
+#endif
+}
+static inline void nf_reset_debug(struct sk_buff *skb)
+{
+#ifdef CONFIG_NETFILTER_DEBUG
+	skb->nf_debug = 0;
+#endif
 }
 
 #ifdef CONFIG_BRIDGE_NETFILTER
@@ -1213,9 +1171,10 @@ static inline void nf_bridge_get(struct nf_bridge_info *nf_bridge)
 	if (nf_bridge)
 		atomic_inc(&nf_bridge->use);
 }
-#endif
-
-#endif
+#endif /* CONFIG_BRIDGE_NETFILTER */
+#else /* CONFIG_NETFILTER */
+static inline void nf_reset(struct sk_buff *skb) {}
+#endif /* CONFIG_NETFILTER */
 
 #endif	/* __KERNEL__ */
 #endif	/* _LINUX_SKBUFF_H */

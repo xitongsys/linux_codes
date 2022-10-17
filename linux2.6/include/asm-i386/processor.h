@@ -19,6 +19,7 @@
 #include <linux/cache.h>
 #include <linux/config.h>
 #include <linux/threads.h>
+#include <asm/percpu.h>
 
 /* flag for disabling the tsc */
 extern int tsc_disable;
@@ -59,10 +60,12 @@ struct cpuinfo_x86 {
 	char	x86_model_id[64];
 	int 	x86_cache_size;  /* in KB - valid for CPUS which support this
 				    call  */
+	int 	x86_cache_alignment;	/* In bytes */
 	int	fdiv_bug;
 	int	f00f_bug;
 	int	coma_bug;
 	unsigned long loops_per_jiffy;
+	unsigned char x86_num_cores;
 } __attribute__((__aligned__(SMP_CACHE_BYTES)));
 
 #define X86_VENDOR_INTEL 0
@@ -83,8 +86,8 @@ struct cpuinfo_x86 {
 
 extern struct cpuinfo_x86 boot_cpu_data;
 extern struct cpuinfo_x86 new_cpu_data;
-extern struct tss_struct init_tss[NR_CPUS];
 extern struct tss_struct doublefault_tss;
+DECLARE_PER_CPU(struct tss_struct, init_tss);
 
 #ifdef CONFIG_SMP
 extern struct cpuinfo_x86 cpu_data[];
@@ -94,11 +97,19 @@ extern struct cpuinfo_x86 cpu_data[];
 #define current_cpu_data boot_cpu_data
 #endif
 
+extern	int phys_proc_id[NR_CPUS];
 extern char ignore_fpu_irq;
 
 extern void identify_cpu(struct cpuinfo_x86 *);
 extern void print_cpu_info(struct cpuinfo_x86 *);
+extern unsigned int init_intel_cacheinfo(struct cpuinfo_x86 *c);
 extern void dodgy_tsc(void);
+
+#ifdef CONFIG_X86_HT
+extern void detect_ht(struct cpuinfo_x86 *c);
+#else
+static inline void detect_ht(struct cpuinfo_x86 *c) {}
+#endif
 
 /*
  * EFLAGS bits
@@ -123,6 +134,8 @@ extern void dodgy_tsc(void);
 
 /*
  * Generic CPUID function
+ * clear %ecx since some cpus (Cyrix MII) do not set or clear %ecx
+ * resulting in stale register contents being returned.
  */
 static inline void cpuid(int op, int *eax, int *ebx, int *ecx, int *edx)
 {
@@ -131,7 +144,7 @@ static inline void cpuid(int op, int *eax, int *ebx, int *ecx, int *edx)
 		  "=b" (*ebx),
 		  "=c" (*ecx),
 		  "=d" (*edx)
-		: "0" (op));
+		: "0" (op), "c"(0));
 }
 
 /*
@@ -256,17 +269,6 @@ static inline void clear_in_cr4 (unsigned long mask)
 	outb((data), 0x23); \
 } while (0)
 
-/*
- * Bus types (default is ISA, but people can check others with these..)
- * pc98 indicates PC98 systems (CBUS)
- */
-extern int MCA_bus;
-#ifdef CONFIG_X86_PC9800
-#define pc98 1
-#else
-#define pc98 0
-#endif
-
 static inline void __monitor(const void *eax, unsigned long ecx,
 		unsigned long edx)
 {
@@ -291,6 +293,9 @@ extern unsigned int machine_submodel_id;
 extern unsigned int BIOS_revision;
 extern unsigned int mca_pentium_flag;
 
+/* Boot loader type from the setup header */
+extern int bootloader_type;
+
 /*
  * User space process size: 3GB (default).
  */
@@ -301,14 +306,17 @@ extern unsigned int mca_pentium_flag;
  */
 #define TASK_UNMAPPED_BASE	(PAGE_ALIGN(TASK_SIZE / 3))
 
+#define HAVE_ARCH_PICK_MMAP_LAYOUT
+
 /*
- * Size of io_bitmap, covering ports 0 to 0x3ff.
+ * Size of io_bitmap.
  */
-#define IO_BITMAP_BITS  1024
+#define IO_BITMAP_BITS  65536
 #define IO_BITMAP_BYTES (IO_BITMAP_BITS/8)
 #define IO_BITMAP_LONGS (IO_BITMAP_BYTES/sizeof(long))
 #define IO_BITMAP_OFFSET offsetof(struct tss_struct,io_bitmap)
 #define INVALID_IO_BITMAP_OFFSET 0x8000
+#define INVALID_IO_BITMAP_OFFSET_LAZY 0x9000
 
 struct i387_fsave_struct {
 	long	cwd;
@@ -332,7 +340,7 @@ struct i387_fxsave_struct {
 	long	foo;
 	long	fos;
 	long	mxcsr;
-	long	reserved;
+	long	mxcsr_mask;
 	long	st_space[32];	/* 8*16 bytes for each FP-reg = 128 bytes */
 	long	xmm_space[32];	/* 8*16 bytes for each XMM-reg = 128 bytes */
 	long	padding[56];
@@ -361,6 +369,8 @@ union i387_union {
 typedef struct {
 	unsigned long seg;
 } mm_segment_t;
+
+struct thread_struct;
 
 struct tss_struct {
 	unsigned short	back_link,__blh;
@@ -394,19 +404,27 @@ struct tss_struct {
 	 */
 	unsigned long	io_bitmap[IO_BITMAP_LONGS + 1];
 	/*
+	 * Cache the current maximum and the last task that used the bitmap:
+	 */
+	unsigned long io_bitmap_max;
+	struct thread_struct *io_bitmap_owner;
+	/*
 	 * pads the TSS to be cacheline-aligned (size is 0x100)
 	 */
-	unsigned long __cacheline_filler[5];
+	unsigned long __cacheline_filler[35];
 	/*
 	 * .. and then another 0x100 bytes for emergency kernel stack
 	 */
 	unsigned long stack[64];
 } __attribute__((packed));
 
+#define ARCH_MIN_TASKALIGN	16
+
 struct thread_struct {
 /* cached TLS descriptors. */
 	struct desc_struct tls_array[GDT_ENTRY_TLS_ENTRIES];
 	unsigned long	esp0;
+	unsigned long	sysenter_cs;
 	unsigned long	eip;
 	unsigned long	esp;
 	unsigned long	fs;
@@ -424,10 +442,13 @@ struct thread_struct {
 	unsigned int		saved_fs, saved_gs;
 /* IO permissions */
 	unsigned long	*io_bitmap_ptr;
+/* max allowed port in the bitmap, in bytes: */
+	unsigned long	io_bitmap_max;
 };
 
 #define INIT_THREAD  {							\
 	.vm86_info = NULL,						\
+	.sysenter_cs = __KERNEL_CS,					\
 	.io_bitmap_ptr = NULL,						\
 }
 
@@ -440,28 +461,19 @@ struct thread_struct {
 #define INIT_TSS  {							\
 	.esp0		= sizeof(init_stack) + (long)&init_stack,	\
 	.ss0		= __KERNEL_DS,					\
-	.esp1		= sizeof(init_tss[0]) + (long)&init_tss[0],	\
 	.ss1		= __KERNEL_CS,					\
 	.ldt		= GDT_ENTRY_LDT,				\
 	.io_bitmap_base	= INVALID_IO_BITMAP_OFFSET,			\
 	.io_bitmap	= { [ 0 ... IO_BITMAP_LONGS] = ~0 },		\
 }
 
-static inline void load_esp0(struct tss_struct *tss, unsigned long esp0)
+static inline void load_esp0(struct tss_struct *tss, struct thread_struct *thread)
 {
-	tss->esp0 = esp0;
+	tss->esp0 = thread->esp0;
 	/* This can only happen when SEP is enabled, no need to test "SEP"arately */
-	if ((unlikely(tss->ss1 != __KERNEL_CS))) {
-		tss->ss1 = __KERNEL_CS;
-		wrmsr(MSR_IA32_SYSENTER_CS, __KERNEL_CS, 0);
-	}
-}
-
-static inline void disable_sysenter(struct tss_struct *tss)
-{
-	if (cpu_has_sep)  {
-		tss->ss1 = 0;
-		wrmsr(MSR_IA32_SYSENTER_CS, 0, 0);
+	if (unlikely(tss->ss1 != thread->sysenter_cs)) {
+		tss->ss1 = thread->sysenter_cs;
+		wrmsr(MSR_IA32_SYSENTER_CS, thread->sysenter_cs, 0);
 	}
 }
 
@@ -495,8 +507,24 @@ extern unsigned long thread_saved_pc(struct task_struct *tsk);
 void show_trace(struct task_struct *task, unsigned long *stack);
 
 unsigned long get_wchan(struct task_struct *p);
-#define KSTK_EIP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)->thread_info))[1019])
-#define KSTK_ESP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)->thread_info))[1022])
+
+#define THREAD_SIZE_LONGS      (THREAD_SIZE/sizeof(unsigned long))
+#define KSTK_TOP(info)                                                 \
+({                                                                     \
+       unsigned long *__ptr = (unsigned long *)(info);                 \
+       (unsigned long)(&__ptr[THREAD_SIZE_LONGS]);                     \
+})
+
+#define task_pt_regs(task)                                             \
+({                                                                     \
+       struct pt_regs *__regs__;                                       \
+       __regs__ = (struct pt_regs *)KSTK_TOP((task)->thread_info);     \
+       __regs__ - 1;                                                   \
+})
+
+#define KSTK_EIP(task) (task_pt_regs(task)->eip)
+#define KSTK_ESP(task) (task_pt_regs(task)->esp)
+
 
 struct microcode_header {
 	unsigned int hdrver;
@@ -635,5 +663,9 @@ extern inline void prefetchw(const void *x)
 #define spin_lock_prefetch(x)	prefetchw(x)
 
 extern void select_idle_routine(const struct cpuinfo_x86 *c);
+
+#define cache_line_size() (boot_cpu_data.x86_cache_alignment)
+
+extern unsigned long boot_option_idle_override;
 
 #endif /* __ASM_I386_PROCESSOR_H */

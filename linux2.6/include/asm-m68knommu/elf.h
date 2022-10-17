@@ -9,6 +9,33 @@
 #include <asm/ptrace.h>
 #include <asm/user.h>
 
+/*
+ * 68k ELF relocation types
+ */
+#define R_68K_NONE  0
+#define R_68K_32    1
+#define R_68K_16    2
+#define R_68K_8     3
+#define R_68K_PC32  4
+#define R_68K_PC16  5
+#define R_68K_PC8   6
+#define R_68K_GOT32 7
+#define R_68K_GOT16 8
+#define R_68K_GOT8  9
+#define R_68K_GOT32O    10
+#define R_68K_GOT16O    11
+#define R_68K_GOT8O 12
+#define R_68K_PLT32 13
+#define R_68K_PLT16 14
+#define R_68K_PLT8  15
+#define R_68K_PLT32O    16
+#define R_68K_PLT16O    17
+#define R_68K_PLT8O 18
+#define R_68K_COPY  19
+#define R_68K_GLOB_DAT  20
+#define R_68K_JMP_SLOT  21
+#define R_68K_RELATIVE  22
+
 typedef unsigned long elf_greg_t;
 
 #define ELF_NGREG (sizeof(struct user_regs_struct) / sizeof(elf_greg_t))
@@ -34,22 +61,14 @@ typedef struct user_m68kfp_struct elf_fpregset_t;
 #define ELF_PLAT_INIT(_r, load_addr)	_r->a1 = 0
 
 #define USE_ELF_CORE_DUMP
-#ifndef CONFIG_SUN3
 #define ELF_EXEC_PAGESIZE	4096
-#else
-#define ELF_EXEC_PAGESIZE	8192
-#endif
 
 /* This is the location that an ET_DYN program is loaded if exec'ed.  Typical
    use of this is to invoke "./ld.so someprog" to test out a new version of
    the loader.  We need to make sure that it is out of the way of the program
    that it will "exec", and that there is sufficient room for the brk.  */
 
-#ifndef CONFIG_SUN3
 #define ELF_ET_DYN_BASE         0xD0000000UL
-#else
-#define ELF_ET_DYN_BASE         0x0D800000UL
-#endif
 
 #define ELF_CORE_COPY_REGS(pr_reg, regs)				\
 	/* Bleech. */							\

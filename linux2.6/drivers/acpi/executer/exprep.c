@@ -6,7 +6,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -339,6 +339,8 @@ acpi_ex_prep_common_field_object (
 	obj_desc->common_field.access_byte_width = (u8)
 			ACPI_DIV_8 (access_bit_width); /* 1, 2, 4,  8 */
 
+	obj_desc->common_field.access_bit_width = (u8) access_bit_width;
+
 	/*
 	 * base_byte_offset is the address of the start of the field within the
 	 * region.  It is the byte address of the first *datum* (field-width data
@@ -351,7 +353,7 @@ acpi_ex_prep_common_field_object (
 	 */
 	nearest_byte_address =
 			ACPI_ROUND_BITS_DOWN_TO_BYTES (field_bit_position);
-	obj_desc->common_field.base_byte_offset =
+	obj_desc->common_field.base_byte_offset = (u32)
 			ACPI_ROUND_DOWN (nearest_byte_address, byte_alignment);
 
 	/*
@@ -360,28 +362,6 @@ acpi_ex_prep_common_field_object (
 	 */
 	obj_desc->common_field.start_field_bit_offset = (u8)
 		(field_bit_position - ACPI_MUL_8 (obj_desc->common_field.base_byte_offset));
-
-	/*
-	 * Valid bits -- the number of bits that compose a partial datum,
-	 * 1) At the end of the field within the region (arbitrary starting bit
-	 *    offset)
-	 * 2) At the end of a buffer used to contain the field (starting offset
-	 *    always zero)
-	 */
-	obj_desc->common_field.end_field_valid_bits = (u8)
-		((obj_desc->common_field.start_field_bit_offset + field_bit_length) %
-				  access_bit_width);
-	/* start_buffer_bit_offset always = 0 */
-
-	obj_desc->common_field.end_buffer_valid_bits = (u8)
-		(field_bit_length % access_bit_width);
-
-	/*
-	 * datum_valid_bits is the number of valid field bits in the first
-	 * field datum.
-	 */
-	obj_desc->common_field.datum_valid_bits  = (u8)
-		(access_bit_width - obj_desc->common_field.start_field_bit_offset);
 
 	/*
 	 * Does the entire field fit within a single field access element? (datum)
@@ -507,7 +487,8 @@ acpi_ex_prep_field_value (
 			(info->field_bit_position / ACPI_MUL_8 (obj_desc->field.access_byte_width));
 
 		if (!obj_desc->index_field.data_obj || !obj_desc->index_field.index_obj) {
-			ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "Null Index Object\n"));
+			ACPI_REPORT_ERROR (("Null Index Object during field prep\n"));
+			acpi_ut_delete_object_desc (obj_desc);
 			return_ACPI_STATUS (AE_AML_INTERNAL);
 		}
 
@@ -539,7 +520,7 @@ acpi_ex_prep_field_value (
 			  acpi_ns_get_type (info->field_node));
 
 	ACPI_DEBUG_PRINT ((ACPI_DB_BFIELD, "Set named_obj %p [%4.4s], obj_desc %p\n",
-			info->field_node, info->field_node->name.ascii, obj_desc));
+			info->field_node, acpi_ut_get_node_name (info->field_node), obj_desc));
 
 	/* Remove local reference to the object */
 

@@ -118,7 +118,7 @@ int snd_midi_event_new(int bufsize, snd_midi_event_t **rdev)
 	snd_midi_event_t *dev;
 
 	*rdev = NULL;
-	dev = (snd_midi_event_t *)snd_kcalloc(sizeof(snd_midi_event_t), GFP_KERNEL);
+	dev = kcalloc(1, sizeof(*dev), GFP_KERNEL);
 	if (dev == NULL)
 		return -ENOMEM;
 	if (bufsize > 0) {
@@ -138,8 +138,7 @@ int snd_midi_event_new(int bufsize, snd_midi_event_t **rdev)
 void snd_midi_event_free(snd_midi_event_t *dev)
 {
 	if (dev != NULL) {
-		if (dev->buf)
-			kfree(dev->buf);
+		kfree(dev->buf);
 		kfree(dev);
 	}
 }
@@ -202,8 +201,7 @@ int snd_midi_event_resize_buffer(snd_midi_event_t *dev, int bufsize)
 	dev->bufsize = bufsize;
 	reset_encode(dev);
 	spin_unlock_irqrestore(&dev->lock, flags);
-	if (old_buf)
-		kfree(old_buf);
+	kfree(old_buf);
 	return 0;
 }
 

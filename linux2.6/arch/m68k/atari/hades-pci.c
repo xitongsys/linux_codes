@@ -40,13 +40,20 @@ static const char pci_mem_name[] = "PCI memory space";
 static const char pci_io_name[] = "PCI I/O space";
 static const char pci_config_name[] = "PCI config space";
 
-static struct resource config_space = { pci_config_name, HADES_CONFIG_BASE,
-										HADES_CONFIG_BASE + HADES_CONFIG_SIZE - 1 };
-static struct resource io_space = { pci_io_name, HADES_IO_BASE, HADES_IO_BASE +
-								    HADES_IO_SIZE - 1 };
+static struct resource config_space = {
+    .name = pci_config_name,
+    .start = HADES_CONFIG_BASE,
+    .end = HADES_CONFIG_BASE + HADES_CONFIG_SIZE - 1
+};
+static struct resource io_space = {
+    .name = pci_io_name,
+    .start = HADES_IO_BASE,
+    .end = HADES_IO_BASE + HADES_IO_SIZE - 1
+};
 
-static const unsigned long pci_conf_base_phys[] = { 0xA0080000, 0xA0040000,
-												    0xA0020000, 0xA0010000 };
+static const unsigned long pci_conf_base_phys[] = {
+    0xA0080000, 0xA0040000, 0xA0020000, 0xA0010000
+};
 static unsigned long pci_conf_base_virt[N_SLOTS];
 static unsigned long pci_io_base_virt;
 
@@ -292,11 +299,11 @@ static int hades_write_config_dword(struct pci_dev *dev, int where, u32 value)
 static void __init hades_fixup(int pci_modify)
 {
 	char irq_tab[4] = {
-			    IRQ_TT_MFP_IO0,	/* Slot 0. */
-			    IRQ_TT_MFP_IO1,	/* Slot 1. */
-			    IRQ_TT_MFP_SCC,	/* Slot 2. */
-			    IRQ_TT_MFP_SCSIDMA	/* Slot 3. */
-			  };
+		[0] = IRQ_TT_MFP_IO0,		/* Slot 0. */
+		[1] = IRQ_TT_MFP_IO1,		/* Slot 1. */
+		[2] = IRQ_TT_MFP_SCC,		/* Slot 2. */
+		[3] = IRQ_TT_MFP_SCSIDMA	/* Slot 3. */
+	};
 	struct pci_dev *dev = NULL;
 	unsigned char slot;
 
@@ -304,7 +311,7 @@ static void __init hades_fixup(int pci_modify)
 	 * Go through all devices, fixing up irqs as we see fit:
 	 */
 
-	while ((dev = pci_find_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL)
+	while ((dev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL)
 	{
 		if (dev->class >> 16 != PCI_BASE_CLASS_BRIDGE)
 		{

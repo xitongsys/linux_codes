@@ -1,5 +1,5 @@
 /*
- *	$Id: maple_keyb.c,v 1.1 2001/11/02 17:27:32 jsimmons Exp $
+ *	$Id: maple_keyb.c,v 1.4 2004/03/22 01:18:15 lethal Exp $
  * 	SEGA Dreamcast keyboard driver
  *	Based on drivers/usb/usbkbd.c
  */
@@ -14,18 +14,19 @@
 
 MODULE_AUTHOR("YAEGASHI Takeshi <t@keshi.org>");
 MODULE_DESCRIPTION("SEGA Dreamcast keyboard driver");
+MODULE_LICENSE("GPL");
 
 static unsigned char dc_kbd_keycode[256] = {
 	  0,  0,  0,  0, 30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38,
 	 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44,  2,  3,
 	  4,  5,  6,  7,  8,  9, 10, 11, 28,  1, 14, 15, 57, 12, 13, 26,
-	 27, 43, 84, 39, 40, 41, 51, 52, 53, 58, 59, 60, 61, 62, 63, 64,
+	 27, 43, 43, 39, 40, 41, 51, 52, 53, 58, 59, 60, 61, 62, 63, 64,
 	 65, 66, 67, 68, 87, 88, 99, 70,119,110,102,104,111,107,109,106,
 	105,108,103, 69, 98, 55, 74, 78, 96, 79, 80, 81, 75, 76, 77, 71,
-	 72, 73, 82, 83, 86,127,116,117, 85, 89, 90, 91, 92, 93, 94, 95,
-	120,121,122,123,134,138,130,132,128,129,131,137,133,135,136,113,
-	115,114,  0,  0,  0,124,  0,181,182,183,184,185,186,187,188,189,
-	190,191,192,193,194,195,196,197,198,  0,  0,  0,  0,  0,  0,  0,
+	 72, 73, 82, 83, 86,127,116,117,183,184,185,186,187,188,189,190,
+	191,192,193,194,134,138,130,132,128,129,131,137,133,135,136,113,
+	115,114,  0,  0,  0,121,  0, 89, 93,124, 92, 94, 95,  0,  0,  0,
+	122,123, 90, 91, 85,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
 	  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
 	  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
 	  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
@@ -124,8 +125,11 @@ static int dc_kbd_connect(struct maple_device *dev)
 
 	kbd->dev.evbit[0] = BIT(EV_KEY) | BIT(EV_REP);
 
+	init_input_dev(&kbd->dev);
+
 	for (i=0; i<255; i++)
 		set_bit(dc_kbd_keycode[i], kbd->dev.keybit);
+
 	clear_bit(0, kbd->dev.keybit);
 
 	kbd->dev.private = kbd;
@@ -135,15 +139,12 @@ static int dc_kbd_connect(struct maple_device *dev)
 
 	kbd->dev.name = dev->product_name;
 	kbd->dev.id.bustype = BUS_MAPLE;
-	
+
 	input_register_device(&kbd->dev);
 
 	maple_getcond_callback(dev, dc_kbd_callback, 1, MAPLE_FUNC_KEYBOARD);
 
-	printk(KERN_INFO "input%d: keyboard(0x%lx): %s\n",
-	       kbd->dev.number, data, kbd->dev.name);
-
-	MOD_INC_USE_COUNT;
+	printk(KERN_INFO "input: keyboard(0x%lx): %s\n", data, kbd->dev.name);
 
 	return 0;
 }
@@ -154,10 +155,7 @@ static void dc_kbd_disconnect(struct maple_device *dev)
 	struct dc_kbd *kbd = dev->private_data;
 
 	input_unregister_device(&kbd->dev);
-
 	kfree(kbd);
-
-	MOD_DEC_USE_COUNT;
 }
 
 

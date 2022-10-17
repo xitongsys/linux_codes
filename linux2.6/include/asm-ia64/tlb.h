@@ -1,10 +1,10 @@
 #ifndef _ASM_IA64_TLB_H
 #define _ASM_IA64_TLB_H
 /*
+ * Based on <asm-generic/tlb.h>.
+ *
  * Copyright (C) 2002-2003 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
- *
- * This file was derived from asm-generic/tlb.h.
  */
 /*
  * Removing a translation from a page table (including TLB-shootdown) is a four-step
@@ -39,10 +39,13 @@
  */
 #include <linux/config.h>
 #include <linux/mm.h>
+#include <linux/pagemap.h>
 #include <linux/swap.h>
 
+#include <asm/pgalloc.h>
 #include <asm/processor.h>
 #include <asm/tlbflush.h>
+#include <asm/machvec.h>
 
 #ifdef CONFIG_SMP
 # define FREE_PTE_NR		2048
@@ -173,6 +176,12 @@ tlb_finish_mmu (struct mmu_gather *tlb, unsigned long start, unsigned long end)
 	check_pgt_cache();
 }
 
+static inline unsigned int
+tlb_is_full_mm(struct mmu_gather *tlb)
+{
+     return tlb->fullmm;
+}
+
 /*
  * Logically, this routine frees PAGE.  On MP machines, the actual freeing of the page
  * must be delayed until after the TLB has been flushed (see comments at the beginning of
@@ -204,6 +213,8 @@ __tlb_remove_tlb_entry (struct mmu_gather *tlb, pte_t *ptep, unsigned long addre
 	tlb->end_addr = address + PAGE_SIZE;
 }
 
+#define tlb_migrate_finish(mm)	platform_tlb_migrate_finish(mm)
+
 #define tlb_start_vma(tlb, vma)			do { } while (0)
 #define tlb_end_vma(tlb, vma)			do { } while (0)
 
@@ -223,6 +234,12 @@ do {							\
 do {							\
 	tlb->need_flush = 1;				\
 	__pmd_free_tlb(tlb, ptep);			\
+} while (0)
+
+#define pud_free_tlb(tlb, pudp)				\
+do {							\
+	tlb->need_flush = 1;				\
+	__pud_free_tlb(tlb, pudp);			\
 } while (0)
 
 #endif /* _ASM_IA64_TLB_H */

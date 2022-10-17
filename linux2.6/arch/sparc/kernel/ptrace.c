@@ -48,10 +48,12 @@ static inline void pt_succ_return(struct pt_regs *regs, unsigned long value)
 }
 
 static void
-pt_succ_return_linux(struct pt_regs *regs, unsigned long value, long *addr)
+pt_succ_return_linux(struct pt_regs *regs, unsigned long value, long __user *addr)
 {
-	if(put_user(value, addr))
-		return pt_error_return(regs, EFAULT);
+	if (put_user(value, addr)) {
+		pt_error_return(regs, EFAULT);
+		return;
+	}
 	regs->u_regs[UREG_I0] = 0;
 	regs->psr &= ~PSR_C;
 	regs->pc = regs->npc;
@@ -59,7 +61,7 @@ pt_succ_return_linux(struct pt_regs *regs, unsigned long value, long *addr)
 }
 
 static void
-pt_os_succ_return (struct pt_regs *regs, unsigned long val, long *addr)
+pt_os_succ_return (struct pt_regs *regs, unsigned long val, long __user *addr)
 {
 	if (current->personality == PER_SUNOS)
 		pt_succ_return (regs, val);
@@ -69,10 +71,10 @@ pt_os_succ_return (struct pt_regs *regs, unsigned long val, long *addr)
 
 /* Fuck me gently with a chainsaw... */
 static inline void read_sunos_user(struct pt_regs *regs, unsigned long offset,
-				   struct task_struct *tsk, long *addr)
+				   struct task_struct *tsk, long __user *addr)
 {
 	struct pt_regs *cregs = tsk->thread.kregs;
-	struct thread_struct *t = &tsk->thread;
+	struct thread_info *t = tsk->thread_info;
 	int v;
 	
 	if(offset >= 1024)
@@ -93,16 +95,16 @@ static inline void read_sunos_user(struct pt_regs *regs, unsigned long offset,
 	}
 	switch(offset) {
 	case 0:
-		v = tsk->thread_info->ksp;
+		v = t->ksp;
 		break;
 	case 4:
-		v = tsk->thread_info->kpc;
+		v = t->kpc;
 		break;
 	case 8:
-		v = tsk->thread_info->kpsr;
+		v = t->kpsr;
 		break;
 	case 12:
-		v = tsk->thread_info->uwinmask;
+		v = t->uwinmask;
 		break;
 	case 832:
 		v = t->w_saved;
@@ -167,7 +169,7 @@ static inline void write_sunos_user(struct pt_regs *regs, unsigned long offset,
 				    struct task_struct *tsk)
 {
 	struct pt_regs *cregs = tsk->thread.kregs;
-	struct thread_struct *t = &tsk->thread;
+	struct thread_info *t = tsk->thread_info;
 	unsigned long value = regs->u_regs[UREG_I3];
 
 	if(offset >= 1024)
@@ -343,14 +345,14 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 
 		if (access_process_vm(child, addr,
 				      &tmp, sizeof(tmp), 0) == sizeof(tmp))
-			pt_os_succ_return(regs, tmp, (long *)data);
+			pt_os_succ_return(regs, tmp, (long __user *)data);
 		else
 			pt_error_return(regs, EIO);
 		goto out_tsk;
 	}
 
 	case PTRACE_PEEKUSR:
-		read_sunos_user(regs, addr, child, (long *) data);
+		read_sunos_user(regs, addr, child, (long __user *) data);
 		goto out_tsk;
 
 	case PTRACE_POKEUSR:
@@ -368,7 +370,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 	}
 
 	case PTRACE_GETREGS: {
-		struct pt_regs *pregs = (struct pt_regs *) addr;
+		struct pt_regs __user *pregs = (struct pt_regs __user *) addr;
 		struct pt_regs *cregs = child->thread.kregs;
 		int rval;
 
@@ -391,7 +393,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 	}
 
 	case PTRACE_SETREGS: {
-		struct pt_regs *pregs = (struct pt_regs *) addr;
+		struct pt_regs __user *pregs = (struct pt_regs __user *) addr;
 		struct pt_regs *cregs = child->thread.kregs;
 		unsigned long psr, pc, npc, y;
 		int i;
@@ -433,7 +435,8 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 				unsigned long *insnaddr;
 				unsigned long insn;
 			} fpq[16];
-		} *fps = (struct fps *) addr;
+		};
+		struct fps __user *fps = (struct fps __user *) addr;
 		int i;
 
 		i = verify_area(VERIFY_WRITE, fps, sizeof(struct fps));
@@ -467,7 +470,8 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 				unsigned long *insnaddr;
 				unsigned long insn;
 			} fpq[16];
-		} *fps = (struct fps *) addr;
+		};
+		struct fps __user *fps = (struct fps __user *) addr;
 		int i;
 
 		i = verify_area(VERIFY_READ, fps, sizeof(struct fps));
@@ -489,7 +493,8 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 
 	case PTRACE_READTEXT:
 	case PTRACE_READDATA: {
-		int res = ptrace_readdata(child, addr, (void *) addr2, data);
+		int res = ptrace_readdata(child, addr,
+					  (void __user *) addr2, data);
 
 		if (res == data) {
 			pt_succ_return(regs, 0);
@@ -504,7 +509,8 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 
 	case PTRACE_WRITETEXT:
 	case PTRACE_WRITEDATA: {
-		int res = ptrace_writedata(child, (void *) addr2, addr, data);
+		int res = ptrace_writedata(child, (void __user *) addr2,
+					   addr, data);
 
 		if (res == data) {
 			pt_succ_return(regs, 0);
@@ -561,7 +567,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
  * exit.
  */
 	case PTRACE_KILL: {
-		if (child->state == TASK_ZOMBIE) {	/* already dead */
+		if (child->exit_state == EXIT_ZOMBIE) {	/* already dead */
 			pt_succ_return(regs, 0);
 			goto out_tsk;
 		}
@@ -608,12 +614,9 @@ asmlinkage void syscall_trace(void)
 		return;
 	if (!(current->ptrace & PT_PTRACED))
 		return;
-	current->exit_code = SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
-					? 0x80 : 0);
-	current->state = TASK_STOPPED;
 	current->thread.flags ^= MAGIC_CONSTANT;
-	notify_parent(current, SIGCHLD);
-	schedule();
+	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
+				 ? 0x80 : 0));
 	/*
 	 * this isn't the same as continuing with a signal, but it will do
 	 * for normal use.  strace only continues with a signal if the

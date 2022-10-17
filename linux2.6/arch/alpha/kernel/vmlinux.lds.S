@@ -17,6 +17,8 @@ SECTIONS
   _text = .;					/* Text and read-only data */
   .text : { 
 	*(.text) 
+	SCHED_TEXT
+	LOCK_TEXT
 	*(.fixup)
 	*(.gnu.warning)
   } :kernel
@@ -43,11 +45,6 @@ SECTIONS
   __setup_start = .;
   .init.setup : { *(.init.setup) }
   __setup_end = .;
-
-  . = ALIGN(8);
-  __start___param = .;
-  __param : { *(__param) }
-  __stop___param = .;
 
   . = ALIGN(8);
   __initcall_start = .;

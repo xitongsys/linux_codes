@@ -13,6 +13,7 @@
 #define _ASM_PCI_BRIDGE_H
 
 #include <linux/types.h>
+#include <linux/pci.h>
 #include <asm/xtalk/xwidget.h>		/* generic widget header */
 
 /* I/O page size */
@@ -388,9 +389,11 @@ typedef struct bridge_err_cmdword_s {
 
 /* Widget part number of bridge */
 #define BRIDGE_WIDGET_PART_NUM		0xc002
+#define XBRIDGE_WIDGET_PART_NUM		0xd002
 
 /* Manufacturer of bridge */
 #define BRIDGE_WIDGET_MFGR_NUM		0x036
+#define XBRIDGE_WIDGET_MFGR_NUM		0x024
 
 /* Revision numbers for known Bridge revisions */
 #define BRIDGE_REV_A			0x1
@@ -827,11 +830,22 @@ typedef union ate_u {
 
 #define BRIDGE_INTERNAL_ATES	128
 
-/*
- * Linux pci bus mappings to sn physical id's
- */
-extern unsigned char bus_to_wid[];	/* widget id for linux pci bus */
-extern unsigned char bus_to_nid[];	/* nasid for linux pci bus */
-extern unsigned char num_bridges;	/* number of bridges in the system */
+struct bridge_controller {
+	struct pci_controller	pc;
+	struct resource		mem;
+	struct resource		io;
+	bridge_t		*base;
+	nasid_t			nasid;
+	unsigned int		widget_id;
+	unsigned int 		irq_cpu;
+	dma64_addr_t		baddr;
+	unsigned int		pci_int[8];
+};
+
+#define BRIDGE_CONTROLLER(bus) \
+	((struct bridge_controller *)((bus)->sysdata))
+
+extern void register_bridge_irq(unsigned int irq);
+extern int request_bridge_irq(struct bridge_controller *bc);
 
 #endif /* _ASM_PCI_BRIDGE_H */

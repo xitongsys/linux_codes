@@ -41,8 +41,6 @@ struct sigcontext {
                                                                                 
 #if _MIPS_SIM == _MIPS_SIM_ABI64 || _MIPS_SIM == _MIPS_SIM_NABI32
 
-#include <linux/types.h>
-
 /*
  * Keep this struct definition in sync with the sigcontext fragment
  * in arch/mips/tools/offset.c
@@ -65,6 +63,10 @@ struct sigcontext {
 	unsigned int	sc_cause;
 };
 
+#ifdef __KERNEL__
+
+#include <linux/posix_types.h>
+
 struct sigcontext32 {
 	__u32	sc_regmask;		/* Unused */
 	__u32	sc_status;
@@ -84,6 +86,7 @@ struct sigcontext32 {
 
 	__u32	sc_sigset[4];		/* kernel's sigset_t */
 };
+#endif /* __KERNEL__ */
 
 #endif /* _MIPS_SIM == _MIPS_SIM_ABI64 || _MIPS_SIM == _MIPS_SIM_NABI32 */
 

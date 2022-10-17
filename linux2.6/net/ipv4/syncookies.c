@@ -47,7 +47,7 @@ static __u16 const msstab[] = {
  */
 __u32 cookie_v4_init_sequence(struct sock *sk, struct sk_buff *skb, __u16 *mssp)
 {
-	struct tcp_opt *tp = tcp_sk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
 	int mssind;
 	const __u16 mss = *mssp;
 
@@ -59,7 +59,7 @@ __u32 cookie_v4_init_sequence(struct sock *sk, struct sk_buff *skb, __u16 *mssp)
 		;
 	*mssp = msstab[mssind] + 1;
 
-	NET_INC_STATS_BH(SyncookiesSent);
+	NET_INC_STATS_BH(LINUX_MIB_SYNCOOKIESSENT);
 
 	return secure_tcp_syn_cookie(skb->nh.iph->saddr, skb->nh.iph->daddr,
 				     skb->h.th->source, skb->h.th->dest,
@@ -98,7 +98,7 @@ static inline struct sock *get_cookie_sock(struct sock *sk, struct sk_buff *skb,
 					   struct open_request *req,
 					   struct dst_entry *dst)
 {
-	struct tcp_opt *tp = tcp_sk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
 	struct sock *child;
 
 	child = tp->af_specific->syn_recv_sock(sk, skb, req, dst);
@@ -114,7 +114,7 @@ static inline struct sock *get_cookie_sock(struct sock *sk, struct sk_buff *skb,
 struct sock *cookie_v4_check(struct sock *sk, struct sk_buff *skb,
 			     struct ip_options *opt)
 {
-	struct tcp_opt *tp = tcp_sk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
 	__u32 cookie = ntohl(skb->h.th->ack_seq) - 1; 
 	struct sock *ret = sk;
 	struct open_request *req; 
@@ -127,11 +127,11 @@ struct sock *cookie_v4_check(struct sock *sk, struct sk_buff *skb,
 
   	if (time_after(jiffies, tp->last_synq_overflow + TCP_TIMEOUT_INIT) ||
 	    (mss = cookie_check(skb, cookie)) == 0) {
-	 	NET_INC_STATS_BH(SyncookiesFailed);
+	 	NET_INC_STATS_BH(LINUX_MIB_SYNCOOKIESFAILED);
 		goto out;
 	}
 
-	NET_INC_STATS_BH(SyncookiesRecv);
+	NET_INC_STATS_BH(LINUX_MIB_SYNCOOKIESRECV);
 
 	req = tcp_openreq_alloc();
 	ret = NULL;

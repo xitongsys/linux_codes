@@ -25,10 +25,14 @@
 #define FTDI_VID	0x0403	/* Vendor Id */
 #define FTDI_SIO_PID	0x8372	/* Product Id SIO application of 8U100AX  */
 #define FTDI_8U232AM_PID 0x6001 /* Similar device to SIO above */
+#define FTDI_8U232AM_ALT_PID 0x6006 /* FTDI's alternate PID for above */
+#define FTDI_8U2232C_PID 0x6010 /* Dual channel device */
 #define FTDI_RELAIS_PID	0xFA10  /* Relais device from Rudolf Gugler */
 #define FTDI_NF_RIC_VID	0x0DCD	/* Vendor Id */
 #define FTDI_NF_RIC_PID	0x0001	/* Product Id */
 
+/* www.irtrans.de device */
+#define FTDI_IRTRANS_PID 0xFC60 /* Product Id */
 
 /* www.crystalfontz.com devices - thanx for providing free devices for evaluation ! */
 /* they use the ftdi chipset for the USB interface and the vendor id is the same */
@@ -57,6 +61,12 @@
 #define FTDI_MTXORB_4_PID      0xFA04  /* Matrix Orbital Product Id */
 #define FTDI_MTXORB_5_PID      0xFA05  /* Matrix Orbital Product Id */
 #define FTDI_MTXORB_6_PID      0xFA06  /* Matrix Orbital Product Id */
+
+/* Interbiometrics USB I/O Board */
+/* Developed for Interbiometrics by Rudolf Gugler */
+#define INTERBIOMETRICS_VID              0x1209
+#define INTERBIOMETRICS_IOBOARD_PID      0x1002
+#define INTERBIOMETRICS_MINI_IOBOARD_PID 0x1006
 
 /*
  * The following are the values for the Perle Systems
@@ -132,6 +142,9 @@
 /* http://home.earthlink.net/~jrhees/USBUIRT/index.htm */
 #define FTDI_USB_UIRT_PID	0xF850	/* Product Id */
 
+/* ELV USB Module UO100 (PID sent by Stefan Frings) */
+#define FTDI_ELV_UO100_PID	0xFB58	/* Product Id */
+
 /*
  * Definitions for ID TECH (www.idt-net.com) devices
  */
@@ -143,7 +156,95 @@
  */
 #define OCT_VID			0x0B39	/* OCT vendor ID */
 /* Note: OCT US101 is also rebadged as Dick Smith Electronics (NZ) XH6381 */
+/* Also rebadged as SIIG Inc. model US2308 */
 #define OCT_US101_PID		0x0421	/* OCT US101 USB to RS-232 */
+
+/* an infrared receiver for user access control with IR tags */
+#define FTDI_PIEGROUP_PID	0xF208	/* Product Id */
+
+/*
+ * Protego product ids
+ */
+#define PROTEGO_SPECIAL_1	0xFC70	/* special/unknown device */
+#define PROTEGO_R2X0		0xFC71	/* R200-USB TRNG unit (R210, R220, and R230) */
+#define PROTEGO_SPECIAL_3	0xFC72	/* special/unknown device */
+#define PROTEGO_SPECIAL_4	0xFC73	/* special/unknown device */
+
+/*
+ * Gude Analog- und Digitalsysteme GmbH
+ */
+#define FTDI_GUDEADS_E808_PID    0xE808
+#define FTDI_GUDEADS_E809_PID    0xE809
+#define FTDI_GUDEADS_E80A_PID    0xE80A
+#define FTDI_GUDEADS_E80B_PID    0xE80B
+#define FTDI_GUDEADS_E80C_PID    0xE80C
+#define FTDI_GUDEADS_E80D_PID    0xE80D
+#define FTDI_GUDEADS_E80E_PID    0xE80E
+#define FTDI_GUDEADS_E80F_PID    0xE80F
+#define FTDI_GUDEADS_E888_PID    0xE888  /* Expert ISDN Control USB */
+#define FTDI_GUDEADS_E889_PID    0xE889  /* USB RS-232 OptoBridge */
+#define FTDI_GUDEADS_E88A_PID    0xE88A
+#define FTDI_GUDEADS_E88B_PID    0xE88B
+#define FTDI_GUDEADS_E88C_PID    0xE88C
+#define FTDI_GUDEADS_E88D_PID    0xE88D
+#define FTDI_GUDEADS_E88E_PID    0xE88E
+#define FTDI_GUDEADS_E88F_PID    0xE88F
+
+/*
+ * Linx Technologies product ids
+ */
+#define LINX_SDMUSBQSS_PID	0xF448	/* Linx SDM-USB-QS-S */
+#define LINX_MASTERDEVEL2_PID   0xF449   /* Linx Master Development 2.0 */
+#define LINX_FUTURE_0_PID   0xF44A   /* Linx future device */
+#define LINX_FUTURE_1_PID   0xF44B   /* Linx future device */
+#define LINX_FUTURE_2_PID   0xF44C   /* Linx future device */
+
+/* CCS Inc. ICDU/ICDU40 product ID - the FT232BM is used in an in-circuit-debugger */
+/* unit for PIC16's/PIC18's */
+#define FTDI_CCSICDU20_0_PID    0xF9D0     
+#define FTDI_CCSICDU40_1_PID    0xF9D1     
+
+/* Inside Accesso contactless reader (http://www.insidefr.com) */
+#define INSIDE_ACCESSO		0xFAD0
+
+/*
+ * Intrepid Control Systems (http://www.intrepidcs.com/) ValueCAN and NeoVI
+ */
+#define INTREPID_VID		0x093C
+#define INTREPID_VALUECAN_PID	0x0601
+#define INTREPID_NEOVI_PID	0x0701
+
+/*
+ * Falcom Wireless Communications GmbH
+ */
+#define FALCOM_VID		0x0F94	/* Vendor Id */
+#define FALCOM_TWIST_PID	0x0001	/* Falcom Twist USB GPRS modem */
+
+/*
+ * SUUNTO product ids
+ */
+#define FTDI_SUUNTO_SPORTS_PID	0xF680	/* Suunto Sports instrument */
+
+/*
+ * Definitions for B&B Electronics products.
+ */
+#define BANDB_VID		0x0856	/* B&B Electronics Vendor ID */
+#define BANDB_USOTL4_PID	0xAC01	/* USOTL4 Isolated RS-485 Converter */
+#define BANDB_USTL4_PID		0xAC02	/* USTL4 RS-485 Converter */
+#define BANDB_USO9ML2_PID	0xAC03	/* USO9ML2 Isolated RS-232 Converter */
+
+/*
+ * RM Michaelides CANview USB (http://www.rmcan.com)
+ * CAN filedbus interface adapter, addad by port GmbH www.port.de)
+ */
+#define FTDI_RM_VID		0x0403	/* Vendor  Id */
+#define FTDI_RMCANVIEW_PID	0xfd60	/* Product Id */
+
+/*
+ * EVER Eco Pro UPS (http://www.ever.com.pl/)
+ */
+
+#define	EVER_ECO_PRO_CDS	0xe520	/* RS-232 converter */
 
 /* Commands */
 #define FTDI_SIO_RESET 		0 /* Reset the port */
@@ -154,6 +255,23 @@
 #define FTDI_SIO_GET_MODEM_STATUS	5 /* Retrieve current value of modern status register */
 #define FTDI_SIO_SET_EVENT_CHAR	6 /* Set the event character */
 #define FTDI_SIO_SET_ERROR_CHAR	7 /* Set the error character */
+#define FTDI_SIO_SET_LATENCY_TIMER	9 /* Set the latency timer */
+#define FTDI_SIO_GET_LATENCY_TIMER	10 /* Get the latency timer */
+
+/* Port interface code for FT2232C */
+#define INTERFACE_A		1
+#define INTERFACE_B		2
+
+
+/*
+ *   BmRequestType:  1100 0000b
+ *   bRequest:       FTDI_E2_READ
+ *   wValue:         0
+ *   wIndex:         Address of word to read
+ *   wLength:        2
+ *   Data:           Will return a word of data from E2Address
+ *
+ */
 
 /* Port Identifier Table */
 #define PIT_DEFAULT 		0 /* SIOA */
@@ -254,6 +372,7 @@ typedef enum {
 	SIO = 1,
 	FT8U232AM = 2,
 	FT232BM = 3,
+	FT2232C = 4,
 } ftdi_chip_type_t;
 
 typedef enum {
@@ -391,6 +510,55 @@ typedef enum {
  * and the lValue field contains the XON character.
  */  
  
+/*
+ * FTDI_SIO_GET_LATENCY_TIMER
+ *
+ * Set the timeout interval. The FTDI collects data from the slave
+ * device, transmitting it to the host when either A) 62 bytes are
+ * received, or B) the timeout interval has elapsed and the buffer
+ * contains at least 1 byte.  Setting this value to a small number
+ * can dramatically improve performance for applications which send
+ * small packets, since the default value is 16ms.
+ */
+#define  FTDI_SIO_GET_LATENCY_TIMER_REQUEST FTDI_SIO_GET_LATENCY_TIMER
+#define  FTDI_SIO_GET_LATENCY_TIMER_REQUEST_TYPE 0xC0
+
+/* 
+ *  BmRequestType:   1100 0000b
+ *  bRequest:        FTDI_SIO_GET_LATENCY_TIMER
+ *  wValue:          0
+ *  wIndex:          Port
+ *  wLength:         0
+ *  Data:            latency (on return)
+ */
+
+/* 
+ * FTDI_SIO_SET_LATENCY_TIMER
+ *
+ * Set the timeout interval. The FTDI collects data from the slave
+ * device, transmitting it to the host when either A) 62 bytes are
+ * received, or B) the timeout interval has elapsed and the buffer
+ * contains at least 1 byte.  Setting this value to a small number
+ * can dramatically improve performance for applications which send
+ * small packets, since the default value is 16ms.
+ */
+#define  FTDI_SIO_SET_LATENCY_TIMER_REQUEST FTDI_SIO_SET_LATENCY_TIMER
+#define  FTDI_SIO_SET_LATENCY_TIMER_REQUEST_TYPE 0x40
+
+/* 
+ *  BmRequestType:   0100 0000b
+ *  bRequest:        FTDI_SIO_SET_LATENCY_TIMER
+ *  wValue:          Latency (milliseconds)
+ *  wIndex:          Port
+ *  wLength:         0
+ *  Data:            None
+ *
+ * wValue:
+ *   B0..7   Latency timer
+ *   B8..15  0
+ *
+ */
+
 /*
  * FTDI_SIO_SET_EVENT_CHAR 
  *

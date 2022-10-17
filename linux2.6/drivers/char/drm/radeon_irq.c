@@ -27,10 +27,9 @@
  *
  * Authors:
  *    Keith Whitwell <keith@tungstengraphics.com>
- *    Michel Dänzer <michel@daenzer.net>
+ *    Michel Dï¿½zer <michel@daenzer.net>
  */
 
-#include "radeon.h"
 #include "drmP.h"
 #include "drm.h"
 #include "radeon_drm.h"
@@ -54,7 +53,7 @@
  * tied to dma at all, this is just a hangover from dri prehistory.
  */
 
-irqreturn_t DRM(dma_service)( DRM_IRQ_ARGS )
+irqreturn_t radeon_driver_irq_handler( DRM_IRQ_ARGS )
 {
 	drm_device_t *dev = (drm_device_t *) arg;
 	drm_radeon_private_t *dev_priv = 
@@ -78,7 +77,7 @@ irqreturn_t DRM(dma_service)( DRM_IRQ_ARGS )
 	if (stat & RADEON_CRTC_VBLANK_STAT) {
 		atomic_inc(&dev->vbl_received);
 		DRM_WAKEUP(&dev->vbl_queue);
-		DRM(vbl_send_signals)( dev );
+		drm_vbl_send_signals( dev );
 	}
 
 	/* Acknowledge interrupts we handle */
@@ -141,7 +140,7 @@ int radeon_emit_and_wait_irq(drm_device_t *dev)
 }
 
 
-int DRM(vblank_wait)(drm_device_t *dev, unsigned int *sequence)
+int radeon_driver_vblank_wait(drm_device_t *dev, unsigned int *sequence)
 {
   	drm_radeon_private_t *dev_priv = 
 	   (drm_radeon_private_t *)dev->dev_private;
@@ -187,7 +186,7 @@ int radeon_irq_emit( DRM_IOCTL_ARGS )
 		return DRM_ERR(EINVAL);
 	}
 
-	DRM_COPY_FROM_USER_IOCTL( emit, (drm_radeon_irq_emit_t *)data,
+	DRM_COPY_FROM_USER_IOCTL( emit, (drm_radeon_irq_emit_t __user *)data,
 				  sizeof(emit) );
 
 	result = radeon_emit_irq( dev );
@@ -214,7 +213,7 @@ int radeon_irq_wait( DRM_IOCTL_ARGS )
 		return DRM_ERR(EINVAL);
 	}
 
-	DRM_COPY_FROM_USER_IOCTL( irqwait, (drm_radeon_irq_wait_t *)data,
+	DRM_COPY_FROM_USER_IOCTL( irqwait, (drm_radeon_irq_wait_t __user*)data,
 				  sizeof(irqwait) );
 
 	return radeon_wait_irq( dev, irqwait.irq_seq );
@@ -223,7 +222,7 @@ int radeon_irq_wait( DRM_IOCTL_ARGS )
 
 /* drm_dma.h hooks
 */
-void DRM(driver_irq_preinstall)( drm_device_t *dev ) {
+void radeon_driver_irq_preinstall( drm_device_t *dev ) {
 	drm_radeon_private_t *dev_priv =
 		(drm_radeon_private_t *)dev->dev_private;
 
@@ -234,7 +233,7 @@ void DRM(driver_irq_preinstall)( drm_device_t *dev ) {
 	radeon_acknowledge_irqs( dev_priv );
 }
 
-void DRM(driver_irq_postinstall)( drm_device_t *dev ) {
+void radeon_driver_irq_postinstall( drm_device_t *dev ) {
 	drm_radeon_private_t *dev_priv =
 		(drm_radeon_private_t *)dev->dev_private;
 
@@ -247,7 +246,7 @@ void DRM(driver_irq_postinstall)( drm_device_t *dev ) {
 		      RADEON_SW_INT_ENABLE );
 }
 
-void DRM(driver_irq_uninstall)( drm_device_t *dev ) {
+void radeon_driver_irq_uninstall( drm_device_t *dev ) {
 	drm_radeon_private_t *dev_priv =
 		(drm_radeon_private_t *)dev->dev_private;
 	if (!dev_priv)

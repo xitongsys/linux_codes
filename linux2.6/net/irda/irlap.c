@@ -37,6 +37,7 @@
 #include <linux/proc_fs.h>
 #include <linux/init.h>
 #include <linux/random.h>
+#include <linux/module.h>
 #include <linux/seq_file.h>
 
 #include <net/irda/irda.h>
@@ -59,6 +60,8 @@ int sysctl_warn_noreply_time = 3;
 
 extern void irlap_queue_xmit(struct irlap_cb *self, struct sk_buff *skb);
 static void __irlap_close(struct irlap_cb *self);
+static void irlap_init_qos_capabilities(struct irlap_cb *self,
+					struct qos_info *qos_user);
 
 #ifdef CONFIG_IRDA_DEBUG
 static char *lap_reasons[] = {
@@ -173,6 +176,7 @@ struct irlap_cb *irlap_open(struct net_device *dev, struct qos_info *qos,
 
 	return self;
 }
+EXPORT_SYMBOL(irlap_open);
 
 /*
  * Function __irlap_close (self)
@@ -233,6 +237,7 @@ void irlap_close(struct irlap_cb *self)
 	}
 	__irlap_close(lap);
 }
+EXPORT_SYMBOL(irlap_close);
 
 /*
  * Function irlap_connect_indication (self, skb)
@@ -864,7 +869,7 @@ void irlap_flush_all_queues(struct irlap_cb *self)
  *    Change the speed of the IrDA port
  *
  */
-void irlap_change_speed(struct irlap_cb *self, __u32 speed, int now)
+static void irlap_change_speed(struct irlap_cb *self, __u32 speed, int now)
 {
 	struct sk_buff *skb;
 
@@ -891,8 +896,8 @@ void irlap_change_speed(struct irlap_cb *self, __u32 speed, int now)
  *    IrLAP itself. Normally, IrLAP will not specify any values, but it can
  *    be used to restrict certain values.
  */
-void irlap_init_qos_capabilities(struct irlap_cb *self,
-				 struct qos_info *qos_user)
+static void irlap_init_qos_capabilities(struct irlap_cb *self,
+					struct qos_info *qos_user)
 {
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == LAP_MAGIC, return;);

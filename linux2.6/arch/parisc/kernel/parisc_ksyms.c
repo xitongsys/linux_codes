@@ -1,15 +1,37 @@
 /*
- * Architecture-specific kernel symbols
+ *    Architecture-specific kernel symbols
+ *
+ *    Copyright (C) 2000-2001 Richard Hirst <rhirst with parisc-linux.org>
+ *    Copyright (C) 2001 Dave Kennedy
+ *    Copyright (C) 2001 Paul Bame <bame at parisc-linux.org>
+ *    Copyright (C) 2001-2003 Grant Grundler <grundler with parisc-linux.org>
+ *    Copyright (C) 2002-2003 Matthew Wilcox <willy at parisc-linux.org>
+ *    Copyright (C) 2002 Randolph Chung <tausq at parisc-linux.org>
+ *    Copyright (C) 2002-2003 Helge Deller <deller with parisc-linux.org>
+ * 
+ *    This program is free software; you can redistribute it and/or modify
+ *    it under the terms of the GNU General Public License as published by
+ *    the Free Software Foundation; either version 2 of the License, or
+ *    (at your option) any later version.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU General Public License for more details.
+ *
+ *    You should have received a copy of the GNU General Public License
+ *    along with this program; if not, write to the Free Software
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/syscalls.h>
 
 #include <linux/string.h>
 EXPORT_SYMBOL(memchr);
 EXPORT_SYMBOL(memcmp);
-EXPORT_SYMBOL(memcpy);
 EXPORT_SYMBOL(memmove);
 EXPORT_SYMBOL(memscan);
 EXPORT_SYMBOL(memset);
@@ -25,10 +47,6 @@ EXPORT_SYMBOL(strnlen);
 EXPORT_SYMBOL(strrchr);
 EXPORT_SYMBOL(strstr);
 EXPORT_SYMBOL(strpbrk);
-
-#include <asm/processor.h>
-EXPORT_SYMBOL(kernel_thread);
-EXPORT_SYMBOL(boot_cpu_data);
 
 #include <linux/pm.h>
 EXPORT_SYMBOL(pm_power_off);
@@ -46,10 +64,19 @@ EXPORT_SYMBOL(__cmpxchg_u64);
 #endif
 
 #include <asm/uaccess.h>
-EXPORT_SYMBOL(lcopy_to_user);
-EXPORT_SYMBOL(lcopy_from_user);
-EXPORT_SYMBOL(lstrnlen_user);
+EXPORT_SYMBOL(lstrncpy_from_user);
 EXPORT_SYMBOL(lclear_user);
+EXPORT_SYMBOL(lstrnlen_user);
+
+/* Global fixups */
+extern void fixup_get_user_skip_1(void);
+extern void fixup_get_user_skip_2(void);
+extern void fixup_put_user_skip_1(void);
+extern void fixup_put_user_skip_2(void);
+EXPORT_SYMBOL(fixup_get_user_skip_1);
+EXPORT_SYMBOL(fixup_get_user_skip_2);
+EXPORT_SYMBOL(fixup_put_user_skip_1);
+EXPORT_SYMBOL(fixup_put_user_skip_2);
 
 #ifndef __LP64__
 /* Needed so insmod can set dp value */
@@ -60,24 +87,11 @@ EXPORT_SYMBOL($global$);
 #include <asm/io.h>
 EXPORT_SYMBOL(__ioremap);
 EXPORT_SYMBOL(iounmap);
-EXPORT_SYMBOL(__memcpy_toio);
-EXPORT_SYMBOL(__memcpy_fromio);
-EXPORT_SYMBOL(__memset_io);
-
-#include <asm/cache.h>
-EXPORT_SYMBOL(flush_kernel_dcache_range_asm);
-EXPORT_SYMBOL(flush_kernel_dcache_page);
-EXPORT_SYMBOL(flush_data_cache_local);
-EXPORT_SYMBOL(flush_kernel_icache_range_asm);
-EXPORT_SYMBOL(flush_all_caches);
-EXPORT_SYMBOL(dcache_stride);
-EXPORT_SYMBOL(flush_cache_all_local);
+EXPORT_SYMBOL(memcpy_toio);
+EXPORT_SYMBOL(memcpy_fromio);
+EXPORT_SYMBOL(memset_io);
 
 #include <asm/unistd.h>
-extern long sys_open(const char *, int, int);
-extern off_t sys_lseek(int, off_t, int);
-extern int sys_read(int, char *, int);
-extern int sys_write(int, const char *, int);
 EXPORT_SYMBOL(sys_open);
 EXPORT_SYMBOL(sys_lseek);
 EXPORT_SYMBOL(sys_read);
@@ -164,4 +178,10 @@ EXPORT_SYMBOL(__moddi3);
 #ifndef __LP64__
 extern void $$dyncall(void);
 EXPORT_SYMBOL($$dyncall);
+#endif
+
+#ifdef CONFIG_DISCONTIGMEM
+#include <asm/mmzone.h>
+EXPORT_SYMBOL(node_data);
+EXPORT_SYMBOL(pfnnid_map);
 #endif

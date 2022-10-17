@@ -28,8 +28,7 @@
 struct auth_cred {
 	uid_t	uid;
 	gid_t	gid;
-	int	ngroups;
-	gid_t	*groups;
+	struct group_info *group_info;
 };
 
 /*
@@ -52,7 +51,6 @@ struct rpc_cred {
 };
 #define RPCAUTH_CRED_LOCKED	0x0001
 #define RPCAUTH_CRED_UPTODATE	0x0002
-#define RPCAUTH_CRED_DEAD	0x0004
 
 #define RPCAUTH_CRED_MAGIC	0x0f4aa4f0
 
@@ -73,6 +71,7 @@ struct rpc_auth {
 						 * differ from the flavor in
 						 * au_ops->au_flavor in gss
 						 * case) */
+	atomic_t		au_count;	/* Reference counter */
 
 	/* per-flavor data */
 };
@@ -102,6 +101,10 @@ struct rpc_credops {
 	u32 *			(*crmarshal)(struct rpc_task *, u32 *, int);
 	int			(*crrefresh)(struct rpc_task *);
 	u32 *			(*crvalidate)(struct rpc_task *, u32 *);
+	int			(*crwrap_req)(struct rpc_task *, kxdrproc_t,
+						void *, u32 *, void *);
+	int			(*crunwrap_resp)(struct rpc_task *, kxdrproc_t,
+						void *, u32 *, void *);
 };
 
 extern struct rpc_authops	authunix_ops;
@@ -109,8 +112,6 @@ extern struct rpc_authops	authnull_ops;
 #ifdef CONFIG_SUNRPC_SECURE
 extern struct rpc_authops	authdes_ops;
 #endif
-
-u32			pseudoflavor_to_flavor(rpc_authflavor_t);
 
 int			rpcauth_register(struct rpc_authops *);
 int			rpcauth_unregister(struct rpc_authops *);
@@ -124,10 +125,11 @@ void			put_rpccred(struct rpc_cred *);
 void			rpcauth_unbindcred(struct rpc_task *);
 u32 *			rpcauth_marshcred(struct rpc_task *, u32 *);
 u32 *			rpcauth_checkverf(struct rpc_task *, u32 *);
+int			rpcauth_wrap_req(struct rpc_task *task, kxdrproc_t encode, void *rqstp, u32 *data, void *obj);
+int			rpcauth_unwrap_resp(struct rpc_task *task, kxdrproc_t decode, void *rqstp, u32 *data, void *obj);
 int			rpcauth_refreshcred(struct rpc_task *);
 void			rpcauth_invalcred(struct rpc_task *);
 int			rpcauth_uptodatecred(struct rpc_task *);
-int			rpcauth_deadcred(struct rpc_task *);
 void			rpcauth_init_credcache(struct rpc_auth *);
 void			rpcauth_free_credcache(struct rpc_auth *);
 

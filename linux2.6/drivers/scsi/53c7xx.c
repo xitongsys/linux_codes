@@ -280,7 +280,7 @@
 #endif
 
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 #include "53c7xx.h"
 #include <linux/stat.h>
 #include <linux/stddef.h>
@@ -1102,8 +1102,8 @@ NCR53c7x0_init (struct Scsi_Host *host) {
 }
 
 /* 
- * Function : static int ncr53c7xx_init(Scsi_Host_Template *tpnt, int board, 
- *	int chip, u32 base, int io_port, int irq, int dma, long long options,
+ * Function : int ncr53c7xx_init(Scsi_Host_Template *tpnt, int board, int chip,
+ *	unsigned long base, int io_port, int irq, int dma, long long options,
  *	int clock);
  *
  * Purpose : initializes a NCR53c7,8x0 based on base addresses,

@@ -1,6 +1,6 @@
 /*
  *  ALSA sequencer Client Manager
- *  Copyright (c) 1998-2001 by Frank van de Pol <fvdpol@home.nl>
+ *  Copyright (c) 1998-2001 by Frank van de Pol <fvdpol@coil.demon.nl>
  *                             Jaroslav Kysela <perex@suse.cz>
  *                             Takashi Iwai <tiwai@suse.de>
  *
@@ -23,6 +23,7 @@
 
 #include <sound/driver.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 #include <linux/slab.h>
 #include <sound/core.h>
 #include <sound/minors.h>
@@ -137,7 +138,7 @@ client_t *snd_seq_client_use_ptr(int clientid)
 		if (clientid < 64) {
 			int idx;
 			
-			if (! client_requested[clientid]) {
+			if (! client_requested[clientid] && current->fs->root) {
 				client_requested[clientid] = 1;
 				for (idx = 0; idx < 64; idx++) {
 					if (seq_client_load[idx] < 0)
@@ -202,7 +203,7 @@ static client_t *seq_create_client1(int client_index, int poolsize)
 	client_t *client;
 
 	/* init client data */
-	client = snd_kcalloc(sizeof(client_t), GFP_KERNEL);
+	client = kcalloc(1, sizeof(*client), GFP_KERNEL);
 	if (client == NULL)
 		return NULL;
 	client->pool = snd_seq_pool_new(poolsize);
@@ -328,7 +329,7 @@ static int snd_seq_open(struct inode *inode, struct file *file)
 	up(&register_mutex);
 
 	c = client->number;
-	(user_client_t *) file->private_data = client;
+	file->private_data = client;
 
 	/* fill client data */
 	user->file = file;
@@ -419,7 +420,10 @@ static ssize_t snd_seq_read(struct file *file, char __user *buf, size_t count, l
 			count -= err;
 			buf += err;
 		} else {
-			copy_to_user(buf, &cell->event, sizeof(snd_seq_event_t));
+			if (copy_to_user(buf, &cell->event, sizeof(snd_seq_event_t))) {
+				err = -EFAULT;
+				break;
+			}
 			count -= sizeof(snd_seq_event_t);
 			buf += sizeof(snd_seq_event_t);
 		}
@@ -560,7 +564,7 @@ static int snd_seq_deliver_single_event(client_t *client,
 	client_t *dest = NULL;
 	client_port_t *dest_port = NULL;
 	int result = -ENOENT;
-	int direct, quoted = 0;
+	int direct;
 
 	direct = snd_seq_ev_is_direct(event);
 
@@ -580,17 +584,6 @@ static int snd_seq_deliver_single_event(client_t *client,
 	if (dest_port->timestamping)
 		update_timestamp_of_queue(event, dest_port->time_queue,
 					  dest_port->time_real);
-
-	/* expand the quoted event */
-	if (event->type == SNDRV_SEQ_EVENT_KERNEL_QUOTE) {
-		quoted = 1;
-		event = event->data.quote.event;
-		if (event == NULL) {
-			snd_printd("seq: quoted event is NULL\n");
-			result = 0; /* do not send bounce error */
-			goto __skip;
-		}
-	}
 
 	switch (dest->type) {
 	case USER_CLIENT:
@@ -614,14 +607,7 @@ static int snd_seq_deliver_single_event(client_t *client,
 		snd_seq_client_unlock(dest);
 
 	if (result < 0 && !direct) {
-		if (quoted) {
-			/* return directly to the original source */
-			dest = snd_seq_client_use_ptr(event->source.client);
-			result = bounce_error_event(dest, event, result, atomic, hop);
-			snd_seq_client_unlock(dest);
-		} else {
-			result = bounce_error_event(client, event, result, atomic, hop);
-		}
+		result = bounce_error_event(client, event, result, atomic, hop);
 	}
 	return result;
 }
@@ -694,8 +680,8 @@ static int port_broadcast_event(client_t *client,
 	if (dest_client == NULL)
 		return 0; /* no matching destination */
 
-	read_lock(&client->ports_lock);
-	list_for_each(p, &client->ports_list_head) {
+	read_lock(&dest_client->ports_lock);
+	list_for_each(p, &dest_client->ports_list_head) {
 		client_port_t *port = list_entry(p, client_port_t, list);
 		event->dest.port = port->addr.port;
 		/* pass NULL as source client to avoid error bounce */
@@ -706,7 +692,7 @@ static int port_broadcast_event(client_t *client,
 			break;
 		num_ev++;
 	}
-	read_unlock(&client->ports_lock);
+	read_unlock(&dest_client->ports_lock);
 	snd_seq_client_unlock(dest_client);
 	event->dest.port = SNDRV_SEQ_ADDRESS_BROADCAST; /* restore */
 	return (err < 0) ? err : num_ev;
@@ -765,8 +751,8 @@ static int multicast_event(client_t *client, snd_seq_event_t *event,
  *               n == 0 : the event was not passed to any client.
  *               n < 0  : error - event was not processed.
  */
-int snd_seq_deliver_event(client_t *client, snd_seq_event_t *event,
-			  int atomic, int hop)
+static int snd_seq_deliver_event(client_t *client, snd_seq_event_t *event,
+				 int atomic, int hop)
 {
 	int result;
 
@@ -918,7 +904,7 @@ static int snd_seq_client_enqueue_event(client_t *client,
 		return -ENXIO; /* queue is not allocated */
 
 	/* allocate an event cell */
-	err = snd_seq_event_dup(client->pool, event, &cell, !blocking && !atomic, file);
+	err = snd_seq_event_dup(client->pool, event, &cell, !blocking || atomic, file);
 	if (err < 0)
 		return err;
 
@@ -1028,7 +1014,7 @@ static ssize_t snd_seq_write(struct file *file, const char __user *buf, size_t c
 		} else {
 #if defined(CONFIG_SND_BIT32_EMUL) || defined(CONFIG_SND_BIT32_EMUL_MODULE)
 			if (client->convert32 && snd_seq_ev_is_varusr(&event)) {
-				void *ptr = (void*)A(event.data.raw32.d[1]);
+				void *ptr = compat_ptr(event.data.raw32.d[1]);
 				event.data.ext.ptr = ptr;
 			}
 #endif
@@ -1667,6 +1653,13 @@ static int snd_seq_ioctl_get_queue_tempo(client_t * client, void __user *arg)
 
 
 /* SET_QUEUE_TEMPO ioctl() */
+int snd_seq_set_queue_tempo(int client, snd_seq_queue_tempo_t *tempo)
+{
+	if (!snd_seq_queue_check_access(tempo->queue, client))
+		return -EPERM;
+	return snd_seq_queue_timer_set_tempo(tempo->queue, client, tempo);
+}
+
 static int snd_seq_ioctl_set_queue_tempo(client_t * client, void __user *arg)
 {
 	int result;
@@ -1675,15 +1668,8 @@ static int snd_seq_ioctl_set_queue_tempo(client_t * client, void __user *arg)
 	if (copy_from_user(&tempo, arg, sizeof(tempo)))
 		return -EFAULT;
 
-	if (snd_seq_queue_check_access(tempo.queue, client->number)) {
-		result = snd_seq_queue_timer_set_tempo(tempo.queue, client->number, &tempo);
-		if (result < 0)
-			return result;
-	} else {
-		return -EPERM;
-	}	
-
-	return 0;
+	result = snd_seq_set_queue_tempo(client->number, &tempo);
+	return result < 0 ? result : 0;
 }
 
 
@@ -2127,17 +2113,17 @@ static int snd_seq_do_ioctl(client_t *client, unsigned int cmd, void __user *arg
 	switch (cmd) {
 	case SNDRV_SEQ_IOCTL_PVERSION:
 		/* return sequencer version number */
-		return put_user(SNDRV_SEQ_VERSION, (int *)arg) ? -EFAULT : 0;
+		return put_user(SNDRV_SEQ_VERSION, (int __user *)arg) ? -EFAULT : 0;
 	case SNDRV_SEQ_IOCTL_CLIENT_ID:
 		/* return the id of this client */
-		return put_user(client->number, (int *)arg) ? -EFAULT : 0;
+		return put_user(client->number, (int __user *)arg) ? -EFAULT : 0;
 	}
 
 	if (! arg)
 		return -EFAULT;
 	for (p = ioctl_tables; p->cmd; p++) {
 		if (p->cmd == cmd)
-			return p->func(client, (void __user *) arg);
+			return p->func(client, arg);
 	}
 	snd_printd("seq unknown ioctl() 0x%x (type='%c', number=0x%2x)\n",
 		   cmd, _IOC_TYPE(cmd), _IOC_NR(cmd));
@@ -2149,10 +2135,15 @@ static int snd_seq_ioctl(struct inode *inode, struct file *file,
 			 unsigned int cmd, unsigned long arg)
 {
 	client_t *client = (client_t *) file->private_data;
+	int err;
 
 	snd_assert(client != NULL, return -ENXIO);
 		
-	return snd_seq_do_ioctl(client, cmd, (void __user *) arg);
+	/* FIXME: need to unlock BKL to allow preemption */
+	unlock_kernel();
+	err = snd_seq_do_ioctl(client, cmd, (void __user *) arg);
+	lock_kernel();
+	return err;
 }
 
 
@@ -2234,8 +2225,7 @@ static int kernel_client_enqueue(int client, snd_seq_event_t *ev,
 
 	if (ev->type == SNDRV_SEQ_EVENT_NONE)
 		return 0; /* ignore this */
-	if (ev->type == SNDRV_SEQ_EVENT_KERNEL_ERROR ||
-	    ev->type == SNDRV_SEQ_EVENT_KERNEL_QUOTE)
+	if (ev->type == SNDRV_SEQ_EVENT_KERNEL_ERROR)
 		return -EINVAL; /* quoted events can't be enqueued */
 
 	/* fill in client number */
@@ -2321,7 +2311,7 @@ int snd_seq_kernel_client_dispatch(int client, snd_seq_event_t * ev,
  * exported, called by kernel clients to perform same functions as with
  * userland ioctl() 
  */
-int snd_seq_kernel_client_ctl(int clientid, unsigned int cmd, void __user *arg)
+int snd_seq_kernel_client_ctl(int clientid, unsigned int cmd, void *arg)
 {
 	client_t *client;
 	mm_segment_t fs;

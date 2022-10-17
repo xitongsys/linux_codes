@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -165,6 +165,11 @@ struct multiple_apic_table
 	u8                              type; \
 	u8                              length;
 
+struct apic_header
+{
+	APIC_HEADER_DEF
+};
+
 /* Values for MPS INTI flags */
 
 #define POLARITY_CONFORMS       0
@@ -236,7 +241,7 @@ struct madt_address_override
 {
 	APIC_HEADER_DEF
 	u16                             reserved;               /* Reserved - must be zero */
-	u32                             address;                /* APIC physical address */
+	u64                             address;                /* APIC physical address */
 };
 
 struct madt_io_sapic
@@ -283,19 +288,6 @@ struct smart_battery_table
 };
 
 
-/*
- * High performance timer
- */
-struct hpet_table
-{
-	ACPI_TABLE_HEADER_DEF
-	u32                             hardware_id;
-	u32                             base_address [3];
-	u8                              hpet_number;
-	u16                             clock_tick;
-	u8                              attributes;
-};
-
 #pragma pack()
 
 
@@ -338,5 +330,23 @@ struct acpi_table_support
 #include "actbl1.h"   /* Acpi 1.0 table definitions */
 #include "actbl2.h"   /* Acpi 2.0 table definitions */
 
+extern u8 acpi_fadt_is_v1; /* is set to 1 if FADT is revision 1,
+			    * needed for certain workarounds */
+
+#pragma pack(1)
+/*
+ * High performance timer
+ */
+struct hpet_table
+{
+	ACPI_TABLE_HEADER_DEF
+	u32                             hardware_id;
+	struct acpi_generic_address     base_address;
+	u8                              hpet_number;
+	u16                             clock_tick;
+	u8                              attributes;
+};
+
+#pragma pack()
 
 #endif /* __ACTBL_H__ */

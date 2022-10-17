@@ -1531,7 +1531,7 @@ xlog_recover_reorder_trans(
 	xlog_recover_item_t	*first_item, *itemq, *itemq_next;
 	xfs_buf_log_format_t	*buf_f;
 	xfs_buf_log_format_v1_t	*obuf_f;
-	ushort			flags;
+	ushort			flags = 0;
 
 	first_item = itemq = trans->r_itemq;
 	trans->r_itemq = NULL;
@@ -1553,7 +1553,7 @@ xlog_recover_reorder_trans(
 		case XFS_LI_BUF:
 		case XFS_LI_6_1_BUF:
 		case XFS_LI_5_3_BUF:
-			if ((!flags & XFS_BLI_CANCEL)) {
+			if (!(flags & XFS_BLI_CANCEL)) {
 				xlog_recover_insert_item_frontq(&trans->r_itemq,
 								itemq);
 				break;
@@ -1867,6 +1867,7 @@ xlog_recover_do_inode_buffer(
 
 			nbits = xfs_contig_bits(data_map, map_size,
 							 bit);
+			ASSERT(nbits > 0);
 			reg_buf_offset = bit << XFS_BLI_SHIFT;
 			reg_buf_bytes = nbits << XFS_BLI_SHIFT;
 			item_index++;
@@ -1951,6 +1952,7 @@ xlog_recover_do_reg_buffer(
 		if (bit == -1)
 			break;
 		nbits = xfs_contig_bits(data_map, map_size, bit);
+		ASSERT(nbits > 0);
 		ASSERT(item->ri_buf[i].i_addr != 0);
 		ASSERT(item->ri_buf[i].i_len % XFS_BLI_CHUNK == 0);
 		ASSERT(XFS_BUF_COUNT(bp) >=
@@ -2045,12 +2047,11 @@ xfs_qm_dqcheck(
 		errs++;
 	}
 
-	if (! errs) {
+	if (! errs && !INT_ISZERO(ddq->d_id, ARCH_CONVERT)) {
 		if (INT_GET(ddq->d_blk_softlimit, ARCH_CONVERT) &&
 		    INT_GET(ddq->d_bcount, ARCH_CONVERT) >=
 				INT_GET(ddq->d_blk_softlimit, ARCH_CONVERT)) {
-			if (INT_ISZERO(ddq->d_btimer, ARCH_CONVERT) &&
-			    !INT_ISZERO(ddq->d_id, ARCH_CONVERT)) {
+			if (INT_ISZERO(ddq->d_btimer, ARCH_CONVERT)) {
 				if (flags & XFS_QMOPT_DOWARN)
 					cmn_err(CE_ALERT,
 					"%s : Dquot ID 0x%x (0x%p) "
@@ -2063,12 +2064,24 @@ xfs_qm_dqcheck(
 		if (INT_GET(ddq->d_ino_softlimit, ARCH_CONVERT) &&
 		    INT_GET(ddq->d_icount, ARCH_CONVERT) >=
 				INT_GET(ddq->d_ino_softlimit, ARCH_CONVERT)) {
-			if (INT_ISZERO(ddq->d_itimer, ARCH_CONVERT) &&
-			    !INT_ISZERO(ddq->d_id, ARCH_CONVERT)) {
+			if (INT_ISZERO(ddq->d_itimer, ARCH_CONVERT)) {
 				if (flags & XFS_QMOPT_DOWARN)
 					cmn_err(CE_ALERT,
 					"%s : Dquot ID 0x%x (0x%p) "
 					"INODE TIMER NOT STARTED",
+					str, (int)
+					INT_GET(ddq->d_id, ARCH_CONVERT), ddq);
+				errs++;
+			}
+		}
+		if (INT_GET(ddq->d_rtb_softlimit, ARCH_CONVERT) &&
+		    INT_GET(ddq->d_rtbcount, ARCH_CONVERT) >=
+				INT_GET(ddq->d_rtb_softlimit, ARCH_CONVERT)) {
+			if (INT_ISZERO(ddq->d_rtbtimer, ARCH_CONVERT)) {
+				if (flags & XFS_QMOPT_DOWARN)
+					cmn_err(CE_ALERT,
+					"%s : Dquot ID 0x%x (0x%p) "
+					"RTBLK TIMER NOT STARTED",
 					str, (int)
 					INT_GET(ddq->d_id, ARCH_CONVERT), ddq);
 				errs++;
@@ -2317,7 +2330,7 @@ xlog_recover_do_inode_trans(
 		 * invalidate the buffer when we write it out below.
 		 */
 		imap.im_blkno = 0;
-		xfs_imap(log->l_mp, 0, ino, &imap, 0);
+		xfs_imap(log->l_mp, NULL, ino, &imap, 0);
 	}
 
 	/*
@@ -3249,7 +3262,7 @@ xlog_recover_process_iunlinks(
 				xfs_buf_relse(agibp);
 
 				ino = XFS_AGINO_TO_INO(mp, agno, agino);
-				error = xfs_iget(mp, NULL, ino, 0, &ip, 0);
+				error = xfs_iget(mp, NULL, ino, 0, 0, &ip, 0);
 				ASSERT(error || (ip != NULL));
 
 				if (!error) {
@@ -3371,10 +3384,11 @@ xlog_pack_data_checksum(
 void
 xlog_pack_data(
 	xlog_t			*log,
-	xlog_in_core_t		*iclog)
+	xlog_in_core_t		*iclog,
+	int			roundoff)
 {
 	int			i, j, k;
-	int			size = iclog->ic_offset + iclog->ic_roundoff;
+	int			size = iclog->ic_offset + roundoff;
 	uint			cycle_lsn;
 	xfs_caddr_t		dp;
 	xlog_in_core_2_t	*xhdr;
@@ -3416,6 +3430,7 @@ xlog_unpack_data_checksum(
 {
 	uint			*up = (uint *)dp;
 	uint			chksum = 0;
+	int			i;
 
 	/* divide length by 4 to get # words */
 	for (i=0; i < INT_GET(rhead->h_len, ARCH_CONVERT) >> 2; i++) {
@@ -3476,7 +3491,7 @@ xlog_valid_rec_header(
 	xlog_rec_header_t	*rhead,
 	xfs_daddr_t		blkno)
 {
-	int			bblks;
+	int			hlen;
 
 	if (unlikely(
 	    (INT_GET(rhead->h_magicno, ARCH_CONVERT) !=
@@ -3495,8 +3510,8 @@ xlog_valid_rec_header(
 	}
 
 	/* LR body must have data or it wouldn't have been written */
-	bblks = INT_GET(rhead->h_len, ARCH_CONVERT);
-	if (unlikely( bblks <= 0 || bblks > INT_MAX )) {
+	hlen = INT_GET(rhead->h_len, ARCH_CONVERT);
+	if (unlikely( hlen <= 0 || hlen > INT_MAX )) {
 		XFS_ERROR_REPORT("xlog_valid_rec_header(2)",
 				XFS_ERRLEVEL_LOW, log->l_mp);
 		return XFS_ERROR(EFSCORRUPTED);
@@ -3658,7 +3673,7 @@ xlog_do_recovery_pass(
 				error = xlog_bread(log, 0, wrapped_hblks, hbp);
 				if (error)
 					goto bread_err2;
-				XFS_BUF_SET_PTR(hbp, bufaddr, hblks);
+				XFS_BUF_SET_PTR(hbp, bufaddr, BBTOB(hblks));
 				if (!offset)
 					offset = xlog_align(log, 0,
 							wrapped_hblks, hbp);
@@ -3716,8 +3731,7 @@ xlog_do_recovery_pass(
 				if ((error = xlog_bread(log, wrapped_hblks,
 						bblks - split_bblks, dbp)))
 					goto bread_err2;
-				XFS_BUF_SET_PTR(dbp, bufaddr,
-						XLOG_BIG_RECORD_BSIZE);
+				XFS_BUF_SET_PTR(dbp, bufaddr, h_size);
 				if (!offset)
 					offset = xlog_align(log, wrapped_hblks,
 						bblks - split_bblks, dbp);
@@ -4042,7 +4056,7 @@ xlog_recover_check_summary(
 				XFS_FSS_TO_BB(mp, 1), 0);
 		if (XFS_BUF_ISERROR(agibp)) {
 			xfs_ioerror_alert("xlog_recover_check_summary(agi)",
-					  log->l_mp, agibp, agidaddr);
+					  mp, agibp, agidaddr);
 		}
 		agip = XFS_BUF_TO_AGI(agibp);
 		ASSERT(XFS_AGI_MAGIC ==
@@ -4058,7 +4072,8 @@ xlog_recover_check_summary(
 
 	sbbp = xfs_getsb(mp, 0);
 #ifdef XFS_LOUD_RECOVERY
-	sbp = XFS_BUF_TO_SBP(sbbp);
+	sbp = &mp->m_sb;
+	xfs_xlatesb(XFS_BUF_TO_SBP(sbbp), sbp, 1, ARCH_CONVERT, XFS_SB_ALL_BITS);
 	cmn_err(CE_NOTE,
 		"xlog_recover_check_summary: sb_icount %Lu itotal %Lu",
 		sbp->sb_icount, itotal);

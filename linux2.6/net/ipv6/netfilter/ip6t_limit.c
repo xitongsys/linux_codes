@@ -1,12 +1,18 @@
 /* Kernel module to control the rate
  *
- * Jérôme de Vivie   <devivie@info.enserb.u-bordeaux.fr>
- * Hervé Eychenne   <eychenne@info.enserb.u-bordeaux.fr>
- *
  * 2 September 1999: Changed from the target RATE to the match
  *                   `limit', removed logging.  Did I mention that
  *                   Alexey is a fucking genius?
  *                   Rusty Russell (rusty@rustcorp.com.au).  */
+
+/* (C) 1999 Jérôme de Vivie <devivie@info.enserb.u-bordeaux.fr>
+ * (C) 1999 Hervé Eychenne <eychenne@info.enserb.u-bordeaux.fr>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/spinlock.h>
@@ -23,7 +29,7 @@ MODULE_DESCRIPTION("rate limiting within ip6tables");
  * see net/sched/sch_tbf.c in the linux source tree
  */
 
-static spinlock_t limit_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(limit_lock);
 
 /* Rusty: This is my (non-mathematically-inclined) understanding of
    this algorithm.  The `average rate' in jiffies becomes your initial
@@ -51,8 +57,7 @@ ip6t_limit_match(const struct sk_buff *skb,
 		const struct net_device *out,
 		const void *matchinfo,
 		int offset,
-		const void *hdr,
-		u_int16_t datalen,
+		unsigned int protoff,
 		int *hotdrop)
 {
 	struct ip6t_rateinfo *r = ((struct ip6t_rateinfo *)matchinfo)->master;

@@ -11,18 +11,18 @@
 /*
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or 
+ * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- * 
+ *
  * Should you need to contact me, the author, you can do so either by
  * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
  * Vojtech Pavlik, Simunkova 1594, Prague 8, 182 00 Czech Republic
@@ -34,8 +34,10 @@
 #include <linux/init.h>
 #include <linux/serio.h>
 
+#define DRIVER_DESC	"XT keyboard driver"
+
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
-MODULE_DESCRIPTION("XT keyboard driver");
+MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
 #define XTKBD_EMUL0	0xe0
@@ -43,7 +45,7 @@ MODULE_LICENSE("GPL");
 #define XTKBD_KEY	0x7f
 #define XTKBD_RELEASE	0x80
 
-static unsigned char xtkbd_keycode[256] = {	 
+static unsigned char xtkbd_keycode[256] = {
 	  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
 	 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
 	 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
@@ -86,7 +88,7 @@ irqreturn_t xtkbd_interrupt(struct serio *serio,
 	return IRQ_HANDLED;
 }
 
-void xtkbd_connect(struct serio *serio, struct serio_dev *dev)
+void xtkbd_connect(struct serio *serio, struct serio_driver *drv)
 {
 	struct xtkbd *xtkbd;
 	int i;
@@ -98,7 +100,7 @@ void xtkbd_connect(struct serio *serio, struct serio_dev *dev)
 		return;
 
 	memset(xtkbd, 0, sizeof(struct xtkbd));
-	
+
 	xtkbd->dev.evbit[0] = BIT(EV_KEY) | BIT(EV_REP);
 
 	xtkbd->serio = serio;
@@ -111,7 +113,7 @@ void xtkbd_connect(struct serio *serio, struct serio_dev *dev)
 
 	serio->private = xtkbd;
 
-	if (serio_open(serio, dev)) {
+	if (serio_open(serio, drv)) {
 		kfree(xtkbd);
 		return;
 	}
@@ -129,6 +131,7 @@ void xtkbd_connect(struct serio *serio, struct serio_dev *dev)
 	xtkbd->dev.id.vendor = 0x0001;
 	xtkbd->dev.id.product = 0x0001;
 	xtkbd->dev.id.version = 0x0100;
+	xtkbd->dev.dev = &serio->dev;
 
 	input_register_device(&xtkbd->dev);
 
@@ -143,21 +146,25 @@ void xtkbd_disconnect(struct serio *serio)
 	kfree(xtkbd);
 }
 
-struct serio_dev xtkbd_dev = {
-	.interrupt =	xtkbd_interrupt,
-	.connect =	xtkbd_connect,
-	.disconnect =	xtkbd_disconnect
+struct serio_driver xtkbd_drv = {
+	.driver		= {
+		.name	= "xtkbd",
+	},
+	.description	= DRIVER_DESC,
+	.interrupt	= xtkbd_interrupt,
+	.connect	= xtkbd_connect,
+	.disconnect	= xtkbd_disconnect,
 };
 
 int __init xtkbd_init(void)
 {
-	serio_register_device(&xtkbd_dev);
+	serio_register_driver(&xtkbd_drv);
 	return 0;
 }
 
 void __exit xtkbd_exit(void)
 {
-	serio_unregister_device(&xtkbd_dev);
+	serio_unregister_driver(&xtkbd_drv);
 }
 
 module_init(xtkbd_init);

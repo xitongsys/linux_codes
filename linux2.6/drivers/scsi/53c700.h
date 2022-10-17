@@ -9,8 +9,10 @@
 #define _53C700_H
 
 #include <linux/interrupt.h>
-
 #include <asm/io.h>
+
+#include <scsi/scsi_device.h>
+
 
 #if defined(CONFIG_53C700_MEM_MAPPED) && defined(CONFIG_53C700_IO_MAPPED)
 #define CONFIG_53C700_BOTH_MAPPED
@@ -35,9 +37,10 @@
 /* The maximum number of luns (make this of the form 2^n) */
 #define NCR_700_MAX_LUNS		32
 #define NCR_700_LUN_MASK		(NCR_700_MAX_LUNS - 1)
-/* Alter this with care: too many tags won't give the elevator a chance to
- * work; too few will cause the device to operate less efficiently */
+/* Maximum number of tags the driver ever allows per device */
 #define NCR_700_MAX_TAGS		16
+/* Tag depth the driver starts out with (can be altered in sysfs) */
+#define NCR_700_DEFAULT_TAGS		4
 /* This is the default number of commands per LUN in the untagged case.
  * two is a good value because it means we can have one command active and
  * one command fully prepared and waiting
@@ -56,7 +59,9 @@
 struct NCR_700_Host_Parameters;
 
 /* These are the externally used routines */
-struct Scsi_Host *NCR_700_detect(Scsi_Host_Template *, struct NCR_700_Host_Parameters *);
+struct Scsi_Host *NCR_700_detect(struct scsi_host_template *,
+		struct NCR_700_Host_Parameters *, struct device *,
+		unsigned long, u8);
 int NCR_700_release(struct Scsi_Host *host);
 irqreturn_t NCR_700_intr(int, void *, struct pt_regs *);
 
@@ -97,49 +102,62 @@ struct NCR_700_SG_List {
  * 18 device supports tag queueing */
 #define NCR_700_DEV_NEGOTIATED_SYNC	(1<<16)
 #define NCR_700_DEV_BEGIN_SYNC_NEGOTIATION	(1<<17)
-#define NCR_700_DEV_BEGIN_TAG_QUEUEING	(1<<18)
-#define NCR_700_DEV_TAG_STARVATION_WARNED (1<<19)
+#define NCR_700_DEV_PRINT_SYNC_NEGOTIATION (1<<19)
 
 static inline void
-NCR_700_set_SXFER(Scsi_Device *SDp, __u8 sxfer)
+NCR_700_set_depth(struct scsi_device *SDp, __u8 depth)
 {
-	((unsigned long)SDp->hostdata) &= 0xffffff00;
-	((unsigned long)SDp->hostdata) |= sxfer & 0xff;
-}
-static inline __u8 NCR_700_get_SXFER(Scsi_Device *SDp)
-{
-	return (((unsigned long)SDp->hostdata) & 0xff);
-}
-static inline void
-NCR_700_set_depth(Scsi_Device *SDp, __u8 depth)
-{
-	((unsigned long)SDp->hostdata) &= 0xffff00ff;
-	((unsigned long)SDp->hostdata) |= (0xff00 & (depth << 8));
+	long l = (long)SDp->hostdata;
+
+	l &= 0xffff00ff;
+	l |= 0xff00 & (depth << 8);
+	SDp->hostdata = (void *)l;
 }
 static inline __u8
-NCR_700_get_depth(Scsi_Device *SDp)
+NCR_700_get_depth(struct scsi_device *SDp)
 {
 	return ((((unsigned long)SDp->hostdata) & 0xff00)>>8);
 }
 static inline int
-NCR_700_is_flag_set(Scsi_Device *SDp, __u32 flag)
+NCR_700_is_flag_set(struct scsi_device *SDp, __u32 flag)
 {
-	return (((unsigned long)SDp->hostdata) & flag) == flag;
+	return (spi_flags(SDp->sdev_target) & flag) == flag;
 }
 static inline int
-NCR_700_is_flag_clear(Scsi_Device *SDp, __u32 flag)
+NCR_700_is_flag_clear(struct scsi_device *SDp, __u32 flag)
 {
-	return (((unsigned long)SDp->hostdata) & flag) == 0;
+	return (spi_flags(SDp->sdev_target) & flag) == 0;
 }
 static inline void
-NCR_700_set_flag(Scsi_Device *SDp, __u32 flag)
+NCR_700_set_flag(struct scsi_device *SDp, __u32 flag)
 {
-	((unsigned long)SDp->hostdata) |= (flag & 0xffff0000);
+	spi_flags(SDp->sdev_target) |= flag;
 }
 static inline void
-NCR_700_clear_flag(Scsi_Device *SDp, __u32 flag)
+NCR_700_clear_flag(struct scsi_device *SDp, __u32 flag)
 {
-	((unsigned long)SDp->hostdata) &= ~(flag & 0xffff0000);
+	spi_flags(SDp->sdev_target) &= ~flag;
+}
+
+enum NCR_700_tag_neg_state {
+	NCR_700_START_TAG_NEGOTIATION = 0,
+	NCR_700_DURING_TAG_NEGOTIATION = 1,
+	NCR_700_FINISHED_TAG_NEGOTIATION = 2,
+};
+
+static inline enum NCR_700_tag_neg_state
+NCR_700_get_tag_neg_state(struct scsi_device *SDp)
+{
+	return (enum NCR_700_tag_neg_state)((spi_flags(SDp->sdev_target)>>20) & 0x3);
+}
+
+static inline void
+NCR_700_set_tag_neg_state(struct scsi_device *SDp,
+			  enum NCR_700_tag_neg_state state)
+{
+	/* clear the slot */
+	spi_flags(SDp->sdev_target) &= ~(0x3 << 20);
+	spi_flags(SDp->sdev_target) |= ((__u32)state) << 20;
 }
 
 struct NCR_700_command_slot {
@@ -153,7 +171,7 @@ struct NCR_700_command_slot {
 	__u8	state;
 	int	tag;
 	__u32	resume_offset;
-	Scsi_Cmnd	*cmnd;
+	struct scsi_cmnd *cmnd;
 	/* The pci_mapped address of the actual command in cmnd */
 	dma_addr_t	pCmd;
 	__u32		temp;
@@ -191,7 +209,7 @@ struct NCR_700_Host_Parameters {
 	__u32	pScript;		/* physical mem addr of script */
 
 	enum NCR_700_Host_State state; /* protected by state lock */
-	Scsi_Cmnd *cmd;
+	struct scsi_cmnd *cmd;
 	/* Note: pScript contains the single consistent block of
 	 * memory.  All the msgin, msgout and status are allocated in
 	 * this memory too (at separate cache lines).  TOTAL_MEM_SIZE
@@ -211,6 +229,7 @@ struct NCR_700_Host_Parameters {
 	__u8	tag_negotiated;
 	__u8	rev;
 	__u8	reselection_id;
+	__u8	min_period;
 
 	/* Free list, singly linked by ITL_forw elements */
 	struct NCR_700_command_slot *free_list;
@@ -434,6 +453,7 @@ struct NCR_700_Host_Parameters {
 		       #symbol, A_##symbol##_used[i], val)); \
 	} \
 }
+
 
 static inline __u8
 NCR_700_mem_readb(struct Scsi_Host *host, __u32 reg)

@@ -23,32 +23,6 @@
  *
  ******************************************************************************/
 
-/******************************************************************************
- *
- * History:
- *	$Log: lm80.h,v $
- *	Revision 1.6  2003/05/13 17:26:52  mkarl
- *	Editorial changes.
- *	
- *	Revision 1.5  2003/03/31 07:15:18  mkarl
- *	Corrected Copyright.
- *	Editorial changes.
- *	
- *	Revision 1.4  2002/04/25 11:04:10  rschmidt
- *	Editorial changes
- *	
- *	Revision 1.3  1999/11/22 13:41:19  cgoos
- *	Changed license header to GPL.
- *	
- *	Revision 1.2  1999/03/12 13:26:51  malthoff
- *	remove __STDC__.
- *	
- *	Revision 1.1  1998/06/19 09:28:31  malthoff
- *	created.
- *	
- *
- ******************************************************************************/
-
 #ifndef __INC_LM80_H
 #define __INC_LM80_H
 

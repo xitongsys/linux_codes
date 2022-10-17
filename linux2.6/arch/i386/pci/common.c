@@ -9,6 +9,7 @@
 #include <linux/ioport.h>
 #include <linux/init.h>
 
+#include <asm/acpi.h>
 #include <asm/segment.h>
 #include <asm/io.h>
 #include <asm/smp.h>
@@ -19,8 +20,10 @@
 extern  void pcibios_sort(void);
 #endif
 
-unsigned int pci_probe = PCI_PROBE_BIOS | PCI_PROBE_CONF1 | PCI_PROBE_CONF2;
+unsigned int pci_probe = PCI_PROBE_BIOS | PCI_PROBE_CONF1 | PCI_PROBE_CONF2 |
+				PCI_PROBE_MMCONF;
 
+int pci_routeirq;
 int pcibios_last_bus = -1;
 struct pci_bus *pci_root_bus = NULL;
 struct pci_raw_ops *raw_pci_ops;
@@ -50,7 +53,7 @@ int pcibios_scanned;
  * This interrupt-safe spinlock protects all accesses to PCI
  * configuration space.
  */
-spinlock_t pci_config_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(pci_config_lock);
 
 /*
  * Several buggy motherboards address only 16 devices and mirror
@@ -68,7 +71,7 @@ static void __devinit pcibios_fixup_ghosts(struct pci_bus *b)
 	int i;
 
 	DBG("PCI: Scanning for ghost devices on bus %d\n", b->number);
-	for (ln=b->devices.next; ln != &b->devices; ln=ln->next) {
+	list_for_each(ln, &b->devices) {
 		d = pci_dev_b(ln);
 		if ((d->class >> 8) == PCI_CLASS_BRIDGE_HOST)
 			seen_host_bridge++;
@@ -197,12 +200,16 @@ char * __devinit  pcibios_setup(char *str)
 		return NULL;
 	}
 #endif
-#ifdef CONFIG_ACPI_PCI
-	else if (!strcmp(str, "noacpi")) {
-		pci_probe |= PCI_NO_ACPI_ROUTING;
+#ifdef CONFIG_PCI_MMCONFIG
+	else if (!strcmp(str, "nommconf")) {
+		pci_probe &= ~PCI_PROBE_MMCONF;
 		return NULL;
 	}
 #endif
+	else if (!strcmp(str, "noacpi")) {
+		acpi_noirq_set();
+		return NULL;
+	}
 #ifndef CONFIG_X86_VISWS
 	else if (!strcmp(str, "usepirqmask")) {
 		pci_probe |= PCI_USE_PIRQ_MASK;
@@ -220,6 +227,9 @@ char * __devinit  pcibios_setup(char *str)
 		return NULL;
 	} else if (!strcmp(str, "assign-busses")) {
 		pci_probe |= PCI_ASSIGN_ALL_BUSSES;
+		return NULL;
+	} else if (!strcmp(str, "routeirq")) {
+		pci_routeirq = 1;
 		return NULL;
 	}
 	return str;

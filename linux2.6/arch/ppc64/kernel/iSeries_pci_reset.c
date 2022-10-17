@@ -1,3 +1,4 @@
+#define PCIFR(...)
 /************************************************************************/
 /* File iSeries_pci_reset.c created by Allan Trautman on Mar 21 2001.   */
 /************************************************************************/
@@ -28,60 +29,76 @@
 /************************************************************************/
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/irq.h>
+#include <linux/delay.h>
 
 #include <asm/io.h>
 #include <asm/iSeries/HvCallPci.h>
 #include <asm/iSeries/HvTypes.h>
 #include <asm/iSeries/mf.h>
-#include <asm/flight_recorder.h>
 #include <asm/pci.h>
 
 #include <asm/iSeries/iSeries_pci.h>
 #include "pci.h"
 
-/************************************************************************/
-/* Interface to toggle the reset line                                   */
-/* Time is in .1 seconds, need for seconds.                             */
-/************************************************************************/
-int  iSeries_Device_ToggleReset(struct pci_dev* PciDev, int AssertTime, int DelayTime)
+/*
+ * Interface to toggle the reset line
+ * Time is in .1 seconds, need for seconds.
+ */
+int iSeries_Device_ToggleReset(struct pci_dev *PciDev, int AssertTime,
+		int DelayTime)
 {
-	unsigned long AssertDelay, WaitDelay;
-	struct iSeries_Device_Node* DeviceNode = (struct iSeries_Device_Node*)PciDev->sysdata;
+	unsigned int AssertDelay, WaitDelay;
+	struct iSeries_Device_Node *DeviceNode =
+		(struct iSeries_Device_Node *)PciDev->sysdata;
+
  	if (DeviceNode == NULL) { 
-		printk("PCI: Pci Reset Failed, Device Node not found for pci_dev %p\n",PciDev);
+		printk("PCI: Pci Reset Failed, Device Node not found for pci_dev %p\n",
+				PciDev);
 		return -1;
 	}
-	/********************************************************************
+	/*
 	 * Set defaults, Assert is .5 second, Wait is 3 seconds.
-	 ********************************************************************/
-	if (AssertTime == 0) AssertDelay = ( 5 * HZ)/10;
-	else                 AssertDelay = (AssertTime*HZ)/10;
-	if (WaitDelay == 0)  WaitDelay   = (30 * HZ)/10;
-	else                 WaitDelay   = (DelayTime* HZ)/10;
+	 */
+	if (AssertTime == 0)
+		AssertDelay = 500;
+	else
+		AssertDelay = AssertTime * 100;
 
-	/********************************************************************
+	if (DelayTime == 0)
+		WaitDelay = 3000;
+	else
+		WaitDelay = DelayTime * 100;
+
+	/*
 	 * Assert reset
-	 ********************************************************************/
-	DeviceNode->ReturnCode = HvCallPci_setSlotReset(ISERIES_BUS(DeviceNode),0x00,DeviceNode->AgentId,1);
+	 */
+	DeviceNode->ReturnCode = HvCallPci_setSlotReset(ISERIES_BUS(DeviceNode),
+			0x00, DeviceNode->AgentId, 1);
 	if (DeviceNode->ReturnCode == 0) {
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout(AssertDelay);       /* Sleep for the time     */
-		DeviceNode->ReturnCode = HvCallPci_setSlotReset(ISERIES_BUS(DeviceNode),0x00,DeviceNode->AgentId, 0);
+		msleep(AssertDelay);			/* Sleep for the time */
+		DeviceNode->ReturnCode =
+			HvCallPci_setSlotReset(ISERIES_BUS(DeviceNode),
+					0x00, DeviceNode->AgentId, 0);
 
-		/***************************************************************
+		/*
    		 * Wait for device to reset
-		 ***************************************************************/
-		set_current_state(TASK_UNINTERRUPTIBLE);  
-		schedule_timeout(WaitDelay);
+		 */
+		msleep(WaitDelay);
 	}
-	if (DeviceNode->ReturnCode == 0) {
-		PCIFR("Slot 0x%04X.%02 Reset\n",ISERIES_BUS(DeviceNode),DeviceNode->AgentId );
-	} 
+	if (DeviceNode->ReturnCode == 0)
+		PCIFR("Slot 0x%04X.%02 Reset\n", ISERIES_BUS(DeviceNode),
+				DeviceNode->AgentId);
 	else {
-		printk("PCI: Slot 0x%04X.%02X Reset Failed, RCode: %04X\n",ISERIES_BUS(DeviceNode),DeviceNode->AgentId,DeviceNode->ReturnCode);
-		PCIFR(      "Slot 0x%04X.%02X Reset Failed, RCode: %04X\n",ISERIES_BUS(DeviceNode),DeviceNode->AgentId,DeviceNode->ReturnCode);
+		printk("PCI: Slot 0x%04X.%02X Reset Failed, RCode: %04X\n",
+				ISERIES_BUS(DeviceNode), DeviceNode->AgentId,
+				DeviceNode->ReturnCode);
+		PCIFR("Slot 0x%04X.%02X Reset Failed, RCode: %04X\n",
+				ISERIES_BUS(DeviceNode), DeviceNode->AgentId,
+				DeviceNode->ReturnCode);
 	}
 	return DeviceNode->ReturnCode;
 }
+EXPORT_SYMBOL(iSeries_Device_ToggleReset);

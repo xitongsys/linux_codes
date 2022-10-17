@@ -265,7 +265,7 @@ struct he_cs_stper
 struct he_dev {
 	unsigned int number;
 	unsigned int irq;
-	unsigned long membase;
+	void __iomem *membase;
 
 	char prod_id[30];
 	char mac_addr[6];
@@ -891,48 +891,5 @@ struct he_vcc
 #define CLK_HIGH	ID_CLOCK /* HOST_CNTL_ID_PROM_CLOCK */
 #define SI_HIGH		ID_DIN /* HOST_CNTL_ID_PROM_DATA_IN */
 #define EEPROM_DELAY	400 /* microseconds */
-
-/* Read from EEPROM = 0000 0011b */
-unsigned int readtab[] = {
-	CS_HIGH | CLK_HIGH,
-	CS_LOW | CLK_LOW,
-	CLK_HIGH,               /* 0 */
-	CLK_LOW,
-	CLK_HIGH,               /* 0 */
-	CLK_LOW,
-	CLK_HIGH,               /* 0 */
-	CLK_LOW,
-	CLK_HIGH,               /* 0 */
-	CLK_LOW,
-	CLK_HIGH,               /* 0 */
-	CLK_LOW,
-	CLK_HIGH,               /* 0 */
-	CLK_LOW | SI_HIGH,
-	CLK_HIGH | SI_HIGH,     /* 1 */
-	CLK_LOW | SI_HIGH,
-	CLK_HIGH | SI_HIGH      /* 1 */
-};     
- 
-/* Clock to read from/write to the EEPROM */
-unsigned int clocktab[] = {
-	CLK_LOW,
-	CLK_HIGH,
-	CLK_LOW,
-	CLK_HIGH,
-	CLK_LOW,
-	CLK_HIGH,
-	CLK_LOW,
-	CLK_HIGH,
-	CLK_LOW,
-	CLK_HIGH,
-	CLK_LOW,
-	CLK_HIGH,
-	CLK_LOW,
-	CLK_HIGH,
-	CLK_LOW,
-	CLK_HIGH,
-	CLK_LOW
-};     
-
 
 #endif /* _HE_H_ */

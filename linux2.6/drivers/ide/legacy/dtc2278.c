@@ -141,6 +141,8 @@ static int __init probe_dtc2278(void)
 	probe_hwif_init(hwif);
 	probe_hwif_init(mate);
 
+	create_proc_ide_interfaces();
+
 	return 0;
 }
 
@@ -155,27 +157,7 @@ int __init dtc2278_init(void)
 }
 
 #ifdef MODULE
-static void __exit dtc2278_release_hwif(ide_hwif_t *hwif)
-{
-	if (hwif->chipset != ide_dtc2278)
-		return;
-
-	hwif->serialized = 0;
-	hwif->chipset = ide_unknown;
-	hwif->tuneproc = NULL;
-	hwif->drives[0].no_unmask = 0;
-	hwif->drives[1].no_unmask = 0;
-	hwif->mate = NULL;
-}
-
-static void __exit dtc2278_exit(void)
-{
-	dtc2278_release_hwif(&ide_hwifs[0]);
-	dtc2278_release_hwif(&ide_hwifs[1]);
-}
-
 module_init(dtc2278_init);
-module_exit(dtc2278_exit);
 #endif
 
 MODULE_AUTHOR("See Local File");

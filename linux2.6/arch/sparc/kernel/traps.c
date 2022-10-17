@@ -12,6 +12,7 @@
 #include <linux/config.h>
 #include <linux/sched.h>  /* for jiffies */
 #include <linux/kernel.h>
+#include <linux/kallsyms.h>
 #include <linux/signal.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
@@ -118,7 +119,8 @@ void die_if_kernel(char *str, struct pt_regs *regs)
 		      count++ < 30				&&
                       (((unsigned long) rw) >= PAGE_OFFSET)	&&
 		      !(((unsigned long) rw) & 0x7)) {
-			printk("Caller[%08lx]\n", rw->ins[7]);
+			printk("Caller[%08lx]", rw->ins[7]);
+			print_symbol(": %s\n", rw->ins[7]);
 			rw = (struct reg_window *)rw->ins[6];
 		}
 	}
@@ -129,23 +131,23 @@ void die_if_kernel(char *str, struct pt_regs *regs)
 	do_exit(SIGSEGV);
 }
 
-void do_hw_interrupt(unsigned long type, unsigned long psr, unsigned long pc)
+void do_hw_interrupt(struct pt_regs *regs, unsigned long type)
 {
 	siginfo_t info;
 
 	if(type < 0x80) {
 		/* Sun OS's puke from bad traps, Linux survives! */
 		printk("Unimplemented Sparc TRAP, type = %02lx\n", type);
-		die_if_kernel("Whee... Hello Mr. Penguin", current->thread.kregs);
+		die_if_kernel("Whee... Hello Mr. Penguin", regs);
 	}	
 
-	if(psr & PSR_PS)
-		die_if_kernel("Kernel bad trap", current->thread.kregs);
+	if(regs->psr & PSR_PS)
+		die_if_kernel("Kernel bad trap", regs);
 
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
 	info.si_code = ILL_ILLTRP;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)regs->pc;
 	info.si_trapno = type - 0x80;
 	force_sig_info(SIGILL, &info, current);
 }
@@ -168,7 +170,7 @@ void do_illegal_instruction(struct pt_regs *regs, unsigned long pc, unsigned lon
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
 	info.si_code = ILL_ILLOPC;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	send_sig_info(SIGILL, &info, current);
 }
@@ -183,7 +185,7 @@ void do_priv_instruction(struct pt_regs *regs, unsigned long pc, unsigned long n
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
 	info.si_code = ILL_PRVOPC;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	send_sig_info(SIGILL, &info, current);
 }
@@ -244,21 +246,21 @@ void do_fpd_trap(struct pt_regs *regs, unsigned long pc, unsigned long npc,
 		       &fptask->thread.fpqueue[0], &fptask->thread.fpqdepth);
 	}
 	last_task_used_math = current;
-	if(current->used_math) {
+	if(used_math()) {
 		fpload(&current->thread.float_regs[0], &current->thread.fsr);
 	} else {
 		/* Set initial sane state. */
 		fpload(&init_fregs[0], &init_fsr);
-		current->used_math = 1;
+		set_used_math();
 	}
 #else
-	if(!current->used_math) {
+	if(!used_math()) {
 		fpload(&init_fregs[0], &init_fsr);
-		current->used_math = 1;
+		set_used_math();
 	} else {
 		fpload(&current->thread.float_regs[0], &current->thread.fsr);
 	}
-	current->flags |= PF_USEDFPU;
+	current_thread_info()->flags |= _TIF_USEDFPU;
 #endif
 }
 
@@ -289,7 +291,7 @@ void do_fpe_trap(struct pt_regs *regs, unsigned long pc, unsigned long npc,
 #ifndef CONFIG_SMP
 	if(!fpt) {
 #else
-        if(!(fpt->flags & PF_USEDFPU)) {
+        if(!(fpt->thread_info->flags & _TIF_USEDFPU)) {
 #endif
 		fpsave(&fake_regs[0], &fake_fsr, &fake_queue[0], &fake_depth);
 		regs->psr &= ~PSR_EF;
@@ -332,7 +334,7 @@ void do_fpe_trap(struct pt_regs *regs, unsigned long pc, unsigned long npc,
 	/* nope, better SIGFPE the offending process... */
 	       
 #ifdef CONFIG_SMP
-	fpt->flags &= ~PF_USEDFPU;
+	fpt->thread_info->flags &= ~_TIF_USEDFPU;
 #endif
 	if(psr & PSR_PS) {
 		/* The first fsr store/load we tried trapped,
@@ -352,7 +354,7 @@ void do_fpe_trap(struct pt_regs *regs, unsigned long pc, unsigned long npc,
 	fsr = fpt->thread.fsr;
 	info.si_signo = SIGFPE;
 	info.si_errno = 0;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	info.si_code = __SI_FAULT;
 	if ((fsr & 0x1c000) == (1 << 14)) {
@@ -386,7 +388,7 @@ void handle_tag_overflow(struct pt_regs *regs, unsigned long pc, unsigned long n
 	info.si_signo = SIGEMT;
 	info.si_errno = 0;
 	info.si_code = EMT_TAGOVF;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	send_sig_info(SIGEMT, &info, current);
 }
@@ -415,7 +417,7 @@ void handle_reg_access(struct pt_regs *regs, unsigned long pc, unsigned long npc
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_OBJERR;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	force_sig_info(SIGBUS, &info, current);
 }
@@ -428,7 +430,7 @@ void handle_cp_disabled(struct pt_regs *regs, unsigned long pc, unsigned long np
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
 	info.si_code = ILL_COPROC;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	send_sig_info(SIGILL, &info, current);
 }
@@ -445,7 +447,7 @@ void handle_cp_exception(struct pt_regs *regs, unsigned long pc, unsigned long n
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
 	info.si_code = ILL_COPROC;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	send_sig_info(SIGILL, &info, current);
 }
@@ -458,7 +460,7 @@ void handle_hw_divzero(struct pt_regs *regs, unsigned long pc, unsigned long npc
 	info.si_signo = SIGFPE;
 	info.si_errno = 0;
 	info.si_code = FPE_INTDIV;
-	info.si_addr = (void *)pc;
+	info.si_addr = (void __user *)pc;
 	info.si_trapno = 0;
 	send_sig_info(SIGFPE, &info, current);
 }
@@ -497,7 +499,10 @@ void trap_init(void)
 	    TI_KSP         != offsetof(struct thread_info, ksp) ||
 	    TI_KPC         != offsetof(struct thread_info, kpc) ||
 	    TI_KPSR        != offsetof(struct thread_info, kpsr) ||
-	    TI_KWIM        != offsetof(struct thread_info, kwim))
+	    TI_KWIM        != offsetof(struct thread_info, kwim) ||
+	    TI_REG_WINDOW  != offsetof(struct thread_info, reg_window) ||
+	    TI_RWIN_SPTRS  != offsetof(struct thread_info, rwbuf_stkptrs) ||
+	    TI_W_SAVED     != offsetof(struct thread_info, w_saved))
 		thread_info_offsets_are_bolixed_pete();
 
 	/* Attach to the address space of init_task. */

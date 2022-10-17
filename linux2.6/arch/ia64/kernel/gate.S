@@ -81,6 +81,7 @@ GLOBAL_ENTRY(__kernel_syscall_via_epc)
 	LOAD_FSYSCALL_TABLE(r14)
 
 	mov r16=IA64_KR(CURRENT)		// 12 cycle read latency
+	tnat.nz p10,p9=r15
 	mov r19=NR_syscalls-1
 	;;
 	shladd r18=r17,3,r14
@@ -91,16 +92,18 @@ GLOBAL_ENTRY(__kernel_syscall_via_epc)
 	cmp.geu p6,p7=r19,r17			// (syscall > 0 && syscall < 1024+NR_syscalls)?
 	;;
 (p6)	ld8 r18=[r18]
-	mov r29=psr				// read psr (12 cyc load latency)
+	mov r21=ar.fpsr
 	add r14=-8,r14				// r14 <- addr of fsys_bubble_down entry
 	;;
 (p6)	mov b7=r18
 (p6)	tbit.z p8,p0=r18,0
 (p8)	br.dptk.many b7
 
+(p6)	rsm psr.i
 	mov r27=ar.rsc
-	mov r21=ar.fpsr
 	mov r26=ar.pfs
+	;;
+	mov r29=psr				// read psr (12 cyc load latency)
 /*
  * brl.cond doesn't work as intended because the linker would convert this branch
  * into a branch to a PLT.  Perhaps there will be a way to avoid this with some
@@ -117,7 +120,8 @@ GLOBAL_ENTRY(__kernel_syscall_via_epc)
 #endif
 
 	mov r10=-1
-	mov r8=ENOSYS
+(p10)	mov r8=EINVAL
+(p9)	mov r8=ENOSYS
 	FSYS_RETURN
 END(__kernel_syscall_via_epc)
 
@@ -195,10 +199,10 @@ GLOBAL_ENTRY(__kernel_sigtramp)
 	ld8 r15=[base1]					// get address of new RBS base (or NULL)
 	cover				// push args in interrupted frame onto backing store
 	;;
-	cmp.ne p8,p0=r15,r0		// do we need to switch the rbs?
+	cmp.ne p1,p0=r15,r0		// do we need to switch rbs? (note: pr is saved by kernel)
 	mov.m r9=ar.bsp			// fetch ar.bsp
-	.spillsp.p p8, ar.rnat, RNAT_OFF+SIGCONTEXT_OFF
-(p8)	br.cond.spnt setup_rbs		// yup -> (clobbers p8, r14-r16, and r18-r20)
+	.spillsp.p p1, ar.rnat, RNAT_OFF+SIGCONTEXT_OFF
+(p1)	br.cond.spnt setup_rbs		// yup -> (clobbers p8, r14-r16, and r18-r20)
 back_from_setup_rbs:
 	alloc r8=ar.pfs,0,0,3,0
 	ld8 out0=[base0],16		// load arg0 (signum)
@@ -234,11 +238,11 @@ back_from_setup_rbs:
 	br.call.sptk.many rp=b6			// call the signal handler
 .ret0:	adds base0=(BSP_OFF+SIGCONTEXT_OFF),sp
 	;;
-	ld8 r15=[base0],(CFM_OFF-BSP_OFF)	// fetch sc_ar_bsp and advance to CFM_OFF
+	ld8 r15=[base0]				// fetch sc_ar_bsp
 	mov r14=ar.bsp
 	;;
-	cmp.ne p8,p0=r14,r15			// do we need to restore the rbs?
-(p8)	br.cond.spnt restore_rbs		// yup -> (clobbers r14-r18, f6 & f7)
+	cmp.ne p1,p0=r14,r15			// do we need to restore the rbs?
+(p1)	br.cond.spnt restore_rbs		// yup -> (clobbers r14-r18, f6 & f7)
 	;;
 back_from_restore_rbs:
 	adds base0=(FR6_OFF+SIGCONTEXT_OFF),sp

@@ -1,31 +1,18 @@
 #include <linux/mm.h>
 #include <linux/hugetlb.h>
+#include <linux/mount.h>
 #include <linux/seq_file.h>
+#include <asm/elf.h>
 #include <asm/uaccess.h>
+#include "internal.h"
 
 char *task_mem(struct mm_struct *mm, char *buffer)
 {
-	unsigned long data = 0, stack = 0, exec = 0, lib = 0;
-	struct vm_area_struct *vma;
+	unsigned long data, text, lib;
 
-	down_read(&mm->mmap_sem);
-	for (vma = mm->mmap; vma; vma = vma->vm_next) {
-		unsigned long len = (vma->vm_end - vma->vm_start) >> 10;
-		if (!vma->vm_file) {
-			data += len;
-			if (vma->vm_flags & VM_GROWSDOWN)
-				stack += len;
-			continue;
-		}
-		if (vma->vm_flags & VM_WRITE)
-			continue;
-		if (vma->vm_flags & VM_EXEC) {
-			exec += len;
-			if (vma->vm_flags & VM_EXECUTABLE)
-				continue;
-			lib += len;
-		}
-	}
+	data = mm->total_vm - mm->shared_vm - mm->stack_vm;
+	text = (PAGE_ALIGN(mm->end_code) - (mm->start_code & PAGE_MASK)) >> 10;
+	lib = (mm->exec_vm << (PAGE_SHIFT-10)) - text;
 	buffer += sprintf(buffer,
 		"VmSize:\t%8lu kB\n"
 		"VmLck:\t%8lu kB\n"
@@ -33,13 +20,14 @@ char *task_mem(struct mm_struct *mm, char *buffer)
 		"VmData:\t%8lu kB\n"
 		"VmStk:\t%8lu kB\n"
 		"VmExe:\t%8lu kB\n"
-		"VmLib:\t%8lu kB\n",
-		mm->total_vm << (PAGE_SHIFT-10),
+		"VmLib:\t%8lu kB\n"
+		"VmPTE:\t%8lu kB\n",
+		(mm->total_vm - mm->reserved_vm) << (PAGE_SHIFT-10),
 		mm->locked_vm << (PAGE_SHIFT-10),
 		mm->rss << (PAGE_SHIFT-10),
-		data - stack, stack,
-		exec - lib, lib);
-	up_read(&mm->mmap_sem);
+		data << (PAGE_SHIFT-10),
+		mm->stack_vm << (PAGE_SHIFT-10), text, lib,
+		(PTRS_PER_PTE*sizeof(pte_t)*mm->nr_ptes) >> 10);
 	return buffer;
 }
 
@@ -51,28 +39,42 @@ unsigned long task_vsize(struct mm_struct *mm)
 int task_statm(struct mm_struct *mm, int *shared, int *text,
 	       int *data, int *resident)
 {
-	struct vm_area_struct *vma;
-	int size = 0;
-
+	*shared = mm->rss - mm->anon_rss;
+	*text = (PAGE_ALIGN(mm->end_code) - (mm->start_code & PAGE_MASK))
+								>> PAGE_SHIFT;
+	*data = mm->total_vm - mm->shared_vm;
 	*resident = mm->rss;
-	for (vma = mm->mmap; vma; vma = vma->vm_next) {
-		int pages = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
+	return mm->total_vm;
+}
 
-		size += pages;
-		if (is_vm_hugetlb_page(vma)) {
-			if (!(vma->vm_flags & VM_DONTCOPY))
-				*shared += pages;
-			continue;
-		}
-		if (vma->vm_flags & VM_SHARED || !list_empty(&vma->shared))
-			*shared += pages;
-		if (vma->vm_flags & VM_EXECUTABLE)
-			*text += pages;
-		else
-			*data += pages;
+int proc_exe_link(struct inode *inode, struct dentry **dentry, struct vfsmount **mnt)
+{
+	struct vm_area_struct * vma;
+	int result = -ENOENT;
+	struct task_struct *task = proc_task(inode);
+	struct mm_struct * mm = get_task_mm(task);
+
+	if (!mm)
+		goto out;
+	down_read(&mm->mmap_sem);
+
+	vma = mm->mmap;
+	while (vma) {
+		if ((vma->vm_flags & VM_EXECUTABLE) && vma->vm_file)
+			break;
+		vma = vma->vm_next;
 	}
 
-	return size;
+	if (vma) {
+		*mnt = mntget(vma->vm_file->f_vfsmnt);
+		*dentry = dget(vma->vm_file->f_dentry);
+		result = 0;
+	}
+
+	up_read(&mm->mmap_sem);
+	mmput(mm);
+out:
+	return result;
 }
 
 static int show_map(struct seq_file *m, void *v)
@@ -105,7 +107,7 @@ static int show_map(struct seq_file *m, void *v)
 		if (len < 1)
 			len = 1;
 		seq_printf(m, "%*c", len, ' ');
-		seq_path(m, file->f_vfsmnt, file->f_dentry, " \t\n\\");
+		seq_path(m, file->f_vfsmnt, file->f_dentry, "");
 	}
 	seq_putc(m, '\n');
 	return 0;
@@ -128,14 +130,17 @@ static void *m_start(struct seq_file *m, loff_t *pos)
 	if (!map) {
 		up_read(&mm->mmap_sem);
 		mmput(mm);
+		if (l == -1)
+			map = get_gate_vma(task);
 	}
 	return map;
 }
 
 static void m_stop(struct seq_file *m, void *v)
 {
+	struct task_struct *task = m->private;
 	struct vm_area_struct *map = v;
-	if (map) {
+	if (map && map != get_gate_vma(task)) {
 		struct mm_struct *mm = map->vm_mm;
 		up_read(&mm->mmap_sem);
 		mmput(mm);
@@ -144,11 +149,14 @@ static void m_stop(struct seq_file *m, void *v)
 
 static void *m_next(struct seq_file *m, void *v, loff_t *pos)
 {
+	struct task_struct *task = m->private;
 	struct vm_area_struct *map = v;
 	(*pos)++;
 	if (map->vm_next)
 		return map->vm_next;
 	m_stop(m, v);
+	if (map != get_gate_vma(task))
+		return get_gate_vma(task);
 	return NULL;
 }
 

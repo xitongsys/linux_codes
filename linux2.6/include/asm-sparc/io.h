@@ -11,98 +11,94 @@
 #include <asm/page.h>      /* IO address mapping routines need this */
 #include <asm/system.h>
 
-#define page_to_phys(page)	((page - mem_map) << PAGE_SHIFT)
+#define page_to_phys(page)	(((page) - mem_map) << PAGE_SHIFT)
 
-static inline u32 flip_dword (u32 d)
+static inline u32 flip_dword (u32 l)
 {
-	return ((d&0xff)<<24) | (((d>>8)&0xff)<<16) | (((d>>16)&0xff)<<8)| ((d>>24)&0xff);
+	return ((l&0xff)<<24) | (((l>>8)&0xff)<<16) | (((l>>16)&0xff)<<8)| ((l>>24)&0xff);
 }
 
-static inline u16 flip_word (u16 d)
+static inline u16 flip_word (u16 w)
 {
-	return ((d&0xff) << 8) | ((d>>8)&0xff);
+	return ((w&0xff) << 8) | ((w>>8)&0xff);
 }
+
+#define mmiowb()
 
 /*
  * Memory mapped I/O to PCI
- *
- * Observe that ioremap returns void* cookie, but accessors, such
- * as readb, take unsigned long as address, by API. This mismatch
- * happened historically. The ioremap is much older than accessors,
- * so at one time ioremap's cookie was used as address (*a = val).
- * When accessors came about, they were designed to be compatible across
- * buses, so that drivers can select proper ones like sunhme.c did.
- * To make that easier, they use same aruments (ulong) for sbus, pci, isa.
- * The offshot is, we must cast readb et. al. arguments with a #define.
  */
 
-static inline u8 __raw_readb(unsigned long addr)
+static inline u8 __raw_readb(const volatile void __iomem *addr)
 {
-	return *(volatile u8 *)addr;
+	return *(__force volatile u8 *)addr;
 }
 
-static inline u16 __raw_readw(unsigned long addr)
+static inline u16 __raw_readw(const volatile void __iomem *addr)
 {
-	return *(volatile u16 *)addr;
+	return *(__force volatile u16 *)addr;
 }
 
-static inline u32 __raw_readl(unsigned long addr)
+static inline u32 __raw_readl(const volatile void __iomem *addr)
 {
-	return *(volatile u32 *)addr;
+	return *(__force volatile u32 *)addr;
 }
 
-static inline void __raw_writeb(u8 b, unsigned long addr)
+static inline void __raw_writeb(u8 b, volatile void __iomem *addr)
 {
-	*(volatile u8 *)addr = b;
+	*(__force volatile u8 *)addr = b;
 }
 
-static inline void __raw_writew(u16 b, unsigned long addr)
+static inline void __raw_writew(u16 w, volatile void __iomem *addr)
 {
-	*(volatile u16 *)addr = b;
+	*(__force volatile u16 *)addr = w;
 }
 
-static inline void __raw_writel(u32 b, unsigned long addr)
+static inline void __raw_writel(u32 l, volatile void __iomem *addr)
 {
-	*(volatile u32 *)addr = b;
+	*(__force volatile u32 *)addr = l;
 }
 
-static inline u8 __readb(unsigned long addr)
+static inline u8 __readb(const volatile void __iomem *addr)
 {
-	return *(volatile u8 *)addr;
+	return *(__force volatile u8 *)addr;
 }
 
-static inline u16 __readw(unsigned long addr)
+static inline u16 __readw(const volatile void __iomem *addr)
 {
-	return flip_word(*(volatile u16 *)addr);
+	return flip_word(*(__force volatile u16 *)addr);
 }
 
-static inline u32 __readl(unsigned long addr)
+static inline u32 __readl(const volatile void __iomem *addr)
 {
-	return flip_dword(*(volatile u32 *)addr);
+	return flip_dword(*(__force volatile u32 *)addr);
 }
 
-static inline void __writeb(u8 b, unsigned long addr)
+static inline void __writeb(u8 b, volatile void __iomem *addr)
 {
-	*(volatile u8 *)addr = b;
+	*(__force volatile u8 *)addr = b;
 }
 
-static inline void __writew(u16 b, unsigned long addr)
+static inline void __writew(u16 w, volatile void __iomem *addr)
 {
-	*(volatile u16 *)addr = flip_word(b);
+	*(__force volatile u16 *)addr = flip_word(w);
 }
 
-static inline void __writel(u32 b, unsigned long addr)
+static inline void __writel(u32 l, volatile void __iomem *addr)
 {
-	*(volatile u32 *)addr = flip_dword(b);
+	*(__force volatile u32 *)addr = flip_dword(l);
 }
 
-#define readb(addr)	__readb((unsigned long)(addr))
-#define readw(addr)	__readw((unsigned long)(addr))
-#define readl(addr)	__readl((unsigned long)(addr))
+#define readb(__addr)		__readb(__addr)
+#define readw(__addr)		__readw(__addr)
+#define readl(__addr)		__readl(__addr)
+#define readb_relaxed(__addr)	readb(__addr)
+#define readw_relaxed(__addr)	readw(__addr)
+#define readl_relaxed(__addr)	readl(__addr)
 
-#define writeb(b, addr)	__writeb((b),(unsigned long)(addr))
-#define writew(b, addr)	__writew((b),(unsigned long)(addr))
-#define writel(b, addr)	__writel((b),(unsigned long)(addr))
+#define writeb(__b, __addr)	__writeb((__b),(__addr))
+#define writew(__w, __addr)	__writew((__w),(__addr))
+#define writel(__l, __addr)	__writel((__l),(__addr))
 
 /*
  * I/O space operations
@@ -121,29 +117,29 @@ static inline void __writel(u32 b, unsigned long addr)
  * mapped somewhere into virtual kernel space and we
  * can use inb/outb again.
  */
-#define inb_local(addr)		__readb(addr)
-#define inb(addr)		__readb(addr)
-#define inw(addr)		__readw(addr)
-#define inl(addr)		__readl(addr)
+#define inb_local(__addr)	__readb((void __iomem *)(unsigned long)(__addr))
+#define inb(__addr)		__readb((void __iomem *)(unsigned long)(__addr))
+#define inw(__addr)		__readw((void __iomem *)(unsigned long)(__addr))
+#define inl(__addr)		__readl((void __iomem *)(unsigned long)(__addr))
 
-#define outb_local(b, addr)	__writeb(b, addr)
-#define outb(b, addr)		__writeb(b, addr)
-#define outw(b, addr)		__writew(b, addr)
-#define outl(b, addr)		__writel(b, addr)
+#define outb_local(__b, __addr)	__writeb(__b, (void __iomem *)(unsigned long)(__addr))
+#define outb(__b, __addr)	__writeb(__b, (void __iomem *)(unsigned long)(__addr))
+#define outw(__w, __addr)	__writew(__w, (void __iomem *)(unsigned long)(__addr))
+#define outl(__l, __addr)	__writel(__l, (void __iomem *)(unsigned long)(__addr))
 
-#define inb_p inb
-#define outb_p outb
-#define inw_p inw
-#define outw_p outw
-#define inl_p inl
-#define outl_p outl
+#define inb_p(__addr)		inb(__addr)
+#define outb_p(__b, __addr)	outb(__b, __addr)
+#define inw_p(__addr)		inw(__addr)
+#define outw_p(__w, __addr)	outw(__w, __addr)
+#define inl_p(__addr)		inl(__addr)
+#define outl_p(__l, __addr)	outl(__l, __addr)
 
-extern void outsb(unsigned long addr, const void *src, unsigned long cnt);
-extern void outsw(unsigned long addr, const void *src, unsigned long cnt);
-extern void outsl(unsigned long addr, const void *src, unsigned long cnt);
-extern void insb(unsigned long addr, void *dst, unsigned long count);
-extern void insw(unsigned long addr, void *dst, unsigned long count);
-extern void insl(unsigned long addr, void *dst, unsigned long count);
+void outsb(unsigned long addr, const void *src, unsigned long cnt);
+void outsw(unsigned long addr, const void *src, unsigned long cnt);
+void outsl(unsigned long addr, const void *src, unsigned long cnt);
+void insb(unsigned long addr, void *dst, unsigned long count);
+void insw(unsigned long addr, void *dst, unsigned long count);
+void insl(unsigned long addr, void *dst, unsigned long count);
 
 #define IO_SPACE_LIMIT 0xffffffff
 
@@ -153,56 +149,95 @@ extern void insl(unsigned long addr, void *dst, unsigned long count);
  * SBus has only one, memory mapped, I/O space.
  * We do not need to flip bytes for SBus of course.
  */
-static inline u8 _sbus_readb(unsigned long addr)
+static inline u8 _sbus_readb(const volatile void __iomem *addr)
 {
-	return *(volatile u8 *)addr;
+	return *(__force volatile u8 *)addr;
 }
 
-static inline u16 _sbus_readw(unsigned long addr)
+static inline u16 _sbus_readw(const volatile void __iomem *addr)
 {
-	return *(volatile u16 *)addr;
+	return *(__force volatile u16 *)addr;
 }
 
-static inline u32 _sbus_readl(unsigned long addr)
+static inline u32 _sbus_readl(const volatile void __iomem *addr)
 {
-	return *(volatile u32 *)addr;
+	return *(__force volatile u32 *)addr;
 }
 
-static inline void _sbus_writeb(u8 b, unsigned long addr)
+static inline void _sbus_writeb(u8 b, volatile void __iomem *addr)
 {
-	*(volatile u8 *)addr = b;
+	*(__force volatile u8 *)addr = b;
 }
 
-static inline void _sbus_writew(u16 b, unsigned long addr)
+static inline void _sbus_writew(u16 w, volatile void __iomem *addr)
 {
-	*(volatile u16 *)addr = b;
+	*(__force volatile u16 *)addr = w;
 }
 
-static inline void _sbus_writel(u32 b, unsigned long addr)
+static inline void _sbus_writel(u32 l, volatile void __iomem *addr)
 {
-	*(volatile u32 *)addr = b;
+	*(__force volatile u32 *)addr = l;
 }
 
 /*
  * The only reason for #define's is to hide casts to unsigned long.
  */
-#define sbus_readb(a)		_sbus_readb((unsigned long)(a))
-#define sbus_readw(a)		_sbus_readw((unsigned long)(a))
-#define sbus_readl(a)		_sbus_readl((unsigned long)(a))
-#define sbus_writeb(v, a)	_sbus_writeb(v, (unsigned long)(a))
-#define sbus_writew(v, a)	_sbus_writew(v, (unsigned long)(a))
-#define sbus_writel(v, a)	_sbus_writel(v, (unsigned long)(a))
+#define sbus_readb(__addr)		_sbus_readb(__addr)
+#define sbus_readw(__addr)		_sbus_readw(__addr)
+#define sbus_readl(__addr)		_sbus_readl(__addr)
+#define sbus_writeb(__b, __addr)	_sbus_writeb(__b, __addr)
+#define sbus_writew(__w, __addr)	_sbus_writew(__w, __addr)
+#define sbus_writel(__l, __addr)	_sbus_writel(__l, __addr)
 
-static inline void *sbus_memset_io(void *__dst, int c, __kernel_size_t n)
+static inline void sbus_memset_io(volatile void __iomem *__dst, int c, __kernel_size_t n)
 {
-	unsigned long dst = (unsigned long)__dst;
-
 	while(n--) {
-		sbus_writeb(c, dst);
-		dst++;
+		sbus_writeb(c, __dst);
+		__dst++;
 	}
-	return (void *) dst;
 }
+
+static inline void
+_memset_io(volatile void __iomem *dst, int c, __kernel_size_t n)
+{
+	volatile void __iomem *d = dst;
+
+	while (n--) {
+		writeb(c, d);
+		d++;
+	}
+}
+
+#define memset_io(d,c,sz)	_memset_io(d,c,sz)
+
+static inline void
+_memcpy_fromio(void *dst, const volatile void __iomem *src, __kernel_size_t n)
+{
+	char *d = dst;
+
+	while (n--) {
+		char tmp = readb(src);
+		*d++ = tmp;
+		src++;
+	}
+}
+
+#define memcpy_fromio(d,s,sz)	_memcpy_fromio(d,s,sz)
+
+static inline void 
+_memcpy_toio(volatile void __iomem *dst, const void *src, __kernel_size_t n)
+{
+	const char *s = src;
+	volatile void __iomem *d = dst;
+
+	while (n--) {
+		char tmp = *s++;
+		writeb(tmp, d);
+		d++;
+	}
+}
+
+#define memcpy_toio(d,s,sz)	_memcpy_toio(d,s,sz)
 
 #ifdef __KERNEL__
 
@@ -210,16 +245,16 @@ static inline void *sbus_memset_io(void *__dst, int c, __kernel_size_t n)
  * Bus number may be embedded in the higher bits of the physical address.
  * This is why we have no bus number argument to ioremap().
  */
-extern void *ioremap(unsigned long offset, unsigned long size);
+extern void __iomem *ioremap(unsigned long offset, unsigned long size);
 #define ioremap_nocache(X,Y)	ioremap((X),(Y))
-extern void iounmap(void *addr);
+extern void iounmap(volatile void __iomem *addr);
 
 /*
  * Bus number may be in res->flags... somewhere.
  */
-extern unsigned long sbus_ioremap(struct resource *res, unsigned long offset,
+extern void __iomem *sbus_ioremap(struct resource *res, unsigned long offset,
     unsigned long size, char *name);
-extern void sbus_iounmap(unsigned long vaddr, unsigned long size);
+extern void sbus_iounmap(volatile void __iomem *vaddr, unsigned long size);
 
 
 /*

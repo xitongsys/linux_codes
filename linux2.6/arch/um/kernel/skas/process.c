@@ -4,12 +4,14 @@
  */
 
 #include <stdlib.h>
+#include <unistd.h>
 #include <errno.h>
 #include <signal.h>
 #include <setjmp.h>
 #include <sched.h>
 #include <sys/wait.h>
 #include <sys/ptrace.h>
+#include <linux/ptrace.h>
 #include <sys/mman.h>
 #include <sys/user.h>
 #include <asm/unistd.h>
@@ -24,11 +26,18 @@
 #include "os.h"
 #include "proc_mm.h"
 #include "skas_ptrace.h"
+#include "chan_user.h"
+#include "signal_user.h"
+#include "registers.h"
 
-unsigned long exec_regs[FRAME_SIZE];
-unsigned long exec_fp_regs[HOST_FP_SIZE];
-unsigned long exec_fpx_regs[HOST_XFP_SIZE];
-int have_fpx_regs = 1;
+int is_skas_winch(int pid, int fd, void *data)
+{
+	if(pid != os_getpid())
+		return(0);
+
+	register_winch_irq(-1, fd, -1, data);
+	return(1);
+}
 
 static void handle_segv(int pid)
 {
@@ -43,36 +52,35 @@ static void handle_segv(int pid)
 	segv(fault.addr, 0, FAULT_WRITE(fault.is_write), 1, NULL);
 }
 
-static void handle_trap(int pid, union uml_pt_regs *regs)
+/*To use the same value of using_sysemu as the caller, ask it that value (in local_using_sysemu)*/
+static void handle_trap(int pid, union uml_pt_regs *regs, int local_using_sysemu)
 {
-	int err, syscall_nr, status;
+	int err, status;
 
-	syscall_nr = PT_SYSCALL_NR(regs->skas.regs);
-	if(syscall_nr < 1){
-		relay_signal(SIGTRAP, regs);
-		return;
+	/* Mark this as a syscall */
+	UPT_SYSCALL_NR(regs) = PT_SYSCALL_NR(regs->skas.regs);
+
+	if (!local_using_sysemu)
+	{
+		err = ptrace(PTRACE_POKEUSER, pid, PT_SYSCALL_NR_OFFSET, __NR_getpid);
+		if(err < 0)
+			panic("handle_trap - nullifying syscall failed errno = %d\n",
+			      errno);
+
+		err = ptrace(PTRACE_SYSCALL, pid, 0, 0);
+		if(err < 0)
+			panic("handle_trap - continuing to end of syscall failed, "
+			      "errno = %d\n", errno);
+
+		CATCH_EINTR(err = waitpid(pid, &status, WUNTRACED));
+		if((err < 0) || !WIFSTOPPED(status) ||
+		   (WSTOPSIG(status) != SIGTRAP + 0x80))
+			panic("handle_trap - failed to wait at end of syscall, "
+			      "errno = %d, status = %d\n", errno, status);
 	}
-	UPT_SYSCALL_NR(regs) = syscall_nr;
-
-	err = ptrace(PTRACE_POKEUSER, pid, PT_SYSCALL_NR_OFFSET, __NR_getpid);
-	if(err < 0)
-	        panic("handle_trap - nullifying syscall failed errno = %d\n", 
-		      errno);
-
-	err = ptrace(PTRACE_SYSCALL, pid, 0, 0);
-	if(err < 0)
-	        panic("handle_trap - continuing to end of syscall failed, "
-		      "errno = %d\n", errno);
-
-	err = waitpid(pid, &status, WUNTRACED);
-	if((err < 0) || !WIFSTOPPED(status) || (WSTOPSIG(status) != SIGTRAP))
-		panic("handle_trap - failed to wait at end of syscall, "
-		      "errno = %d, status = %d\n", errno, status);
 
 	handle_syscall(regs);
 }
-
-int userspace_pid;
 
 static int userspace_tramp(void *arg)
 {
@@ -83,7 +91,12 @@ static int userspace_tramp(void *arg)
 	return(0);
 }
 
-void start_userspace(void)
+/* Each element set once, and only accessed by a single processor anyway */
+#undef NR_CPUS
+#define NR_CPUS 1
+int userspace_pid[NR_CPUS];
+
+void start_userspace(int cpu)
 {
 	void *stack;
 	unsigned long sp;
@@ -101,7 +114,7 @@ void start_userspace(void)
 		panic("start_userspace : clone failed, errno = %d", errno);
 
 	do {
-		n = waitpid(pid, &status, WUNTRACED);
+		CATCH_EINTR(n = waitpid(pid, &status, WUNTRACED));
 		if(n < 0)
 			panic("start_userspace : wait failed, errno = %d", 
 			      errno);
@@ -111,44 +124,58 @@ void start_userspace(void)
 		panic("start_userspace : expected SIGSTOP, got status = %d",
 		      status);
 
+	if (ptrace(PTRACE_OLDSETOPTIONS, pid, NULL, (void *)PTRACE_O_TRACESYSGOOD) < 0)
+		panic("start_userspace : PTRACE_SETOPTIONS failed, errno=%d\n",
+		      errno);
+
 	if(munmap(stack, PAGE_SIZE) < 0)
 		panic("start_userspace : munmap failed, errno = %d\n", errno);
 
-	userspace_pid = pid;
+	userspace_pid[cpu] = pid;
 }
 
 void userspace(union uml_pt_regs *regs)
 {
-	int err, status, op;
+	int err, status, op, pid = userspace_pid[0];
+	int local_using_sysemu; /*To prevent races if using_sysemu changes under us.*/
 
-	restore_registers(regs);
+	restore_registers(pid, regs);
 		
-	err = ptrace(PTRACE_SYSCALL, userspace_pid, 0, 0);
+	local_using_sysemu = get_using_sysemu();
+
+	op = local_using_sysemu ? PTRACE_SYSEMU : PTRACE_SYSCALL;
+	err = ptrace(op, pid, 0, 0);
+
 	if(err)
-		panic("userspace - PTRACE_SYSCALL failed, errno = %d\n", 
-		       errno);
+		panic("userspace - PTRACE_%s failed, errno = %d\n",
+		       local_using_sysemu ? "SYSEMU" : "SYSCALL", errno);
 	while(1){
-		err = waitpid(userspace_pid, &status, WUNTRACED);
+		CATCH_EINTR(err = waitpid(pid, &status, WUNTRACED));
 		if(err < 0)
 			panic("userspace - waitpid failed, errno = %d\n", 
 			      errno);
 
 		regs->skas.is_user = 1;
-		save_registers(regs);
+		save_registers(pid, regs);
+		UPT_SYSCALL_NR(regs) = -1; /* Assume: It's not a syscall */
 
 		if(WIFSTOPPED(status)){
 		  	switch(WSTOPSIG(status)){
 			case SIGSEGV:
-				handle_segv(userspace_pid);
+				handle_segv(pid);
+				break;
+			case SIGTRAP + 0x80:
+			        handle_trap(pid, regs, local_using_sysemu);
 				break;
 			case SIGTRAP:
-			        handle_trap(userspace_pid, regs);
+				relay_signal(SIGTRAP, regs);
 				break;
 			case SIGIO:
 			case SIGVTALRM:
 			case SIGILL:
 			case SIGBUS:
 			case SIGFPE:
+			case SIGWINCH:
 				user_signal(WSTOPSIG(status), regs);
 				break;
 			default:
@@ -156,123 +183,93 @@ void userspace(union uml_pt_regs *regs)
 				       "%d\n", WSTOPSIG(status));
 			}
 			interrupt_end();
+
+			/* Avoid -ERESTARTSYS handling in host */
+			PT_SYSCALL_NR(regs->skas.regs) = -1;
 		}
 
-		restore_registers(regs);
+		restore_registers(pid, regs);
 
-		op = singlestepping_skas() ? PTRACE_SINGLESTEP : 
-			PTRACE_SYSCALL;
-		err = ptrace(op, userspace_pid, 0, 0);
+		/*Now we ended the syscall, so re-read local_using_sysemu.*/
+		local_using_sysemu = get_using_sysemu();
+
+		op = SELECT_PTRACE_OPERATION(local_using_sysemu, singlestepping(NULL));
+
+		err = ptrace(op, pid, 0, 0);
 		if(err)
-			panic("userspace - PTRACE_SYSCALL failed, "
-			      "errno = %d\n", errno);
+			panic("userspace - PTRACE_%s failed, "
+			      "errno = %d\n",
+			      local_using_sysemu ? "SYSEMU" : "SYSCALL", errno);
 	}
 }
 
 void new_thread(void *stack, void **switch_buf_ptr, void **fork_buf_ptr,
 		void (*handler)(int))
 {
-	jmp_buf switch_buf, fork_buf;
+	unsigned long flags;
+	sigjmp_buf switch_buf, fork_buf;
 
 	*switch_buf_ptr = &switch_buf;
 	*fork_buf_ptr = &fork_buf;
 
-	if(setjmp(fork_buf) == 0)
+	/* Somewhat subtle - siglongjmp restores the signal mask before doing
+	 * the longjmp.  This means that when jumping from one stack to another
+	 * when the target stack has interrupts enabled, an interrupt may occur
+	 * on the source stack.  This is bad when starting up a process because
+	 * it's not supposed to get timer ticks until it has been scheduled.
+	 * So, we disable interrupts around the sigsetjmp to ensure that
+	 * they can't happen until we get back here where they are safe.
+	 */
+	flags = get_signals();
+	block_signals();
+	if(sigsetjmp(fork_buf, 1) == 0)
 		new_thread_proc(stack, handler);
 
 	remove_sigstack();
+
+	set_signals(flags);
 }
 
 void thread_wait(void *sw, void *fb)
 {
-	jmp_buf buf, **switch_buf = sw, *fork_buf;
+	sigjmp_buf buf, **switch_buf = sw, *fork_buf;
 
 	*switch_buf = &buf;
 	fork_buf = fb;
-	if(setjmp(buf) == 0)
-		longjmp(*fork_buf, 1);
-}
-
-static int move_registers(int int_op, int fp_op, union uml_pt_regs *regs,
-			  unsigned long *fp_regs)
-{
-	if(ptrace(int_op, userspace_pid, 0, regs->skas.regs) < 0)
-		return(-errno);
-	if(ptrace(fp_op, userspace_pid, 0, fp_regs) < 0)
-		return(-errno);
-	return(0);
-}
-
-void save_registers(union uml_pt_regs *regs)
-{
-	unsigned long *fp_regs;
-	int err, fp_op;
-
-	if(have_fpx_regs){
-		fp_op = PTRACE_GETFPXREGS;
-		fp_regs = regs->skas.xfp;
-	}
-	else {
-		fp_op = PTRACE_GETFPREGS;
-		fp_regs = regs->skas.fp;
-	}
-
-	err = move_registers(PTRACE_GETREGS, fp_op, regs, fp_regs);
-	if(err)
-		panic("save_registers - saving registers failed, errno = %d\n",
-		      err);
-}
-
-void restore_registers(union uml_pt_regs *regs)
-{
-	unsigned long *fp_regs;
-	int err, fp_op;
-
-	if(have_fpx_regs){
-		fp_op = PTRACE_SETFPXREGS;
-		fp_regs = regs->skas.xfp;
-	}
-	else {
-		fp_op = PTRACE_SETFPREGS;
-		fp_regs = regs->skas.fp;
-	}
-
-	err = move_registers(PTRACE_SETREGS, fp_op, regs, fp_regs);
-	if(err)
-		panic("restore_registers - saving registers failed, "
-		      "errno = %d\n", err);
+	if(sigsetjmp(buf, 1) == 0)
+		siglongjmp(*fork_buf, 1);
 }
 
 void switch_threads(void *me, void *next)
 {
-	jmp_buf my_buf, **me_ptr = me, *next_buf = next;
+	sigjmp_buf my_buf, **me_ptr = me, *next_buf = next;
 	
 	*me_ptr = &my_buf;
-	if(setjmp(my_buf) == 0)
-		longjmp(*next_buf, 1);
+	if(sigsetjmp(my_buf, 1) == 0)
+		siglongjmp(*next_buf, 1);
 }
 
-static jmp_buf initial_jmpbuf;
+static sigjmp_buf initial_jmpbuf;
 
 /* XXX Make these percpu */
 static void (*cb_proc)(void *arg);
 static void *cb_arg;
-static jmp_buf *cb_back;
+static sigjmp_buf *cb_back;
 
 int start_idle_thread(void *stack, void *switch_buf_ptr, void **fork_buf_ptr)
 {
-	jmp_buf **switch_buf = switch_buf_ptr;
+	sigjmp_buf **switch_buf = switch_buf_ptr;
 	int n;
 
 	*fork_buf_ptr = &initial_jmpbuf;
-	n = setjmp(initial_jmpbuf);
+	n = sigsetjmp(initial_jmpbuf, 1);
 	if(n == 0)
 		new_thread_proc((void *) stack, new_thread_handler);
 	else if(n == 1)
 		remove_sigstack();
 	else if(n == 2){
 		(*cb_proc)(cb_arg);
-		longjmp(*cb_back, 1);
+		siglongjmp(*cb_back, 1);
 	}
 	else if(n == 3){
 		kmalloc_ok = 0;
@@ -282,7 +279,7 @@ int start_idle_thread(void *stack, void *switch_buf_ptr, void **fork_buf_ptr)
 		kmalloc_ok = 0;
 		return(1);
 	}
-	longjmp(**switch_buf, 1);
+	siglongjmp(**switch_buf, 1);
 }
 
 void remove_sigstack(void)
@@ -297,15 +294,15 @@ void remove_sigstack(void)
 
 void initial_thread_cb_skas(void (*proc)(void *), void *arg)
 {
-	jmp_buf here;
+	sigjmp_buf here;
 
 	cb_proc = proc;
 	cb_arg = arg;
 	cb_back = &here;
 
 	block_signals();
-	if(setjmp(here) == 0)
-		longjmp(initial_jmpbuf, 2);
+	if(sigsetjmp(here, 1) == 0)
+		siglongjmp(initial_jmpbuf, 2);
 	unblock_signals();
 
 	cb_proc = NULL;
@@ -316,40 +313,21 @@ void initial_thread_cb_skas(void (*proc)(void *), void *arg)
 void halt_skas(void)
 {
 	block_signals();
-	longjmp(initial_jmpbuf, 3);
+	siglongjmp(initial_jmpbuf, 3);
 }
 
 void reboot_skas(void)
 {
 	block_signals();
-	longjmp(initial_jmpbuf, 4);
-}
-
-int new_mm(int from)
-{
-	struct proc_mm_op copy;
-	int n, fd = os_open_file("/proc/mm", of_write(OPENFLAGS()), 0);
-
-	if(fd < 0)
-		return(-errno);
-
-	if(from != -1){
-		copy = ((struct proc_mm_op) { .op 	= MM_COPY_SEGMENTS,
-					      .u 	= 
-					      { .copy_segments	= from } } );
-		n = os_write_file(fd, &copy, sizeof(copy));
-		if(n != sizeof(copy)) 
-			printk("new_mm : /proc/mm copy_segments failed, "
-			       "errno = %d\n", errno);
-	}
-	return(fd);
+	siglongjmp(initial_jmpbuf, 4);
 }
 
 void switch_mm_skas(int mm_fd)
 {
 	int err;
 
-	err = ptrace(PTRACE_SWITCH_MM, userspace_pid, 0, mm_fd);
+#warning need cpu pid in switch_mm_skas
+	err = ptrace(PTRACE_SWITCH_MM, userspace_pid[0], 0, mm_fd);
 	if(err)
 		panic("switch_mm_skas - PTRACE_SWITCH_MM failed, errno = %d\n",
 		      errno);
@@ -357,30 +335,8 @@ void switch_mm_skas(int mm_fd)
 
 void kill_off_processes_skas(void)
 {
-	os_kill_process(userspace_pid, 1);
-}
-
-void init_registers(int pid)
-{
-	int err;
-
-	if(ptrace(PTRACE_GETREGS, pid, 0, exec_regs) < 0)
-		panic("check_ptrace : PTRACE_GETREGS failed, errno = %d", 
-		      errno);
-
-	err = ptrace(PTRACE_GETFPXREGS, pid, 0, exec_fpx_regs);
-	if(!err)
-		return;
-
-	have_fpx_regs = 0;
-	if(errno != EIO)
-		panic("check_ptrace : PTRACE_GETFPXREGS failed, errno = %d", 
-		      errno);
-
-	err = ptrace(PTRACE_GETFPREGS, pid, 0, exec_fp_regs);
-	if(err)
-		panic("check_ptrace : PTRACE_GETFPREGS failed, errno = %d", 
-		      errno);
+#warning need to loop over userspace_pids in kill_off_processes_skas
+	os_kill_ptraced_process(userspace_pid[0], 1);
 }
 
 /*

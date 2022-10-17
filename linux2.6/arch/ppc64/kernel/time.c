@@ -48,6 +48,8 @@
 #include <linux/time.h>
 #include <linux/init.h>
 #include <linux/profile.h>
+#include <linux/cpu.h>
+#include <linux/security.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
@@ -56,6 +58,7 @@
 #include <asm/cache.h>
 #include <asm/machdep.h>
 #ifdef CONFIG_PPC_ISERIES
+#include <asm/iSeries/ItLpQueue.h>
 #include <asm/iSeries/HvCallXm.h>
 #endif
 #include <asm/uaccess.h>
@@ -63,10 +66,9 @@
 #include <asm/ppcdebug.h>
 #include <asm/prom.h>
 #include <asm/sections.h>
+#include <asm/systemcfg.h>
 
-void smp_local_timer_interrupt(struct pt_regs *);
-
-u64 jiffies_64 = INITIAL_JIFFIES;
+u64 jiffies_64 __cacheline_aligned_in_smp = INITIAL_JIFFIES;
 
 EXPORT_SYMBOL(jiffies_64);
 
@@ -82,64 +84,29 @@ static unsigned long first_settimeofday = 1;
 #define XSEC_PER_SEC (1024*1024)
 
 unsigned long tb_ticks_per_jiffy;
-unsigned long tb_ticks_per_usec;
+unsigned long tb_ticks_per_usec = 100; /* sane default */
 unsigned long tb_ticks_per_sec;
 unsigned long next_xtime_sync_tb;
 unsigned long xtime_sync_interval;
 unsigned long tb_to_xs;
 unsigned      tb_to_us;
 unsigned long processor_freq;
-spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(rtc_lock);
+
+unsigned long tb_to_ns_scale;
+unsigned long tb_to_ns_shift;
 
 struct gettimeofday_struct do_gtod;
 
 extern unsigned long wall_jiffies;
-extern unsigned long lpEvent_count;
+extern unsigned long lpevent_count;
 extern int smp_tb_synchronized;
+
+extern struct timezone sys_tz;
 
 void ppc_adjtimex(void);
 
 static unsigned adjusting_time = 0;
-
-/*
- * The profiling function is SMP safe. (nothing can mess
- * around with "current", and the profiling counters are
- * updated with atomic operations). This is especially
- * useful with a profiling multiplier != 1
- */
-static inline void ppc64_do_profile(struct pt_regs *regs)
-{
-	unsigned long nip;
-	extern unsigned long prof_cpu_mask;
-
-	profile_hook(regs);
-
-	if (user_mode(regs))
-		return;
-
-	if (!prof_buffer)
-		return;
-
-	nip = instruction_pointer(regs);
-
-	/*
-	 * Only measure the CPUs specified by /proc/irq/prof_cpu_mask.
-	 * (default is all CPUs.)
-	 */
-	if (!((1<<smp_processor_id()) & prof_cpu_mask))
-		return;
-
-	nip -= (unsigned long)_stext;
-	nip >>= prof_shift;
-	/*
-	 * Don't ignore out-of-bounds EIP values silently,
-	 * put them into the last histogram slot, so if
-	 * present, they will show up as a sharp peak.
-	 */
-	if (nip > prof_len-1)
-		nip = prof_len-1;
-	atomic_inc((atomic_t *)&prof_buffer[nip]);
-}
 
 static __inline__ void timer_check_rtc(void)
 {
@@ -175,21 +142,72 @@ static __inline__ void timer_check_rtc(void)
         }
 }
 
+/*
+ * This version of gettimeofday has microsecond resolution.
+ */
+static inline void __do_gettimeofday(struct timeval *tv, unsigned long tb_val)
+{
+	unsigned long sec, usec, tb_ticks;
+	unsigned long xsec, tb_xsec;
+	struct gettimeofday_vars * temp_varp;
+	unsigned long temp_tb_to_xs, temp_stamp_xsec;
+
+	/*
+	 * These calculations are faster (gets rid of divides)
+	 * if done in units of 1/2^20 rather than microseconds.
+	 * The conversion to microseconds at the end is done
+	 * without a divide (and in fact, without a multiply)
+	 */
+	tb_ticks = tb_val - do_gtod.tb_orig_stamp;
+	temp_varp = do_gtod.varp;
+	temp_tb_to_xs = temp_varp->tb_to_xs;
+	temp_stamp_xsec = temp_varp->stamp_xsec;
+	tb_xsec = mulhdu( tb_ticks, temp_tb_to_xs );
+	xsec = temp_stamp_xsec + tb_xsec;
+	sec = xsec / XSEC_PER_SEC;
+	xsec -= sec * XSEC_PER_SEC;
+	usec = (xsec * USEC_PER_SEC)/XSEC_PER_SEC;
+
+	tv->tv_sec = sec;
+	tv->tv_usec = usec;
+}
+
+void do_gettimeofday(struct timeval *tv)
+{
+	__do_gettimeofday(tv, get_tb());
+}
+
+EXPORT_SYMBOL(do_gettimeofday);
+
 /* Synchronize xtime with do_gettimeofday */ 
 
-static __inline__ void timer_sync_xtime( unsigned long cur_tb )
+static inline void timer_sync_xtime(unsigned long cur_tb)
 {
 	struct timeval my_tv;
 
-	if ( cur_tb > next_xtime_sync_tb ) {
+	if (cur_tb > next_xtime_sync_tb) {
 		next_xtime_sync_tb = cur_tb + xtime_sync_interval;
-		do_gettimeofday( &my_tv );
-		if ( xtime.tv_sec <= my_tv.tv_sec ) {
+		__do_gettimeofday(&my_tv, cur_tb);
+
+		if (xtime.tv_sec <= my_tv.tv_sec) {
 			xtime.tv_sec = my_tv.tv_sec;
 			xtime.tv_nsec = my_tv.tv_usec * 1000;
 		}
 	}
 }
+
+#ifdef CONFIG_SMP
+unsigned long profile_pc(struct pt_regs *regs)
+{
+	unsigned long pc = instruction_pointer(regs);
+
+	if (in_lock_functions(pc))
+		return regs->link;
+
+	return pc;
+}
+EXPORT_SYMBOL(profile_pc);
+#endif
 
 #ifdef CONFIG_PPC_ISERIES
 
@@ -229,6 +247,8 @@ static void iSeries_tb_recal(void)
 				do_gtod.tb_ticks_per_sec = tb_ticks_per_sec;
 				tb_to_xs = divres.result_low;
 				do_gtod.varp->tb_to_xs = tb_to_xs;
+				systemcfg->tb_ticks_per_sec = tb_ticks_per_sec;
+				systemcfg->tb_to_xs = tb_to_xs;
 			}
 			else {
 				printk( "Titan recalibrate: FAILED (difference > 4 percent)\n"
@@ -246,14 +266,14 @@ static void iSeries_tb_recal(void)
 /*
  * For iSeries shared processors, we have to let the hypervisor
  * set the hardware decrementer.  We set a virtual decrementer
- * in the ItLpPaca and call the hypervisor if the virtual
+ * in the lppaca and call the hypervisor if the virtual
  * decrementer is less than the current value in the hardware
  * decrementer. (almost always the new decrementer value will
  * be greater than the current hardware decementer so the hypervisor
  * call will not be needed)
  */
 
-unsigned long tb_last_stamp=0;
+unsigned long tb_last_stamp __cacheline_aligned_in_smp;
 
 /*
  * timer_interrupt - gets called when the decrementer overflows,
@@ -264,26 +284,35 @@ int timer_interrupt(struct pt_regs * regs)
 	int next_dec;
 	unsigned long cur_tb;
 	struct paca_struct *lpaca = get_paca();
-	unsigned long cpu = lpaca->xPacaIndex;
+	unsigned long cpu = smp_processor_id();
 
 	irq_enter();
 
 #ifndef CONFIG_PPC_ISERIES
-	ppc64_do_profile(regs);
+	profile_tick(CPU_PROFILING, regs);
 #endif
 
-	lpaca->xLpPaca.xIntDword.xFields.xDecrInt = 0;
+	lpaca->lppaca.int_dword.fields.decr_int = 0;
 
 	while (lpaca->next_jiffy_update_tb <= (cur_tb = get_tb())) {
-
-#ifdef CONFIG_SMP
-		smp_local_timer_interrupt(regs);
-#endif
+		/*
+		 * We cannot disable the decrementer, so in the period
+		 * between this cpu's being marked offline in cpu_online_map
+		 * and calling stop-self, it is taking timer interrupts.
+		 * Avoid calling into the scheduler rebalancing code if this
+		 * is the case.
+		 */
+		if (!cpu_is_offline(cpu))
+			update_process_times(user_mode(regs));
+		/*
+		 * No need to check whether cpu is offline here; boot_cpuid
+		 * should have been fixed up by now.
+		 */
 		if (cpu == boot_cpuid) {
 			write_seqlock(&xtime_lock);
 			tb_last_stamp = lpaca->next_jiffy_update_tb;
 			do_timer(regs);
-			timer_sync_xtime( cur_tb );
+			timer_sync_xtime(lpaca->next_jiffy_update_tb);
 			timer_check_rtc();
 			write_sequnlock(&xtime_lock);
 			if ( adjusting_time && (time_adjust == 0) )
@@ -299,9 +328,9 @@ int timer_interrupt(struct pt_regs * regs)
 
 #ifdef CONFIG_PPC_ISERIES
 	{
-		struct ItLpQueue *lpq = lpaca->lpQueuePtr;
+		struct ItLpQueue *lpq = lpaca->lpqueue_ptr;
 		if (lpq && ItLpQueue_isLpIntPending(lpq))
-			lpEvent_count += ItLpQueue_process(lpq, regs);
+			lpevent_count += ItLpQueue_process(lpq, regs);
 	}
 #endif
 
@@ -313,42 +342,14 @@ int timer_interrupt(struct pt_regs * regs)
 /*
  * Scheduler clock - returns current time in nanosec units.
  *
- * This is wrong, but my CPUs run at 1GHz, so nyer nyer.
+ * Note: mulhdu(a, b) (multiply high double unsigned) returns
+ * the high 64 bits of a * b, i.e. (a * b) >> 64, where a and b
+ * are 64-bit unsigned numbers.
  */
 unsigned long long sched_clock(void)
 {
-	return get_tb();
+	return mulhdu(get_tb(), tb_to_ns_scale) << tb_to_ns_shift;
 }
-
-/*
- * This version of gettimeofday has microsecond resolution.
- */
-void do_gettimeofday(struct timeval *tv)
-{
-        unsigned long sec, usec, tb_ticks;
-	unsigned long xsec, tb_xsec;
-	struct gettimeofday_vars * temp_varp;
-	unsigned long temp_tb_to_xs, temp_stamp_xsec;
-
-	/* These calculations are faster (gets rid of divides)
-	 * if done in units of 1/2^20 rather than microseconds.
-	 * The conversion to microseconds at the end is done
-	 * without a divide (and in fact, without a multiply) */
-	tb_ticks = get_tb() - do_gtod.tb_orig_stamp;
-	temp_varp = do_gtod.varp;
-	temp_tb_to_xs = temp_varp->tb_to_xs;
-	temp_stamp_xsec = temp_varp->stamp_xsec;
-	tb_xsec = mulhdu( tb_ticks, temp_tb_to_xs );
-	xsec = temp_stamp_xsec + tb_xsec;
-	sec = xsec / XSEC_PER_SEC;
-	xsec -= sec * XSEC_PER_SEC;
-	usec = (xsec * USEC_PER_SEC)/XSEC_PER_SEC;
-
-        tv->tv_sec = sec;
-        tv->tv_usec = usec;
-}
-
-EXPORT_SYMBOL(do_gettimeofday);
 
 int do_settimeofday(struct timespec *tv)
 {
@@ -402,6 +403,7 @@ int do_settimeofday(struct timespec *tv)
 	new_xsec += new_sec * XSEC_PER_SEC;
 	if ( new_xsec > delta_xsec ) {
 		do_gtod.varp->stamp_xsec = new_xsec - delta_xsec;
+		systemcfg->stamp_xsec = new_xsec - delta_xsec;
 	}
 	else {
 		/* This is only for the case where the user is setting the time
@@ -410,71 +412,48 @@ int do_settimeofday(struct timespec *tv)
 		 * the time to Jan 5, 1970 */
 		do_gtod.varp->stamp_xsec = new_xsec;
 		do_gtod.tb_orig_stamp = tb_last_stamp;
+		systemcfg->stamp_xsec = new_xsec;
+		systemcfg->tb_orig_stamp = tb_last_stamp;
 	}
 
+	systemcfg->tz_minuteswest = sys_tz.tz_minuteswest;
+	systemcfg->tz_dsttime = sys_tz.tz_dsttime;
+
 	write_sequnlock_irqrestore(&xtime_lock, flags);
+	clock_was_set();
 	return 0;
 }
 
 EXPORT_SYMBOL(do_settimeofday);
-
-/*
- * This function is a copy of the architecture independent function
- * but which calls do_settimeofday rather than setting the xtime
- * fields itself.  This way, the fields which are used for 
- * do_settimeofday get updated too.
- */
-long ppc64_sys32_stime(int* tptr)
-{
-	int value;
-	struct timespec myTimeval;
-
-	if (!capable(CAP_SYS_TIME))
-		return -EPERM;
-
-	if (get_user(value, tptr))
-		return -EFAULT;
-
-	myTimeval.tv_sec = value;
-	myTimeval.tv_nsec = 0;
-
-	do_settimeofday(&myTimeval);
-
-	return 0;
-}
-
-/*
- * This function is a copy of the architecture independent function
- * but which calls do_settimeofday rather than setting the xtime
- * fields itself.  This way, the fields which are used for 
- * do_settimeofday get updated too.
- */
-long ppc64_sys_stime(long* tptr)
-{
-	long value;
-	struct timespec myTimeval;
-
-	if (!capable(CAP_SYS_TIME))
-		return -EPERM;
-
-	if (get_user(value, tptr))
-		return -EFAULT;
-
-	myTimeval.tv_sec = value;
-	myTimeval.tv_nsec = 0;
-
-	do_settimeofday(&myTimeval);
-
-	return 0;
-}
 
 void __init time_init(void)
 {
 	/* This function is only called on the boot processor */
 	unsigned long flags;
 	struct rtc_time tm;
+	struct div_result res;
+	unsigned long scale, shift;
 
 	ppc_md.calibrate_decr();
+
+	/*
+	 * Compute scale factor for sched_clock.
+	 * The calibrate_decr() function has set tb_ticks_per_sec,
+	 * which is the timebase frequency.
+	 * We compute 1e9 * 2^64 / tb_ticks_per_sec and interpret
+	 * the 128-bit result as a 64.64 fixed-point number.
+	 * We then shift that number right until it is less than 1.0,
+	 * giving us the scale factor and shift count to use in
+	 * sched_clock().
+	 */
+	div128_by_32(1000000000, 0, tb_ticks_per_sec, &res);
+	scale = res.result_low;
+	for (shift = 0; res.result_high != 0; ++shift) {
+		scale = (scale >> 1) | (res.result_high << 63);
+		res.result_high >>= 1;
+	}
+	tb_to_ns_scale = scale;
+	tb_to_ns_shift = shift;
 
 #ifdef CONFIG_PPC_ISERIES
 	if (!piranha_simulator)
@@ -492,6 +471,11 @@ void __init time_init(void)
 	do_gtod.tb_ticks_per_sec = tb_ticks_per_sec;
 	do_gtod.varp->tb_to_xs = tb_to_xs;
 	do_gtod.tb_to_us = tb_to_us;
+	systemcfg->tb_orig_stamp = tb_last_stamp;
+	systemcfg->tb_update_count = 0;
+	systemcfg->tb_ticks_per_sec = tb_ticks_per_sec;
+	systemcfg->stamp_xsec = xtime.tv_sec * XSEC_PER_SEC;
+	systemcfg->tb_to_xs = tb_to_xs;
 
 	xtime_sync_interval = tb_ticks_per_sec - (tb_ticks_per_sec/8);
 	next_xtime_sync_tb = tb_last_stamp + xtime_sync_interval;
@@ -626,6 +610,22 @@ void ppc_adjtimex(void)
 	mb();
 	do_gtod.varp = temp_varp;
 	do_gtod.var_idx = temp_idx;
+
+	/*
+	 * tb_update_count is used to allow the problem state gettimeofday code
+	 * to assure itself that it sees a consistent view of the tb_to_xs and
+	 * stamp_xsec variables.  It reads the tb_update_count, then reads
+	 * tb_to_xs and stamp_xsec and then reads tb_update_count again.  If
+	 * the two values of tb_update_count match and are even then the
+	 * tb_to_xs and stamp_xsec values are consistent.  If not, then it
+	 * loops back and reads them again until this criteria is met.
+	 */
+	++(systemcfg->tb_update_count);
+	wmb();
+	systemcfg->tb_to_xs = new_tb_to_xs;
+	systemcfg->stamp_xsec = new_stamp_xsec;
+	wmb();
+	++(systemcfg->tb_update_count);
 
 	write_sequnlock_irqrestore( &xtime_lock, flags );
 

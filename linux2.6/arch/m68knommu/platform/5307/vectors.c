@@ -14,6 +14,7 @@
 #include <linux/param.h>
 #include <linux/init.h>
 #include <linux/unistd.h>
+#include <linux/delay.h>
 #include <asm/irq.h>
 #include <asm/dma.h>
 #include <asm/traps.h>
@@ -22,7 +23,6 @@
 #include <asm/mcftimer.h>
 #include <asm/mcfsim.h>
 #include <asm/mcfdma.h>
-#include <asm/delay.h>
 #include <asm/mcfwdebug.h>
 
 /***************************************************************************/
@@ -32,7 +32,7 @@
 asmlinkage void dbginterrupt_c(struct frame *fp)
 {
 	extern void dump(struct pt_regs *fp);
-	printk("%s(%d): BUS ERROR TRAP\n", __FILE__, __LINE__);
+	printk(KERN_DEBUG "%s(%d): BUS ERROR TRAP\n", __FILE__, __LINE__);
 	dump((struct pt_regs *) fp);
 	asm("halt");
 }

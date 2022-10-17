@@ -9,6 +9,7 @@
  *		Wesley Craig <netatalk@umich.edu>
  *
  *	Fixes:
+ *		Neil Horman		:	Added missing device ioctls
  *		Michael Callahan	:	Made routing work
  *		Wesley Craig		:	Fix probing to listen to a
  *						passed node id.
@@ -61,16 +62,6 @@
 #include <net/route.h>
 #include <linux/atalk.h>
 
-extern void aarp_cleanup_module(void);
-
-extern void aarp_probe_network(struct atalk_iface *atif);
-extern int  aarp_proxy_probe_network(struct atalk_iface *atif,
-				     struct atalk_addr *sa);
-extern void aarp_proxy_remove(struct net_device *dev, struct atalk_addr *sa);
-
-extern void atalk_register_sysctl(void);
-extern void atalk_unregister_sysctl(void);
-
 struct datalink_proto *ddp_dl, *aarp_dl;
 static struct proto_ops atalk_dgram_ops;
 
@@ -81,18 +72,11 @@ static struct proto_ops atalk_dgram_ops;
 \**************************************************************************/
 
 HLIST_HEAD(atalk_sockets);
-rwlock_t atalk_sockets_lock = RW_LOCK_UNLOCKED;
+DEFINE_RWLOCK(atalk_sockets_lock);
 
 static inline void __atalk_insert_socket(struct sock *sk)
 {
 	sk_add_node(sk, &atalk_sockets);
-}
-
-static inline void atalk_insert_socket(struct sock *sk)
-{
-	write_lock_bh(&atalk_sockets_lock);
-	__atalk_insert_socket(sk);
-	write_unlock_bh(&atalk_sockets_lock);
 }
 
 static inline void atalk_remove_socket(struct sock *sk)
@@ -210,10 +194,10 @@ static inline void atalk_destroy_socket(struct sock *sk)
 
 /* Anti-deadlock ordering is atalk_routes_lock --> iface_lock -DaveM */
 struct atalk_route *atalk_routes;
-rwlock_t atalk_routes_lock = RW_LOCK_UNLOCKED;
+DEFINE_RWLOCK(atalk_routes_lock);
 
 struct atalk_iface *atalk_interfaces;
-rwlock_t atalk_interfaces_lock = RW_LOCK_UNLOCKED;
+DEFINE_RWLOCK(atalk_interfaces_lock);
 
 /* For probing devices or in a routerless network */
 struct atalk_route atrtr_default;
@@ -580,7 +564,7 @@ static int atrtr_create(struct rtentry *r, struct net_device *devhint)
 
 		retval = -ENOBUFS;
 		if (!rt)
-			goto out;
+			goto out_unlock;
 		memset(rt, 0, sizeof(*rt));
 
 		rt->next = atalk_routes;
@@ -629,7 +613,7 @@ out:
  * Called when a device is downed. Just throw away any routes
  * via it.
  */
-void atrtr_device_down(struct net_device *dev)
+static void atrtr_device_down(struct net_device *dev)
 {
 	struct atalk_route **r = &atalk_routes;
 	struct atalk_route *tmp;
@@ -673,7 +657,7 @@ static int ddp_device_event(struct notifier_block *this, unsigned long event,
 
 /* ioctl calls. Shouldn't even need touching */
 /* Device configuration ioctl calls */
-static int atif_ioctl(int cmd, void *arg)
+static int atif_ioctl(int cmd, void __user *arg)
 {
 	static char aarp_mcast[6] = { 0x09, 0x00, 0x00, 0xFF, 0xFF, 0xFF };
 	struct ifreq atreq;
@@ -892,7 +876,7 @@ static int atif_ioctl(int cmd, void *arg)
 }
 
 /* Routing ioctl() calls */
-static int atrtr_ioctl(unsigned int cmd, void *arg)
+static int atrtr_ioctl(unsigned int cmd, void __user *arg)
 {
 	struct rtentry rt;
 
@@ -908,12 +892,12 @@ static int atrtr_ioctl(unsigned int cmd, void *arg)
 
 		case SIOCADDRT: {
 			struct net_device *dev = NULL;
-			/*
-			 * FIXME: the name of the device is still in user
-			 * space, isn't it?
-			 */
 			if (rt.rt_dev) {
-				dev = __dev_get_by_name(rt.rt_dev);
+				char name[IFNAMSIZ];
+				if (copy_from_user(name, rt.rt_dev, IFNAMSIZ-1))
+					return -EFAULT;
+				name[IFNAMSIZ-1] = '\0';
+				dev = __dev_get_by_name(name);
 				if (!dev)
 					return -ENODEV;
 			}			
@@ -1051,7 +1035,7 @@ static int atalk_create(struct socket *sock, int protocol)
 	sk = sk_alloc(PF_APPLETALK, GFP_KERNEL, 1, NULL);
 	if (!sk)
 		goto out;
-	at = at_sk(sk) = kmalloc(sizeof(*at), GFP_KERNEL);
+	at = sk->sk_protinfo = kmalloc(sizeof(*at), GFP_KERNEL);
 	if (!at)
 		goto outsk;
 	memset(at, 0, sizeof(*at));
@@ -1552,7 +1536,7 @@ freeit:
 }
 
 static int atalk_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
-			 int len)
+			 size_t len)
 {
 	struct sock *sk = sock->sk;
 	struct atalk_sock *at = at_sk(sk);
@@ -1567,7 +1551,7 @@ static int atalk_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr 
 	struct atalk_route *rt;
 	int err;
 
-	if (flags & ~MSG_DONTWAIT)
+	if (flags & ~(MSG_DONTWAIT|MSG_CMSG_COMPAT))
 		return -EINVAL;
 
 	if (len > DDP_MAXSZ)
@@ -1659,7 +1643,7 @@ static int atalk_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr 
 	ddp->deh_dport = usat->sat_port;
 	ddp->deh_sport = at->src_port;
 
-	SOCK_DEBUG(sk, "SK %p: Copy user data (%d bytes).\n", sk, len);
+	SOCK_DEBUG(sk, "SK %p: Copy user data (%Zd bytes).\n", sk, len);
 
 	err = memcpy_fromiovec(skb_put(skb, len), msg->msg_iov, len);
 	if (err) {
@@ -1706,13 +1690,13 @@ static int atalk_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr 
 			kfree_skb(skb);
 		/* else queued/sent above in the aarp queue */
 	}
-	SOCK_DEBUG(sk, "SK %p: Done write (%d).\n", sk, len);
+	SOCK_DEBUG(sk, "SK %p: Done write (%Zd).\n", sk, len);
 
 	return len;
 }
 
 static int atalk_recvmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
-			 int size, int flags)
+			 size_t size, int flags)
 {
 	struct sock *sk = sock->sk;
 	struct sockaddr_at *sat = (struct sockaddr_at *)msg->msg_name;
@@ -1769,6 +1753,7 @@ static int atalk_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	int rc = -EINVAL;
 	struct sock *sk = sock->sk;
+	void __user *argp = (void __user *)arg;
 
 	switch (cmd) {
 		/* Protocol layer */
@@ -1778,7 +1763,7 @@ static int atalk_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 
 			if (amount < 0)
 				amount = 0;
-			rc = put_user(amount, (int *)arg);
+			rc = put_user(amount, (int __user *)argp);
 			break;
 		}
 		case TIOCINQ: {
@@ -1791,24 +1776,18 @@ static int atalk_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 
 			if (skb)
 				amount = skb->len - sizeof(struct ddpehdr);
-			rc = put_user(amount, (int *)arg);
+			rc = put_user(amount, (int __user *)argp);
 			break;
 		}
 		case SIOCGSTAMP:
-			if (!sk)
-				break;
-			rc = -ENOENT;
-			if (!sk->sk_stamp.tv_sec)
-				break;
-			rc = copy_to_user((void *)arg, &sk->sk_stamp,
-					  sizeof(struct timeval)) ? -EFAULT : 0;
+			rc = sock_get_timestamp(sk, argp);
 			break;
 		/* Routing */
 		case SIOCADDRT:
 		case SIOCDELRT:
 			rc = -EPERM;
 			if (capable(CAP_NET_ADMIN))
-				rc = atrtr_ioctl(cmd, (void *)arg);
+				rc = atrtr_ioctl(cmd, argp);
 			break;
 		/* Interface */
 		case SIOCGIFADDR:
@@ -1819,7 +1798,7 @@ static int atalk_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		case SIOCSARP:		/* proxy AARP */
 		case SIOCDARP:		/* proxy AARP */
 			rtnl_lock();
-			rc = atif_ioctl(cmd, (void *)arg);
+			rc = atif_ioctl(cmd, argp);
 			rtnl_unlock();
 			break;
 		/* Physical layer ioctl calls */
@@ -1828,6 +1807,8 @@ static int atalk_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		case SIOCSIFHWADDR:
 		case SIOCGIFFLAGS:
 		case SIOCSIFFLAGS:
+		case SIOCGIFTXQLEN:
+		case SIOCSIFTXQLEN:
 		case SIOCGIFMTU:
 		case SIOCGIFCONF:
 		case SIOCADDMULTI:
@@ -1835,7 +1816,7 @@ static int atalk_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		case SIOCGIFCOUNT:
 		case SIOCGIFINDEX:
 		case SIOCGIFNAME:
-			rc = dev_ioctl(cmd, (void *)arg);
+			rc = dev_ioctl(cmd, argp);
 			break;
 	}
 
@@ -1876,12 +1857,12 @@ static struct notifier_block ddp_notifier = {
 	.notifier_call	= ddp_device_event,
 };
 
-struct packet_type ltalk_packet_type = {
+static struct packet_type ltalk_packet_type = {
 	.type		= __constant_htons(ETH_P_LOCALTALK),
 	.func		= ltalk_rcv,
 };
 
-struct packet_type ppptalk_packet_type = {
+static struct packet_type ppptalk_packet_type = {
 	.type		= __constant_htons(ETH_P_PPPTALK),
 	.func		= atalk_rcv,
 };

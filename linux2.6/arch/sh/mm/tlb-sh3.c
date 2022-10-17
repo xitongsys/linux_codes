@@ -25,7 +25,6 @@
 #include <asm/io.h>
 #include <asm/uaccess.h>
 #include <asm/pgalloc.h>
-#include <asm/hardirq.h>
 #include <asm/mmu_context.h>
 #include <asm/cacheflush.h>
 
@@ -39,6 +38,16 @@ void update_mmu_cache(struct vm_area_struct * vma,
 	/* Ptrace may call this routine. */
 	if (vma && current->active_mm != vma->vm_mm)
 		return;
+
+#if defined(CONFIG_SH7705_CACHE_32KB)
+	struct page *page;
+	page = pte_page(pte);
+	if (VALID_PAGE(page) && !test_bit(PG_mapped, &page->flags)) {
+		unsigned long phys = pte_val(pte) & PTE_PHYS_MASK;
+		__flush_wback_region((void *)P1SEGADDR(phys), PAGE_SIZE);
+		__set_bit(PG_mapped, &page->flags);
+	}
+#endif
 
 	local_irq_save(flags);
 
@@ -61,6 +70,7 @@ void update_mmu_cache(struct vm_area_struct * vma,
 void __flush_tlb_page(unsigned long asid, unsigned long page)
 {
 	unsigned long addr, data;
+	int i, ways = MMU_NTLB_WAYS;
 
 	/*
 	 * NOTE: PTEH.ASID should be set to this MM
@@ -68,8 +78,15 @@ void __flush_tlb_page(unsigned long asid, unsigned long page)
 	 *
 	 * It would be simple if we didn't need to set PTEH.ASID...
 	 */
-	addr = MMU_TLB_ADDRESS_ARRAY |(page & 0x1F000)| MMU_PAGE_ASSOC_BIT;
+	addr = MMU_TLB_ADDRESS_ARRAY | (page & 0x1F000);
 	data = (page & 0xfffe0000) | asid; /* VALID bit is off */
-	ctrl_outl(data, addr);
+	
+	if ((cpu_data->flags & CPU_HAS_MMU_PAGE_ASSOC)) {
+		addr |= MMU_PAGE_ASSOC_BIT;
+		ways = 1;	/* we already know the way .. */
+	}
+
+	for (i = 0; i < ways; i++)
+		ctrl_outl(data, addr + (i << 8));
 }
 

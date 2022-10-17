@@ -24,6 +24,7 @@
 #include <linux/vmalloc.h>
 #include <linux/elf.h>
 #include <linux/seq_file.h>
+#include <linux/syscalls.h>
 #include <linux/fcntl.h>
 #include <linux/rcupdate.h>
 #include <linux/cpu.h>
@@ -32,9 +33,10 @@
 #include <linux/err.h>
 #include <linux/vermagic.h>
 #include <linux/notifier.h>
+#include <linux/stop_machine.h>
+#include <linux/device.h>
 #include <asm/uaccess.h>
 #include <asm/semaphore.h>
-#include <asm/pgalloc.h>
 #include <asm/cacheflush.h>
 
 #if 0
@@ -50,11 +52,8 @@
 /* If this is set, the section belongs in the init part of the module */
 #define INIT_OFFSET_MASK (1UL << (BITS_PER_LONG-1))
 
-#define symbol_is(literal, string)				\
-	(strcmp(MODULE_SYMBOL_PREFIX literal, (string)) == 0)
-
 /* Protects module list */
-static spinlock_t modlist_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(modlist_lock);
 
 /* List of modules, protected by module_mutex AND modlist_lock */
 static DECLARE_MUTEX(module_mutex);
@@ -90,13 +89,6 @@ static inline int strong_try_module_get(struct module *mod)
 		return 0;
 	return try_module_get(mod);
 }
-
-/* Stub function for modules which don't have an initfn */
-int init_module(void)
-{
-	return 0;
-}
-EXPORT_SYMBOL(init_module);
 
 /* A thread that wants to hold a reference to a module only while it
  * is running can call ths to safely exit.
@@ -387,7 +379,7 @@ static void module_unload_init(struct module *mod)
 	for (i = 0; i < NR_CPUS; i++)
 		local_set(&mod->ref[i].count, 0);
 	/* Hold reference count during initialization. */
-	local_set(&mod->ref[smp_processor_id()].count, 1);
+	local_set(&mod->ref[_smp_processor_id()].count, 1);
 	/* Backwards compatibility macros put refcount during init. */
 	mod->waiter = current;
 }
@@ -457,171 +449,6 @@ static void module_unload_free(struct module *mod)
 	}
 }
 
-#ifdef CONFIG_SMP
-/* Thread to stop each CPU in user context. */
-enum stopref_state {
-	STOPREF_WAIT,
-	STOPREF_PREPARE,
-	STOPREF_DISABLE_IRQ,
-	STOPREF_EXIT,
-};
-
-static enum stopref_state stopref_state;
-static unsigned int stopref_num_threads;
-static atomic_t stopref_thread_ack;
-
-static int stopref(void *cpu)
-{
-	int irqs_disabled = 0;
-	int prepared = 0;
-
-	sprintf(current->comm, "kmodule%lu\n", (unsigned long)cpu);
-
-	/* Highest priority we can manage, and move to right CPU. */
-#if 0 /* FIXME */
-	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
-	setscheduler(current->pid, SCHED_FIFO, &param);
-#endif
-	set_cpus_allowed(current, cpumask_of_cpu((int)(long)cpu));
-
-	/* Ack: we are alive */
-	mb(); /* Theoretically the ack = 0 might not be on this CPU yet. */
-	atomic_inc(&stopref_thread_ack);
-
-	/* Simple state machine */
-	while (stopref_state != STOPREF_EXIT) {
-		if (stopref_state == STOPREF_DISABLE_IRQ && !irqs_disabled) {
-			local_irq_disable();
-			irqs_disabled = 1;
-			/* Ack: irqs disabled. */
-			mb(); /* Must read state first. */
-			atomic_inc(&stopref_thread_ack);
-		} else if (stopref_state == STOPREF_PREPARE && !prepared) {
-			/* Everyone is in place, hold CPU. */
-			preempt_disable();
-			prepared = 1;
-			mb(); /* Must read state first. */
-			atomic_inc(&stopref_thread_ack);
-		}
-		if (irqs_disabled || prepared)
-			cpu_relax();
-		else
-			yield();
-	}
-
-	/* Ack: we are exiting. */
-	mb(); /* Must read state first. */
-	atomic_inc(&stopref_thread_ack);
-
-	if (irqs_disabled)
-		local_irq_enable();
-	if (prepared)
-		preempt_enable();
-
-	return 0;
-}
-
-/* Change the thread state */
-static void stopref_set_state(enum stopref_state state, int sleep)
-{
-	atomic_set(&stopref_thread_ack, 0);
-	wmb();
-	stopref_state = state;
-	while (atomic_read(&stopref_thread_ack) != stopref_num_threads) {
-		if (sleep)
-			yield();
-		else
-			cpu_relax();
-	}
-}
-
-/* Stop the machine.  Disables irqs. */
-static int stop_refcounts(void)
-{
-	unsigned int i, cpu;
-	cpumask_t old_allowed;
-	int ret = 0;
-
-	/* One thread per cpu.  We'll do our own. */
-	cpu = smp_processor_id();
-
-	/* FIXME: racy with set_cpus_allowed. */
-	old_allowed = current->cpus_allowed;
-	set_cpus_allowed(current, cpumask_of_cpu(cpu));
-
-	atomic_set(&stopref_thread_ack, 0);
-	stopref_num_threads = 0;
-	stopref_state = STOPREF_WAIT;
-
-	/* No CPUs can come up or down during this. */
-	down(&cpucontrol);
-
-	for (i = 0; i < NR_CPUS; i++) {
-		if (i == cpu || !cpu_online(i))
-			continue;
-		ret = kernel_thread(stopref, (void *)(long)i, CLONE_KERNEL);
-		if (ret < 0)
-			break;
-		stopref_num_threads++;
-	}
-
-	/* Wait for them all to come to life. */
-	while (atomic_read(&stopref_thread_ack) != stopref_num_threads)
-		yield();
-
-	/* If some failed, kill them all. */
-	if (ret < 0) {
-		stopref_set_state(STOPREF_EXIT, 1);
-		up(&cpucontrol);
-		return ret;
-	}
-
-	/* Don't schedule us away at this point, please. */
-	preempt_disable();
-
-	/* Now they are all scheduled, make them hold the CPUs, ready. */
-	stopref_set_state(STOPREF_PREPARE, 0);
-
-	/* Make them disable irqs. */
-	stopref_set_state(STOPREF_DISABLE_IRQ, 0);
-
-	local_irq_disable();
-	return 0;
-}
-
-/* Restart the machine.  Re-enables irqs. */
-static void restart_refcounts(void)
-{
-	stopref_set_state(STOPREF_EXIT, 0);
-	local_irq_enable();
-	preempt_enable();
-	up(&cpucontrol);
-}
-#else /* ...!SMP */
-static inline int stop_refcounts(void)
-{
-	local_irq_disable();
-	return 0;
-}
-static inline void restart_refcounts(void)
-{
-	local_irq_enable();
-}
-#endif
-
-unsigned int module_refcount(struct module *mod)
-{
-	unsigned int i, total = 0;
-
-	for (i = 0; i < NR_CPUS; i++)
-		total += local_read(&mod->ref[i].count);
-	return total;
-}
-EXPORT_SYMBOL(module_refcount);
-
-/* This exists whether we can unload or not */
-static void free_module(struct module *mod);
-
 #ifdef CONFIG_MODULE_FORCE_UNLOAD
 static inline int try_force(unsigned int flags)
 {
@@ -637,11 +464,48 @@ static inline int try_force(unsigned int flags)
 }
 #endif /* CONFIG_MODULE_FORCE_UNLOAD */
 
-/* Stub function for modules which don't have an exitfn */
-void cleanup_module(void)
+struct stopref
 {
+	struct module *mod;
+	int flags;
+	int *forced;
+};
+
+/* Whole machine is stopped with interrupts off when this runs. */
+static inline int __try_stop_module(void *_sref)
+{
+	struct stopref *sref = _sref;
+
+	/* If it's not unused, quit unless we are told to block. */
+	if ((sref->flags & O_NONBLOCK) && module_refcount(sref->mod) != 0) {
+		if (!(*sref->forced = try_force(sref->flags)))
+			return -EWOULDBLOCK;
+	}
+
+	/* Mark it as dying. */
+	sref->mod->state = MODULE_STATE_GOING;
+	return 0;
 }
-EXPORT_SYMBOL(cleanup_module);
+
+static int try_stop_module(struct module *mod, int flags, int *forced)
+{
+	struct stopref sref = { mod, flags, forced };
+
+	return stop_machine_run(__try_stop_module, &sref, NR_CPUS);
+}
+
+unsigned int module_refcount(struct module *mod)
+{
+	unsigned int i, total = 0;
+
+	for (i = 0; i < NR_CPUS; i++)
+		total += local_read(&mod->ref[i].count);
+	return total;
+}
+EXPORT_SYMBOL(module_refcount);
+
+/* This exists whether we can unload or not */
+static void free_module(struct module *mod);
 
 static void wait_for_zero_refcount(struct module *mod)
 {
@@ -687,8 +551,8 @@ sys_delete_module(const char __user *name_user, unsigned int flags)
 		goto out;
 	}
 
-	/* Already dying? */
-	if (mod->state == MODULE_STATE_GOING) {
+	/* Doing init or already dying? */
+	if (mod->state != MODULE_STATE_LIVE) {
 		/* FIXME: if (force), slam module count and wake up
                    waiter --RR */
 		DEBUGP("%s already dying\n", mod->name);
@@ -697,7 +561,7 @@ sys_delete_module(const char __user *name_user, unsigned int flags)
 	}
 
 	/* If it has an init func, it must have an exit func to unload */
-	if ((mod->init != init_module && mod->exit == cleanup_module)
+	if ((mod->init != NULL && mod->exit == NULL)
 	    || mod->unsafe) {
 		forced = try_force(flags);
 		if (!forced) {
@@ -706,33 +570,25 @@ sys_delete_module(const char __user *name_user, unsigned int flags)
 			goto out;
 		}
 	}
-	/* Stop the machine so refcounts can't move: irqs disabled. */
-	DEBUGP("Stopping refcounts...\n");
-	ret = stop_refcounts();
+
+	/* Set this up before setting mod->state */
+	mod->waiter = current;
+
+	/* Stop the machine so refcounts can't move and disable module. */
+	ret = try_stop_module(mod, flags, &forced);
 	if (ret != 0)
 		goto out;
-
-	/* If it's not unused, quit unless we are told to block. */
-	if ((flags & O_NONBLOCK) && module_refcount(mod) != 0) {
-		forced = try_force(flags);
-		if (!forced) {
-			ret = -EWOULDBLOCK;
-			restart_refcounts();
-			goto out;
-		}
-	}
-
-	/* Mark it as dying. */
-	mod->waiter = current;
-	mod->state = MODULE_STATE_GOING;
-	restart_refcounts();
 
 	/* Never wait if forced. */
 	if (!forced && module_refcount(mod) != 0)
 		wait_for_zero_refcount(mod);
 
 	/* Final destruction now noone is using it. */
-	mod->exit();
+	if (mod->exit != NULL) {
+		up(&module_mutex);
+		mod->exit();
+		down(&module_mutex);
+	}
 	free_module(mod);
 
  out:
@@ -759,7 +615,7 @@ static void print_unload_info(struct seq_file *m, struct module *mod)
 		seq_printf(m, "[unsafe],");
 	}
 
-	if (mod->init != init_module && mod->exit == cleanup_module) {
+	if (mod->init != NULL && mod->exit == NULL) {
 		printed_something = 1;
 		seq_printf(m, "[permanent],");
 	}
@@ -795,6 +651,18 @@ void symbol_put_addr(void *addr)
 }
 EXPORT_SYMBOL_GPL(symbol_put_addr);
 
+static ssize_t show_refcnt(struct module_attribute *mattr,
+			   struct module *mod, char *buffer)
+{
+	/* sysfs holds a reference */
+	return sprintf(buffer, "%u\n", module_refcount(mod)-1);
+}
+
+static struct module_attribute refcnt = {
+	.attr = { .name = "refcnt", .mode = 0444, .owner = THIS_MODULE },
+	.show = show_refcnt,
+};
+
 #else /* !CONFIG_MODULE_UNLOAD */
 static void print_unload_info(struct seq_file *m, struct module *mod)
 {
@@ -814,29 +682,9 @@ static inline int use_module(struct module *a, struct module *b)
 static inline void module_unload_init(struct module *mod)
 {
 }
-
-asmlinkage long
-sys_delete_module(const char *name_user, unsigned int flags)
-{
-	return -ENOSYS;
-}
-
 #endif /* CONFIG_MODULE_UNLOAD */
 
 #ifdef CONFIG_OBSOLETE_MODPARM
-static int param_set_byte(const char *val, struct kernel_param *kp)  
-{
-	char *endp;
-	long l;
-
-	if (!val) return -EINVAL;
-	l = simple_strtol(val, &endp, 0);
-	if (endp == val || *endp || ((char)l != l))
-		return -EINVAL;
-	*((char *)kp->arg) = l;
-	return 0;
-}
-
 /* Bounds checking done below */
 static int obsparm_copy_string(const char *val, struct kernel_param *kp)
 {
@@ -1076,6 +924,154 @@ static unsigned long resolve_symbol(Elf_Shdr *sechdrs,
 	return ret;
 }
 
+
+/*
+ * /sys/module/foo/sections stuff
+ * J. Corbet <corbet@lwn.net>
+ */
+#ifdef CONFIG_KALLSYMS
+static ssize_t module_sect_show(struct module_attribute *mattr,
+				struct module *mod, char *buf)
+{
+	struct module_sect_attr *sattr =
+		container_of(mattr, struct module_sect_attr, mattr);
+	return sprintf(buf, "0x%lx\n", sattr->address);
+}
+
+static void add_sect_attrs(struct module *mod, unsigned int nsect,
+		char *secstrings, Elf_Shdr *sechdrs)
+{
+	unsigned int nloaded = 0, i, size[2];
+	struct module_sect_attrs *sect_attrs;
+	struct module_sect_attr *sattr;
+	struct attribute **gattr;
+	
+	/* Count loaded sections and allocate structures */
+	for (i = 0; i < nsect; i++)
+		if (sechdrs[i].sh_flags & SHF_ALLOC)
+			nloaded++;
+	size[0] = ALIGN(sizeof(*sect_attrs)
+			+ nloaded * sizeof(sect_attrs->attrs[0]),
+			sizeof(sect_attrs->grp.attrs[0]));
+	size[1] = (nloaded + 1) * sizeof(sect_attrs->grp.attrs[0]);
+	if (! (sect_attrs = kmalloc(size[0] + size[1], GFP_KERNEL)))
+		return;
+
+	/* Setup section attributes. */
+	sect_attrs->grp.name = "sections";
+	sect_attrs->grp.attrs = (void *)sect_attrs + size[0];
+
+	sattr = &sect_attrs->attrs[0];
+	gattr = &sect_attrs->grp.attrs[0];
+	for (i = 0; i < nsect; i++) {
+		if (! (sechdrs[i].sh_flags & SHF_ALLOC))
+			continue;
+		sattr->address = sechdrs[i].sh_addr;
+		strlcpy(sattr->name, secstrings + sechdrs[i].sh_name,
+			MODULE_SECT_NAME_LEN);
+		sattr->mattr.show = module_sect_show;
+		sattr->mattr.store = NULL;
+		sattr->mattr.attr.name = sattr->name;
+		sattr->mattr.attr.owner = mod;
+		sattr->mattr.attr.mode = S_IRUGO;
+		*(gattr++) = &(sattr++)->mattr.attr;
+	}
+	*gattr = NULL;
+
+	if (sysfs_create_group(&mod->mkobj.kobj, &sect_attrs->grp))
+		goto out;
+
+	mod->sect_attrs = sect_attrs;
+	return;
+  out:
+	kfree(sect_attrs);
+}
+
+static void remove_sect_attrs(struct module *mod)
+{
+	if (mod->sect_attrs) {
+		sysfs_remove_group(&mod->mkobj.kobj,
+				   &mod->sect_attrs->grp);
+		/* We are positive that no one is using any sect attrs
+		 * at this point.  Deallocate immediately. */
+		kfree(mod->sect_attrs);
+		mod->sect_attrs = NULL;
+	}
+}
+
+
+#else
+static inline void add_sect_attrs(struct module *mod, unsigned int nsect,
+		char *sectstrings, Elf_Shdr *sechdrs)
+{
+}
+
+static inline void remove_sect_attrs(struct module *mod)
+{
+}
+#endif /* CONFIG_KALLSYMS */
+
+
+#ifdef CONFIG_MODULE_UNLOAD
+static inline int module_add_refcnt_attr(struct module *mod)
+{
+	return sysfs_create_file(&mod->mkobj.kobj, &refcnt.attr);
+}
+static void module_remove_refcnt_attr(struct module *mod)
+{
+	return sysfs_remove_file(&mod->mkobj.kobj, &refcnt.attr);
+}
+#else
+static inline int module_add_refcnt_attr(struct module *mod)
+{
+	return 0;
+}
+static void module_remove_refcnt_attr(struct module *mod)
+{
+}
+#endif
+
+
+static int mod_sysfs_setup(struct module *mod,
+			   struct kernel_param *kparam,
+			   unsigned int num_params)
+{
+	int err;
+
+	memset(&mod->mkobj.kobj, 0, sizeof(mod->mkobj.kobj));
+	err = kobject_set_name(&mod->mkobj.kobj, "%s", mod->name);
+	if (err)
+		goto out;
+	kobj_set_kset_s(&mod->mkobj, module_subsys);
+	mod->mkobj.mod = mod;
+	err = kobject_register(&mod->mkobj.kobj);
+	if (err)
+		goto out;
+
+	err = module_add_refcnt_attr(mod);
+	if (err)
+		goto out_unreg;
+
+	err = module_param_sysfs_setup(mod, kparam, num_params);
+	if (err)
+		goto out_unreg;
+
+	return 0;
+
+out_unreg:
+	kobject_unregister(&mod->mkobj.kobj);
+out:
+	return err;
+}
+
+static void mod_kobject_remove(struct module *mod)
+{
+	module_remove_refcnt_attr(mod);
+	module_param_sysfs_remove(mod);
+
+	kobject_unregister(&mod->mkobj.kobj);
+}
+
 /* Free a module, remove from lists, etc (must hold module mutex). */
 static void free_module(struct module *mod)
 {
@@ -1083,6 +1079,9 @@ static void free_module(struct module *mod)
 	spin_lock_irq(&modlist_lock);
 	list_del(&mod->list);
 	spin_unlock_irq(&modlist_lock);
+
+	remove_sect_attrs(mod);
+	mod_kobject_remove(mod);
 
 	/* Arch-specific cleanup. */
 	module_arch_cleanup(mod);
@@ -1135,6 +1134,8 @@ static int simplify_symbols(Elf_Shdr *sechdrs,
 			/* We compiled with -fno-common.  These are not
 			   supposed to happen.  */
 			DEBUGP("Common symbol: %s\n", strtab + sym[i].st_name);
+			printk("%s: please compile with -fno-common\n",
+			       mod->name);
 			ret = -ENOEXEC;
 			break;
 
@@ -1261,7 +1262,7 @@ static void set_license(struct module *mod, const char *license)
 		license = "unspecified";
 
 	mod->license_gplok = license_is_gpl_compatible(license);
-	if (!mod->license_gplok) {
+	if (!mod->license_gplok && !(tainted & TAINT_PROPRIETARY_MODULE)) {
 		printk(KERN_WARNING "%s: module license '%s' taints kernel.\n",
 		       mod->name, license);
 		tainted |= TAINT_PROPRIETARY_MODULE;
@@ -1377,7 +1378,15 @@ static void add_kallsyms(struct module *mod,
 		mod->symtab[i].st_info
 			= elf_type(&mod->symtab[i], sechdrs, secstrings, mod);
 }
-#endif
+#else
+static inline void add_kallsyms(struct module *mod,
+				Elf_Shdr *sechdrs,
+				unsigned int symindex,
+				unsigned int strindex,
+				const char *secstrings)
+{
+}
+#endif /* CONFIG_KALLSYMS */
 
 /* Allocate and load the module: note that size of section 0 is always
    zero, and we rely on this for optional sections. */
@@ -1395,6 +1404,7 @@ static struct module *load_module(void __user *umod,
 	struct module *mod;
 	long err = 0;
 	void *percpu = NULL, *ptr = NULL; /* Stops spurious gcc warning */
+	struct exception_table_entry *extable;
 
 	DEBUGP("load_module: umod=%p, len=%lu, uargs=%p\n",
 	       umod, len, uargs);
@@ -1420,15 +1430,19 @@ static struct module *load_module(void __user *umod,
 		goto free_hdr;
 	}
 
+	if (len < hdr->e_shoff + hdr->e_shnum * sizeof(Elf_Shdr))
+		goto truncated;
+
 	/* Convenience variables */
 	sechdrs = (void *)hdr + hdr->e_shoff;
 	secstrings = (void *)hdr + sechdrs[hdr->e_shstrndx].sh_offset;
 	sechdrs[0].sh_addr = 0;
 
-	/* And these should exist, but gcc whinges if we don't init them */
-	symindex = strindex = 0;
-
 	for (i = 1; i < hdr->e_shnum; i++) {
+		if (sechdrs[i].sh_type != SHT_NOBITS
+		    && len < sechdrs[i].sh_offset + sechdrs[i].sh_size)
+			goto truncated;
+
 		/* Mark all sections sh_addr with their address in the
 		   temporary image. */
 		sechdrs[i].sh_addr = (size_t)hdr + sechdrs[i].sh_offset;
@@ -1454,6 +1468,13 @@ static struct module *load_module(void __user *umod,
 		goto free_hdr;
 	}
 	mod = (void *)sechdrs[modindex].sh_addr;
+
+	if (symindex == 0) {
+		printk(KERN_WARNING "%s: module has no symbols (stripped?)\n",
+		       mod->name);
+		err = -ENOEXEC;
+		goto free_hdr;
+	}
 
 	/* Optional sections */
 	exportindex = find_sec(hdr, sechdrs, secstrings, "__ksymtab");
@@ -1611,13 +1632,19 @@ static struct module *load_module(void __user *umod,
 	}
 #endif
 
-  	/* Set up exception table */
-	mod->num_exentries = sechdrs[exindex].sh_size / sizeof(*mod->extable);
-	mod->extable = (void *)sechdrs[exindex].sh_addr;
-
 	/* Now do relocations. */
 	for (i = 1; i < hdr->e_shnum; i++) {
 		const char *strtab = (char *)sechdrs[strindex].sh_addr;
+		unsigned int info = sechdrs[i].sh_info;
+
+		/* Not a valid relocation section? */
+		if (info >= hdr->e_shnum)
+			continue;
+
+		/* Don't bother with non-allocated sections */
+		if (!(sechdrs[info].sh_flags & SHF_ALLOC))
+			continue;
+
 		if (sechdrs[i].sh_type == SHT_REL)
 			err = apply_relocate(sechdrs, strtab, symindex, i,mod);
 		else if (sechdrs[i].sh_type == SHT_RELA)
@@ -1627,17 +1654,20 @@ static struct module *load_module(void __user *umod,
 			goto cleanup;
 	}
 
+  	/* Set up and sort exception table */
+	mod->num_exentries = sechdrs[exindex].sh_size / sizeof(*mod->extable);
+	mod->extable = extable = (void *)sechdrs[exindex].sh_addr;
+	sort_extable(extable, extable + mod->num_exentries);
+
 	/* Finally, copy percpu area over. */
 	percpu_modcopy(mod->percpu, (void *)sechdrs[pcpuindex].sh_addr,
 		       sechdrs[pcpuindex].sh_size);
 
+	add_kallsyms(mod, sechdrs, symindex, strindex, secstrings);
+
 	err = module_finalize(hdr, sechdrs, mod);
 	if (err < 0)
 		goto cleanup;
-
-#ifdef CONFIG_KALLSYMS
-	add_kallsyms(mod, sechdrs, symindex, strindex, secstrings);
-#endif
 
 	mod->args = args;
 	if (obsparmindex) {
@@ -1648,6 +1678,10 @@ static struct module *load_module(void __user *umod,
 				      / sizeof(struct obsolete_modparm),
 				      sechdrs, symindex,
 				      (char *)sechdrs[strindex].sh_addr);
+		if (setupindex)
+			printk(KERN_WARNING "%s: Ignoring new-style "
+			       "parameters in presence of obsolete ones\n",
+			       mod->name);
 	} else {
 		/* Size of section 0 is 0, so this works well if no params */
 		err = parse_args(mod->name, mod->args,
@@ -1659,6 +1693,15 @@ static struct module *load_module(void __user *umod,
 	}
 	if (err < 0)
 		goto arch_cleanup;
+
+	err = mod_sysfs_setup(mod, 
+			      (struct kernel_param *)
+			      sechdrs[setupindex].sh_addr,
+			      sechdrs[setupindex].sh_size
+			      / sizeof(struct kernel_param));
+	if (err < 0)
+		goto arch_cleanup;
+	add_sect_attrs(mod, hdr->e_shnum, secstrings, sechdrs);
 
 	/* Get rid of temporary copy */
 	vfree(hdr);
@@ -1682,6 +1725,11 @@ static struct module *load_module(void __user *umod,
 	vfree(hdr);
 	if (err < 0) return ERR_PTR(err);
 	else return ptr;
+
+ truncated:
+	printk(KERN_ERR "Module len %lu truncated\n", len);
+	err = -ENOEXEC;
+	goto free_hdr;
 }
 
 /* This is where the real work happens */
@@ -1691,7 +1739,7 @@ sys_init_module(void __user *umod,
 		const char __user *uargs)
 {
 	struct module *mod;
-	int ret;
+	int ret = 0;
 
 	/* Must have permission */
 	if (!capable(CAP_SYS_MODULE))
@@ -1730,7 +1778,8 @@ sys_init_module(void __user *umod,
 	up(&notify_mutex);
 
 	/* Start the module */
-	ret = mod->init();
+	if (mod->init != NULL)
+		ret = mod->init();
 	if (ret < 0) {
 		/* Init routine failed: abort.  Try to protect us from
                    buggy refcounters. */
@@ -1768,6 +1817,16 @@ static inline int within(unsigned long addr, void *start, unsigned long size)
 }
 
 #ifdef CONFIG_KALLSYMS
+/*
+ * This ignores the intensely annoying "mapping symbols" found
+ * in ARM ELF files: $a, $t and $d.
+ */
+static inline int is_arm_mapping_symbol(const char *str)
+{
+	return str[0] == '$' && strchr("atd", str[1]) 
+	       && (str[2] == '\0' || str[2] == '.');
+}
+
 static const char *get_ksymbol(struct module *mod,
 			       unsigned long addr,
 			       unsigned long *size,
@@ -1792,11 +1851,13 @@ static const char *get_ksymbol(struct module *mod,
 		 * and inserted at a whim. */
 		if (mod->symtab[i].st_value <= addr
 		    && mod->symtab[i].st_value > mod->symtab[best].st_value
-		    && *(mod->strtab + mod->symtab[i].st_name) != '\0' )
+		    && *(mod->strtab + mod->symtab[i].st_name) != '\0'
+		    && !is_arm_mapping_symbol(mod->strtab + mod->symtab[i].st_name))
 			best = i;
 		if (mod->symtab[i].st_value > addr
 		    && mod->symtab[i].st_value < nextval
-		    && *(mod->strtab + mod->symtab[i].st_name) != '\0')
+		    && *(mod->strtab + mod->symtab[i].st_name) != '\0'
+		    && !is_arm_mapping_symbol(mod->strtab + mod->symtab[i].st_name))
 			nextval = mod->symtab[i].st_value;
 	}
 
@@ -1850,6 +1911,37 @@ struct module *module_get_kallsym(unsigned int symnum,
 	}
 	up(&module_mutex);
 	return NULL;
+}
+
+static unsigned long mod_find_symname(struct module *mod, const char *name)
+{
+	unsigned int i;
+
+	for (i = 0; i < mod->num_symtab; i++)
+		if (strcmp(name, mod->strtab+mod->symtab[i].st_name) == 0)
+			return mod->symtab[i].st_value;
+	return 0;
+}
+
+/* Look for this name: can be of form module:name. */
+unsigned long module_kallsyms_lookup_name(const char *name)
+{
+	struct module *mod;
+	char *colon;
+	unsigned long ret = 0;
+
+	/* Don't lock: we're in enough trouble already. */
+	if ((colon = strchr(name, ':')) != NULL) {
+		*colon = '\0';
+		if ((mod = find_module(name)) != NULL)
+			ret = mod_find_symname(mod, colon+1);
+		*colon = ':';
+	} else {
+		list_for_each_entry(mod, &modules, list)
+			if ((ret = mod_find_symname(mod, name)) != 0)
+				break;
+	}
+	return ret;
 }
 #endif /* CONFIG_KALLSYMS */
 
@@ -1940,7 +2032,7 @@ const struct exception_table_entry *search_module_extables(unsigned long addr)
 }
 
 /* Is this a valid kernel address?  We don't grab the lock: we are oopsing. */
-struct module *module_text_address(unsigned long addr)
+struct module *__module_text_address(unsigned long addr)
 {
 	struct module *mod;
 
@@ -1950,6 +2042,47 @@ struct module *module_text_address(unsigned long addr)
 			return mod;
 	return NULL;
 }
+
+struct module *module_text_address(unsigned long addr)
+{
+	struct module *mod;
+	unsigned long flags;
+
+	spin_lock_irqsave(&modlist_lock, flags);
+	mod = __module_text_address(addr);
+	spin_unlock_irqrestore(&modlist_lock, flags);
+
+	return mod;
+}
+
+/* Don't grab lock, we're oopsing. */
+void print_modules(void)
+{
+	struct module *mod;
+
+	printk("Modules linked in:");
+	list_for_each_entry(mod, &modules, list)
+		printk(" %s", mod->name);
+	printk("\n");
+}
+
+void module_add_driver(struct module *mod, struct device_driver *drv)
+{
+	if (!mod || !drv)
+		return;
+
+	/* Don't check return code; this call is idempotent */
+	sysfs_create_link(&drv->kobj, &mod->mkobj.kobj, "module");
+}
+EXPORT_SYMBOL(module_add_driver);
+
+void module_remove_driver(struct device_driver *drv)
+{
+	if (!drv)
+		return;
+	sysfs_remove_link(&drv->kobj, "module");
+}
+EXPORT_SYMBOL(module_remove_driver);
 
 #ifdef CONFIG_MODVERSIONS
 /* Generate the signature for struct module here, too, for modversions. */

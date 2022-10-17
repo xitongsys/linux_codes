@@ -72,7 +72,7 @@
 /*
  * There is a bunch of documentation about the card, jumpers, config
  * settings, restrictions, cables, device names and numbers in
- * ../../Documentation/specialix.txt 
+ * Documentation/specialix.txt
  */
 
 #include <linux/config.h>
@@ -92,6 +92,7 @@
 #include <linux/delay.h>
 #include <linux/version.h>
 #include <linux/pci.h>
+#include <linux/init.h>
 #include <asm/uaccess.h>
 
 #include "specialix_io8.h"
@@ -134,10 +135,6 @@
 	 ASYNC_SPD_HI       | ASYNC_SPEED_VHI    | ASYNC_SESSION_LOCKOUT | \
 	 ASYNC_PGRP_LOCKOUT | ASYNC_CALLOUT_NOHUP)
 
-#ifndef MIN
-#define MIN(a,b) ((a) < (b) ? (a) : (b))
-#endif
-
 #undef RS_EVENT_WRITE_WAKEUP
 #define RS_EVENT_WRITE_WAKEUP	0
 
@@ -158,7 +155,7 @@ static struct specialix_board sx_board[SX_NBOARD] =  {
 };
 
 static struct specialix_port sx_port[SX_NBOARD * SX_NPORT];
-		
+
 
 #ifdef SPECIALIX_TIMER
 static struct timer_list missed_irq_timer;
@@ -714,7 +711,7 @@ static inline void sx_transmit(struct specialix_board * bp)
 				sx_out(bp, CD186x_TDR, CD186x_C_SBRK);
 				port->COR2 &= ~COR2_ETC;
 			}
-			count = MIN(port->break_length, 0xff);
+			count = min_t(int, port->break_length, 0xff);
 			sx_out(bp, CD186x_TDR, CD186x_C_ESC);
 			sx_out(bp, CD186x_TDR, CD186x_C_DELAY);
 			sx_out(bp, CD186x_TDR, count);
@@ -1455,8 +1452,7 @@ static void sx_close(struct tty_struct * tty, struct file * filp)
 		 */
 		timeout = jiffies+HZ;
 		while(port->IER & IER_TXEMPTY) {
-			current->state = TASK_INTERRUPTIBLE;
- 			schedule_timeout(port->timeout);
+			msleep_interruptible(jiffies_to_msecs(port->timeout));
 			if (time_after(jiffies, timeout)) {
 				printk (KERN_INFO "Timeout waiting for close\n");
 				break;
@@ -1467,15 +1463,13 @@ static void sx_close(struct tty_struct * tty, struct file * filp)
 	sx_shutdown_port(bp, port);
 	if (tty->driver->flush_buffer)
 		tty->driver->flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	tty_ldisc_flush(tty);
 	tty->closing = 0;
 	port->event = 0;
-	port->tty = 0;
+	port->tty = NULL;
 	if (port->blocked_open) {
 		if (port->close_delay) {
-			current->state = TASK_INTERRUPTIBLE;
-			schedule_timeout(port->close_delay);
+			msleep_interruptible(jiffies_to_msecs(port->close_delay));
 		}
 		wake_up_interruptible(&port->open_wait);
 	}
@@ -1485,7 +1479,7 @@ static void sx_close(struct tty_struct * tty, struct file * filp)
 }
 
 
-static int sx_write(struct tty_struct * tty, int from_user, 
+static int sx_write(struct tty_struct * tty, 
                     const unsigned char *buf, int count)
 {
 	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
@@ -1502,52 +1496,22 @@ static int sx_write(struct tty_struct * tty, int from_user,
 		return 0;
 
 	save_flags(flags);
-	if (from_user) {
-		down(&tmp_buf_sem);
-		while (1) {
-			c = MIN(count, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
-					   SERIAL_XMIT_SIZE - port->xmit_head));
-			if (c <= 0)
-				break;
-
-			c -= copy_from_user(tmp_buf, buf, c);
-			if (!c) {
-				if (!total)
-					total = -EFAULT;
-				break;
-			}
-
-			cli();
-			c = MIN(c, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
-				       SERIAL_XMIT_SIZE - port->xmit_head));
-			memcpy(port->xmit_buf + port->xmit_head, tmp_buf, c);
-			port->xmit_head = (port->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
-			port->xmit_cnt += c;
+	while (1) {
+		cli();
+		c = min_t(int, count, min(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
+				   SERIAL_XMIT_SIZE - port->xmit_head));
+		if (c <= 0) {
 			restore_flags(flags);
-
-			buf += c;
-			count -= c;
-			total += c;
+			break;
 		}
-		up(&tmp_buf_sem);
-	} else {
-		while (1) {
-			cli();
-			c = MIN(count, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
-					   SERIAL_XMIT_SIZE - port->xmit_head));
-			if (c <= 0) {
-				restore_flags(flags);
-				break;
-			}
-			memcpy(port->xmit_buf + port->xmit_head, buf, c);
-			port->xmit_head = (port->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
-			port->xmit_cnt += c;
-			restore_flags(flags);
+		memcpy(port->xmit_buf + port->xmit_head, buf, c);
+		port->xmit_head = (port->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
+		port->xmit_cnt += c;
+		restore_flags(flags);
 
-			buf += c;
-			count -= c;
-			total += c;
-		}
+		buf += c;
+		count -= c;
+		total += c;
 	}
 
 	cli();
@@ -1645,19 +1609,21 @@ static void sx_flush_buffer(struct tty_struct *tty)
 	port->xmit_cnt = port->xmit_head = port->xmit_tail = 0;
 	restore_flags(flags);
 	
+	tty_wakeup(tty);
 	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
 }
 
 
-static int sx_get_modem_info(struct specialix_port * port, unsigned int *value)
+static int sx_tiocmget(struct tty_struct *tty, struct file *file)
 {
+	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
 	struct specialix_board * bp;
 	unsigned char status;
 	unsigned int result;
 	unsigned long flags;
+
+	if (sx_paranoia_check(port, tty->name, __FUNCTION__))
+		return -ENODEV;
 
 	bp = port_Board(port);
 	save_flags(flags); cli();
@@ -1682,71 +1648,49 @@ static int sx_get_modem_info(struct specialix_port * port, unsigned int *value)
 		          |/* ((status & MSVR_DSR) ? */ TIOCM_DSR /* : 0) */
 		          |   ((status & MSVR_CTS) ? TIOCM_CTS : 0);
 	}
-	put_user(result,(unsigned int *) value);
-	return 0;
+
+	return result;
 }
 
 
-static int sx_set_modem_info(struct specialix_port * port, unsigned int cmd,
-                             unsigned int *value)
+static int sx_tiocmset(struct tty_struct *tty, struct file *file,
+		       unsigned int set, unsigned int clear)
 {
-	int error;
-	unsigned int arg;
+	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
 	unsigned long flags;
-	struct specialix_board *bp = port_Board(port);
+	struct specialix_board *bp;
 
-	error = verify_area(VERIFY_READ, value, sizeof(int));
-	if (error) 
-		return error;
+	if (sx_paranoia_check(port, tty->name, __FUNCTION__))
+		return -ENODEV;
 
-	get_user(arg, (unsigned long *) value);
-	switch (cmd) {
-	case TIOCMBIS: 
-	   /*	if (arg & TIOCM_RTS) 
-			port->MSVR |= MSVR_RTS; */
-	   /*   if (arg & TIOCM_DTR)
-			port->MSVR |= MSVR_DTR; */
+	bp = port_Board(port);
 
-		if (SX_CRTSCTS(port->tty)) {
-			if (arg & TIOCM_RTS)
-				port->MSVR |= MSVR_DTR; 
-		} else {
-			if (arg & TIOCM_DTR)
-				port->MSVR |= MSVR_DTR; 
-		}	     
-		break;
-	case TIOCMBIC:
-	  /*	if (arg & TIOCM_RTS)
-			port->MSVR &= ~MSVR_RTS; */
-	  /*    if (arg & TIOCM_DTR)
-			port->MSVR &= ~MSVR_DTR; */
-		if (SX_CRTSCTS(port->tty)) {
-			if (arg & TIOCM_RTS)
-				port->MSVR &= ~MSVR_DTR;
-		} else {
-			if (arg & TIOCM_DTR)
-				port->MSVR &= ~MSVR_DTR;
-		}
-		break;
-	case TIOCMSET:
-	  /* port->MSVR = (arg & TIOCM_RTS) ? (port->MSVR | MSVR_RTS) : 
-						 (port->MSVR & ~MSVR_RTS); */
-	  /* port->MSVR = (arg & TIOCM_DTR) ? (port->MSVR | MSVR_DTR) : 
-						 (port->MSVR & ~MSVR_DTR); */
-		if (SX_CRTSCTS(port->tty)) {
-	  		port->MSVR = (arg & TIOCM_RTS) ? 
-			                         (port->MSVR |  MSVR_DTR) : 
-			                         (port->MSVR & ~MSVR_DTR);
-		} else {
-			port->MSVR = (arg & TIOCM_DTR) ?
-			                         (port->MSVR |  MSVR_DTR):
-			                         (port->MSVR & ~MSVR_DTR);
-		}
-		break;
-	default:
-		return -EINVAL;
-	}
 	save_flags(flags); cli();
+   /*	if (set & TIOCM_RTS)
+		port->MSVR |= MSVR_RTS; */
+   /*   if (set & TIOCM_DTR)
+		port->MSVR |= MSVR_DTR; */
+
+	if (SX_CRTSCTS(port->tty)) {
+		if (set & TIOCM_RTS)
+			port->MSVR |= MSVR_DTR;
+	} else {
+		if (set & TIOCM_DTR)
+			port->MSVR |= MSVR_DTR;
+	}
+
+  /*	if (clear & TIOCM_RTS)
+		port->MSVR &= ~MSVR_RTS; */
+  /*    if (clear & TIOCM_DTR)
+		port->MSVR &= ~MSVR_DTR; */
+	if (SX_CRTSCTS(port->tty)) {
+		if (clear & TIOCM_RTS)
+			port->MSVR &= ~MSVR_DTR;
+	} else {
+		if (clear & TIOCM_DTR)
+			port->MSVR &= ~MSVR_DTR;
+	}
+
 	sx_out(bp, CD186x_CAR, port_No(port));
 	sx_out(bp, CD186x_MSVR, port->MSVR);
 	restore_flags(flags);
@@ -1774,18 +1718,13 @@ static inline void sx_send_break(struct specialix_port * port, unsigned long len
 
 
 static inline int sx_set_serial_info(struct specialix_port * port,
-                                     struct serial_struct * newinfo)
+                                     struct serial_struct __user * newinfo)
 {
 	struct serial_struct tmp;
 	struct specialix_board *bp = port_Board(port);
 	int change_speed;
 	unsigned long flags;
-	int error;
 	
-	error = verify_area(VERIFY_READ, (void *) newinfo, sizeof(tmp));
-	if (error)
-		return error;
-
 	if (copy_from_user(&tmp, newinfo, sizeof(tmp)))
 		return -EFAULT;
 	
@@ -1830,16 +1769,11 @@ static inline int sx_set_serial_info(struct specialix_port * port,
 
 
 static inline int sx_get_serial_info(struct specialix_port * port,
-				     struct serial_struct * retinfo)
+				     struct serial_struct __user *retinfo)
 {
 	struct serial_struct tmp;
 	struct specialix_board *bp = port_Board(port);
-	int error;
 	
-	error = verify_area(VERIFY_WRITE, (void *) retinfo, sizeof(tmp));
-	if (error)
-		return error;
-
 	memset(&tmp, 0, sizeof(tmp));
 	tmp.type = PORT_CIRRUS;
 	tmp.line = port - sx_port;
@@ -1861,8 +1795,8 @@ static int sx_ioctl(struct tty_struct * tty, struct file * filp,
                     unsigned int cmd, unsigned long arg)
 {
 	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
-	int error;
 	int retval;
+	void __user *argp = (void __user *)arg;
 				
 	if (sx_paranoia_check(port, tty->name, "sx_ioctl"))
 		return -ENODEV;
@@ -1884,32 +1818,20 @@ static int sx_ioctl(struct tty_struct * tty, struct file * filp,
 		sx_send_break(port, arg ? arg*(HZ/10) : HZ/4);
 		return 0;
 	 case TIOCGSOFTCAR:
-		error = verify_area(VERIFY_WRITE, (void *) arg, sizeof(long));
-		if (error)
-			return error;
-		put_user(C_CLOCAL(tty) ? 1 : 0,
-		         (unsigned long *) arg);
+		if (put_user(C_CLOCAL(tty)?1:0, (unsigned long __user *)argp))
+			return -EFAULT;
 		return 0;
 	 case TIOCSSOFTCAR:
-		get_user(arg, (unsigned long *) arg);
+		if (get_user(arg, (unsigned long __user *) argp))
+			return -EFAULT;
 		tty->termios->c_cflag =
 			((tty->termios->c_cflag & ~CLOCAL) |
 			(arg ? CLOCAL : 0));
 		return 0;
-	 case TIOCMGET:
-		error = verify_area(VERIFY_WRITE, (void *) arg,
-		                    sizeof(unsigned int));
-		if (error)
-			return error;
-		return sx_get_modem_info(port, (unsigned int *) arg);
-	 case TIOCMBIS:
-	 case TIOCMBIC:
-	 case TIOCMSET:
-		return sx_set_modem_info(port, cmd, (unsigned int *) arg);
 	 case TIOCGSERIAL:	
-		return sx_get_serial_info(port, (struct serial_struct *) arg);
+		return sx_get_serial_info(port, argp);
 	 case TIOCSSERIAL:	
-		return sx_set_serial_info(port, (struct serial_struct *) arg);
+		return sx_set_serial_info(port, argp);
 	 default:
 		return -ENOIOCTLCMD;
 	}
@@ -2054,7 +1976,7 @@ static void sx_hangup(struct tty_struct * tty)
 	port->event = 0;
 	port->count = 0;
 	port->flags &= ~ASYNC_NORMAL_ACTIVE;
-	port->tty = 0;
+	port->tty = NULL;
 	wake_up_interruptible(&port->open_wait);
 }
 
@@ -2091,12 +2013,8 @@ static void do_softint(void *private_)
 	if(!(tty = port->tty)) 
 		return;
 
-	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event)) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
-	}
+	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event))
+		tty_wakeup(tty);
 }
 
 static struct tty_operations sx_ops = {
@@ -2115,6 +2033,8 @@ static struct tty_operations sx_ops = {
 	.stop = sx_stop,
 	.start = sx_start,
 	.hangup = sx_hangup,
+	.tiocmget = sx_tiocmget,
+	.tiocmset = sx_tiocmset,
 };
 
 static int sx_init_drivers(void)
@@ -2266,8 +2186,8 @@ int iobase[SX_NBOARD]  = {0,};
 
 int irq [SX_NBOARD] = {0,};
 
-MODULE_PARM(iobase,"1-" __MODULE_STRING(SX_NBOARD) "i");
-MODULE_PARM(irq,"1-" __MODULE_STRING(SX_NBOARD) "i");
+module_param_array(iobase, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
 
 /*
  * You can setup up to 4 boards.

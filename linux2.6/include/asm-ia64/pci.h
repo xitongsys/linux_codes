@@ -16,6 +16,7 @@
  * loader.
  */
 #define pcibios_assign_all_busses()     0
+#define pcibios_scan_all_fns(a, b)	0
 
 #define PCIBIOS_MIN_IO		0x1000
 #define PCIBIOS_MIN_MEM		0x10000000
@@ -75,7 +76,8 @@ extern int pcibios_prep_mwi (struct pci_dev *);
 #define pci_dac_page_to_dma(dev,pg,off,dir)		((dma_addr_t) page_to_bus(pg) + (off))
 #define pci_dac_dma_to_page(dev,dma_addr)		(virt_to_page(bus_to_virt(dma_addr)))
 #define pci_dac_dma_to_offset(dev,dma_addr)		offset_in_page(dma_addr)
-#define pci_dac_dma_sync_single(dev,dma_addr,len,dir)	do { mb(); } while (0)
+#define pci_dac_dma_sync_single_for_cpu(dev,dma_addr,len,dir)	do { } while (0)
+#define pci_dac_dma_sync_single_for_device(dev,dma_addr,len,dir)	do { mb(); } while (0)
 
 #define sg_dma_len(sg)		((sg)->dma_length)
 #define sg_dma_address(sg)	((sg)->dma_address)
@@ -83,6 +85,20 @@ extern int pcibios_prep_mwi (struct pci_dev *);
 #define HAVE_PCI_MMAP
 extern int pci_mmap_page_range (struct pci_dev *dev, struct vm_area_struct *vma,
 				enum pci_mmap_state mmap_state, int write_combine);
+#define HAVE_PCI_LEGACY
+extern int pci_mmap_legacy_page_range(struct pci_bus *bus,
+				      struct vm_area_struct *vma);
+extern ssize_t pci_read_legacy_io(struct kobject *kobj, char *buf, loff_t off,
+				  size_t count);
+extern ssize_t pci_write_legacy_io(struct kobject *kobj, char *buf, loff_t off,
+				   size_t count);
+extern int pci_mmap_legacy_mem(struct kobject *kobj,
+			       struct bin_attribute *attr,
+			       struct vm_area_struct *vma);
+
+#define pci_get_legacy_mem platform_pci_get_legacy_mem
+#define pci_legacy_read platform_pci_legacy_read
+#define pci_legacy_write platform_pci_legacy_write
 
 struct pci_window {
 	struct resource resource;
@@ -96,10 +112,14 @@ struct pci_controller {
 
 	unsigned int windows;
 	struct pci_window *window;
+
+	void *platform_data;
 };
 
 #define PCI_CONTROLLER(busdev) ((struct pci_controller *) busdev->sysdata)
 #define pci_domain_nr(busdev)    (PCI_CONTROLLER(busdev)->segment)
+
+extern struct pci_ops pci_root_ops;
 
 static inline int pci_name_bus(char *name, struct pci_bus *bus)
 {
@@ -111,7 +131,16 @@ static inline int pci_name_bus(char *name, struct pci_bus *bus)
 	return 0;
 }
 
-/* generic pci stuff */
-#include <asm-generic/pci.h>
+static inline void pcibios_add_platform_entries(struct pci_dev *dev)
+{
+}
+
+extern void pcibios_resource_to_bus(struct pci_dev *dev,
+		struct pci_bus_region *region, struct resource *res);
+
+extern void pcibios_bus_to_resource(struct pci_dev *dev,
+		struct resource *res, struct pci_bus_region *region);
+
+#define pcibios_scan_all_fns(a, b)	0
 
 #endif /* _ASM_IA64_PCI_H */

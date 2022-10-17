@@ -43,13 +43,10 @@
 #include "xfs_dmapi.h"
 #include "xfs_mount.h"
 
-
-#ifndef CONFIG_XFS_DMAPI
-xfs_dmops_t	xfs_dmcore_xfs = {
+xfs_dmops_t	xfs_dmcore_stub = {
 	.xfs_send_data		= (xfs_send_data_t)fs_nosys,
 	.xfs_send_mmap		= (xfs_send_mmap_t)fs_noerr,
 	.xfs_send_destroy	= (xfs_send_destroy_t)fs_nosys,
 	.xfs_send_namesp	= (xfs_send_namesp_t)fs_nosys,
 	.xfs_send_unmount	= (xfs_send_unmount_t)fs_noval,
 };
-#endif /* CONFIG_XFS_DMAPI */

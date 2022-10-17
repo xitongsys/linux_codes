@@ -25,11 +25,11 @@
 #include <linux/init.h>
 #include <linux/console.h>
 #include <linux/module.h>
+#include <linux/hardirq.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
-#include <asm/hardirq.h>
 
 #ifndef CONFIG_ARCH_S390X
 #define __FAIL_ADDR_MASK 0x7ffff000
@@ -87,12 +87,12 @@ static int __check_access_register(struct pt_regs *regs, int error_code)
 	if (areg == 0)
 		/* Access via access register 0 -> kernel address */
 		return 0;
-	if (regs && areg < NUM_ACRS && regs->acrs[areg] <= 1)
+	if (regs && areg < NUM_ACRS && current->thread.acrs[areg] <= 1)
 		/*
 		 * access register contains 0 -> kernel address,
 		 * access register contains 1 -> user space address
 		 */
-		return regs->acrs[areg];
+		return current->thread.acrs[areg];
 
 	/* Something unhealthy was done with the access registers... */
 	die("page fault via unknown access register", regs, error_code);
@@ -115,8 +115,10 @@ static inline int check_user_space(struct pt_regs *regs, int error_code)
 	 *   3: Home Segment Table Descriptor
 	 */
 	int descriptor = S390_lowcore.trans_exc_code & 3;
-	if (descriptor == 1)
+	if (descriptor == 1) {
+		save_access_regs(current->thread.acrs);
 		return __check_access_register(regs, error_code);
+	}
 	return descriptor >> 1;
 }
 
@@ -124,8 +126,8 @@ static inline int check_user_space(struct pt_regs *regs, int error_code)
  * Send SIGSEGV to task.  This is an external routine
  * to keep the stack usage of do_page_fault small.
  */
-static void force_sigsegv(struct pt_regs *regs, unsigned long error_code,
-			  int si_code, unsigned long address)
+static void do_sigsegv(struct pt_regs *regs, unsigned long error_code,
+		       int si_code, unsigned long address)
 {
 	struct siginfo si;
 
@@ -157,7 +159,8 @@ static void force_sigsegv(struct pt_regs *regs, unsigned long error_code,
  *   11       Page translation     ->  Not present       (nullification)
  *   3b       Region third trans.  ->  Not present       (nullification)
  */
-extern inline void do_exception(struct pt_regs *regs, unsigned long error_code)
+extern inline void
+do_exception(struct pt_regs *regs, unsigned long error_code, int is_protection)
 {
         struct task_struct *tsk;
         struct mm_struct *mm;
@@ -175,7 +178,7 @@ extern inline void do_exception(struct pt_regs *regs, unsigned long error_code)
 	 * as a special case because the translation exception code 
 	 * field is not guaranteed to contain valid data in this case.
 	 */
-	if (error_code == 4 && !(S390_lowcore.trans_exc_code & 4)) {
+	if (is_protection && !(S390_lowcore.trans_exc_code & 4)) {
 
 		/* Low-address protection hit in kernel mode means 
 		   NULL pointer write access in kernel mode.  */
@@ -230,7 +233,7 @@ extern inline void do_exception(struct pt_regs *regs, unsigned long error_code)
  */
 good_area:
 	si_code = SEGV_ACCERR;
-	if (error_code != 4) {
+	if (!is_protection) {
 		/* page not present, check vm flags */
 		if (!(vma->vm_flags & (VM_READ | VM_EXEC | VM_WRITE)))
 			goto bad_area;
@@ -245,7 +248,7 @@ survive:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
-	switch (handle_mm_fault(mm, vma, address, error_code == 4)) {
+	switch (handle_mm_fault(mm, vma, address, is_protection)) {
 	case VM_FAULT_MINOR:
 		tsk->min_flt++;
 		break;
@@ -261,6 +264,11 @@ survive:
 	}
 
         up_read(&mm->mmap_sem);
+	/*
+	 * The instruction that caused the program check will
+	 * be repeated. Don't signal single step via SIGTRAP.
+	 */
+	clear_tsk_thread_flag(current, TIF_SINGLE_STEP);
         return;
 
 /*
@@ -274,7 +282,7 @@ bad_area:
         if (regs->psw.mask & PSW_MASK_PSTATE) {
                 tsk->thread.prot_addr = address;
                 tsk->thread.trap_no = error_code;
-		force_sigsegv(regs, error_code, si_code, address);
+		do_sigsegv(regs, error_code, si_code, address);
                 return;
 	}
 
@@ -335,28 +343,15 @@ do_sigbus:
 void do_protection_exception(struct pt_regs *regs, unsigned long error_code)
 {
 	regs->psw.addr -= (error_code >> 16);
-	do_exception(regs, 4);
+	do_exception(regs, 4, 1);
 }
 
-void do_segment_exception(struct pt_regs *regs, unsigned long error_code)
+void do_dat_exception(struct pt_regs *regs, unsigned long error_code)
 {
-	do_exception(regs, 0x10);
+	do_exception(regs, error_code & 0xff, 0);
 }
 
-void do_page_exception(struct pt_regs *regs, unsigned long error_code)
-{
-	do_exception(regs, 0x11);
-}
-
-#ifdef CONFIG_ARCH_S390X
-
-void
-do_region_exception(struct pt_regs *regs, unsigned long error_code)
-{
-	do_exception(regs, 0x3b);
-}
-
-#else /* CONFIG_ARCH_S390X */
+#ifndef CONFIG_ARCH_S390X
 
 typedef struct _pseudo_wait_t {
        struct _pseudo_wait_t *next;
@@ -454,6 +449,11 @@ do_pseudo_page_fault(struct pt_regs *regs, unsigned long error_code)
                 wait_struct.next = pseudo_lock_queue;
                 pseudo_lock_queue = &wait_struct;
                 spin_unlock(&pseudo_wait_spinlock);
+		/*
+		 * The instruction that caused the program check will
+		 * be repeated. Don't signal single step via SIGTRAP.
+		 */
+		clear_tsk_thread_flag(current, TIF_SINGLE_STEP);
                 /* go to sleep */
                 wait_event(wait_struct.queue, wait_struct.resolved);
         }
@@ -538,8 +538,6 @@ asmlinkage void
 pfault_interrupt(struct pt_regs *regs, __u16 error_code)
 {
 	struct task_struct *tsk;
-	wait_queue_head_t queue;
-	wait_queue_head_t *qp;
 	__u16 subcode;
 
 	/*
@@ -553,46 +551,34 @@ pfault_interrupt(struct pt_regs *regs, __u16 error_code)
 		return;
 
 	/*
-	 * Get the token (= address of kernel stack of affected task).
+	 * Get the token (= address of the task structure of the affected task).
 	 */
 	tsk = *(struct task_struct **) __LC_PFAULT_INTPARM;
 
-	/*
-	 * We got all needed information from the lowcore and can
-	 * now safely switch on interrupts.
-	 */
-	if (regs->psw.mask & PSW_MASK_PSTATE)
-		local_irq_enable();
-
 	if (subcode & 0x0080) {
 		/* signal bit is set -> a page has been swapped in by VM */
-		qp = (wait_queue_head_t *)
-			xchg(&tsk->thread.pfault_wait, -1);
-		if (qp != NULL) {
+		if (xchg(&tsk->thread.pfault_wait, -1) != 0) {
 			/* Initial interrupt was faster than the completion
 			 * interrupt. pfault_wait is valid. Set pfault_wait
 			 * back to zero and wake up the process. This can
 			 * safely be done because the task is still sleeping
 			 * and can't procude new pfaults. */
-			tsk->thread.pfault_wait = 0ULL;
-			wake_up(qp);
+			tsk->thread.pfault_wait = 0;
+			wake_up_process(tsk);
 		}
 	} else {
 		/* signal bit not set -> a real page is missing. */
-                init_waitqueue_head (&queue);
-		qp = (wait_queue_head_t *)
-			xchg(&tsk->thread.pfault_wait, (addr_t) &queue);
-		if (qp != NULL) {
+		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
+		if (xchg(&tsk->thread.pfault_wait, 1) != 0) {
 			/* Completion interrupt was faster than the initial
 			 * interrupt (swapped in a -1 for pfault_wait). Set
 			 * pfault_wait back to zero and exit. This can be
 			 * done safely because tsk is running in kernel 
 			 * mode and can't produce new pfaults. */
-			tsk->thread.pfault_wait = 0ULL;
-		}
-
-                /* go to sleep */
-                wait_event(queue, tsk->thread.pfault_wait == 0ULL);
+			tsk->thread.pfault_wait = 0;
+			set_task_state(tsk, TASK_RUNNING);
+		} else
+			set_tsk_need_resched(tsk);
 	}
 }
 #endif

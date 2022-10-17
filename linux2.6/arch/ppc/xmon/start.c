@@ -12,6 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/sysrq.h>
+#include <linux/bitops.h>
 #include <asm/xmon.h>
 #include <asm/prom.h>
 #include <asm/bootx.h>
@@ -21,9 +22,6 @@
 #include <asm/processor.h>
 #include <asm/delay.h>
 #include <asm/btext.h>
-#ifdef CONFIG_SMP
-#include <asm/bitops.h>
-#endif
 
 static volatile unsigned char *sccc, *sccd;
 unsigned int TXRDY, RXRDY, DLAB;
@@ -104,7 +102,7 @@ static struct sysrq_key_op sysrq_xmon_op =
 {
 	.handler =	sysrq_handle_xmon,
 	.help_msg =	"Xmon",
-	.action_msg =	"Entering xmon\n",
+	.action_msg =	"Entering xmon",
 };
 #endif
 
@@ -448,13 +446,13 @@ xmon_init_scc(void)
 	scc_initialized = 1;
 	if (via_modem) {
 		for (;;) {
-			xmon_write(0, "ATE1V1\r", 7);
+			xmon_write(NULL, "ATE1V1\r", 7);
 			if (xmon_expect("OK", 5)) {
-				xmon_write(0, "ATA\r", 4);
+				xmon_write(NULL, "ATA\r", 4);
 				if (xmon_expect("CONNECT", 40))
 					break;
 			}
-			xmon_write(0, "+++", 3);
+			xmon_write(NULL, "+++", 3);
 			xmon_expect("OK", 3);
 		}
 	}
@@ -618,7 +616,7 @@ xmon_fgets(char *str, int nb, void *f)
 	c = xmon_getchar();
 	if (c == -1) {
 	    if (p == str)
-		return 0;
+		return NULL;
 	    break;
 	}
 	*p++ = c;

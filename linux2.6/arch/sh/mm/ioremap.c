@@ -1,5 +1,4 @@
-/* $Id: ioremap.c,v 1.6 2003/05/04 19:29:55 lethal Exp $
- *
+/*
  * arch/sh/mm/ioremap.c
  *
  * Re-map IO memory to kernel address space so that we can access it.
@@ -140,7 +139,7 @@ void * p3_ioremap(unsigned long phys_addr, unsigned long size, unsigned long fla
 	 */
 	offset = phys_addr & ~PAGE_MASK;
 	phys_addr &= PAGE_MASK;
-	size = PAGE_ALIGN(last_addr) - phys_addr;
+	size = PAGE_ALIGN(last_addr+1) - phys_addr;
 
 	/*
 	 * Ok, go for it..
@@ -148,9 +147,10 @@ void * p3_ioremap(unsigned long phys_addr, unsigned long size, unsigned long fla
 	area = get_vm_area(size, VM_IOREMAP);
 	if (!area)
 		return NULL;
+	area->phys_addr = phys_addr;
 	addr = area->addr;
 	if (remap_area_pages((unsigned long) addr, phys_addr, size, flags)) {
-		vfree(addr);
+		vunmap(addr);
 		return NULL;
 	}
 	return (void *) (offset + (char *)addr);
@@ -159,5 +159,5 @@ void * p3_ioremap(unsigned long phys_addr, unsigned long size, unsigned long fla
 void p3_iounmap(void *addr)
 {
 	if (addr > high_memory)
-		return vfree((void *) (PAGE_MASK & (unsigned long) addr));
+		vfree((void *)(PAGE_MASK & (unsigned long)addr));
 }

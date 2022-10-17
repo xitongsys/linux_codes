@@ -4,11 +4,13 @@
 
 
 struct hpsb_address_serve {
-        struct list_head as_list; /* global list */
-        
-        struct list_head addr_list; /* hpsb_highlevel list */
+        struct list_head host_list; /* per host list */
+
+        struct list_head hl_list; /* hpsb_highlevel list */
 
         struct hpsb_address_ops *op;
+
+	struct hpsb_host *host;
 
         /* first address handled and first address behind, quadlet aligned */
         u64 start, end;
@@ -17,7 +19,7 @@ struct hpsb_address_serve {
 
 /*
  * The above structs are internal to highlevel driver handling.  Only the
- * following structures are of interest to actual highlevel drivers.  
+ * following structures are of interest to actual highlevel drivers.
  */
 
 struct hpsb_highlevel {
@@ -36,9 +38,9 @@ struct hpsb_highlevel {
          * hpsb_unregister_highlevel once for each host. */
         void (*remove_host) (struct hpsb_host *host);
 
-        /* Host experienced bus reset with possible configuration changes.  Note
-         * that this one may occur during interrupt/bottom half handling.  You
-         * can not expect to be able to do stock hpsb_reads. */
+        /* Host experienced bus reset with possible configuration changes.
+	 * Note that this one may occur during interrupt/bottom half handling.
+	 * You can not expect to be able to do stock hpsb_reads. */
         void (*host_reset) (struct hpsb_host *host);
 
         /* An isochronous packet was received.  Channel contains the channel
@@ -50,13 +52,14 @@ struct hpsb_highlevel {
 
         /* A write request was received on either the FCP_COMMAND (direction =
          * 0) or the FCP_RESPONSE (direction = 1) register.  The cts arg
-         * contains the cts field (first byte of data).
-         */
+         * contains the cts field (first byte of data). */
         void (*fcp_request) (struct hpsb_host *host, int nodeid, int direction,
                              int cts, u8 *data, size_t length);
 
-
+	/* These are initialized by the subsystem when the
+	 * hpsb_higlevel is registered. */
 	struct list_head hl_list;
+	struct list_head irq_list;
 	struct list_head addr_list;
 
 	struct list_head host_info_list;
@@ -65,8 +68,8 @@ struct hpsb_highlevel {
 
 struct hpsb_address_ops {
         /*
-         * Null function pointers will make the respective operation complete 
-         * with RCODE_TYPE_ERROR.  Makes for easy to implement read-only 
+         * Null function pointers will make the respective operation complete
+         * with RCODE_TYPE_ERROR.  Makes for easy to implement read-only
          * registers (just leave everything but read NULL).
          *
          * All functions shall return appropriate IEEE 1394 rcodes.
@@ -74,7 +77,7 @@ struct hpsb_address_ops {
 
         /* These functions have to implement block reads for themselves. */
         /* These functions either return a response code
-           or a negative number. In the first case a response will be generated; in the 
+           or a negative number. In the first case a response will be generated; in the
            later case, no response will be sent and the driver, that handled the request
            will send the response itself
         */
@@ -92,8 +95,6 @@ struct hpsb_address_ops {
 };
 
 
-void init_hpsb_highlevel(void);
-
 void highlevel_add_host(struct hpsb_host *host);
 void highlevel_remove_host(struct hpsb_host *host);
 void highlevel_host_reset(struct hpsb_host *host);
@@ -103,7 +104,7 @@ void highlevel_host_reset(struct hpsb_host *host);
    a packet arrives. The flags argument contains the second word of the first header
    quadlet of the incoming packet (containing transaction label, retry code,
    transaction code and priority). These functions either return a response code
-   or a negative number. In the first case a response will be generated; in the 
+   or a negative number. In the first case a response will be generated; in the
    later case, no response will be sent and the driver, that handled the request
    will send the response itself.
 */
@@ -139,16 +140,22 @@ void hpsb_unregister_highlevel(struct hpsb_highlevel *hl);
  * It returns true for successful allocation.  There is no unregister function,
  * all address spaces are deallocated together with the hpsb_highlevel.
  */
-int hpsb_register_addrspace(struct hpsb_highlevel *hl,
+u64 hpsb_allocate_and_register_addrspace(struct hpsb_highlevel *hl,
+					 struct hpsb_host *host,
+					 struct hpsb_address_ops *ops,
+					 u64 size, u64 alignment,
+					 u64 start, u64 end);
+int hpsb_register_addrspace(struct hpsb_highlevel *hl, struct hpsb_host *host,
                             struct hpsb_address_ops *ops, u64 start, u64 end);
 
-int hpsb_unregister_addrspace(struct hpsb_highlevel *hl, u64 start);
+int hpsb_unregister_addrspace(struct hpsb_highlevel *hl, struct hpsb_host *host,
+                              u64 start);
 
 /*
  * Enable or disable receving a certain isochronous channel through the
  * iso_receive op.
  */
-int hpsb_listen_channel(struct hpsb_highlevel *hl, struct hpsb_host *host, 
+int hpsb_listen_channel(struct hpsb_highlevel *hl, struct hpsb_host *host,
                          unsigned int channel);
 void hpsb_unlisten_channel(struct hpsb_highlevel *hl, struct hpsb_host *host,
                            unsigned int channel);

@@ -2,7 +2,11 @@
  * This is a module which is used for queueing IPv4 packets and
  * communicating with userspace via netlink.
  *
- * (C) 2000-2002 James Morris, this code is GPL.
+ * (C) 2000-2002 James Morris <jmorris@intercode.com.au>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  * 2000-03-27: Simplified code (thanks to Andi Kleen for clues).
  * 2000-05-20: Fixed notifier problems (following Miguel Freitas' report).
@@ -51,7 +55,7 @@ typedef int (*ipq_cmpfn)(struct ipq_queue_entry *, unsigned long);
 
 static unsigned char copy_mode = IPQ_COPY_NONE;
 static unsigned int queue_maxlen = IPQ_QMAX_DEFAULT;
-static rwlock_t queue_lock = RW_LOCK_UNLOCKED;
+static DEFINE_RWLOCK(queue_lock);
 static int peer_pid;
 static unsigned int copy_range;
 static unsigned int queue_total;
@@ -158,6 +162,7 @@ static inline void
 __ipq_reset(void)
 {
 	peer_pid = 0;
+	net_disable_timestamp();
 	__ipq_set_mode(IPQ_COPY_NONE, 0);
 	__ipq_flush(NF_DROP);
 }
@@ -253,7 +258,8 @@ ipq_build_packet_message(struct ipq_queue_entry *entry, int *errp)
 	}
 	
 	if (data_len)
-		memcpy(pmsg->payload, entry->skb->data, data_len);
+		if (skb_copy_bits(entry->skb, 0, pmsg->payload, data_len))
+			BUG();
 		
 	nlh->nlmsg_len = skb->tail - old_tail;
 	return skb;
@@ -358,6 +364,8 @@ ipq_mangle_ipv4(ipq_verdict_msg_t *v, struct ipq_queue_entry *e)
 		}
 		skb_put(e->skb, diff);
 	}
+	if (!skb_ip_make_writable(&e->skb, v->data_len))
+		return -ENOMEM;
 	memcpy(e->skb->data, v->payload, v->data_len);
 	e->skb->nfcache |= NFC_ALTERED;
 
@@ -510,9 +518,10 @@ ipq_rcv_skb(struct sk_buff *skb)
 			write_unlock_bh(&queue_lock);
 			RCV_SKB_FAIL(-EBUSY);
 		}
-	}
-	else
+	} else {
+		net_enable_timestamp();
 		peer_pid = pid;
+	}
 		
 	write_unlock_bh(&queue_lock);
 	
@@ -615,6 +624,7 @@ static ctl_table ipq_root_table[] = {
 	{ .ctl_name = 0 }
 };
 
+#ifdef CONFIG_PROC_FS
 static int
 ipq_get_info(char *buffer, char **start, off_t offset, int length)
 {
@@ -644,6 +654,7 @@ ipq_get_info(char *buffer, char **start, off_t offset, int length)
 		len = 0;
 	return len;
 }
+#endif /* CONFIG_PROC_FS */
 
 static int
 init_or_cleanup(int init)

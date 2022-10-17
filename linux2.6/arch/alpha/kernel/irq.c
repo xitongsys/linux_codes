@@ -25,10 +25,11 @@
 #include <linux/irq.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/profile.h>
+#include <linux/bitops.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/bitops.h>
 #include <asm/uaccess.h>
 
 /*
@@ -83,6 +84,7 @@ handle_IRQ_event(unsigned int irq, struct pt_regs *regs,
 		 struct irqaction *action)
 {
 	int status = 1;	/* Force the "do bottom halves" bit */
+	int ret;
 
 	do {
 		if (!(action->flags & SA_INTERRUPT))
@@ -90,8 +92,9 @@ handle_IRQ_event(unsigned int irq, struct pt_regs *regs,
 		else
 			local_irq_disable();
 
-		status |= action->flags;
-		action->handler(irq, action->dev_id, regs);
+		ret = action->handler(irq, action->dev_id, regs);
+		if (ret == IRQ_HANDLED)
+			status |= action->flags;
 		action = action->next;
 	} while (action);
 	if (status & SA_SAMPLE_RANDOM)
@@ -227,7 +230,7 @@ static struct proc_dir_entry * irq_dir[NR_IRQS];
 #ifdef CONFIG_SMP 
 static struct proc_dir_entry * smp_affinity_entry[NR_IRQS];
 static char irq_user_affinity[NR_IRQS];
-static unsigned long irq_affinity[NR_IRQS] = { [0 ... NR_IRQS-1] = ~0UL };
+static cpumask_t irq_affinity[NR_IRQS] = { [0 ... NR_IRQS-1] = CPU_MASK_ALL };
 
 static void
 select_smp_affinity(int irq)
@@ -238,86 +241,47 @@ select_smp_affinity(int irq)
 	if (! irq_desc[irq].handler->set_affinity || irq_user_affinity[irq])
 		return;
 
-	while (((cpu_present_mask >> cpu) & 1) == 0)
+	while (!cpu_possible(cpu))
 		cpu = (cpu < (NR_CPUS-1) ? cpu + 1 : 0);
 	last_cpu = cpu;
 
-	irq_affinity[irq] = 1UL << cpu;
-	irq_desc[irq].handler->set_affinity(irq, 1UL << cpu);
+	irq_affinity[irq] = cpumask_of_cpu(cpu);
+	irq_desc[irq].handler->set_affinity(irq, cpumask_of_cpu(cpu));
 }
-
-#define HEX_DIGITS 16
 
 static int
 irq_affinity_read_proc (char *page, char **start, off_t off,
 			int count, int *eof, void *data)
 {
-	if (count < HEX_DIGITS+1)
+	int len = cpumask_scnprintf(page, count, irq_affinity[(long)data]);
+	if (count - len < 2)
 		return -EINVAL;
-	return sprintf (page, "%016lx\n", irq_affinity[(long)data]);
-}
-
-static unsigned int
-parse_hex_value (const char *buffer,
-		 unsigned long count, unsigned long *ret)
-{
-	unsigned char hexnum [HEX_DIGITS];
-	unsigned long value;
-	unsigned long i;
-
-	if (!count)
-		return -EINVAL;
-	if (count > HEX_DIGITS)
-		count = HEX_DIGITS;
-	if (copy_from_user(hexnum, buffer, count))
-		return -EFAULT;
-
-	/*
-	 * Parse the first 8 characters as a hex string, any non-hex char
-	 * is end-of-string. '00e1', 'e1', '00E1', 'E1' are all the same.
-	 */
-	value = 0;
-
-	for (i = 0; i < count; i++) {
-		unsigned int c = hexnum[i];
-
-		switch (c) {
-			case '0' ... '9': c -= '0'; break;
-			case 'a' ... 'f': c -= 'a'-10; break;
-			case 'A' ... 'F': c -= 'A'-10; break;
-		default:
-			goto out;
-		}
-		value = (value << 4) | c;
-	}
-out:
-	*ret = value;
-	return 0;
+	len += sprintf(page + len, "\n");
+	return len;
 }
 
 static int
-irq_affinity_write_proc(struct file *file, const char *buffer,
+irq_affinity_write_proc(struct file *file, const char __user *buffer,
 			unsigned long count, void *data)
 {
 	int irq = (long) data, full_count = count, err;
-	unsigned long new_value;
+	cpumask_t new_value;
 
 	if (!irq_desc[irq].handler->set_affinity)
 		return -EIO;
 
-	err = parse_hex_value(buffer, count, &new_value);
+	err = cpumask_parse(buffer, count, new_value);
 
 	/* The special value 0 means release control of the
 	   affinity to kernel.  */
-	if (new_value == 0) {
+	cpus_and(new_value, new_value, cpu_online_map);
+	if (cpus_empty(new_value)) {
 		irq_user_affinity[irq] = 0;
 		select_smp_affinity(irq);
 	}
 	/* Do not allow disabling IRQs completely - it's a too easy
 	   way to make the system unusable accidentally :-) At least
 	   one online CPU still has to be targeted.  */
-	else if (!(new_value & cpu_present_mask))
-		return -EINVAL;
 	else {
 		irq_affinity[irq] = new_value;
 		irq_user_affinity[irq] = 1;
@@ -327,30 +291,6 @@ irq_affinity_write_proc(struct file *file, const char *buffer,
 	return full_count;
 }
 
-static int
-prof_cpu_mask_read_proc(char *page, char **start, off_t off,
-			int count, int *eof, void *data)
-{
-	unsigned long *mask = (unsigned long *) data;
-	if (count < HEX_DIGITS+1)
-		return -EINVAL;
-	return sprintf (page, "%016lx\n", *mask);
-}
-
-static int
-prof_cpu_mask_write_proc(struct file *file, const char *buffer,
-			 unsigned long count, void *data)
-{
-	unsigned long *mask = (unsigned long *) data, full_count = count, err;
-	unsigned long new_value;
-
-	err = parse_hex_value(buffer, count, &new_value);
-	if (err)
-		return err;
-
-	*mask = new_value;
-	return full_count;
-}
 #endif /* CONFIG_SMP */
 
 #define MAX_NAMELEN 10
@@ -388,40 +328,26 @@ register_irq_proc (unsigned int irq)
 #endif
 }
 
-unsigned long prof_cpu_mask = ~0UL;
-
 void
 init_irq_proc (void)
 {
-#ifdef CONFIG_SMP
-	struct proc_dir_entry *entry;
-#endif
 	int i;
 
 	/* create /proc/irq */
-	root_irq_dir = proc_mkdir("irq", 0);
+	root_irq_dir = proc_mkdir("irq", NULL);
 
 #ifdef CONFIG_SMP 
 	/* create /proc/irq/prof_cpu_mask */
-	entry = create_proc_entry("prof_cpu_mask", 0600, root_irq_dir);
-
-	entry->nlink = 1;
-	entry->data = (void *)&prof_cpu_mask;
-	entry->read_proc = prof_cpu_mask_read_proc;
-	entry->write_proc = prof_cpu_mask_write_proc;
+	create_prof_cpu_mask(root_irq_dir);
 #endif
 
 	/*
-	 * Create entries for all existing IRQs. If the number of IRQs
-	 * is greater the 1/4 the total dynamic inode space for /proc,
-	 * don't pollute the inode space
+	 * Create entries for all existing IRQs.
 	 */
-	if (ACTUAL_NR_IRQS < (PROC_NDYNAMIC / 4)) {
-		for (i = 0; i < ACTUAL_NR_IRQS; i++) {
-			if (irq_desc[i].handler == &no_irq_type)
-				continue;
-			register_irq_proc(i);
-		}
+	for (i = 0; i < ACTUAL_NR_IRQS; i++) {
+		if (irq_desc[i].handler == &no_irq_type)
+			continue;
+		register_irq_proc(i);
 	}
 }
 
@@ -458,7 +384,7 @@ request_irq(unsigned int irq, irqreturn_t (*handler)(int, void *, struct pt_regs
 
 	action->handler = handler;
 	action->flags = irqflags;
-	action->mask = 0;
+	cpus_clear(action->mask);
 	action->name = devname;
 	action->next = NULL;
 	action->dev_id = dev_id;
@@ -529,19 +455,21 @@ show_interrupts(struct seq_file *p, void *v)
 #ifdef CONFIG_SMP
 	int j;
 #endif
-	int i;
+	int i = *(loff_t *) v;
 	struct irqaction * action;
 	unsigned long flags;
 
 #ifdef CONFIG_SMP
-	seq_puts(p, "           ");
-	for (i = 0; i < NR_CPUS; i++)
-		if (cpu_online(i))
-			seq_printf(p, "CPU%d       ", i);
-	seq_putc(p, '\n');
+	if (i == 0) {
+		seq_puts(p, "           ");
+		for (i = 0; i < NR_CPUS; i++)
+			if (cpu_online(i))
+				seq_printf(p, "CPU%d       ", i);
+		seq_putc(p, '\n');
+	}
 #endif
 
-	for (i = 0; i < ACTUAL_NR_IRQS; i++) {
+	if (i < ACTUAL_NR_IRQS) {
 		spin_lock_irqsave(&irq_desc[i].lock, flags);
 		action = irq_desc[i].action;
 		if (!action) 
@@ -568,15 +496,16 @@ show_interrupts(struct seq_file *p, void *v)
 		seq_putc(p, '\n');
 unlock:
 		spin_unlock_irqrestore(&irq_desc[i].lock, flags);
-	}
+	} else if (i == ACTUAL_NR_IRQS) {
 #ifdef CONFIG_SMP
-	seq_puts(p, "IPI: ");
-	for (i = 0; i < NR_CPUS; i++)
-		if (cpu_online(i))
-			seq_printf(p, "%10lu ", cpu_data[i].ipi_count);
-	seq_putc(p, '\n');
+		seq_puts(p, "IPI: ");
+		for (i = 0; i < NR_CPUS; i++)
+			if (cpu_online(i))
+				seq_printf(p, "%10lu ", cpu_data[i].ipi_count);
+		seq_putc(p, '\n');
 #endif
-	seq_printf(p, "ERR: %10lu\n", irq_err_count);
+		seq_printf(p, "ERR: %10lu\n", irq_err_count);
+	}
 	return 0;
 }
 

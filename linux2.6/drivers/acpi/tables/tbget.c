@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -148,8 +148,7 @@ acpi_tb_get_table_header (
 				  (void *) &header);
 		if (ACPI_FAILURE (status)) {
 			ACPI_REPORT_ERROR (("Could not map memory at %8.8X%8.8X for length %X\n",
-				ACPI_HIDWORD (address->pointer.physical),
-				ACPI_LODWORD (address->pointer.physical),
+				ACPI_FORMAT_UINT64 (address->pointer.physical),
 				sizeof (struct acpi_table_header)));
 			return_ACPI_STATUS (status);
 		}
@@ -167,6 +166,9 @@ acpi_tb_get_table_header (
 			address->pointer_type));
 		return_ACPI_STATUS (AE_BAD_PARAMETER);
 	}
+
+	ACPI_DEBUG_PRINT ((ACPI_DB_TABLES, "Table Signature: [%4.4s]\n",
+		return_header->signature));
 
 	return_ACPI_STATUS (AE_OK);
 }
@@ -365,8 +367,7 @@ acpi_tb_get_this_table (
 		if (ACPI_FAILURE (status)) {
 			ACPI_REPORT_ERROR (("Could not map memory for table [%4.4s] at %8.8X%8.8X for length %X\n",
 				header->signature,
-				ACPI_HIDWORD (address->pointer.physical),
-				ACPI_LODWORD (address->pointer.physical), header->length));
+				ACPI_FORMAT_UINT64 (address->pointer.physical), header->length));
 			return (status);
 		}
 
@@ -408,8 +409,7 @@ acpi_tb_get_this_table (
 	ACPI_DEBUG_PRINT ((ACPI_DB_INFO,
 		"Found table [%4.4s] at %8.8X%8.8X, mapped/copied to %p\n",
 		full_table->signature,
-		ACPI_HIDWORD (address->pointer.physical),
-		ACPI_LODWORD (address->pointer.physical), full_table));
+		ACPI_FORMAT_UINT64 (address->pointer.physical), full_table));
 
 	return_ACPI_STATUS (status);
 }
@@ -458,6 +458,7 @@ acpi_tb_get_table_ptr (
 	if (instance == 1) {
 		/* Get the first */
 
+		*table_ptr_loc = NULL;
 		if (acpi_gbl_table_lists[table_type].next) {
 			*table_ptr_loc = acpi_gbl_table_lists[table_type].next->pointer;
 		}

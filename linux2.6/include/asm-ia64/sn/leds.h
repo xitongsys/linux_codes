@@ -1,19 +1,15 @@
-#ifndef _ASM_IA64_SN_LEDS_H
-#define _ASM_IA64_SN_LEDS_H
-
 /*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
- * Copyright (C) 2000-2003 Silicon Graphics, Inc. All rights reserved.
+ * Copyright (C) 2000-2004 Silicon Graphics, Inc. All rights reserved.
  */
+#ifndef _ASM_IA64_SN_LEDS_H
+#define _ASM_IA64_SN_LEDS_H
 
-#include <linux/config.h>
-#include <asm/smp.h>
 #include <asm/sn/addrs.h>
-#include <asm/sn/sn_cpuid.h>
 #include <asm/sn/pda.h>
-#include <asm/sn/sn2/shub.h>
+#include <asm/sn/shub_mmr.h>
 
 #define LED0		(LOCAL_MMR_ADDR(SH_REAL_JUNK_BUS_LED0))
 #define LED_CPU_SHIFT	16
@@ -23,7 +19,7 @@
 #define LED_ALWAYS_SET		0x00
 
 /*
- * Basic macros for flashing the LEDS on an SGI, SN1.
+ * Basic macros for flashing the LEDS on an SGI SN.
  */
 
 static __inline__ void

@@ -28,11 +28,14 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/sched.h>
+#include <linux/delay.h>
 #include <linux/timer.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/spinlock.h>
+#include <linux/moduleparam.h>
+
 #include <linux/skbuff.h>
 #include <asm/io.h>
 
@@ -52,13 +55,6 @@
 /* ======================== Module parameters ======================== */
 
 
-/* Bit map of interrupts to choose from */
-static u_int irq_mask = 0x86bc;
-static int irq_list[4] = { -1 };
-
-MODULE_PARM(irq_mask, "i");
-MODULE_PARM(irq_list, "1-4i");
-
 MODULE_AUTHOR("Marcel Holtmann <marcel@holtmann.org>");
 MODULE_DESCRIPTION("Bluetooth driver for the Anycom BlueCard (LSE039/LSE041)");
 MODULE_LICENSE("GPL");
@@ -72,7 +68,7 @@ typedef struct bluecard_info_t {
 	dev_link_t link;
 	dev_node_t node;
 
-	struct hci_dev hdev;
+	struct hci_dev *hdev;
 
 	spinlock_t lock;		/* For serializing operations */
 	struct timer_list timer;	/* For LED control */
@@ -89,14 +85,14 @@ typedef struct bluecard_info_t {
 } bluecard_info_t;
 
 
-void bluecard_config(dev_link_t *link);
-void bluecard_release(dev_link_t *link);
-int bluecard_event(event_t event, int priority, event_callback_args_t *args);
+static void bluecard_config(dev_link_t *link);
+static void bluecard_release(dev_link_t *link);
+static int bluecard_event(event_t event, int priority, event_callback_args_t *args);
 
 static dev_info_t dev_info = "bluecard_cs";
 
-dev_link_t *bluecard_attach(void);
-void bluecard_detach(dev_link_t *);
+static dev_link_t *bluecard_attach(void);
+static void bluecard_detach(dev_link_t *);
 
 static dev_link_t *dev_list = NULL;
 
@@ -169,10 +165,13 @@ static dev_link_t *dev_list = NULL;
 /* ======================== LED handling routines ======================== */
 
 
-void bluecard_activity_led_timeout(u_long arg)
+static void bluecard_activity_led_timeout(u_long arg)
 {
 	bluecard_info_t *info = (bluecard_info_t *)arg;
 	unsigned int iobase = info->link.io.BasePort1;
+
+	if (!test_bit(CARD_HAS_PCCARD_ID, &(info->hw_state)))
+		return;
 
 	if (test_bit(CARD_HAS_ACTIVITY_LED, &(info->hw_state))) {
 		/* Disable activity LED */
@@ -187,6 +186,9 @@ void bluecard_activity_led_timeout(u_long arg)
 static void bluecard_enable_activity_led(bluecard_info_t *info)
 {
 	unsigned int iobase = info->link.io.BasePort1;
+
+	if (!test_bit(CARD_HAS_PCCARD_ID, &(info->hw_state)))
+		return;
 
 	if (test_bit(CARD_HAS_ACTIVITY_LED, &(info->hw_state))) {
 		/* Enable activity LED */
@@ -226,7 +228,7 @@ static int bluecard_write(unsigned int iobase, unsigned int offset, __u8 *buf, i
 static void bluecard_write_wakeup(bluecard_info_t *info)
 {
 	if (!info) {
-		printk(KERN_WARNING "bluecard_cs: Call of write_wakeup for unknown device.\n");
+		BT_ERR("Unknown device");
 		return;
 	}
 
@@ -333,7 +335,7 @@ static void bluecard_write_wakeup(bluecard_info_t *info)
 			skb_queue_head(&(info->txq), skb);
 		}
 
-		info->hdev.stat.byte_tx += len;
+		info->hdev->stat.byte_tx += len;
 
 		/* Change buffer */
 		change_bit(XMIT_BUFFER_NUMBER, &(info->tx_state));
@@ -379,7 +381,7 @@ static void bluecard_receive(bluecard_info_t *info, unsigned int offset)
 	int i, len;
 
 	if (!info) {
-		printk(KERN_WARNING "bluecard_cs: Call of receive for unknown device.\n");
+		BT_ERR("Unknown device");
 		return;
 	}
 
@@ -397,14 +399,14 @@ static void bluecard_receive(bluecard_info_t *info, unsigned int offset)
 			info->rx_state = RECV_WAIT_PACKET_TYPE;
 			info->rx_count = 0;
 			if (!(info->rx_skb = bt_skb_alloc(HCI_MAX_FRAME_SIZE, GFP_ATOMIC))) {
-				printk(KERN_WARNING "bluecard_cs: Can't allocate mem for new packet.\n");
+				BT_ERR("Can't allocate mem for new packet");
 				return;
 			}
 		}
 
 		if (info->rx_state == RECV_WAIT_PACKET_TYPE) {
 
-			info->rx_skb->dev = (void *)&(info->hdev);
+			info->rx_skb->dev = (void *) info->hdev;
 			info->rx_skb->pkt_type = buf[i];
 
 			switch (info->rx_skb->pkt_type) {
@@ -439,8 +441,8 @@ static void bluecard_receive(bluecard_info_t *info, unsigned int offset)
 
 			default:
 				/* unknown packet */
-				printk(KERN_WARNING "bluecard_cs: Unknown HCI packet with type 0x%02x received.\n", info->rx_skb->pkt_type);
-				info->hdev.stat.err_rx++;
+				BT_ERR("Unknown HCI packet with type 0x%02x received", info->rx_skb->pkt_type);
+				info->hdev->stat.err_rx++;
 
 				kfree_skb(info->rx_skb);
 				info->rx_skb = NULL;
@@ -495,23 +497,23 @@ static void bluecard_receive(bluecard_info_t *info, unsigned int offset)
 
 	}
 
-	info->hdev.stat.byte_rx += len;
+	info->hdev->stat.byte_rx += len;
 }
 
 
-void bluecard_interrupt(int irq, void *dev_inst, struct pt_regs *regs)
+static irqreturn_t bluecard_interrupt(int irq, void *dev_inst, struct pt_regs *regs)
 {
 	bluecard_info_t *info = dev_inst;
 	unsigned int iobase;
 	unsigned char reg;
 
-	if (!info) {
-		printk(KERN_WARNING "bluecard_cs: Call of irq %d for unknown device.\n", irq);
-		return;
+	if (!info || !info->hdev) {
+		BT_ERR("Call of irq %d for unknown device", irq);
+		return IRQ_NONE;
 	}
 
 	if (!test_bit(CARD_READY, &(info->hw_state)))
-		return;
+		return IRQ_HANDLED;
 
 	iobase = info->link.io.BasePort1;
 
@@ -556,6 +558,8 @@ void bluecard_interrupt(int irq, void *dev_inst, struct pt_regs *regs)
 	outb(info->ctrl_reg, iobase + REG_CONTROL);
 
 	spin_unlock(&(info->lock));
+
+	return IRQ_HANDLED;
 }
 
 
@@ -572,7 +576,7 @@ static int bluecard_hci_set_baud_rate(struct hci_dev *hdev, int baud)
 	unsigned char cmd[] = { HCI_COMMAND_PKT, 0x09, 0xfc, 0x01, 0x03 };
 
 	if (!(skb = bt_skb_alloc(HCI_MAX_FRAME_SIZE, GFP_ATOMIC))) {
-		printk(KERN_WARNING "bluecard_cs: Can't allocate mem for new packet.\n");
+		BT_ERR("Can't allocate mem for new packet");
 		return -1;
 	}
 
@@ -627,13 +631,16 @@ static int bluecard_hci_open(struct hci_dev *hdev)
 	bluecard_info_t *info = (bluecard_info_t *)(hdev->driver_data);
 	unsigned int iobase = info->link.io.BasePort1;
 
-	bluecard_hci_set_baud_rate(hdev, DEFAULT_BAUD_RATE);
+	if (test_bit(CARD_HAS_PCCARD_ID, &(info->hw_state)))
+		bluecard_hci_set_baud_rate(hdev, DEFAULT_BAUD_RATE);
 
 	if (test_and_set_bit(HCI_RUNNING, &(hdev->flags)))
 		return 0;
 
-	/* Enable LED */
-	outb(0x08 | 0x20, iobase + 0x30);
+	if (test_bit(CARD_HAS_PCCARD_ID, &(info->hw_state))) {
+		/* Enable LED */
+		outb(0x08 | 0x20, iobase + 0x30);
+	}
 
 	return 0;
 }
@@ -649,8 +656,10 @@ static int bluecard_hci_close(struct hci_dev *hdev)
 
 	bluecard_hci_flush(hdev);
 
-	/* Disable LED */
-	outb(0x00, iobase + 0x30);
+	if (test_bit(CARD_HAS_PCCARD_ID, &(info->hw_state))) {
+		/* Disable LED */
+		outb(0x00, iobase + 0x30);
+	}
 
 	return 0;
 }
@@ -662,7 +671,7 @@ static int bluecard_hci_send_frame(struct sk_buff *skb)
 	struct hci_dev *hdev = (struct hci_dev *)(skb->dev);
 
 	if (!hdev) {
-		printk(KERN_WARNING "bluecard_cs: Frame for unknown HCI device (hdev=NULL).");
+		BT_ERR("Frame for unknown HCI device (hdev=NULL)");
 		return -ENODEV;
 	}
 
@@ -705,7 +714,7 @@ static int bluecard_hci_ioctl(struct hci_dev *hdev, unsigned int cmd, unsigned l
 /* ======================== Card services HCI interaction ======================== */
 
 
-int bluecard_open(bluecard_info_t *info)
+static int bluecard_open(bluecard_info_t *info)
 {
 	unsigned int iobase = info->link.io.BasePort1;
 	struct hci_dev *hdev;
@@ -722,6 +731,27 @@ int bluecard_open(bluecard_info_t *info)
 	info->rx_state = RECV_WAIT_PACKET_TYPE;
 	info->rx_count = 0;
 	info->rx_skb = NULL;
+
+	/* Initialize HCI device */
+	hdev = hci_alloc_dev();
+	if (!hdev) {
+		BT_ERR("Can't allocate HCI device");
+		return -ENOMEM;
+	}
+
+	info->hdev = hdev;
+
+	hdev->type = HCI_PCCARD;
+	hdev->driver_data = info;
+
+	hdev->open     = bluecard_hci_open;
+	hdev->close    = bluecard_hci_close;
+	hdev->flush    = bluecard_hci_flush;
+	hdev->send     = bluecard_hci_send_frame;
+	hdev->destruct = bluecard_hci_destruct;
+	hdev->ioctl    = bluecard_hci_ioctl;
+
+	hdev->owner = THIS_MODULE;
 
 	id = inb(iobase + 0x30);
 
@@ -742,8 +772,7 @@ int bluecard_open(bluecard_info_t *info)
 	outb(0x80, iobase + 0x30);
 
 	/* Wait some time */
-	set_current_state(TASK_INTERRUPTIBLE);
-	schedule_timeout(HZ / 100);
+	msleep(10);
 
 	/* Turn FPGA on */
 	outb(0x00, iobase + 0x30);
@@ -756,6 +785,24 @@ int bluecard_open(bluecard_info_t *info)
 	outb(0xff, iobase + REG_INTERRUPT);
 	info->ctrl_reg |= REG_CONTROL_INTERRUPT;
 	outb(info->ctrl_reg, iobase + REG_CONTROL);
+
+	if ((id & 0x0f) == 0x03) {
+		/* Disable RTS */
+		info->ctrl_reg |= REG_CONTROL_RTS;
+		outb(info->ctrl_reg, iobase + REG_CONTROL);
+
+		/* Set baud rate */
+		info->ctrl_reg |= 0x03;
+		outb(info->ctrl_reg, iobase + REG_CONTROL);
+
+		/* Enable RTS */
+		info->ctrl_reg &= ~REG_CONTROL_RTS;
+		outb(info->ctrl_reg, iobase + REG_CONTROL);
+
+		set_bit(XMIT_BUF_ONE_READY, &(info->tx_state));
+		set_bit(XMIT_BUF_TWO_READY, &(info->tx_state));
+		set_bit(XMIT_SENDING_READY, &(info->tx_state));
+	}
 
 	/* Start the RX buffers */
 	outb(REG_COMMAND_RX_BUF_ONE, iobase + REG_COMMAND);
@@ -771,28 +818,13 @@ int bluecard_open(bluecard_info_t *info)
 	outb((0x0f << RTS_LEVEL_SHIFT_BITS) | 1, iobase + REG_RX_CONTROL);
 
 	/* Timeout before it is safe to send the first HCI packet */
-	set_current_state(TASK_INTERRUPTIBLE);
-	schedule_timeout((HZ * 5) / 4);		// or set it to 3/2
+	msleep(1250);
 
-
-	/* Initialize and register HCI device */
-
-	hdev = &(info->hdev);
-
-	hdev->type = HCI_PCCARD;
-	hdev->driver_data = info;
-
-	hdev->open = bluecard_hci_open;
-	hdev->close = bluecard_hci_close;
-	hdev->flush = bluecard_hci_flush;
-	hdev->send = bluecard_hci_send_frame;
-	hdev->destruct = bluecard_hci_destruct;
-	hdev->ioctl = bluecard_hci_ioctl;
-
-	hdev->owner = THIS_MODULE;
-	
+	/* Register HCI device */
 	if (hci_register_dev(hdev) < 0) {
-		printk(KERN_WARNING "bluecard_cs: Can't register HCI device %s.\n", hdev->name);
+		BT_ERR("Can't register HCI device");
+		info->hdev = NULL;
+		hci_free_dev(hdev);
 		return -ENODEV;
 	}
 
@@ -800,10 +832,13 @@ int bluecard_open(bluecard_info_t *info)
 }
 
 
-int bluecard_close(bluecard_info_t *info)
+static int bluecard_close(bluecard_info_t *info)
 {
 	unsigned int iobase = info->link.io.BasePort1;
-	struct hci_dev *hdev = &(info->hdev);
+	struct hci_dev *hdev = info->hdev;
+
+	if (!hdev)
+		return -ENODEV;
 
 	bluecard_hci_close(hdev);
 
@@ -817,17 +852,19 @@ int bluecard_close(bluecard_info_t *info)
 	outb(0x80, iobase + 0x30);
 
 	if (hci_unregister_dev(hdev) < 0)
-		printk(KERN_WARNING "bluecard_cs: Can't unregister HCI device %s.\n", hdev->name);
+		BT_ERR("Can't unregister HCI device %s", hdev->name);
+
+	hci_free_dev(hdev);
 
 	return 0;
 }
 
-dev_link_t *bluecard_attach(void)
+static dev_link_t *bluecard_attach(void)
 {
 	bluecard_info_t *info;
 	client_reg_t client_reg;
 	dev_link_t *link;
-	int i, ret;
+	int ret;
 
 	/* Create new info device */
 	info = kmalloc(sizeof(*info), GFP_KERNEL);
@@ -841,13 +878,7 @@ dev_link_t *bluecard_attach(void)
 	link->io.Attributes1 = IO_DATA_PATH_WIDTH_8;
 	link->io.NumPorts1 = 8;
 	link->irq.Attributes = IRQ_TYPE_EXCLUSIVE | IRQ_HANDLE_PRESENT;
-	link->irq.IRQInfo1 = IRQ_INFO2_VALID | IRQ_LEVEL_ID;
-
-	if (irq_list[0] == -1)
-		link->irq.IRQInfo2 = irq_mask;
-	else
-		for (i = 0; i < 4; i++)
-			link->irq.IRQInfo2 |= 1 << irq_list[i];
+	link->irq.IRQInfo1 = IRQ_LEVEL_ID;
 
 	link->irq.Handler = bluecard_interrupt;
 	link->irq.Instance = info;
@@ -860,7 +891,6 @@ dev_link_t *bluecard_attach(void)
 	link->next = dev_list;
 	dev_list = link;
 	client_reg.dev_info = &dev_info;
-	client_reg.Attributes = INFO_IO_CLIENT | INFO_CARD_SHARE;
 	client_reg.EventMask =
 		CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL |
 		CS_EVENT_RESET_PHYSICAL | CS_EVENT_CARD_RESET |
@@ -869,7 +899,7 @@ dev_link_t *bluecard_attach(void)
 	client_reg.Version = 0x0210;
 	client_reg.event_callback_args.client_data = link;
 
-	ret = CardServices(RegisterClient, &link->handle, &client_reg);
+	ret = pcmcia_register_client(&link->handle, &client_reg);
 	if (ret != CS_SUCCESS) {
 		cs_error(link->handle, RegisterClient, ret);
 		bluecard_detach(link);
@@ -880,7 +910,7 @@ dev_link_t *bluecard_attach(void)
 }
 
 
-void bluecard_detach(dev_link_t *link)
+static void bluecard_detach(dev_link_t *link)
 {
 	bluecard_info_t *info = link->priv;
 	dev_link_t **linkp;
@@ -898,7 +928,7 @@ void bluecard_detach(dev_link_t *link)
 		bluecard_release(link);
 
 	if (link->handle) {
-		ret = CardServices(DeregisterClient, link->handle);
+		ret = pcmcia_deregister_client(link->handle);
 		if (ret != CS_SUCCESS)
 			cs_error(link->handle, DeregisterClient, ret);
 	}
@@ -910,26 +940,22 @@ void bluecard_detach(dev_link_t *link)
 }
 
 
-static int get_tuple(int fn, client_handle_t handle, tuple_t *tuple, cisparse_t *parse)
+static int first_tuple(client_handle_t handle, tuple_t *tuple, cisparse_t *parse)
 {
 	int i;
 
-	i = CardServices(fn, handle, tuple);
+	i = pcmcia_get_first_tuple(handle, tuple);
 	if (i != CS_SUCCESS)
 		return CS_NO_MORE_ITEMS;
 
-	i = CardServices(GetTupleData, handle, tuple);
+	i = pcmcia_get_tuple_data(handle, tuple);
 	if (i != CS_SUCCESS)
 		return i;
 
-	return CardServices(ParseTuple, handle, tuple, parse);
+	return pcmcia_parse_tuple(handle, tuple, parse);
 }
 
-
-#define first_tuple(a, b, c) get_tuple(GetFirstTuple, a, b, c)
-#define next_tuple(a, b, c) get_tuple(GetNextTuple, a, b, c)
-
-void bluecard_config(dev_link_t *link)
+static void bluecard_config(dev_link_t *link)
 {
 	client_handle_t handle = link->handle;
 	bluecard_info_t *info = link->priv;
@@ -956,7 +982,7 @@ void bluecard_config(dev_link_t *link)
 
 	/* Configure card */
 	link->state |= DEV_CONFIG;
-	i = CardServices(GetConfigurationInfo, handle, &config);
+	i = pcmcia_get_configuration_info(handle, &config);
 	link->conf.Vcc = config.Vcc;
 
 	link->conf.ConfigIndex = 0x20;
@@ -965,7 +991,7 @@ void bluecard_config(dev_link_t *link)
 
 	for (n = 0; n < 0x400; n += 0x40) {
 		link->io.BasePort1 = n ^ 0x300;
-		i = CardServices(RequestIO, link->handle, &link->io);
+		i = pcmcia_request_io(link->handle, &link->io);
 		if (i == CS_SUCCESS)
 			break;
 	}
@@ -975,13 +1001,13 @@ void bluecard_config(dev_link_t *link)
 		goto failed;
 	}
 
-	i = CardServices(RequestIRQ, link->handle, &link->irq);
+	i = pcmcia_request_irq(link->handle, &link->irq);
 	if (i != CS_SUCCESS) {
 		cs_error(link->handle, RequestIRQ, i);
 		link->irq.AssignedIRQ = 0;
 	}
 
-	i = CardServices(RequestConfiguration, link->handle, &link->conf);
+	i = pcmcia_request_configuration(link->handle, &link->conf);
 	if (i != CS_SUCCESS) {
 		cs_error(link->handle, RequestConfiguration, i);
 		goto failed;
@@ -990,7 +1016,7 @@ void bluecard_config(dev_link_t *link)
 	if (bluecard_open(info) != 0)
 		goto failed;
 
-	strcpy(info->node.dev_name, info->hdev.name);
+	strcpy(info->node.dev_name, info->hdev->name);
 	link->dev = &info->node;
 	link->state &= ~DEV_CONFIG_PENDING;
 
@@ -1004,24 +1030,26 @@ failed:
 }
 
 
-void bluecard_release(dev_link_t *link)
+static void bluecard_release(dev_link_t *link)
 {
 	bluecard_info_t *info = link->priv;
 
 	if (link->state & DEV_PRESENT)
 		bluecard_close(info);
 
+	del_timer(&(info->timer));
+
 	link->dev = NULL;
 
-	CardServices(ReleaseConfiguration, link->handle);
-	CardServices(ReleaseIO, link->handle, &link->io);
-	CardServices(ReleaseIRQ, link->handle, &link->irq);
+	pcmcia_release_configuration(link->handle);
+	pcmcia_release_io(link->handle, &link->io);
+	pcmcia_release_irq(link->handle, &link->irq);
 
 	link->state &= ~DEV_CONFIG;
 }
 
 
-int bluecard_event(event_t event, int priority, event_callback_args_t *args)
+static int bluecard_event(event_t event, int priority, event_callback_args_t *args)
 {
 	dev_link_t *link = args->client_data;
 	bluecard_info_t *info = link->priv;
@@ -1043,14 +1071,14 @@ int bluecard_event(event_t event, int priority, event_callback_args_t *args)
 		/* Fall through... */
 	case CS_EVENT_RESET_PHYSICAL:
 		if (link->state & DEV_CONFIG)
-			CardServices(ReleaseConfiguration, link->handle);
+			pcmcia_release_configuration(link->handle);
 		break;
 	case CS_EVENT_PM_RESUME:
 		link->state &= ~DEV_SUSPEND;
 		/* Fall through... */
 	case CS_EVENT_CARD_RESET:
 		if (DEV_OK(link))
-			CardServices(RequestConfiguration, link->handle, &link->conf);
+			pcmcia_request_configuration(link->handle, &link->conf);
 		break;
 	}
 
@@ -1075,10 +1103,7 @@ static int __init init_bluecard_cs(void)
 static void __exit exit_bluecard_cs(void)
 {
 	pcmcia_unregister_driver(&bluecard_driver);
-
-	/* XXX: this really needs to move into generic code.. */
-	while (dev_list != NULL)
-		bluecard_detach(dev_list);
+	BUG_ON(dev_list != NULL);
 }
 
 module_init(init_bluecard_cs);

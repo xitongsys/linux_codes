@@ -53,6 +53,7 @@
 #include <linux/seq_file.h>
 #include <linux/major.h>
 #include <linux/root_dev.h>
+#include <linux/delay.h>
 #include <net/arp.h>
 #include <net/ip.h>
 #include <net/ipconfig.h>
@@ -84,8 +85,8 @@
 #endif
 
 /* Define the friendly delay before and after opening net devices */
-#define CONF_PRE_OPEN		(HZ/2)	/* Before opening: 1/2 second */
-#define CONF_POST_OPEN		(1*HZ)	/* After opening: 1 second */
+#define CONF_PRE_OPEN		500	/* Before opening: 1/2 second */
+#define CONF_POST_OPEN		1	/* After opening: 1 second */
 
 /* Define the timeout for waiting for a DHCP/BOOTP/RARP reply */
 #define CONF_OPEN_RETRIES 	2	/* (Re)open devices twice */
@@ -109,7 +110,7 @@
  */
 int ic_set_manually __initdata = 0;		/* IPconfig parameters set manually */
 
-int ic_enable __initdata = 0;			/* IP config enabled? */
+static int ic_enable __initdata = 0;		/* IP config enabled? */
 
 /* Protocol choice */
 int ic_proto_enabled __initdata = 0
@@ -124,10 +125,10 @@ int ic_proto_enabled __initdata = 0
 #endif
 			;
 
-int ic_host_name_set __initdata = 0;		/* Host name set by us? */
+static int ic_host_name_set __initdata = 0;	/* Host name set by us? */
 
 u32 ic_myaddr = INADDR_NONE;		/* My IP address */
-u32 ic_netmask = INADDR_NONE;	/* Netmask for local subnet */
+static u32 ic_netmask = INADDR_NONE;	/* Netmask for local subnet */
 u32 ic_gateway = INADDR_NONE;	/* Gateway IP address */
 
 u32 ic_servaddr = INADDR_NONE;	/* Boot server IP address */
@@ -137,9 +138,9 @@ u8 root_server_path[256] = { 0, };	/* Path to mount as root */
 
 /* Persistent data: */
 
-int ic_proto_used;			/* Protocol used, if any */
-u32 ic_nameservers[CONF_NAMESERVERS_MAX]; /* DNS Server IP addresses */
-u8 ic_domain[64];		/* DNS (not NIS) domain name */
+static int ic_proto_used;			/* Protocol used, if any */
+static u32 ic_nameservers[CONF_NAMESERVERS_MAX]; /* DNS Server IP addresses */
+static u8 ic_domain[64];		/* DNS (not NIS) domain name */
 
 /*
  * Private state.
@@ -152,7 +153,7 @@ static char user_dev_name[IFNAMSIZ] __initdata = { 0, };
 static int ic_proto_have_if __initdata = 0;
 
 #ifdef IPCONFIG_DYNAMIC
-static spinlock_t ic_recv_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(ic_recv_lock);
 static volatile int ic_got_reply __initdata = 0;    /* Proto(s) that replied */
 #endif
 #ifdef IPCONFIG_DHCP
@@ -183,7 +184,14 @@ static int __init ic_open_devs(void)
 
 	last = &ic_first_dev;
 	rtnl_shlock();
+
+	/* bring loopback device up first */
+	if (dev_change_flags(&loopback_dev, loopback_dev.flags | IFF_UP) < 0)
+		printk(KERN_ERR "IP-Config: Failed to open %s\n", loopback_dev.name);
+
 	for (dev = dev_base; dev; dev = dev->next) {
+		if (dev == &loopback_dev)
+			continue;
 		if (user_dev_name[0] ? !strcmp(dev->name, user_dev_name) :
 		    (!(dev->flags & IFF_LOOPBACK) &&
 		     (dev->flags & (IFF_POINTOPOINT|IFF_BROADCAST)) &&
@@ -272,7 +280,7 @@ static int __init ic_dev_ioctl(unsigned int cmd, struct ifreq *arg)
 
 	mm_segment_t oldfs = get_fs();
 	set_fs(get_ds());
-	res = devinet_ioctl(cmd, arg);
+	res = devinet_ioctl(cmd, (struct ifreq __user *) arg);
 	set_fs(oldfs);
 	return res;
 }
@@ -283,7 +291,7 @@ static int __init ic_route_ioctl(unsigned int cmd, struct rtentry *arg)
 
 	mm_segment_t oldfs = get_fs();
 	set_fs(get_ds());
-	res = ip_rt_ioctl(cmd, arg);
+	res = ip_rt_ioctl(cmd, (void __user *) arg);
 	set_fs(oldfs);
 	return res;
 }
@@ -713,6 +721,8 @@ static void __init ic_bootp_send_if(struct ic_device *d, unsigned long jiffies_d
 		b->htype = dev->type;
 	else if (dev->type == ARPHRD_IEEE802_TR) /* fix for token ring */
 		b->htype = ARPHRD_IEEE802;
+	else if (dev->type == ARPHRD_FDDI)
+		b->htype = ARPHRD_ETHER;
 	else {
 		printk("Unknown ARP type 0x%04x for device %s\n", dev->type, dev->name);
 		b->htype = dev->type; /* can cause undefined behavior */
@@ -818,7 +828,7 @@ static int __init ic_bootp_recv(struct sk_buff *skb, struct net_device *dev, str
 	struct bootp_pkt *b;
 	struct iphdr *h;
 	struct ic_device *d;
-	int len;
+	int len, ext_len;
 
 	/* Perform verifications before taking the lock.  */
 	if (skb->pkt_type == PACKET_OTHERHOST)
@@ -859,7 +869,11 @@ static int __init ic_bootp_recv(struct sk_buff *skb, struct net_device *dev, str
 		goto drop;
 
 	len = ntohs(b->udph.len) - sizeof(struct udphdr);
-	if (len < 300)
+	ext_len = len - (sizeof(*b) -
+			 sizeof(struct iphdr) -
+			 sizeof(struct udphdr) -
+			 sizeof(b->exten));
+	if (ext_len < 0)
 		goto drop;
 
 	/* Ok the front looks good, make sure we can get at the rest.  */
@@ -894,7 +908,8 @@ static int __init ic_bootp_recv(struct sk_buff *skb, struct net_device *dev, str
 	}
 
 	/* Parse extensions */
-	if (!memcmp(b->exten, ic_bootp_cookie, 4)) { /* Check magic cookie */
+	if (ext_len >= 4 &&
+	    !memcmp(b->exten, ic_bootp_cookie, 4)) { /* Check magic cookie */
                 u8 *end = (u8 *) b + ntohs(b->iph.tot_len);
 		u8 *ext;
 
@@ -954,6 +969,9 @@ static int __init ic_bootp_recv(struct sk_buff *skb, struct net_device *dev, str
 				break;
 
 			case DHCPACK:
+				if (memcmp(dev->dev_addr, b->hw_addr, dev->addr_len) != 0)
+					goto drop_unlock;
+
 				/* Yeah! */
 				break;
 
@@ -1085,8 +1103,8 @@ static int __init ic_dynamic(void)
 
 		jiff = jiffies + (d->next ? CONF_INTER_TIMEOUT : timeout);
 		while (time_before(jiffies, jiff) && !ic_got_reply) {
-			barrier();
-			cpu_relax();
+			set_current_state(TASK_UNINTERRUPTIBLE);
+			schedule_timeout(1);
 		}
 #ifdef IPCONFIG_DHCP
 		/* DHCP isn't done until we get a DHCPACK. */
@@ -1189,12 +1207,46 @@ static struct file_operations pnp_seq_fops = {
 #endif /* CONFIG_PROC_FS */
 
 /*
+ *  Extract IP address from the parameter string if needed. Note that we
+ *  need to have root_server_addr set _before_ IPConfig gets called as it
+ *  can override it.
+ */
+u32 __init root_nfs_parse_addr(char *name)
+{
+	u32 addr;
+	int octets = 0;
+	char *cp, *cq;
+
+	cp = cq = name;
+	while (octets < 4) {
+		while (*cp >= '0' && *cp <= '9')
+			cp++;
+		if (cp == cq || cp - cq > 3)
+			break;
+		if (*cp == '.' || octets == 3)
+			octets++;
+		if (octets < 4)
+			cp++;
+		cq = cp;
+	}
+	if (octets == 4 && (*cp == ':' || *cp == '\0')) {
+		if (*cp == ':')
+			*cp++ = '\0';
+		addr = in_aton(name);
+		memmove(name, cp, strlen(cp) + 1);
+	} else
+		addr = INADDR_NONE;
+
+	return addr;
+}
+
+/*
  *	IP Autoconfig dispatcher.
  */
 
 static int __init ip_auto_config(void)
 {
-	unsigned long jiff;
+	u32 addr;
 
 #ifdef CONFIG_PROC_FS
 	proc_net_fops_create("pnp", S_IRUGO, &pnp_seq_fops);
@@ -1208,18 +1260,14 @@ static int __init ip_auto_config(void)
  try_try_again:
 #endif
 	/* Give hardware a chance to settle */
-	jiff = jiffies + CONF_PRE_OPEN;
-	while (time_before(jiffies, jiff))
-		cpu_relax();
+	msleep(CONF_PRE_OPEN);
 
 	/* Setup all network devices */
 	if (ic_open_devs() < 0)
 		return -1;
 
 	/* Give drivers a chance to settle */
-	jiff = jiffies + CONF_POST_OPEN;
-	while (time_before(jiffies, jiff))
-		cpu_relax();
+	ssleep(CONF_POST_OPEN);
 
 	/*
 	 * If the config information is insufficient (e.g., our IP address or
@@ -1283,6 +1331,10 @@ static int __init ip_auto_config(void)
 		ic_dev = ic_first_dev->dev;
 	}
 
+	addr = root_nfs_parse_addr(root_server_path);
+	if (root_server_addr == INADDR_NONE)
+		root_server_addr = addr;
+
 	/*
 	 * Use defaults whereever applicable.
 	 */
@@ -1324,7 +1376,7 @@ static int __init ip_auto_config(void)
 	return 0;
 }
 
-module_init(ip_auto_config);
+late_initcall(ip_auto_config);
 
 
 /*

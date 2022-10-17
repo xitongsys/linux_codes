@@ -55,6 +55,8 @@ struct rtable
 		struct rtable		*rt_next;
 	} u;
 
+	struct in_device	*idev;
+	
 	unsigned		rt_flags;
 	unsigned		rt_type;
 
@@ -71,11 +73,6 @@ struct rtable
 	/* Miscellaneous cached information */
 	__u32			rt_spec_dst; /* RFC1122 specific destination */
 	struct inet_peer	*peer; /* long-living peer info */
-
-#ifdef CONFIG_IP_ROUTE_NAT
-	__u32			rt_src_map;
-	__u32			rt_dst_map;
-#endif
 };
 
 struct ip_rt_acct
@@ -108,7 +105,7 @@ struct rt_cache_stat
 
 extern struct rt_cache_stat *rt_cache_stat;
 #define RT_CACHE_STAT_INC(field)					  \
-		(per_cpu_ptr(rt_cache_stat, smp_processor_id())->field++)
+		(per_cpu_ptr(rt_cache_stat, _smp_processor_id())->field++)
 
 extern struct ip_rt_acct *ip_rt_acct;
 
@@ -127,7 +124,7 @@ extern void		ip_rt_send_redirect(struct sk_buff *skb);
 
 extern unsigned		inet_addr_type(u32 addr);
 extern void		ip_rt_multicast_event(struct in_device *);
-extern int		ip_rt_ioctl(unsigned int cmd, void *arg);
+extern int		ip_rt_ioctl(unsigned int cmd, void __user *arg);
 extern void		ip_rt_get_source(u8 *src, struct rtable *rt);
 extern int		ip_rt_dump(struct sk_buff *skb,  struct netlink_callback *cb);
 

@@ -34,6 +34,7 @@
 #include <linux/suspend.h>
 #include <linux/pagemap.h>
 #include <asm/uaccess.h>
+#include <asm/page.h>
 #include <linux/proc_fs.h>
 
 EXPORT_SYMBOL(journal_start);
@@ -54,7 +55,6 @@ EXPORT_SYMBOL(journal_sync_buffer);
 #endif
 EXPORT_SYMBOL(journal_flush);
 EXPORT_SYMBOL(journal_revoke);
-EXPORT_SYMBOL(journal_callback_set);
 
 EXPORT_SYMBOL(journal_init_dev);
 EXPORT_SYMBOL(journal_init_inode);
@@ -73,11 +73,11 @@ EXPORT_SYMBOL(journal_ack_err);
 EXPORT_SYMBOL(journal_clear_err);
 EXPORT_SYMBOL(log_wait_commit);
 EXPORT_SYMBOL(journal_start_commit);
+EXPORT_SYMBOL(journal_force_commit_nested);
 EXPORT_SYMBOL(journal_wipe);
 EXPORT_SYMBOL(journal_blocks_per_page);
 EXPORT_SYMBOL(journal_invalidatepage);
 EXPORT_SYMBOL(journal_try_to_free_buffers);
-EXPORT_SYMBOL(journal_bmap);
 EXPORT_SYMBOL(journal_force_commit);
 
 static int journal_convert_superblock_v1(journal_t *, journal_superblock_t *);
@@ -151,6 +151,9 @@ int kjournald(void *arg)
 	spin_lock(&journal->j_state_lock);
 
 loop:
+	if (journal->j_flags & JFS_UNMOUNT)
+		goto end_loop;
+
 	jbd_debug(1, "commit_sequence=%d, commit_request=%d\n",
 		journal->j_commit_sequence, journal->j_commit_request);
 
@@ -160,7 +163,7 @@ loop:
 		del_timer_sync(journal->j_commit_timer);
 		journal_commit_transaction(journal);
 		spin_lock(&journal->j_state_lock);
-		goto end_loop;
+		goto loop;
 	}
 
 	wake_up(&journal->j_wait_done_commit);
@@ -172,7 +175,7 @@ loop:
 		 */
 		jbd_debug(1, "Now suspending kjournald\n");
 		spin_unlock(&journal->j_state_lock);
-		refrigerator(PF_IOTHREAD);
+		refrigerator(PF_FREEZE);
 		spin_lock(&journal->j_state_lock);
 	} else {
 		/*
@@ -208,10 +211,9 @@ loop:
 		journal->j_commit_request = transaction->t_tid;
 		jbd_debug(1, "woke because of timeout\n");
 	}
-end_loop:
-	if (!(journal->j_flags & JFS_UNMOUNT))
-		goto loop;
+	goto loop;
 
+end_loop:
 	spin_unlock(&journal->j_state_lock);
 	del_timer_sync(journal->j_commit_timer);
 	journal->j_task = NULL;
@@ -321,15 +323,15 @@ repeat:
 	}
 
 	mapped_data = kmap_atomic(new_page, KM_USER0);
-
 	/*
 	 * Check for escaping
 	 */
-	if (*((unsigned int *)(mapped_data + new_offset)) ==
-				htonl(JFS_MAGIC_NUMBER)) {
+	if (*((__be32 *)(mapped_data + new_offset)) ==
+				cpu_to_be32(JFS_MAGIC_NUMBER)) {
 		need_copy_out = 1;
 		do_escape = 1;
 	}
+	kunmap_atomic(mapped_data, KM_USER0);
 
 	/*
 	 * Do we need to do a data copy?
@@ -337,7 +339,6 @@ repeat:
 	if (need_copy_out && !done_copy_out) {
 		char *tmp;
 
-		kunmap_atomic(mapped_data, KM_USER0);
 		jbd_unlock_bh_state(bh_in);
 		tmp = jbd_rep_kmalloc(bh_in->b_size, GFP_NOFS);
 		jbd_lock_bh_state(bh_in);
@@ -349,10 +350,8 @@ repeat:
 		jh_in->b_frozen_data = tmp;
 		mapped_data = kmap_atomic(new_page, KM_USER0);
 		memcpy(tmp, mapped_data + new_offset, jh2bh(jh_in)->b_size);
+		kunmap_atomic(mapped_data, KM_USER0);
 
-		/* If we get to this path, we'll always need the new
-		   address kmapped so that we can clear the escaped
-		   magic number below. */
 		new_page = virt_to_page(tmp);
 		new_offset = offset_in_page(tmp);
 		done_copy_out = 1;
@@ -362,9 +361,11 @@ repeat:
 	 * Did we need to do an escaping?  Now we've done all the
 	 * copying, we can finally do so.
 	 */
-	if (do_escape)
+	if (do_escape) {
+		mapped_data = kmap_atomic(new_page, KM_USER0);
 		*((unsigned int *)(mapped_data + new_offset)) = 0;
-	kunmap_atomic(mapped_data, KM_USER0);
+		kunmap_atomic(mapped_data, KM_USER0);
+	}
 
 	/* keep subsequent assertions sane */
 	new_bh->b_state = 0;
@@ -463,6 +464,39 @@ int log_start_commit(journal_t *journal, tid_t tid)
 	ret = __log_start_commit(journal, tid);
 	spin_unlock(&journal->j_state_lock);
 	return ret;
+}
+
+/*
+ * Force and wait upon a commit if the calling process is not within
+ * transaction.  This is used for forcing out undo-protected data which contains
+ * bitmaps, when the fs is running out of space.
+ *
+ * We can only force the running transaction if we don't have an active handle;
+ * otherwise, we will deadlock.
+ *
+ * Returns true if a transaction was started.
+ */
+int journal_force_commit_nested(journal_t *journal)
+{
+	transaction_t *transaction = NULL;
+	tid_t tid;
+
+	spin_lock(&journal->j_state_lock);
+	if (journal->j_running_transaction && !current->journal_info) {
+		transaction = journal->j_running_transaction;
+		__log_start_commit(journal, transaction->t_tid);
+	} else if (journal->j_committing_transaction)
+		transaction = journal->j_committing_transaction;
+
+	if (!transaction) {
+		spin_unlock(&journal->j_state_lock);
+		return 0;	/* Nothing to retry */
+	}
+
+	tid = transaction->t_tid;
+	spin_unlock(&journal->j_state_lock);
+	log_wait_commit(journal, tid);
+	return 1;
 }
 
 /*
@@ -586,9 +620,13 @@ int journal_bmap(journal_t *journal, unsigned long blocknr,
  * We play buffer_head aliasing tricks to write data/metadata blocks to
  * the journal without copying their contents, but for journal
  * descriptor blocks we do need to generate bona fide buffers.
+ *
+ * After the caller of journal_get_descriptor_buffer() has finished modifying
+ * the buffer's contents they really should run flush_dcache_page(bh->b_page).
+ * But we don't bother doing that, so there will be coherency problems with
+ * mmaps of blockdevs which hold live JBD-controlled filesystems.
  */
-
-struct journal_head * journal_get_descriptor_buffer(journal_t *journal)
+struct journal_head *journal_get_descriptor_buffer(journal_t *journal)
 {
 	struct buffer_head *bh;
 	unsigned long blocknr;
@@ -600,7 +638,10 @@ struct journal_head * journal_get_descriptor_buffer(journal_t *journal)
 		return NULL;
 
 	bh = __getblk(journal->j_dev, blocknr, journal->j_blocksize);
-	bh->b_state |= (1 << BH_Dirty);
+	lock_buffer(bh);
+	memset(bh->b_data, 0, journal->j_blocksize);
+	set_buffer_uptodate(bh);
+	unlock_buffer(bh);
 	BUFFER_TRACE(bh, "return this buffer");
 	return journal_add_journal_head(bh);
 }
@@ -636,7 +677,7 @@ static journal_t * journal_init_common (void)
 	spin_lock_init(&journal->j_list_lock);
 	spin_lock_init(&journal->j_state_lock);
 
-	journal->j_commit_interval = (HZ * 5);
+	journal->j_commit_interval = (HZ * JBD_DEFAULT_MAX_COMMIT_AGE);
 
 	/* The journal is marked for error until we succeed with recovery! */
 	journal->j_flags = JFS_ABORT;
@@ -768,8 +809,8 @@ static int journal_reset(journal_t *journal)
 	journal_superblock_t *sb = journal->j_superblock;
 	unsigned int first, last;
 
-	first = ntohl(sb->s_first);
-	last = ntohl(sb->s_maxlen);
+	first = be32_to_cpu(sb->s_first);
+	last = be32_to_cpu(sb->s_maxlen);
 
 	journal->j_first = first;
 	journal->j_last = last;
@@ -846,12 +887,12 @@ int journal_create(journal_t *journal)
 	/* OK, fill in the initial static fields in the new superblock */
 	sb = journal->j_superblock;
 
-	sb->s_header.h_magic	 = htonl(JFS_MAGIC_NUMBER);
-	sb->s_header.h_blocktype = htonl(JFS_SUPERBLOCK_V2);
+	sb->s_header.h_magic	 = cpu_to_be32(JFS_MAGIC_NUMBER);
+	sb->s_header.h_blocktype = cpu_to_be32(JFS_SUPERBLOCK_V2);
 
-	sb->s_blocksize	= htonl(journal->j_blocksize);
-	sb->s_maxlen	= htonl(journal->j_maxlen);
-	sb->s_first	= htonl(1);
+	sb->s_blocksize	= cpu_to_be32(journal->j_blocksize);
+	sb->s_maxlen	= cpu_to_be32(journal->j_maxlen);
+	sb->s_first	= cpu_to_be32(1);
 
 	journal->j_transaction_sequence = 1;
 
@@ -894,9 +935,9 @@ void journal_update_superblock(journal_t *journal, int wait)
 	jbd_debug(1,"JBD: updating superblock (start %ld, seq %d, errno %d)\n",
 		  journal->j_tail, journal->j_tail_sequence, journal->j_errno);
 
-	sb->s_sequence = htonl(journal->j_tail_sequence);
-	sb->s_start    = htonl(journal->j_tail);
-	sb->s_errno    = htonl(journal->j_errno);
+	sb->s_sequence = cpu_to_be32(journal->j_tail_sequence);
+	sb->s_start    = cpu_to_be32(journal->j_tail);
+	sb->s_errno    = cpu_to_be32(journal->j_errno);
 	spin_unlock(&journal->j_state_lock);
 
 	BUFFER_TRACE(bh, "marking dirty");
@@ -947,13 +988,13 @@ static int journal_get_superblock(journal_t *journal)
 
 	err = -EINVAL;
 
-	if (sb->s_header.h_magic != htonl(JFS_MAGIC_NUMBER) ||
-	    sb->s_blocksize != htonl(journal->j_blocksize)) {
+	if (sb->s_header.h_magic != cpu_to_be32(JFS_MAGIC_NUMBER) ||
+	    sb->s_blocksize != cpu_to_be32(journal->j_blocksize)) {
 		printk(KERN_WARNING "JBD: no valid journal superblock found\n");
 		goto out;
 	}
 
-	switch(ntohl(sb->s_header.h_blocktype)) {
+	switch(be32_to_cpu(sb->s_header.h_blocktype)) {
 	case JFS_SUPERBLOCK_V1:
 		journal->j_format_version = 1;
 		break;
@@ -965,9 +1006,9 @@ static int journal_get_superblock(journal_t *journal)
 		goto out;
 	}
 
-	if (ntohl(sb->s_maxlen) < journal->j_maxlen)
-		journal->j_maxlen = ntohl(sb->s_maxlen);
-	else if (ntohl(sb->s_maxlen) > journal->j_maxlen) {
+	if (be32_to_cpu(sb->s_maxlen) < journal->j_maxlen)
+		journal->j_maxlen = be32_to_cpu(sb->s_maxlen);
+	else if (be32_to_cpu(sb->s_maxlen) > journal->j_maxlen) {
 		printk (KERN_WARNING "JBD: journal file too short\n");
 		goto out;
 	}
@@ -995,11 +1036,11 @@ static int load_superblock(journal_t *journal)
 
 	sb = journal->j_superblock;
 
-	journal->j_tail_sequence = ntohl(sb->s_sequence);
-	journal->j_tail = ntohl(sb->s_start);
-	journal->j_first = ntohl(sb->s_first);
-	journal->j_last = ntohl(sb->s_maxlen);
-	journal->j_errno = ntohl(sb->s_errno);
+	journal->j_tail_sequence = be32_to_cpu(sb->s_sequence);
+	journal->j_tail = be32_to_cpu(sb->s_start);
+	journal->j_first = be32_to_cpu(sb->s_first);
+	journal->j_last = be32_to_cpu(sb->s_maxlen);
+	journal->j_errno = be32_to_cpu(sb->s_errno);
 
 	return 0;
 }
@@ -1212,7 +1253,7 @@ int journal_update_format (journal_t *journal)
 
 	sb = journal->j_superblock;
 
-	switch (ntohl(sb->s_header.h_blocktype)) {
+	switch (be32_to_cpu(sb->s_header.h_blocktype)) {
 	case JFS_SUPERBLOCK_V2:
 		return 0;
 	case JFS_SUPERBLOCK_V1:
@@ -1234,7 +1275,7 @@ static int journal_convert_superblock_v1(journal_t *journal,
 
 	/* Pre-initialise new fields to zero */
 	offset = ((char *) &(sb->s_feature_compat)) - ((char *) sb);
-	blocksize = ntohl(sb->s_blocksize);
+	blocksize = be32_to_cpu(sb->s_blocksize);
 	memset(&sb->s_feature_compat, 0, blocksize-offset);
 
 	sb->s_nr_users = cpu_to_be32(1);
@@ -1577,7 +1618,7 @@ static void journal_destroy_journal_head_cache(void)
 {
 	J_ASSERT(journal_head_cache != NULL);
 	kmem_cache_destroy(journal_head_cache);
-	journal_head_cache = 0;
+	journal_head_cache = NULL;
 }
 
 /*

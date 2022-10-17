@@ -7,6 +7,8 @@
 #include <asm/segment.h>
 #include <asm/entry.h>
 
+#ifdef __KERNEL__
+
 /*
  * switch_to(n) should switch tasks to task ptr, first checking that
  * ptr isn't the current task, in which case it does nothing.  This
@@ -49,7 +51,7 @@ asmlinkage void resume(void);
 #if 0
 #define local_irq_enable() asm volatile ("andiw %0,%%sr": : "i" (ALLOWINT) : "memory")
 #else
-#include <asm/hardirq.h>
+#include <linux/hardirq.h>
 #define local_irq_enable() ({							\
 	if (MACH_IS_Q40 || !hardirq_count())					\
 		asm volatile ("andiw %0,%%sr": : "i" (ALLOWINT) : "memory");	\
@@ -155,5 +157,43 @@ static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
 	return x;
 }
 #endif
+
+/*
+ * Atomic compare and exchange.  Compare OLD with MEM, if identical,
+ * store NEW in MEM.  Return the initial value in MEM.  Success is
+ * indicated by comparing RETURN with OLD.
+ */
+#ifdef CONFIG_RMW_INSNS
+#define __HAVE_ARCH_CMPXCHG	1
+
+static inline unsigned long __cmpxchg(volatile void *p, unsigned long old,
+				      unsigned long new, int size)
+{
+	switch (size) {
+	case 1:
+		__asm__ __volatile__ ("casb %0,%2,%1"
+				      : "=d" (old), "=m" (*(char *)p)
+				      : "d" (new), "0" (old), "m" (*(char *)p));
+		break;
+	case 2:
+		__asm__ __volatile__ ("casw %0,%2,%1"
+				      : "=d" (old), "=m" (*(short *)p)
+				      : "d" (new), "0" (old), "m" (*(short *)p));
+		break;
+	case 4:
+		__asm__ __volatile__ ("casl %0,%2,%1"
+				      : "=d" (old), "=m" (*(int *)p)
+				      : "d" (new), "0" (old), "m" (*(int *)p));
+		break;
+	}
+	return old;
+}
+
+#define cmpxchg(ptr,o,n)\
+	((__typeof__(*(ptr)))__cmpxchg((ptr),(unsigned long)(o),\
+					(unsigned long)(n),sizeof(*(ptr))))
+#endif
+
+#endif /* __KERNEL__ */
 
 #endif /* _M68K_SYSTEM_H */

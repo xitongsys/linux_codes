@@ -20,6 +20,7 @@
 #include <linux/poll.h>
 #include <linux/init.h>
 #include <linux/smp_lock.h>
+#include <asm/io.h>
 #include <asm/mostek.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -30,7 +31,7 @@ static int rtc_busy = 0;
 /* Retrieve the current date and time from the real time clock. */
 static void get_rtc_time(struct rtc_time *t)
 {
-	unsigned long regs = mstk48t02_regs;
+	void * __iomem regs = mstk48t02_regs;
 	u8 tmp;
 
 	spin_lock_irq(&mostek_lock);
@@ -57,7 +58,7 @@ static void get_rtc_time(struct rtc_time *t)
 /* Set the current date and time inthe real time clock. */
 void set_rtc_time(struct rtc_time *t)
 {
-	unsigned long regs = mstk48t02_regs;
+	void * __iomem regs = mstk48t02_regs;
 	u8 tmp;
 
 	spin_lock_irq(&mostek_lock);
@@ -85,13 +86,15 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	unsigned long arg)
 {
 	struct rtc_time rtc_tm;
+	void __user *argp = (void __user *)arg;
 
 	switch (cmd)
 	{
 	case RTCGET:
+		memset(&rtc_tm, 0, sizeof(struct rtc_time));
 		get_rtc_time(&rtc_tm);
 
-		if (copy_to_user((struct rtc_time*)arg, &rtc_tm, sizeof(struct rtc_time)))
+		if (copy_to_user(argp, &rtc_tm, sizeof(struct rtc_time)))
 			return -EFAULT;
 
 		return 0;
@@ -101,7 +104,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		if (!capable(CAP_SYS_TIME))
 			return -EPERM;
 
-		if (copy_from_user(&rtc_tm, (struct rtc_time*)arg, sizeof(struct rtc_time)))
+		if (copy_from_user(&rtc_tm, argp, sizeof(struct rtc_time)))
 			return -EFAULT;
 
 		set_rtc_time(&rtc_tm);

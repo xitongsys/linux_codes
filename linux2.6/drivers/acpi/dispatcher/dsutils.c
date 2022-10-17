@@ -5,7 +5,7 @@
  ******************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2003, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -60,11 +60,10 @@
  *
  * FUNCTION:    acpi_ds_is_result_used
  *
- * PARAMETERS:  Op
- *              result_obj
- *              walk_state
+ * PARAMETERS:  Op                  - Current Op
+ *              walk_state          - Current State
  *
- * RETURN:      Status
+ * RETURN:      TRUE if result is used, FALSE otherwise
  *
  * DESCRIPTION: Check if a result object will be used by the parent
  *
@@ -89,18 +88,41 @@ acpi_ds_is_result_used (
 	}
 
 	/*
-	 * If there is no parent, the result can't possibly be used!
-	 * (An executing method typically has no parent, since each
-	 * method is parsed separately)  However, a method that is
-	 * invoked from another method has a parent.
+	 * If there is no parent, or the parent is a scope_op, we are executing
+	 * at the method level. An executing method typically has no parent,
+	 * since each method is parsed separately.  A method invoked externally
+	 * via execute_control_method has a scope_op as the parent.
 	 */
-	if (!op->common.parent) {
+	if ((!op->common.parent) ||
+		(op->common.parent->common.aml_opcode == AML_SCOPE_OP)) {
+		/*
+		 * If this is the last statement in the method, we know it is not a
+		 * Return() operator (would not come here.) The following code is the
+		 * optional support for a so-called "implicit return". Some AML code
+		 * assumes that the last value of the method is "implicitly" returned
+		 * to the caller. Just save the last result as the return value.
+		 * NOTE: this is optional because the ASL language does not actually
+		 * support this behavior.
+		 */
+		if ((acpi_gbl_enable_interpreter_slack) &&
+			(walk_state->parser_state.aml >= walk_state->parser_state.aml_end)) {
+			ACPI_DEBUG_PRINT ((ACPI_DB_DISPATCH,
+					"Result of [%s] will be implicitly returned\n",
+					acpi_ps_get_opcode_name (op->common.aml_opcode)));
+
+			/* Use the top of the result stack as the implicit return value */
+
+			walk_state->return_desc = walk_state->results->results.obj_desc[0];
+			return_VALUE (TRUE);
+		}
+
+		/* No parent, the return value cannot possibly be used */
+
 		return_VALUE (FALSE);
 	}
 
-	/*
-	 * Get info on the parent.  The root Op is AML_SCOPE
-	 */
+	/* Get info on the parent. The root_op is AML_SCOPE */
+
 	parent_info = acpi_ps_get_opcode_info (op->common.parent->common.aml_opcode);
 	if (parent_info->class == AML_CLASS_UNKNOWN) {
 		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "Unknown parent opcode. Op=%p\n", op));
@@ -204,9 +226,9 @@ result_not_used:
  *
  * FUNCTION:    acpi_ds_delete_result_if_not_used
  *
- * PARAMETERS:  Op
- *              result_obj
- *              walk_state
+ * PARAMETERS:  Op              - Current parse Op
+ *              result_obj      - Result of the operation
+ *              walk_state      - Current state
  *
  * RETURN:      Status
  *
@@ -280,7 +302,8 @@ acpi_ds_resolve_operands (
 
 	/*
 	 * Attempt to resolve each of the valid operands
-	 * Method arguments are passed by value, not by reference
+	 * Method arguments are passed by reference, not by value.  This means
+	 * that the actual objects are passed, not copies of the objects.
 	 */
 	for (i = 0; i < walk_state->num_operands; i++) {
 		status = acpi_ex_resolve_to_value (&walk_state->operands[i], walk_state);
@@ -312,7 +335,7 @@ acpi_ds_clear_operands (
 	u32                             i;
 
 
-	ACPI_FUNCTION_TRACE_PTR ("acpi_ds_clear_operands", walk_state);
+	ACPI_FUNCTION_TRACE_PTR ("ds_clear_operands", walk_state);
 
 
 	/*
@@ -337,8 +360,9 @@ acpi_ds_clear_operands (
  *
  * FUNCTION:    acpi_ds_create_operand
  *
- * PARAMETERS:  walk_state
- *              Arg
+ * PARAMETERS:  walk_state      - Current walk state
+ *              Arg             - Parse object for the argument
+ *              arg_index       - Which argument (zero based)
  *
  * RETURN:      Status
  *

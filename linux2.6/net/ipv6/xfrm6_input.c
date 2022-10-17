@@ -9,36 +9,40 @@
  *		IPv6 support
  */
 
+#include <linux/module.h>
+#include <linux/string.h>
+#include <net/dsfield.h>
 #include <net/inet_ecn.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
 #include <net/xfrm.h>
 
-static inline void ipip6_ecn_decapsulate(struct ipv6hdr *iph,
-					 struct sk_buff *skb)
+static inline void ipip6_ecn_decapsulate(struct sk_buff *skb)
 {
-	if (INET_ECN_is_ce(ip6_get_dsfield(iph)) &&
-	    INET_ECN_is_not_ce(ip6_get_dsfield(skb->nh.ipv6h)))
-		IP6_ECN_set_ce(skb->nh.ipv6h);
+	struct ipv6hdr *outer_iph = skb->nh.ipv6h;
+	struct ipv6hdr *inner_iph = skb->h.ipv6h;
+
+	if (INET_ECN_is_ce(ipv6_get_dsfield(outer_iph)))
+		IP6_ECN_set_ce(inner_iph);
 }
 
-int xfrm6_rcv(struct sk_buff **pskb, unsigned int *nhoffp)
+int xfrm6_rcv_spi(struct sk_buff **pskb, unsigned int *nhoffp, u32 spi)
 {
 	struct sk_buff *skb = *pskb;
 	int err;
-	u32 spi, seq;
+	u32 seq;
 	struct sec_decap_state xfrm_vec[XFRM_MAX_DEPTH];
 	struct xfrm_state *x;
 	int xfrm_nr = 0;
 	int decaps = 0;
-	int nexthdr = 0;
-	u8 *prevhdr = NULL;
+	int nexthdr;
+	unsigned int nhoff;
 
-	ip6_find_1stfragopt(skb, &prevhdr);
-	nexthdr = *prevhdr;
-	*nhoffp = prevhdr - skb->nh.raw;
+	nhoff = *nhoffp;
+	nexthdr = skb->nh.raw[nhoff];
 
-	if ((err = xfrm_parse_spi(skb, nexthdr, &spi, &seq)) != 0)
+	seq = 0;
+	if (!spi && (err = xfrm_parse_spi(skb, nexthdr, &spi, &seq)) != 0)
 		goto drop;
 	
 	do {
@@ -64,6 +68,8 @@ int xfrm6_rcv(struct sk_buff **pskb, unsigned int *nhoffp)
 		if (nexthdr <= 0)
 			goto drop_unlock;
 
+		skb->nh.raw[nhoff] = nexthdr;
+
 		if (x->props.replay_window)
 			xfrm_replay_advance(x, seq);
 
@@ -77,10 +83,18 @@ int xfrm6_rcv(struct sk_buff **pskb, unsigned int *nhoffp)
 		if (x->props.mode) { /* XXX */
 			if (nexthdr != IPPROTO_IPV6)
 				goto drop;
-			skb->nh.raw = skb->data;
+			if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
+				goto drop;
+			if (skb_cloned(skb) &&
+			    pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
+				goto drop;
+			if (x->props.flags & XFRM_STATE_DECAP_DSCP)
+				ipv6_copy_dscp(skb->nh.ipv6h, skb->h.ipv6h);
 			if (!(x->props.flags & XFRM_STATE_NOECN))
-				ipip6_ecn_decapsulate(iph, skb);
-			iph = skb->nh.ipv6h;
+				ipip6_ecn_decapsulate(skb);
+			skb->mac.raw = memmove(skb->data - skb->mac_len,
+					       skb->mac.raw, skb->mac_len);
+			skb->nh.raw = skb->data;
 			decaps = 1;
 			break;
 		}
@@ -126,4 +140,11 @@ drop:
 		xfrm_state_put(xfrm_vec[xfrm_nr].xvec);
 	kfree_skb(skb);
 	return -1;
+}
+
+EXPORT_SYMBOL(xfrm6_rcv_spi);
+
+int xfrm6_rcv(struct sk_buff **pskb, unsigned int *nhoffp)
+{
+	return xfrm6_rcv_spi(pskb, nhoffp, 0);
 }

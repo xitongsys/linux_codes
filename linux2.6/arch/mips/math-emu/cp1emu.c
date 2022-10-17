@@ -2,7 +2,7 @@
  * cp1emu.c: a MIPS coprocessor 1 (fpu) instruction emulator
  *
  * MIPS floating point support
- * Copyright (C) 1994-2000 Algorithmics Ltd.  All rights reserved.
+ * Copyright (C) 1994-2000 Algorithmics Ltd.
  * http://www.algor.co.uk
  *
  * Kevin D. Kissell, kevink@mips.com and Carsten Langgaard, carstenl@mips.com
@@ -39,6 +39,7 @@
 #include <asm/inst.h>
 #include <asm/bootinfo.h>
 #include <asm/cpu.h>
+#include <asm/cpu-features.h>
 #include <asm/processor.h>
 #include <asm/ptrace.h>
 #include <asm/signal.h>
@@ -233,7 +234,7 @@ static int cop1Emulate(struct pt_regs *xcp, struct mips_fpu_soft_struct *ctx)
 			fpuemuprivate.stats.errors++;
 			return SIGBUS;
 		}
-		/* __computer_return_epc() will have updated cp0_epc */
+		/* __compute_return_epc() will have updated cp0_epc */
 		contpc = REG_TO_VA xcp->cp0_epc;
 		/* In order not to confuse ptrace() et al, tweak context */
 		xcp->cp0_epc = VA_TO_REG emulpc - 4;
@@ -527,9 +528,9 @@ static int cop1Emulate(struct pt_regs *xcp, struct mips_fpu_soft_struct *ctx)
 		if (MIPSInst_FUNC(ir) != movc_op)
 			return SIGILL;
 		cond = fpucondbit[MIPSInst_RT(ir) >> 2];
-		if (((ctx->fcr31 & cond) != 0) != ((MIPSInst_RT(ir) & 1) != 0))
-			return 0;
-		xcp->regs[MIPSInst_RD(ir)] = xcp->regs[MIPSInst_RS(ir)];
+		if (((ctx->fcr31 & cond) != 0) == ((MIPSInst_RT(ir) & 1) != 0))
+			xcp->regs[MIPSInst_RD(ir)] =
+				xcp->regs[MIPSInst_RS(ir)];
 		break;
 #endif
 

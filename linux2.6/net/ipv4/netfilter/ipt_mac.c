@@ -1,4 +1,13 @@
 /* Kernel module to match MAC address parameters. */
+
+/* (C) 1999-2001 Paul `Rusty' Russell
+ * (C) 2002-2004 Netfilter Core Team <coreteam@netfilter.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/if_ether.h>
@@ -24,7 +33,7 @@ match(const struct sk_buff *skb,
     return (skb->mac.raw >= skb->head
 	    && (skb->mac.raw + ETH_HLEN) <= skb->data
 	    /* If so, compare... */
-	    && ((memcmp(skb->mac.ethernet->h_source, info->srcaddr, ETH_ALEN)
+	    && ((memcmp(eth_hdr(skb)->h_source, info->srcaddr, ETH_ALEN)
 		== 0) ^ info->invert));
 }
 

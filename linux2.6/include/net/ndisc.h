@@ -45,6 +45,11 @@ struct nd_msg {
 	__u8		opt[0];
 };
 
+struct rs_msg {
+	struct icmp6hdr	icmph;
+	__u8		opt[0];
+};
+
 struct ra_msg {
         struct icmp6hdr		icmph;
 	__u32			reachable_time;
@@ -97,6 +102,18 @@ extern int			igmp6_event_query(struct sk_buff *skb);
 extern int			igmp6_event_report(struct sk_buff *skb);
 
 extern void			igmp6_cleanup(void);
+
+#ifdef CONFIG_SYSCTL
+extern int 			ndisc_ifinfo_sysctl_change(ctl_table *ctl,
+							   int write,
+							   struct file * filp,
+							   void __user *buffer,
+							   size_t *lenp,
+							   loff_t *ppos);
+#endif
+
+extern void 			inet6_ifinfo_notify(int event,
+						    struct inet6_dev *idev);
 
 static inline struct neighbour * ndisc_get_neigh(struct net_device *dev, struct in6_addr *addr)
 {

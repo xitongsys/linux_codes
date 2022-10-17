@@ -39,6 +39,10 @@ static inline unsigned int _swapl(volatile unsigned long v)
 #define readl(addr) \
     ({ unsigned int __v = (*(volatile unsigned int *) (addr)); __v; })
 
+#define readb_relaxed(addr) readb(addr)
+#define readw_relaxed(addr) readw(addr)
+#define readl_relaxed(addr) readl(addr)
+
 #define writeb(b,addr) (void)((*(volatile unsigned char *) (addr)) = (b))
 #define writew(b,addr) (void)((*(volatile unsigned short *) (addr)) = (b))
 #define writel(b,addr) (void)((*(volatile unsigned int *) (addr)) = (b))
@@ -97,6 +101,8 @@ static inline void io_insl(unsigned int addr, void *buf, int len)
 	while (len--)
 		*bp++ = _swapl(*ap);
 }
+
+#define mmiowb()
 
 /*
  *	make the short names macros so specific devices

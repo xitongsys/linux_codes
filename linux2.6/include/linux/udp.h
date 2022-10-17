@@ -31,6 +31,7 @@ struct udphdr {
 #define UDP_ENCAP	100	/* Set the socket to accept encapsulated packets */
 
 /* UDP encapsulation types */
+#define UDP_ENCAP_ESPINUDP_NON_IKE	1 /* draft-ietf-ipsec-nat-t-ike-00/01 */
 #define UDP_ENCAP_ESPINUDP	2 /* draft-ietf-ipsec-udp-encaps-06 */
 
 #ifdef __KERNEL__
@@ -39,28 +40,23 @@ struct udphdr {
 #include <net/sock.h>
 #include <linux/ip.h>
 
-struct udp_opt {
-	int		pending;	/* Any pending frames ? */
-	unsigned int	corkflag;	/* Cork is required */
-  	__u16		encap_type;	/* Is this an Encapsulation socket? */
+struct udp_sock {
+	/* inet_sock has to be the first member */
+	struct inet_sock inet;
+	int		 pending;	/* Any pending frames ? */
+	unsigned int	 corkflag;	/* Cork is required */
+  	__u16		 encap_type;	/* Is this an Encapsulation socket? */
 	/*
 	 * Following member retains the infomation to create a UDP header
 	 * when the socket is uncorked.
 	 */
-	__u16		len;		/* total length of pending frames */
+	__u16		 len;		/* total length of pending frames */
 };
 
-/* WARNING: don't change the layout of the members in udp_sock! */
-struct udp_sock {
-	struct sock	  sk;
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
-	struct ipv6_pinfo *pinet6;
-#endif
-	struct inet_opt	  inet;
-	struct udp_opt	  udp;
-};
-
-#define udp_sk(__sk) (&((struct udp_sock *)__sk)->udp)
+static inline struct udp_sock *udp_sk(const struct sock *sk)
+{
+	return (struct udp_sock *)sk;
+}
 
 #endif
 

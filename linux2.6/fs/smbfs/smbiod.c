@@ -43,7 +43,7 @@ static enum smbiod_state smbiod_state = SMBIOD_DEAD;
 static pid_t smbiod_pid;
 static DECLARE_WAIT_QUEUE_HEAD(smbiod_wait);
 static LIST_HEAD(smb_servers);
-static spinlock_t servers_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(servers_lock);
 
 #define SMBIOD_DATA_READY	(1<<0)
 static long smbiod_flags;
@@ -54,7 +54,7 @@ static int smbiod_start(void);
 /*
  * called when there's work for us to do
  */
-void smbiod_wake_up()
+void smbiod_wake_up(void)
 {
 	if (smbiod_state == SMBIOD_DEAD)
 		return;
@@ -65,7 +65,7 @@ void smbiod_wake_up()
 /*
  * start smbiod if none is running
  */
-static int smbiod_start()
+static int smbiod_start(void)
 {
 	pid_t pid;
 	if (smbiod_state != SMBIOD_DEAD)
@@ -161,6 +161,8 @@ int smbiod_retry(struct smb_sb_info *server)
 	while (head != &server->xmitq) {
 		req = list_entry(head, struct smb_request, rq_queue);
 		head = head->next;
+
+		req->rq_bytes_sent = 0;
 		if (req->rq_flags & SMB_REQ_NORETRY) {
 			VERBOSE("aborting request %p on xmitq\n", req);
 			req->rq_errno = -EIO;

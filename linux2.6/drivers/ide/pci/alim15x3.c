@@ -1,5 +1,5 @@
 /*
- * linux/drivers/ide/pci/alim15x3.c		Version 0.16	2003/01/02
+ * linux/drivers/ide/pci/alim15x3.c		Version 0.17	2003/01/02
  *
  *  Copyright (C) 1998-2000 Michel Aubry, Maintainer
  *  Copyright (C) 1998-2000 Andrzej Krzysztofowicz, Maintainer
@@ -8,6 +8,7 @@
  *  Copyright (C) 1998-2000 Andre Hedrick (andre@linux-ide.org)
  *  May be copied or modified under the terms of the GNU General Public License
  *  Copyright (C) 2002 Alan Cox <alan@redhat.com>
+ *  ALi (now ULi M5228) support by Clear Zhang <Clear.Zhang@ali.com.tw>
  *
  *  (U)DMA capable version of ali 1533/1543(C), 1535(D)
  *
@@ -19,6 +20,7 @@
  *	Don't use LBA48 mode on ALi <= 0xC4
  *	Don't poke 0x79 with a non ALi northbridge
  *	Don't flip undefined bits on newer chipsets (fix Fujitsu laptop hang)
+ *	Allow UDMA6 on revisions > 0xC4
  *
  *  Documentation
  *	Chipset documentation available under NDA only
@@ -37,7 +39,7 @@
 
 #include <asm/io.h>
 
-#include "alim15x3.h"
+#define DISPLAY_ALI_TIMINGS
 
 /*
  *	ALi devices are not plug in. Otherwise these static values would
@@ -406,7 +408,9 @@ static u8 ali15x3_ratemask (ide_drive_t *drive)
 {
 	u8 mode = 0, can_ultra	= ali15x3_can_ultra(drive);
 
-	if (m5229_revision >= 0xC4 && can_ultra) {
+	if (m5229_revision > 0xC4 && can_ultra) {
+		mode = 4;
+	} else if (m5229_revision == 0xC4 && can_ultra) {
 		mode = 3;
 	} else if (m5229_revision >= 0xC2 && can_ultra) {
 		mode = 2;
@@ -439,10 +443,14 @@ static int ali15x3_tune_chipset (ide_drive_t *drive, u8 xferspeed)
 {
 	ide_hwif_t *hwif	= HWIF(drive);
 	struct pci_dev *dev	= hwif->pci_dev;
-	u8 speed	= ide_rate_filter(ali15x3_ratemask(drive), xferspeed);
+	u8 speed		= ide_rate_filter(ali15x3_ratemask(drive), xferspeed);
+	u8 speed1		= speed;
 	u8 unit			= (drive->select.b.unit & 0x01);
 	u8 tmpbyte		= 0x00;
 	int m5229_udma		= (hwif->channel) ? 0x57 : 0x56;
+
+	if (speed == XFER_UDMA_6)
+		speed1 = 0x47;
 
 	if (speed < XFER_UDMA_0) {
 		u8 ultra_enable	= (unit) ? 0x7f : 0xf7;
@@ -461,7 +469,7 @@ static int ali15x3_tune_chipset (ide_drive_t *drive, u8 xferspeed)
 		/*
 		 * enable ultra dma and set timing
 		 */
-		tmpbyte |= ((0x08 | ((4-speed)&0x07)) << (unit << 2));
+		tmpbyte |= ((0x08 | ((4-speed1)&0x07)) << (unit << 2));
 		pci_write_config_byte(dev, m5229_udma, tmpbyte);
 		if (speed >= XFER_UDMA_3) {
 			pci_read_config_byte(dev, 0x4b, &tmpbyte);
@@ -516,7 +524,7 @@ static int ali15x3_config_drive_for_dma(ide_drive_t *drive)
 
 	if ((id != NULL) && ((id->capability & 1) != 0) && drive->autodma) {
 		/* Consult the list of known "bad" drives */
-		if (hwif->ide_dma_bad_drive(drive))
+		if (__ide_dma_bad_drive(drive))
 			goto ata_pio;
 		if ((id->field_valid & 4) && (m5229_revision >= 0xC2)) {
 			if (id->dma_ultra & hwif->ultra_mask) {
@@ -533,7 +541,7 @@ try_dma_modes:
 				if (!config_chipset_for_dma(drive))
 					goto no_dma_set;
 			}
-		} else if (hwif->ide_dma_good_drive(drive) &&
+		} else if (__ide_dma_good_drive(drive) &&
 			   (id->eide_dma_time < 150)) {
 			/* Consult the list of known "good" drives */
 			if (!config_chipset_for_dma(drive))
@@ -551,18 +559,19 @@ no_dma_set:
 }
 
 /**
- *	ali15x3_dma_write	-	do a DMA IDE write
- *	@drive:	drive to issue write for
+ *	ali15x3_dma_setup	-	begin a DMA phase
+ *	@drive:	target device
  *
- *	Returns 1 if the DMA write cannot be performed, zero on 
- *	success.
+ *	Returns 1 if the DMA cannot be performed, zero on success.
  */
- 
-static int ali15x3_dma_write (ide_drive_t *drive)
+
+static int ali15x3_dma_setup(ide_drive_t *drive)
 {
-	if ((m5229_revision < 0xC2) && (drive->media != ide_disk))
-		return 1;	/* try PIO instead of DMA */
-	return __ide_dma_write(drive);
+	if (m5229_revision < 0xC2 && drive->media != ide_disk) {
+		if (rq_data_dir(drive->hwif->hwgroup->rq))
+			return 1;	/* try PIO instead of DMA */
+	}
+	return ide_dma_setup(drive);
 }
 
 /**
@@ -588,7 +597,7 @@ static unsigned int __init init_chipset_ali15x3 (struct pci_dev *dev, const char
 	if (!ali_proc) {
 		ali_proc = 1;
 		bmide_dev = dev;
-		ide_pci_register_host_proc(&ali_procs[0]);
+		ide_pci_create_host_proc("ali", ali_get_info);
 	}
 #endif  /* defined(DISPLAY_ALI_TIMINGS) && defined(CONFIG_PROC_FS) */
 
@@ -745,8 +754,8 @@ static void __init init_hwif_common_ali15x3 (ide_hwif_t *hwif)
 	hwif->tuneproc = &ali15x3_tune_drive;
 	hwif->speedproc = &ali15x3_tune_chipset;
 
-	/* Don't use LBA48 on ALi devices before rev 0xC5 */
-	hwif->no_lba48 = (m5229_revision <= 0xC4) ? 1 : 0;
+	/* don't use LBA48 DMA on ALi devices before rev 0xC5 */
+	hwif->no_lba48_dma = (m5229_revision <= 0xC4) ? 1 : 0;
 
 	if (!hwif->dma_base) {
 		hwif->drives[0].autotune = 1;
@@ -757,7 +766,7 @@ static void __init init_hwif_common_ali15x3 (ide_hwif_t *hwif)
 	hwif->atapi_dma = 1;
 
 	if (m5229_revision > 0x20)
-		hwif->ultra_mask = 0x3f;
+		hwif->ultra_mask = 0x7f;
 	hwif->mwdma_mask = 0x07;
 	hwif->swdma_mask = 0x07;
 
@@ -766,7 +775,7 @@ static void __init init_hwif_common_ali15x3 (ide_hwif_t *hwif)
                  * M1543C or newer for DMAing
                  */
                 hwif->ide_dma_check = &ali15x3_config_drive_for_dma;
-                hwif->ide_dma_write = &ali15x3_dma_write;
+		hwif->dma_setup = &ali15x3_dma_setup;
 		if (!noautodma)
 			hwif->autodma = 1;
 		if (!(hwif->udma_four))
@@ -791,8 +800,9 @@ static void __init init_hwif_ali15x3 (ide_hwif_t *hwif)
 	s8 irq_routing_table[] = { -1,  9, 3, 10, 4,  5, 7,  6,
 				      1, 11, 0, 12, 0, 14, 0, 15 };
 	int irq = -1;
-	
-	hwif->irq = hwif->channel ? 15 : 14;
+
+	if (hwif->pci_dev->device == PCI_DEVICE_ID_AL_M5229)
+		hwif->irq = hwif->channel ? 15 : 14;
 
 	if (isa_dev) {
 		/*
@@ -846,8 +856,15 @@ static void __init init_dma_ali15x3 (ide_hwif_t *hwif, unsigned long dmabase)
 	ide_setup_dma(hwif, dmabase, 8);
 }
 
-extern void ide_setup_pci_device(struct pci_dev *, ide_pci_device_t *);
-
+static ide_pci_device_t ali15x3_chipset __devinitdata = {
+	.name		= "ALI15X3",
+	.init_chipset	= init_chipset_ali15x3,
+	.init_hwif	= init_hwif_ali15x3,
+	.init_dma	= init_dma_ali15x3,
+	.channels	= 2,
+	.autodma	= AUTODMA,
+	.bootable	= ON_BOARD,
+};
 
 /**
  *	alim15x3_init_one	-	set up an ALi15x3 IDE controller
@@ -859,27 +876,27 @@ extern void ide_setup_pci_device(struct pci_dev *, ide_pci_device_t *);
  
 static int __devinit alim15x3_init_one(struct pci_dev *dev, const struct pci_device_id *id)
 {
-	ide_pci_device_t *d = &ali15x3_chipsets[id->driver_data];
-	
+	ide_pci_device_t *d = &ali15x3_chipset;
+
 	if(pci_find_device(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RS100, NULL))
 		printk(KERN_ERR "Warning: ATI Radeon IGP Northbridge is not yet fully tested.\n");
 
 #if defined(CONFIG_SPARC64)
 	d->init_hwif = init_hwif_common_ali15x3;
 #endif /* CONFIG_SPARC64 */
-	ide_setup_pci_device(dev, d);
-	MOD_INC_USE_COUNT;
-	return 0;
+	return ide_setup_pci_device(dev, d);
 }
 
 
 static struct pci_device_id alim15x3_pci_tbl[] = {
 	{ PCI_VENDOR_ID_AL, PCI_DEVICE_ID_AL_M5229, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ PCI_VENDOR_ID_AL, PCI_DEVICE_ID_AL_M5228, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ 0, },
 };
+MODULE_DEVICE_TABLE(pci, alim15x3_pci_tbl);
 
 static struct pci_driver driver = {
-	.name		= "ALI15x3 IDE",
+	.name		= "ALI15x3_IDE",
 	.id_table	= alim15x3_pci_tbl,
 	.probe		= alim15x3_init_one,
 };
@@ -889,13 +906,7 @@ static int ali15x3_ide_init(void)
 	return ide_pci_register_driver(&driver);
 }
 
-static void ali15x3_ide_exit(void)
-{
-	ide_pci_unregister_driver(&driver);
-}
-
 module_init(ali15x3_ide_init);
-module_exit(ali15x3_ide_exit);
 
 MODULE_AUTHOR("Michael Aubry, Andrzej Krzysztofowicz, CJ, Andre Hedrick, Alan Cox");
 MODULE_DESCRIPTION("PCI driver module for ALi 15x3 IDE");

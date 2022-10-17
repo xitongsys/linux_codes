@@ -1,6 +1,6 @@
 /*
  *   ALSA sequencer Timing queue handling
- *   Copyright (c) 1998-1999 by Frank van de Pol <fvdpol@home.nl>
+ *   Copyright (c) 1998-1999 by Frank van de Pol <fvdpol@coil.demon.nl>
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -111,7 +111,7 @@ static queue_t *queue_new(int owner, int locked)
 {
 	queue_t *q;
 
-	q = snd_kcalloc(sizeof(queue_t), GFP_KERNEL);
+	q = kcalloc(1, sizeof(*q), GFP_KERNEL);
 	if (q == NULL) {
 		snd_printd("malloc failed for snd_seq_queue_new()\n");
 		return NULL;

@@ -43,7 +43,7 @@ extern struct movsl_mask {
 } ____cacheline_aligned_in_smp movsl_mask;
 #endif
 
-#define __addr_ok(addr) ((unsigned long)(addr) < (current_thread_info()->addr_limit.seg))
+#define __addr_ok(addr) ((unsigned long __force)(addr) < (current_thread_info()->addr_limit.seg))
 
 /*
  * Test whether a block of memory is a valid user space address.
@@ -56,6 +56,7 @@ extern struct movsl_mask {
  */
 #define __range_ok(addr,size) ({ \
 	unsigned long flag,sum; \
+	__chk_user_ptr(addr); \
 	asm("addl %3,%1 ; sbbl %0,%0; cmpl %1,%4; sbbl $0,%0" \
 		:"=&r" (flag), "=r" (sum) \
 		:"1" (addr),"g" ((int)(size)),"g" (current_thread_info()->addr_limit.seg)); \
@@ -169,7 +170,9 @@ extern void __get_user_4(void);
  * On error, the variable @x is set to zero.
  */
 #define get_user(x,ptr)							\
-({	int __ret_gu,__val_gu;						\
+({	int __ret_gu;							\
+	unsigned long __val_gu;						\
+	__chk_user_ptr(ptr);						\
 	switch(sizeof (*(ptr))) {					\
 	case 1:  __get_user_x(1,__ret_gu,__val_gu,ptr); break;		\
 	case 2:  __get_user_x(2,__ret_gu,__val_gu,ptr); break;		\
@@ -259,7 +262,7 @@ extern void __put_user_bad(void);
 #define __put_user_check(x,ptr,size)					\
 ({									\
 	long __pu_err = -EFAULT;					\
-	__typeof__(*(ptr)) *__pu_addr = (ptr);				\
+	__typeof__(*(ptr)) __user *__pu_addr = (ptr);			\
 	might_sleep();						\
 	if (access_ok(VERIFY_WRITE,__pu_addr,size))			\
 		__put_user_size((x),__pu_addr,(size),__pu_err,-EFAULT);	\
@@ -288,6 +291,7 @@ extern void __put_user_bad(void);
 #define __put_user_size(x,ptr,size,retval,errret)			\
 do {									\
 	retval = 0;							\
+	__chk_user_ptr(ptr);						\
 	switch (size) {							\
 	case 1: __put_user_asm(x,ptr,retval,"b","b","iq",errret);break;	\
 	case 2: __put_user_asm(x,ptr,retval,"w","w","ir",errret);break; \
@@ -310,7 +314,7 @@ do {									\
 
 #endif
 struct __large_struct { unsigned long buf[100]; };
-#define __m(x) (*(struct __large_struct *)(x))
+#define __m(x) (*(struct __large_struct __user *)(x))
 
 /*
  * Tell gcc we read from memory instead of writing: this is because
@@ -335,7 +339,8 @@ struct __large_struct { unsigned long buf[100]; };
 
 #define __get_user_nocheck(x,ptr,size)				\
 ({								\
-	long __gu_err, __gu_val;				\
+	long __gu_err;						\
+	unsigned long __gu_val;					\
 	__get_user_size(__gu_val,(ptr),(size),__gu_err,-EFAULT);\
 	(x) = (__typeof__(*(ptr)))__gu_val;			\
 	__gu_err;						\
@@ -346,6 +351,7 @@ extern long __get_user_bad(void);
 #define __get_user_size(x,ptr,size,retval,errret)			\
 do {									\
 	retval = 0;							\
+	__chk_user_ptr(ptr);						\
 	switch (size) {							\
 	case 1: __get_user_asm(x,ptr,retval,"b","b","=q",errret);break;	\
 	case 2: __get_user_asm(x,ptr,retval,"w","w","=r",errret);break;	\
@@ -371,8 +377,10 @@ do {									\
 		: "m"(__m(addr)), "i"(errret), "0"(err))
 
 
-unsigned long __copy_to_user_ll(void __user *to, const void *from, unsigned long n);
-unsigned long __copy_from_user_ll(void *to, const void __user *from, unsigned long n);
+unsigned long __must_check __copy_to_user_ll(void __user *to,
+				const void *from, unsigned long n);
+unsigned long __must_check __copy_from_user_ll(void *to,
+				const void __user *from, unsigned long n);
 
 /*
  * Here we special-case 1, 2 and 4-byte copy_*_user invocations.  On a fault
@@ -395,25 +403,32 @@ unsigned long __copy_from_user_ll(void *to, const void __user *from, unsigned lo
  * Returns number of bytes that could not be copied.
  * On success, this will be zero.
  */
-static inline unsigned long
-__copy_to_user(void __user *to, const void *from, unsigned long n)
+static inline unsigned long __must_check
+__copy_to_user_inatomic(void __user *to, const void *from, unsigned long n)
 {
 	if (__builtin_constant_p(n)) {
 		unsigned long ret;
 
 		switch (n) {
 		case 1:
-			__put_user_size(*(u8 *)from, (u8 *)to, 1, ret, 1);
+			__put_user_size(*(u8 *)from, (u8 __user *)to, 1, ret, 1);
 			return ret;
 		case 2:
-			__put_user_size(*(u16 *)from, (u16 *)to, 2, ret, 2);
+			__put_user_size(*(u16 *)from, (u16 __user *)to, 2, ret, 2);
 			return ret;
 		case 4:
-			__put_user_size(*(u32 *)from, (u32 *)to, 4, ret, 4);
+			__put_user_size(*(u32 *)from, (u32 __user *)to, 4, ret, 4);
 			return ret;
 		}
 	}
 	return __copy_to_user_ll(to, from, n);
+}
+
+static inline unsigned long __must_check
+__copy_to_user(void __user *to, const void *from, unsigned long n)
+{
+       might_sleep();
+       return __copy_to_user_inatomic(to, from, n);
 }
 
 /**
@@ -434,7 +449,7 @@ __copy_to_user(void __user *to, const void *from, unsigned long n)
  * data to the requested size using zero bytes.
  */
 static inline unsigned long
-__copy_from_user(void *to, const void __user *from, unsigned long n)
+__copy_from_user_inatomic(void *to, const void __user *from, unsigned long n)
 {
 	if (__builtin_constant_p(n)) {
 		unsigned long ret;
@@ -454,57 +469,20 @@ __copy_from_user(void *to, const void __user *from, unsigned long n)
 	return __copy_from_user_ll(to, from, n);
 }
 
-/**
- * copy_to_user: - Copy a block of data into user space.
- * @to:   Destination address, in user space.
- * @from: Source address, in kernel space.
- * @n:    Number of bytes to copy.
- *
- * Context: User context only.  This function may sleep.
- *
- * Copy data from kernel space to user space.
- *
- * Returns number of bytes that could not be copied.
- * On success, this will be zero.
- */
 static inline unsigned long
-copy_to_user(void __user *to, const void *from, unsigned long n)
+__copy_from_user(void *to, const void __user *from, unsigned long n)
 {
-	might_sleep();
-	if (access_ok(VERIFY_WRITE, to, n))
-		n = __copy_to_user(to, from, n);
-	return n;
+       might_sleep();
+       return __copy_from_user_inatomic(to, from, n);
 }
-
-/**
- * copy_from_user: - Copy a block of data from user space.
- * @to:   Destination address, in kernel space.
- * @from: Source address, in user space.
- * @n:    Number of bytes to copy.
- *
- * Context: User context only.  This function may sleep.
- *
- * Copy data from user space to kernel space.
- *
- * Returns number of bytes that could not be copied.
- * On success, this will be zero.
- *
- * If some data could not be copied, this function will pad the copied
- * data to the requested size using zero bytes.
- */
-static inline unsigned long
-copy_from_user(void *to, const void __user *from, unsigned long n)
-{
-	might_sleep();
-	if (access_ok(VERIFY_READ, from, n))
-		n = __copy_from_user(to, from, n);
-	else
-		memset(to, 0, n);
-	return n;
-}
-
-long strncpy_from_user(char *dst, const char __user *src, long count);
-long __strncpy_from_user(char *dst, const char __user *src, long count);
+unsigned long __must_check copy_to_user(void __user *to,
+				const void *from, unsigned long n);
+unsigned long __must_check copy_from_user(void *to,
+				const void __user *from, unsigned long n);
+long __must_check strncpy_from_user(char *dst, const char __user *src,
+				long count);
+long __must_check __strncpy_from_user(char *dst,
+				const char __user *src, long count);
 
 /**
  * strlen_user: - Get the size of a string in user space.
@@ -523,7 +501,7 @@ long __strncpy_from_user(char *dst, const char __user *src, long count);
 #define strlen_user(str) strnlen_user(str, ~0UL >> 1)
 
 long strnlen_user(const char __user *str, long n);
-unsigned long clear_user(void __user *mem, unsigned long len);
-unsigned long __clear_user(void __user *mem, unsigned long len);
+unsigned long __must_check clear_user(void __user *mem, unsigned long len);
+unsigned long __must_check __clear_user(void __user *mem, unsigned long len);
 
 #endif /* __i386_UACCESS_H */

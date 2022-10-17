@@ -132,7 +132,7 @@ static struct ip_tunnel *tunnels_l[HASH_SIZE];
 static struct ip_tunnel *tunnels_wc[1];
 static struct ip_tunnel **tunnels[4] = { tunnels_wc, tunnels_l, tunnels_r, tunnels_r_l };
 
-static rwlock_t ipip_lock = RW_LOCK_UNLOCKED;
+static DEFINE_RWLOCK(ipip_lock);
 
 static struct ip_tunnel * ipip_tunnel_lookup(u32 remote, u32 local)
 {
@@ -246,11 +246,10 @@ static struct ip_tunnel * ipip_tunnel_locate(struct ip_tunnel_parm *parms, int c
 	nt = dev->priv;
 	SET_MODULE_OWNER(dev);
 	dev->init = ipip_tunnel_init;
-	dev->destructor = free_netdev;
 	nt->parms = *parms;
 
 	if (register_netdevice(dev) < 0) {
-		kfree(dev);
+		free_netdev(dev);
 		goto failed;
 	}
 
@@ -461,8 +460,7 @@ static inline void ipip_ecn_decapsulate(struct iphdr *outer_iph, struct sk_buff 
 {
 	struct iphdr *inner_iph = skb->nh.iph;
 
-	if (INET_ECN_is_ce(outer_iph->tos) &&
-	    INET_ECN_is_not_ce(inner_iph->tos))
+	if (INET_ECN_is_ce(outer_iph->tos))
 		IP_ECN_set_ce(inner_iph);
 }
 
@@ -479,6 +477,7 @@ static int ipip_rcv(struct sk_buff *skb)
 	read_lock(&ipip_lock);
 	if ((tunnel = ipip_tunnel_lookup(iph->saddr, iph->daddr)) != NULL) {
 		if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
+			read_unlock(&ipip_lock);
 			kfree_skb(skb);
 			return 0;
 		}
@@ -496,13 +495,7 @@ static int ipip_rcv(struct sk_buff *skb)
 		skb->dev = tunnel->dev;
 		dst_release(skb->dst);
 		skb->dst = NULL;
-#ifdef CONFIG_NETFILTER
-		nf_conntrack_put(skb->nfct);
-		skb->nfct = NULL;
-#ifdef CONFIG_NETFILTER_DEBUG
-		skb->nf_debug = 0;
-#endif
-#endif
+		nf_reset(skb);
 		ipip_ecn_decapsulate(iph, skb);
 		netif_rx(skb);
 		read_unlock(&ipip_lock);
@@ -647,13 +640,7 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	if ((iph->ttl = tiph->ttl) == 0)
 		iph->ttl	=	old_iph->ttl;
 
-#ifdef CONFIG_NETFILTER
-	nf_conntrack_put(skb->nfct);
-	skb->nfct = NULL;
-#ifdef CONFIG_NETFILTER_DEBUG
-	skb->nf_debug = 0;
-#endif
-#endif
+	nf_reset(skb);
 
 	IPTUNNEL_XMIT();
 	tunnel->recursion--;
@@ -796,6 +783,7 @@ static void ipip_tunnel_setup(struct net_device *dev)
 	dev->get_stats		= ipip_tunnel_get_stats;
 	dev->do_ioctl		= ipip_tunnel_ioctl;
 	dev->change_mtu		= ipip_tunnel_change_mtu;
+	dev->destructor		= free_netdev;
 
 	dev->type		= ARPHRD_TUNNEL;
 	dev->hard_header_len 	= LL_MAX_HEADER + sizeof(struct iphdr);
@@ -872,7 +860,7 @@ static struct xfrm_tunnel ipip_handler = {
 static char banner[] __initdata =
 	KERN_INFO "IPv4 over IPv4 tunneling driver\n";
 
-int __init ipip_init(void)
+static int __init ipip_init(void)
 {
 	int err;
 
@@ -888,18 +876,19 @@ int __init ipip_init(void)
 					   ipip_tunnel_setup);
 	if (!ipip_fb_tunnel_dev) {
 		err = -ENOMEM;
-		goto fail;
+		goto err1;
 	}
 
 	ipip_fb_tunnel_dev->init = ipip_fb_tunnel_init;
 
 	if ((err = register_netdev(ipip_fb_tunnel_dev)))
-	    goto fail;
+		goto err2;
  out:
 	return err;
- fail:
+ err2:
+	free_netdev(ipip_fb_tunnel_dev);
+ err1:
 	xfrm4_tunnel_deregister(&ipip_handler);
-	kfree(ipip_fb_tunnel_dev);
 	goto out;
 }
 
@@ -911,8 +900,6 @@ static void __exit ipip_fini(void)
 	unregister_netdev(ipip_fb_tunnel_dev);
 }
 
-#ifdef MODULE
 module_init(ipip_init);
-#endif
 module_exit(ipip_fini);
 MODULE_LICENSE("GPL");

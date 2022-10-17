@@ -8,22 +8,12 @@
  * published by the Free Software Foundation.
  */
 #include <linux/config.h>
-#include <linux/sched.h>
-#include <linux/mm.h>
-#include <linux/smp.h>
-#include <linux/smp_lock.h>
-#include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/signal.h>
-#include <linux/wait.h>
 #include <linux/ptrace.h>
 #include <linux/personality.h>
-#include <linux/tty.h>
-#include <linux/binfmts.h>
-#include <linux/elf.h>
-#include <linux/suspend.h>
 
-#include <asm/pgalloc.h>
+#include <asm/cacheflush.h>
 #include <asm/ucontext.h>
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -76,7 +66,7 @@ asmlinkage int sys_sigsuspend(int restart, unsigned long oldmask, old_sigset_t m
 }
 
 asmlinkage int
-sys_rt_sigsuspend(sigset_t *unewset, size_t sigsetsize, struct pt_regs *regs)
+sys_rt_sigsuspend(sigset_t __user *unewset, size_t sigsetsize, struct pt_regs *regs)
 {
 	sigset_t saveset, newset;
 
@@ -104,8 +94,8 @@ sys_rt_sigsuspend(sigset_t *unewset, size_t sigsetsize, struct pt_regs *regs)
 }
 
 asmlinkage int 
-sys_sigaction(int sig, const struct old_sigaction *act,
-	      struct old_sigaction *oact)
+sys_sigaction(int sig, const struct old_sigaction __user *act,
+	      struct old_sigaction __user *oact)
 {
 	struct k_sigaction new_ka, old_ka;
 	int ret;
@@ -135,27 +125,145 @@ sys_sigaction(int sig, const struct old_sigaction *act,
 	return ret;
 }
 
-/*
- * Do a signal return; undo the signal stack.
- */
-struct sigframe
+#ifdef CONFIG_IWMMXT
+
+/* iwmmxt_area is 0x98 bytes long, preceeded by 8 bytes of signature */
+#define IWMMXT_STORAGE_SIZE	(0x98 + 8)
+#define IWMMXT_MAGIC0		0x12ef842a
+#define IWMMXT_MAGIC1		0x1c07ca71
+
+struct iwmmxt_sigframe {
+	unsigned long	magic0;
+	unsigned long	magic1;
+	unsigned long	storage[0x98/4];
+};
+
+static int page_present(struct mm_struct *mm, void __user *uptr, int wr)
 {
+	unsigned long addr = (unsigned long)uptr;
+	pgd_t *pgd = pgd_offset(mm, addr);
+	if (pgd_present(*pgd)) {
+		pmd_t *pmd = pmd_offset(pgd, addr);
+		if (pmd_present(*pmd)) {
+			pte_t *pte = pte_offset_map(pmd, addr);
+			return (pte_present(*pte) && (!wr || pte_write(*pte)));
+		}
+	}
+	return 0;
+}
+
+static int copy_locked(void __user *uptr, void *kptr, size_t size, int write,
+		       void (*copyfn)(void *, void __user *))
+{
+	unsigned char v, __user *userptr = uptr;
+	int err = 0;
+
+	do {
+		struct mm_struct *mm;
+
+		if (write) {
+			__put_user_error(0, userptr, err);
+			__put_user_error(0, userptr + size - 1, err);
+		} else {
+			__get_user_error(v, userptr, err);
+			__get_user_error(v, userptr + size - 1, err);
+		}
+
+		if (err)
+			break;
+
+		mm = current->mm;
+		spin_lock(&mm->page_table_lock);
+		if (page_present(mm, userptr, write) &&
+		    page_present(mm, userptr + size - 1, write)) {
+		    	copyfn(kptr, uptr);
+		} else
+			err = 1;
+		spin_unlock(&mm->page_table_lock);
+	} while (err);
+
+	return err;
+}
+
+static int preserve_iwmmxt_context(struct iwmmxt_sigframe *frame)
+{
+	int err = 0;
+
+	/* the iWMMXt context must be 64 bit aligned */
+	WARN_ON((unsigned long)frame & 7);
+
+	__put_user_error(IWMMXT_MAGIC0, &frame->magic0, err);
+	__put_user_error(IWMMXT_MAGIC1, &frame->magic1, err);
+
+	/*
+	 * iwmmxt_task_copy() doesn't check user permissions.
+	 * Let's do a dummy write on the upper boundary to ensure
+	 * access to user mem is OK all way up.
+	 */
+	err |= copy_locked(&frame->storage, current_thread_info(),
+			   sizeof(frame->storage), 1, iwmmxt_task_copy);
+	return err;
+}
+
+static int restore_iwmmxt_context(struct iwmmxt_sigframe *frame)
+{
+	unsigned long magic0, magic1;
+	int err = 0;
+
+	/* the iWMMXt context is 64 bit aligned */
+	WARN_ON((unsigned long)frame & 7);
+
+	/*
+	 * Validate iWMMXt context signature.
+	 * Also, iwmmxt_task_restore() doesn't check user permissions.
+	 * Let's do a dummy write on the upper boundary to ensure
+	 * access to user mem is OK all way up.
+	 */
+	__get_user_error(magic0, &frame->magic0, err);
+	__get_user_error(magic1, &frame->magic1, err);
+	if (!err && magic0 == IWMMXT_MAGIC0 && magic1 == IWMMXT_MAGIC1)
+		err = copy_locked(&frame->storage, current_thread_info(),
+				  sizeof(frame->storage), 0, iwmmxt_task_restore);
+	return err;
+}
+
+#endif
+
+/*
+ * Auxiliary signal frame.  This saves stuff like FP state.
+ * The layout of this structure is not part of the user ABI.
+ */
+struct aux_sigframe {
+#ifdef CONFIG_IWMMXT
+	struct iwmmxt_sigframe	iwmmxt;
+#endif
+#ifdef CONFIG_VFP
+	union vfp_state		vfp;
+#endif
+};
+
+/*
+ * Do a signal return; undo the signal stack.  These are aligned to 64-bit.
+ */
+struct sigframe {
 	struct sigcontext sc;
 	unsigned long extramask[_NSIG_WORDS-1];
 	unsigned long retcode;
+	struct aux_sigframe aux __attribute__((aligned(8)));
 };
 
-struct rt_sigframe
-{
-	struct siginfo *pinfo;
-	void *puc;
+struct rt_sigframe {
+	struct siginfo __user *pinfo;
+	void __user *puc;
 	struct siginfo info;
 	struct ucontext uc;
 	unsigned long retcode;
+	struct aux_sigframe aux __attribute__((aligned(8)));
 };
 
 static int
-restore_sigcontext(struct pt_regs *regs, struct sigcontext *sc)
+restore_sigcontext(struct pt_regs *regs, struct sigcontext __user *sc,
+		   struct aux_sigframe __user *aux)
 {
 	int err = 0;
 
@@ -179,12 +287,21 @@ restore_sigcontext(struct pt_regs *regs, struct sigcontext *sc)
 
 	err |= !valid_user_regs(regs);
 
+#ifdef CONFIG_IWMMXT
+	if (err == 0 && test_thread_flag(TIF_USING_IWMMXT))
+		err |= restore_iwmmxt_context(&aux->iwmmxt);
+#endif
+#ifdef CONFIG_VFP
+//	if (err == 0)
+//		err |= vfp_restore_state(&aux->vfp);
+#endif
+
 	return err;
 }
 
 asmlinkage int sys_sigreturn(struct pt_regs *regs)
 {
-	struct sigframe *frame;
+	struct sigframe __user *frame;
 	sigset_t set;
 
 	/* Always make any pending restarted system calls return -EINTR */
@@ -198,7 +315,7 @@ asmlinkage int sys_sigreturn(struct pt_regs *regs)
 	if (regs->ARM_sp & 7)
 		goto badframe;
 
-	frame = (struct sigframe *)regs->ARM_sp;
+	frame = (struct sigframe __user *)regs->ARM_sp;
 
 	if (verify_area(VERIFY_READ, frame, sizeof (*frame)))
 		goto badframe;
@@ -214,7 +331,7 @@ asmlinkage int sys_sigreturn(struct pt_regs *regs)
 	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
 
-	if (restore_sigcontext(regs, &frame->sc))
+	if (restore_sigcontext(regs, &frame->sc, &frame->aux))
 		goto badframe;
 
 	/* Send SIGTRAP if we're single-stepping */
@@ -232,7 +349,7 @@ badframe:
 
 asmlinkage int sys_rt_sigreturn(struct pt_regs *regs)
 {
-	struct rt_sigframe *frame;
+	struct rt_sigframe __user *frame;
 	sigset_t set;
 
 	/* Always make any pending restarted system calls return -EINTR */
@@ -246,7 +363,7 @@ asmlinkage int sys_rt_sigreturn(struct pt_regs *regs)
 	if (regs->ARM_sp & 7)
 		goto badframe;
 
-	frame = (struct rt_sigframe *)regs->ARM_sp;
+	frame = (struct rt_sigframe __user *)regs->ARM_sp;
 
 	if (verify_area(VERIFY_READ, frame, sizeof (*frame)))
 		goto badframe;
@@ -259,7 +376,10 @@ asmlinkage int sys_rt_sigreturn(struct pt_regs *regs)
 	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
 
-	if (restore_sigcontext(regs, &frame->uc.uc_mcontext))
+	if (restore_sigcontext(regs, &frame->uc.uc_mcontext, &frame->aux))
+		goto badframe;
+
+	if (do_sigaltstack(&frame->uc.uc_stack, NULL, regs->ARM_sp) == -EFAULT)
 		goto badframe;
 
 	/* Send SIGTRAP if we're single-stepping */
@@ -276,7 +396,7 @@ badframe:
 }
 
 static int
-setup_sigcontext(struct sigcontext *sc, /*struct _fpstate *fpstate,*/
+setup_sigcontext(struct sigcontext __user *sc, struct aux_sigframe __user *aux,
 		 struct pt_regs *regs, unsigned long mask)
 {
 	int err = 0;
@@ -304,13 +424,23 @@ setup_sigcontext(struct sigcontext *sc, /*struct _fpstate *fpstate,*/
 	__put_user_error(current->thread.address, &sc->fault_address, err);
 	__put_user_error(mask, &sc->oldmask, err);
 
+#ifdef CONFIG_IWMMXT
+	if (err == 0 && test_thread_flag(TIF_USING_IWMMXT))
+		err |= preserve_iwmmxt_context(&aux->iwmmxt);
+#endif
+#ifdef CONFIG_VFP
+//	if (err == 0)
+//		err |= vfp_save_state(&aux->vfp);
+#endif
+
 	return err;
 }
 
-static inline void *
+static inline void __user *
 get_sigframe(struct k_sigaction *ka, struct pt_regs *regs, int framesize)
 {
 	unsigned long sp = regs->ARM_sp;
+	void __user *frame;
 
 	/*
 	 * This is the X/Open sanctioned signal stack switching.
@@ -321,12 +451,20 @@ get_sigframe(struct k_sigaction *ka, struct pt_regs *regs, int framesize)
 	/*
 	 * ATPCS B01 mandates 8-byte alignment
 	 */
-	return (void *)((sp - framesize) & ~7);
+	frame = (void __user *)((sp - framesize) & ~7);
+
+	/*
+	 * Check that we can actually write to the signal frame.
+	 */
+	if (!access_ok(VERIFY_WRITE, frame, framesize))
+		frame = NULL;
+
+	return frame;
 }
 
 static int
 setup_return(struct pt_regs *regs, struct k_sigaction *ka,
-	     unsigned long *rc, void *frame, int usig)
+	     unsigned long __user *rc, void __user *frame, int usig)
 {
 	unsigned long handler = (unsigned long)ka->sa.sa_handler;
 	unsigned long retcode;
@@ -387,13 +525,13 @@ setup_return(struct pt_regs *regs, struct k_sigaction *ka,
 static int
 setup_frame(int usig, struct k_sigaction *ka, sigset_t *set, struct pt_regs *regs)
 {
-	struct sigframe *frame = get_sigframe(ka, regs, sizeof(*frame));
+	struct sigframe __user *frame = get_sigframe(ka, regs, sizeof(*frame));
 	int err = 0;
 
-	if (!access_ok(VERIFY_WRITE, frame, sizeof (*frame)))
+	if (!frame)
 		return 1;
 
-	err |= setup_sigcontext(&frame->sc, /*&frame->fpstate,*/ regs, set->sig[0]);
+	err |= setup_sigcontext(&frame->sc, &frame->aux, regs, set->sig[0]);
 
 	if (_NSIG_WORDS > 1) {
 		err |= __copy_to_user(frame->extramask, &set->sig[1],
@@ -410,20 +548,27 @@ static int
 setup_rt_frame(int usig, struct k_sigaction *ka, siginfo_t *info,
 	       sigset_t *set, struct pt_regs *regs)
 {
-	struct rt_sigframe *frame = get_sigframe(ka, regs, sizeof(*frame));
+	struct rt_sigframe __user *frame = get_sigframe(ka, regs, sizeof(*frame));
+	stack_t stack;
 	int err = 0;
 
-	if (!access_ok(VERIFY_WRITE, frame, sizeof (*frame)))
+	if (!frame)
 		return 1;
 
 	__put_user_error(&frame->info, &frame->pinfo, err);
 	__put_user_error(&frame->uc, &frame->puc, err);
 	err |= copy_siginfo_to_user(&frame->info, info);
 
-	/* Clear all the bits of the ucontext we don't use.  */
-	err |= __clear_user(&frame->uc, offsetof(struct ucontext, uc_mcontext));
+	__put_user_error(0, &frame->uc.uc_flags, err);
+	__put_user_error(NULL, &frame->uc.uc_link, err);
 
-	err |= setup_sigcontext(&frame->uc.uc_mcontext, /*&frame->fpstate,*/
+	memset(&stack, 0, sizeof(stack));
+	stack.ss_sp = (void __user *)current->sas_ss_sp;
+	stack.ss_flags = sas_ss_flags(regs->ARM_sp);
+	stack.ss_size = current->sas_ss_size;
+	err |= __copy_to_user(&frame->uc.uc_stack, &stack, sizeof(stack));
+
+	err |= setup_sigcontext(&frame->uc.uc_mcontext, &frame->aux,
 				regs, set->sig[0]);
 	err |= __copy_to_user(&frame->uc.uc_sigmask, set, sizeof(*set));
 
@@ -436,8 +581,8 @@ setup_rt_frame(int usig, struct k_sigaction *ka, siginfo_t *info,
 		 * arguments for the signal handler.
 		 *   -- Peter Maydell <pmaydell@chiark.greenend.org.uk> 2000-12-06
 		 */
-		regs->ARM_r1 = (unsigned long)frame->pinfo;
-		regs->ARM_r2 = (unsigned long)frame->puc;
+		regs->ARM_r1 = (unsigned long)&frame->info;
+		regs->ARM_r2 = (unsigned long)&frame->uc;
 	}
 
 	return err;
@@ -453,12 +598,12 @@ static inline void restart_syscall(struct pt_regs *regs)
  * OK, we're invoking a handler
  */	
 static void
-handle_signal(unsigned long sig, siginfo_t *info, sigset_t *oldset,
+handle_signal(unsigned long sig, struct k_sigaction *ka,
+	      siginfo_t *info, sigset_t *oldset,
 	      struct pt_regs * regs, int syscall)
 {
 	struct thread_info *thread = current_thread_info();
 	struct task_struct *tsk = current;
-	struct k_sigaction *ka = &tsk->sighand->action[sig-1];
 	int usig = sig;
 	int ret;
 
@@ -513,15 +658,10 @@ handle_signal(unsigned long sig, siginfo_t *info, sigset_t *oldset,
 		spin_unlock_irq(&tsk->sighand->siglock);
 	}
 
-	if (ret == 0) {
-		if (ka->sa.sa_flags & SA_ONESHOT)
-			ka->sa.sa_handler = SIG_DFL;
+	if (ret == 0)
 		return;
-	}
 
-	if (sig == SIGSEGV)
-		ka->sa.sa_handler = SIG_DFL;
-	force_sig(SIGSEGV, tsk);
+	force_sigsegv(sig, tsk);
 }
 
 /*
@@ -535,6 +675,7 @@ handle_signal(unsigned long sig, siginfo_t *info, sigset_t *oldset,
  */
 static int do_signal(sigset_t *oldset, struct pt_regs *regs, int syscall)
 {
+	struct k_sigaction ka;
 	siginfo_t info;
 	int signr;
 
@@ -547,17 +688,15 @@ static int do_signal(sigset_t *oldset, struct pt_regs *regs, int syscall)
 	if (!user_mode(regs))
 		return 0;
 
-	if (current->flags & PF_FREEZE) {
-		refrigerator(0);
+	if (try_to_freeze(0))
 		goto no_signal;
-	}
 
 	if (current->ptrace & PT_SINGLESTEP)
 		ptrace_cancel_bpt(current);
 
-	signr = get_signal_to_deliver(&info, regs, NULL);
+	signr = get_signal_to_deliver(&info, &ka, regs, NULL);
 	if (signr > 0) {
-		handle_signal(signr, &info, oldset, regs, syscall);
+		handle_signal(signr, &ka, &info, oldset, regs, syscall);
 		if (current->ptrace & PT_SINGLESTEP)
 			ptrace_set_bpt(current);
 		return 1;
@@ -573,10 +712,10 @@ static int do_signal(sigset_t *oldset, struct pt_regs *regs, int syscall)
 				regs->ARM_r7 = __NR_restart_syscall;
 				regs->ARM_pc -= 2;
 			} else {
-				u32 *usp;
+				u32 __user *usp;
 
 				regs->ARM_sp -= 12;
-				usp = (u32 *)regs->ARM_sp;
+				usp = (u32 __user *)regs->ARM_sp;
 
 				put_user(regs->ARM_pc, &usp[0]);
 				/* swi __NR_restart_syscall */

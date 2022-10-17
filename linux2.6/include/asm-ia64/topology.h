@@ -29,15 +29,6 @@
 #define node_to_cpumask(node) (node_to_cpu_mask[node])
 
 /*
- * Returns the number of the node containing MemBlk 'memblk'
- */
-#ifdef CONFIG_ACPI_NUMA
-#define memblk_to_node(memblk) (node_memblk[memblk].nid)
-#else
-#define memblk_to_node(memblk) (memblk)
-#endif
-
-/*
  * Returns the number of the node containing Node 'nid'.
  * Not implemented here. Multi-level hierarchies detected with
  * the help of node_distance().
@@ -49,16 +40,48 @@
  */
 #define node_to_first_cpu(node) (__ffs(node_to_cpumask(node)))
 
-/*
- * Returns the number of the first MemBlk on Node 'node'
- * Should be fixed when IA64 discontigmem goes in.
- */
-#define node_to_memblk(node) (node)
-
-/* Cross-node load balancing interval. */
-#define NODE_BALANCE_RATE 10
-
 void build_cpu_to_node_map(void);
+
+/* sched_domains SD_NODE_INIT for IA64 NUMA machines */
+#define SD_NODE_INIT (struct sched_domain) {		\
+	.span			= CPU_MASK_NONE,	\
+	.parent			= NULL,			\
+	.groups			= NULL,			\
+	.min_interval		= 80,			\
+	.max_interval		= 320,			\
+	.busy_factor		= 320,			\
+	.imbalance_pct		= 125,			\
+	.cache_hot_time		= (10*1000000),		\
+	.cache_nice_tries	= 1,			\
+	.per_cpu_gain		= 100,			\
+	.flags			= SD_LOAD_BALANCE	\
+				| SD_BALANCE_EXEC	\
+				| SD_BALANCE_NEWIDLE	\
+				| SD_WAKE_IDLE		\
+				| SD_WAKE_BALANCE,	\
+	.last_balance		= jiffies,		\
+	.balance_interval	= 1,			\
+	.nr_balance_failed	= 0,			\
+}
+
+/* sched_domains SD_ALLNODES_INIT for IA64 NUMA machines */
+#define SD_ALLNODES_INIT (struct sched_domain) {	\
+	.span			= CPU_MASK_NONE,	\
+	.parent			= NULL,			\
+	.groups			= NULL,			\
+	.min_interval		= 80,			\
+	.max_interval		= 320,			\
+	.busy_factor		= 320,			\
+	.imbalance_pct		= 125,			\
+	.cache_hot_time		= (10*1000000),		\
+	.cache_nice_tries	= 1,			\
+	.per_cpu_gain		= 100,			\
+	.flags			= SD_LOAD_BALANCE	\
+				| SD_BALANCE_EXEC,	\
+	.last_balance		= jiffies,		\
+	.balance_interval	= 100*(63+num_online_cpus())/64,   \
+	.nr_balance_failed	= 0,			\
+}
 
 #endif /* CONFIG_NUMA */
 

@@ -18,6 +18,7 @@
 #include <asm/current.h>
 #include <asm/system.h>
 #include <asm/mmsegment.h>
+#include <asm/percpu.h>
 #include <linux/personality.h>
 
 #define TF_MASK		0x00000100
@@ -44,8 +45,6 @@
 
 /*
  *  CPU type and hardware bug flags. Kept separately for each CPU.
- *  Members of this structure are referenced in head.S, so think twice
- *  before touching them. [mj]
  */
 
 struct cpuinfo_x86 {
@@ -59,9 +58,13 @@ struct cpuinfo_x86 {
 	char	x86_model_id[64];
 	int 	x86_cache_size;  /* in KB */
 	int	x86_clflush_size;
+	int	x86_cache_alignment;
 	int	x86_tlbsize;	/* number of 4K pages in DTLB/ITLB combined(in pages)*/
         __u8    x86_virt_bits, x86_phys_bits;
+	__u8	x86_num_cores;
+	__u8	x86_apicid;
         __u32   x86_power; 	
+	__u32   x86_cpuid_level;	/* Max CPUID function supported */
 	unsigned long loops_per_jiffy;
 } ____cacheline_aligned;
 
@@ -76,14 +79,11 @@ struct cpuinfo_x86 {
 #define X86_VENDOR_NUM 8
 #define X86_VENDOR_UNKNOWN 0xff
 
-extern struct cpuinfo_x86 boot_cpu_data;
-extern struct tss_struct init_tss[NR_CPUS];
-
 #ifdef CONFIG_SMP
 extern struct cpuinfo_x86 cpu_data[];
 #define current_cpu_data cpu_data[smp_processor_id()]
 #else
-#define cpu_data &boot_cpu_data
+#define cpu_data (&boot_cpu_data)
 #define current_cpu_data boot_cpu_data
 #endif
 
@@ -91,6 +91,7 @@ extern char ignore_irq13;
 
 extern void identify_cpu(struct cpuinfo_x86 *);
 extern void print_cpu_info(struct cpuinfo_x86 *);
+extern unsigned int init_intel_cacheinfo(struct cpuinfo_x86 *c);
 extern void dodgy_tsc(void);
 
 /*
@@ -157,31 +158,25 @@ static inline void clear_in_cr4 (unsigned long mask)
 		:"ax");
 }
 
-/*
- * Bus types
- */
-#define MCA_bus 0
-#define MCA_bus__is_a_macro
-
 
 /*
- * User space process size: 512GB - 1GB (default).
+ * User space process size. 47bits.
  */
-#define TASK_SIZE	(0x0000007fc0000000)
+#define TASK_SIZE	(0x800000000000UL)
 
 /* This decides where the kernel will search for a free chunk of vm
  * space during mmap's.
  */
 #define IA32_PAGE_OFFSET ((current->personality & ADDR_LIMIT_3GB) ? 0xc0000000 : 0xFFFFe000)
-#define TASK_UNMAPPED_32 (IA32_PAGE_OFFSET / 3)
+#define TASK_UNMAPPED_32 PAGE_ALIGN(IA32_PAGE_OFFSET/3)
 #define TASK_UNMAPPED_64 PAGE_ALIGN(TASK_SIZE/3) 
 #define TASK_UNMAPPED_BASE	\
 	(test_thread_flag(TIF_IA32) ? TASK_UNMAPPED_32 : TASK_UNMAPPED_64)  
 
 /*
- * Size of io_bitmap, covering ports 0 to 0x3ff.
+ * Size of io_bitmap.
  */
-#define IO_BITMAP_BITS  1024
+#define IO_BITMAP_BITS  65536
 #define IO_BITMAP_BYTES (IO_BITMAP_BITS/8)
 #define IO_BITMAP_LONGS (IO_BITMAP_BYTES/sizeof(long))
 #define IO_BITMAP_OFFSET offsetof(struct tss_struct,io_bitmap)
@@ -228,6 +223,11 @@ struct tss_struct {
 	unsigned long io_bitmap[IO_BITMAP_LONGS + 1];
 } __attribute__((packed)) ____cacheline_aligned;
 
+extern struct cpuinfo_x86 boot_cpu_data;
+DECLARE_PER_CPU(struct tss_struct,init_tss);
+
+#define ARCH_MIN_TASKALIGN	16
+
 struct thread_struct {
 	unsigned long	rsp0;
 	unsigned long	rsp;
@@ -245,14 +245,15 @@ struct thread_struct {
 /* fault info */
 	unsigned long	cr2, trap_no, error_code;
 /* floating point info */
-	union i387_union	i387;
+	union i387_union	i387  __attribute__((aligned(16)));
 /* IO permissions. the bitmap could be moved into the GDT, that would make
    switch faster for a limited number of ioperm using tasks. -AK */
 	int		ioperm;
 	unsigned long	*io_bitmap_ptr;
+	unsigned io_bitmap_max;
 /* cached TLS descriptors. */
 	u64 tls_array[GDT_ENTRY_TLS_ENTRIES];
-};
+} __attribute__((aligned(16)));
 
 #define INIT_THREAD  {}
 
@@ -262,7 +263,9 @@ struct thread_struct {
 #define STACKFAULT_STACK 1
 #define DOUBLEFAULT_STACK 2 
 #define NMI_STACK 3 
-#define N_EXCEPTION_STACKS 3  /* hw limit: 7 */
+#define DEBUG_STACK 4 
+#define MCE_STACK 5
+#define N_EXCEPTION_STACKS 5  /* hw limit: 7 */
 #define EXCEPTION_STKSZ (PAGE_SIZE << EXCEPTION_STACK_ORDER)
 #define EXCEPTION_STACK_ORDER 0 
 
@@ -303,6 +306,67 @@ extern unsigned long get_wchan(struct task_struct *p);
 	(((struct pt_regs *)(tsk->thread.rsp0 - sizeof(struct pt_regs)))->rip)
 #define KSTK_ESP(tsk) -1 /* sorry. doesn't work for syscall. */
 
+
+struct microcode_header {
+	unsigned int hdrver;
+	unsigned int rev;
+	unsigned int date;
+	unsigned int sig;
+	unsigned int cksum;
+	unsigned int ldrver;
+	unsigned int pf;
+	unsigned int datasize;
+	unsigned int totalsize;
+	unsigned int reserved[3];
+};
+
+struct microcode {
+	struct microcode_header hdr;
+	unsigned int bits[0];
+};
+
+typedef struct microcode microcode_t;
+typedef struct microcode_header microcode_header_t;
+
+/* microcode format is extended from prescott processors */
+struct extended_signature {
+	unsigned int sig;
+	unsigned int pf;
+	unsigned int cksum;
+};
+
+struct extended_sigtable {
+	unsigned int count;
+	unsigned int cksum;
+	unsigned int reserved[3];
+	struct extended_signature sigs[0];
+};
+
+/* '6' because it used to be for P6 only (but now covers Pentium 4 as well) */
+#define MICROCODE_IOCFREE	_IO('6',0)
+
+
+#define ASM_NOP1 K8_NOP1
+#define ASM_NOP2 K8_NOP2
+#define ASM_NOP3 K8_NOP3
+#define ASM_NOP4 K8_NOP4
+#define ASM_NOP5 K8_NOP5
+#define ASM_NOP6 K8_NOP6
+#define ASM_NOP7 K8_NOP7
+#define ASM_NOP8 K8_NOP8
+
+/* Opteron nops */
+#define K8_NOP1 ".byte 0x90\n"
+#define K8_NOP2	".byte 0x66,0x90\n" 
+#define K8_NOP3	".byte 0x66,0x66,0x90\n" 
+#define K8_NOP4	".byte 0x66,0x66,0x66,0x90\n" 
+#define K8_NOP5	K8_NOP3 K8_NOP2 
+#define K8_NOP6	K8_NOP3 K8_NOP3
+#define K8_NOP7	K8_NOP4 K8_NOP3
+#define K8_NOP8	K8_NOP4 K8_NOP4
+
+#define ASM_NOP_MAX 8
+
 /* REP NOP (PAUSE) is a good thing to insert into busy-wait loops. */
 extern inline void rep_nop(void)
 {
@@ -318,31 +382,25 @@ extern inline void sync_core(void)
 
 #define cpu_has_fpu 1
 
-/* Some early Opteron versions incorrectly fault on prefetch (errata #91). 
-   If this happens just jump back. */
 #define ARCH_HAS_PREFETCH
 static inline void prefetch(void *x) 
 { 
-	asm volatile("2: prefetcht0 %0\n1:\t" 
-		    ".section __ex_table,\"a\"\n\t"
-		    "  .align 8\n\t"
-		    "  .quad  2b,1b\n\t"
-		    ".previous" :: "m" (*(unsigned long *)x));
+	asm volatile("prefetcht0 %0" :: "m" (*(unsigned long *)x));
 } 
 
-#define ARCH_HAS_PREFETCHW
+#define ARCH_HAS_PREFETCHW 1
 static inline void prefetchw(void *x) 
 { 
-	asm volatile("2: prefetchw %0\n1:\t" 
-		    ".section __ex_table,\"a\"\n\t"
-		    "  .align 8\n\t"
-		    "  .quad  2b,1b\n\t"
-		    ".previous" :: "m" (*(unsigned long *)x));
+	alternative_input(ASM_NOP5,
+			  "prefetchw (%1)",
+			  X86_FEATURE_3DNOW,
+			  "r" (x));
 } 
 
-#define ARCH_HAS_SPINLOCK_PREFETCH
+#define ARCH_HAS_SPINLOCK_PREFETCH 1
 
 #define spin_lock_prefetch(x)  prefetchw(x)
+
 #define cpu_relax()   rep_nop()
 
 /*
@@ -372,6 +430,23 @@ static inline void prefetchw(void *x)
 	outb((data), 0x23); \
 } while (0)
 
+static inline void __monitor(const void *eax, unsigned long ecx,
+		unsigned long edx)
+{
+	/* "monitor %eax,%ecx,%edx;" */
+	asm volatile(
+		".byte 0x0f,0x01,0xc8;"
+		: :"a" (eax), "c" (ecx), "d"(edx));
+}
+
+static inline void __mwait(unsigned long eax, unsigned long ecx)
+{
+	/* "mwait %eax,%ecx;" */
+	asm volatile(
+		".byte 0x0f,0x01,0xc9;"
+		: :"a" (eax), "c" (ecx));
+}
+
 #define stack_current() \
 ({								\
 	struct thread_info *ti;					\
@@ -379,25 +454,10 @@ static inline void prefetchw(void *x)
 	ti->task;					\
 })
 
-#define ASM_NOP1 K8_NOP1
-#define ASM_NOP2 K8_NOP2
-#define ASM_NOP3 K8_NOP3
-#define ASM_NOP4 K8_NOP4
-#define ASM_NOP5 K8_NOP5
-#define ASM_NOP6 K8_NOP6
-#define ASM_NOP7 K8_NOP7
-#define ASM_NOP8 K8_NOP8
+#define cache_line_size() (boot_cpu_data.x86_cache_alignment)
 
-/* Opteron nops */
-#define K8_NOP1 ".byte 0x90\n"
-#define K8_NOP2	".byte 0x66,0x90\n" 
-#define K8_NOP3	".byte 0x66,0x66,0x90\n" 
-#define K8_NOP4	".byte 0x66,0x66,0x66,0x90\n" 
-#define K8_NOP5	K8_NOP3 K8_NOP2 
-#define K8_NOP6	K8_NOP3 K8_NOP3
-#define K8_NOP7	K8_NOP4 K8_NOP3
-#define K8_NOP8	K8_NOP4 K8_NOP4
-
-#define ASM_NOP_MAX 8
+extern unsigned long boot_option_idle_override;
+/* Boot loader type from the setup header */
+extern int bootloader_type;
 
 #endif /* __ASM_X86_64_PROCESSOR_H */

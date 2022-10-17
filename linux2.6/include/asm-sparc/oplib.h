@@ -10,6 +10,7 @@
 
 #include <asm/openprom.h>
 #include <linux/spinlock.h>
+#include <linux/compiler.h>
 
 /* The master romvec pointer... */
 extern struct linux_romvec *romvec;
@@ -244,8 +245,8 @@ extern int prom_getproplen(int thisnode, char *property);
 /* Fetch the requested property using the given buffer.  Returns
  * the number of bytes the prom put into your buffer or -1 on error.
  */
-extern int prom_getproperty(int thisnode, char *property,
-			    char *prop_buffer, int propbuf_size);
+extern int __must_check prom_getproperty(int thisnode, char *property,
+					 char *prop_buffer, int propbuf_size);
 
 /* Acquire an integer property. */
 extern int prom_getint(int node, char *property);
@@ -305,6 +306,11 @@ extern void prom_apply_obio_ranges(struct linux_prom_registers *obioregs, int nr
 /* Apply ranges of any prom node (and optionally parent node as well) to registers. */
 extern void prom_apply_generic_ranges(int node, int parent, 
 				      struct linux_prom_registers *sbusregs, int nregs);
+
+/* CPU probing helpers.  */
+int cpu_find_by_instance(int instance, int *prom_node, int *mid);
+int cpu_find_by_mid(int mid, int *prom_node);
+int cpu_get_hwmid(int prom_node);
 
 extern spinlock_t prom_lock;
 

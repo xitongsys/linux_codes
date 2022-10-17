@@ -5,10 +5,13 @@
  *
  * sysfs unit related routines
  *
- * Copyright (C) 2003 IBM Entwicklung GmbH, IBM Corporation
+ * (C) Copyright IBM Corp. 2003, 2004
+ *
  * Authors:
  *      Martin Peschke <mpeschke@de.ibm.com>
  *	Heiko Carstens <heiko.carstens@de.ibm.com>
+ *      Andreas Herrmann <aherrman@de.ibm.com>
+ *      Volker Sameske <sameske@de.ibm.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,16 +28,11 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-#define ZFCP_SYSFS_UNIT_C_REVISION "$Revision: 1.17 $"
+#define ZFCP_SYSFS_UNIT_C_REVISION "$Revision: 1.30 $"
 
-#include <linux/init.h>
-#include <linux/module.h>
-#include <asm/ccwdev.h>
 #include "zfcp_ext.h"
-#include "zfcp_def.h"
 
 #define ZFCP_LOG_AREA                   ZFCP_LOG_AREA_CONFIG
-#define ZFCP_LOG_AREA_PREFIX            ZFCP_LOG_AREA_PREFIX_CONFIG
 
 /**
  * zfcp_sysfs_unit_release - gets called when a struct device unit is released
@@ -43,11 +41,7 @@
 void
 zfcp_sysfs_unit_release(struct device *dev)
 {
-	struct zfcp_unit *unit;
-
-	unit = dev_get_drvdata(dev);
-	zfcp_unit_dequeue(unit);
-	return;
+	kfree(dev);
 }
 
 /**
@@ -72,6 +66,14 @@ static DEVICE_ATTR(_name, S_IRUGO, zfcp_sysfs_unit_##_name##_show, NULL);
 
 ZFCP_DEFINE_UNIT_ATTR(status, "0x%08x\n", atomic_read(&unit->status));
 ZFCP_DEFINE_UNIT_ATTR(scsi_lun, "0x%x\n", unit->scsi_lun);
+ZFCP_DEFINE_UNIT_ATTR(in_recovery, "%d\n", atomic_test_mask
+		      (ZFCP_STATUS_COMMON_ERP_INUSE, &unit->status));
+ZFCP_DEFINE_UNIT_ATTR(access_denied, "%d\n", atomic_test_mask
+		      (ZFCP_STATUS_COMMON_ACCESS_DENIED, &unit->status));
+ZFCP_DEFINE_UNIT_ATTR(access_shared, "%d\n", atomic_test_mask
+		      (ZFCP_STATUS_UNIT_SHARED, &unit->status));
+ZFCP_DEFINE_UNIT_ATTR(access_readonly, "%d\n", atomic_test_mask
+		      (ZFCP_STATUS_UNIT_READONLY, &unit->status));
 
 /**
  * zfcp_sysfs_unit_failed_store - failed state of unit
@@ -104,16 +106,12 @@ zfcp_sysfs_unit_failed_store(struct device *dev, const char *buf, size_t count)
 		goto out;
 	}
 
-	/* restart error recovery only if adapter is online */
-	if (unit->port->adapter->ccw_device->online != 1) {
-		retval = -ENXIO;
-		goto out;
-	}
 	zfcp_erp_modify_unit_status(unit, ZFCP_STATUS_COMMON_RUNNING, ZFCP_SET);
 	zfcp_erp_unit_reopen(unit, ZFCP_STATUS_COMMON_ERP_FAILED);
+	zfcp_erp_wait(unit->port->adapter);
  out:
 	up(&zfcp_data.config_sema);
-	return retval ? retval : count;
+	return retval ? retval : (ssize_t) count;
 }
 
 /**
@@ -139,34 +137,14 @@ zfcp_sysfs_unit_failed_show(struct device *dev, char *buf)
 static DEVICE_ATTR(failed, S_IWUSR | S_IRUGO, zfcp_sysfs_unit_failed_show,
 		   zfcp_sysfs_unit_failed_store);
 
-/**
- * zfcp_sysfs_unit_in_recovery_show - recovery state of unit
- * @dev: pointer to belonging device
- * @buf: pointer to input buffer
- *
- * Show function of "in_recovery" attribute of unit. Will be
- * "0" if no error recovery is pending for unit, otherwise "1".
- */
-static ssize_t
-zfcp_sysfs_unit_in_recovery_show(struct device *dev, char *buf)
-{
-	struct zfcp_unit *unit;
-
-	unit = dev_get_drvdata(dev);
-	if (atomic_test_mask(ZFCP_STATUS_COMMON_ERP_INUSE, &unit->status))
-		return sprintf(buf, "1\n");
-	else
-		return sprintf(buf, "0\n");
-}
-
-static DEVICE_ATTR(in_recovery, S_IRUGO, zfcp_sysfs_unit_in_recovery_show,
-		   NULL);
-
 static struct attribute *zfcp_unit_attrs[] = {
 	&dev_attr_scsi_lun.attr,
 	&dev_attr_failed.attr,
 	&dev_attr_in_recovery.attr,
 	&dev_attr_status.attr,
+	&dev_attr_access_denied.attr,
+	&dev_attr_access_shared.attr,
+	&dev_attr_access_readonly.attr,
 	NULL
 };
 
@@ -186,5 +164,16 @@ zfcp_sysfs_unit_create_files(struct device *dev)
 	return sysfs_create_group(&dev->kobj, &zfcp_unit_attr_group);
 }
 
+/** 
+ * zfcp_sysfs_remove_unit_files - remove sysfs unit files
+ * @dev: pointer to belonging device
+ *
+ * Remove all attributes of the sysfs representation of a unit.
+ */
+void
+zfcp_sysfs_unit_remove_files(struct device *dev)
+{
+	sysfs_remove_group(&dev->kobj, &zfcp_unit_attr_group);
+}
+
 #undef ZFCP_LOG_AREA
-#undef ZFCP_LOG_AREA_PREFIX

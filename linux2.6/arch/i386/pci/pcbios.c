@@ -365,7 +365,7 @@ void __devinit pcibios_sort(void)
 		idx = found = 0;
 		while (pci_bios_find_device(dev->vendor, dev->device, idx, &bus, &devfn) == PCIBIOS_SUCCESSFUL) {
 			idx++;
-			for (ln=pci_devices.next; ln != &pci_devices; ln=ln->next) {
+			list_for_each(ln, &pci_devices) {
 				d = pci_dev_g(ln);
 				if (d->bus->number == bus && d->devfn == devfn) {
 					list_del(&d->global_list);
@@ -385,8 +385,8 @@ void __devinit pcibios_sort(void)
 			}
 		}
 		if (!found) {
-			printk(KERN_WARNING "PCI: Device %02x:%02x not found by BIOS\n",
-				dev->bus->number, dev->devfn);
+			printk(KERN_WARNING "PCI: Device %s not found by BIOS\n",
+				pci_name(dev));
 			list_del(&dev->global_list);
 			list_add_tail(&dev->global_list, &sorted_devices);
 		}
@@ -431,11 +431,13 @@ struct irq_routing_table * __devinit pcibios_get_irq_routing_table(void)
 		"1:"
 		: "=a" (ret),
 		  "=b" (map),
-		  "+m" (opt)
+		  "=m" (opt)
 		: "0" (PCIBIOS_GET_ROUTING_OPTIONS),
 		  "1" (0),
 		  "D" ((long) &opt),
-		  "S" (&pci_indirect));
+		  "S" (&pci_indirect),
+		  "m" (opt)
+		: "memory");
 	DBG("OK  ret=%d, size=%d, map=%x\n", ret, opt.size, map);
 	if (ret & 0xff00)
 		printk(KERN_ERR "PCI: Error %02x when fetching IRQ routing table.\n", (ret >> 8) & 0xff);

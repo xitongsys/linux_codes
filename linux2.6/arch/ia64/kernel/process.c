@@ -7,6 +7,7 @@
 #define __KERNEL_SYSCALLS__	/* see <asm/unistd.h> */
 #include <linux/config.h>
 
+#include <linux/cpu.h>
 #include <linux/pm.h>
 #include <linux/elf.h>
 #include <linux/errno.h>
@@ -14,6 +15,7 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/notifier.h>
 #include <linux/personality.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -22,16 +24,23 @@
 #include <linux/thread_info.h>
 #include <linux/unistd.h>
 #include <linux/efi.h>
+#include <linux/interrupt.h>
+#include <linux/delay.h>
 
+#include <asm/cpu.h>
 #include <asm/delay.h>
 #include <asm/elf.h>
 #include <asm/ia32.h>
+#include <asm/irq.h>
 #include <asm/pgalloc.h>
 #include <asm/processor.h>
 #include <asm/sal.h>
+#include <asm/tlbflush.h>
 #include <asm/uaccess.h>
 #include <asm/unwind.h>
 #include <asm/user.h>
+
+#include "entry.h"
 
 #ifdef CONFIG_PERFMON
 # include <asm/perfmon.h>
@@ -40,7 +49,10 @@
 #include "sigframe.h"
 
 void (*ia64_mark_idle)(int);
+static cpumask_t cpu_idle_map;
 
+unsigned long boot_option_idle_override = 0;
+EXPORT_SYMBOL(boot_option_idle_override);
 
 void
 ia64_do_show_stack (struct unw_frame_info *info, void *arg)
@@ -68,12 +80,12 @@ void
 show_stack (struct task_struct *task, unsigned long *sp)
 {
 	if (!task)
-		unw_init_running(ia64_do_show_stack, 0);
+		unw_init_running(ia64_do_show_stack, NULL);
 	else {
 		struct unw_frame_info info;
 
 		unw_init_from_blocked_task(&info, task);
-		ia64_do_show_stack(&info, 0);
+		ia64_do_show_stack(&info, NULL);
 	}
 }
 
@@ -90,6 +102,7 @@ show_regs (struct pt_regs *regs)
 {
 	unsigned long ip = regs->cr_iip + ia64_psr(regs)->ri;
 
+	print_modules();
 	printk("\nPid: %d, CPU %d, comm: %20s\n", current->pid, smp_processor_id(), current->comm);
 	printk("psr : %016lx ifs : %016lx ip  : [<%016lx>]    %s\n",
 	       regs->cr_ipsr, regs->cr_ifs, ip, print_tainted());
@@ -131,7 +144,7 @@ show_regs (struct pt_regs *regs)
 		ndirty = (regs->loadrs >> 19);
 		bsp = ia64_rse_skip_regs((unsigned long *) regs->ar_bspstore, ndirty);
 		for (i = 0; i < sof; ++i) {
-			get_user(val, ia64_rse_skip_regs(bsp, i));
+			get_user(val, (unsigned long __user *) ia64_rse_skip_regs(bsp, i));
 			printk("r%-3u:%c%016lx%s", 32 + i, is_nat ? '*' : ' ', val,
 			       ((i == sof - 1) || (i % 3) == 2) ? "\n" : " ");
 		}
@@ -159,37 +172,104 @@ do_notify_resume_user (sigset_t *oldset, struct sigscratch *scr, long in_syscall
 		ia64_do_signal(oldset, scr, in_syscall);
 }
 
+static int pal_halt = 1;
+static int __init nohalt_setup(char * str)
+{
+	pal_halt = 0;
+	return 1;
+}
+__setup("nohalt", nohalt_setup);
+
 /*
  * We use this if we don't have any better idle routine..
  */
 void
 default_idle (void)
 {
-#ifdef CONFIG_IA64_PAL_IDLE
-	if (!need_resched())
-		safe_halt();
-#endif
+	unsigned long pmu_active = ia64_getreg(_IA64_REG_PSR) & (IA64_PSR_PP | IA64_PSR_UP);
+
+	while (!need_resched())
+		if (pal_halt && !pmu_active)
+			safe_halt();
+		else
+			cpu_relax();
 }
 
+#ifdef CONFIG_HOTPLUG_CPU
+/* We don't actually take CPU down, just spin without interrupts. */
+static inline void play_dead(void)
+{
+	extern void ia64_cpu_local_tick (void);
+	/* Ack it */
+	__get_cpu_var(cpu_state) = CPU_DEAD;
+
+	/* We shouldn't have to disable interrupts while dead, but
+	 * some interrupts just don't seem to go away, and this makes
+	 * it "work" for testing purposes. */
+	max_xtp();
+	local_irq_disable();
+	/* Death loop */
+	while (__get_cpu_var(cpu_state) != CPU_UP_PREPARE)
+		cpu_relax();
+
+	/*
+	 * Enable timer interrupts from now on
+	 * Not required if we put processor in SAL_BOOT_RENDEZ mode.
+	 */
+	local_flush_tlb_all();
+	cpu_set(smp_processor_id(), cpu_online_map);
+	wmb();
+	ia64_cpu_local_tick ();
+	local_irq_enable();
+}
+#else
+static inline void play_dead(void)
+{
+	BUG();
+}
+#endif /* CONFIG_HOTPLUG_CPU */
+
+
+void cpu_idle_wait(void)
+{
+        int cpu;
+        cpumask_t map;
+
+        for_each_online_cpu(cpu)
+                cpu_set(cpu, cpu_idle_map);
+
+        wmb();
+        do {
+                ssleep(1);
+                cpus_and(map, cpu_idle_map, cpu_online_map);
+        } while (!cpus_empty(map));
+}
+EXPORT_SYMBOL_GPL(cpu_idle_wait);
+
 void __attribute__((noreturn))
-cpu_idle (void *unused)
+cpu_idle (void)
 {
 	void (*mark_idle)(int) = ia64_mark_idle;
+	int cpu = smp_processor_id();
 
 	/* endless idle loop with no priority at all */
 	while (1) {
-		void (*idle)(void) = pm_idle;
-		if (!idle)
-			idle = default_idle;
-
 #ifdef CONFIG_SMP
 		if (!need_resched())
 			min_xtp();
 #endif
-
 		while (!need_resched()) {
+			void (*idle)(void);
+
 			if (mark_idle)
 				(*mark_idle)(1);
+
+			if (cpu_isset(cpu, cpu_idle_map))
+				cpu_clear(cpu, cpu_idle_map);
+			rmb();
+			idle = pm_idle;
+			if (!idle)
+				idle = default_idle;
 			(*idle)();
 		}
 
@@ -201,6 +281,8 @@ cpu_idle (void *unused)
 #endif
 		schedule();
 		check_pgt_cache();
+		if (cpu_is_offline(smp_processor_id()))
+			play_dead();
 	}
 }
 
@@ -259,10 +341,12 @@ ia64_load_extra (struct task_struct *task)
  *
  * We get here through the following  call chain:
  *
- *	<clone syscall>
- *	sys_clone
- *	do_fork
- *	copy_thread
+ *	from user-level:	from kernel:
+ *
+ *	<clone syscall>	        <some kernel call frames>
+ *	sys_clone		   :
+ *	do_fork			do_fork
+ *	copy_thread		copy_thread
  *
  * This means that the stack layout is as follows:
  *
@@ -276,9 +360,6 @@ ia64_load_extra (struct task_struct *task)
  *	|                     | <-- sp (lowest addr)
  *	+---------------------+
  *
- * Note: if we get called through kernel_thread() then the memory above "(highest addr)"
- * is valid kernel stack memory that needs to be copied as well.
- *
  * Observe that we copy the unat values that are in pt_regs and switch_stack.  Spilling an
  * integer to address X causes bit N in ar.unat to be set to the NaT bit of the register,
  * with N=(X & 0x1ff)/8.  Thus, copying the unat value preserves the NaT bits ONLY if the
@@ -291,9 +372,9 @@ copy_thread (int nr, unsigned long clone_flags,
 	     unsigned long user_stack_base, unsigned long user_stack_size,
 	     struct task_struct *p, struct pt_regs *regs)
 {
-	unsigned long rbs, child_rbs, rbs_size, stack_offset, stack_top, stack_used;
-	struct switch_stack *child_stack, *stack;
 	extern char ia64_ret_from_clone, ia32_ret_from_clone;
+	struct switch_stack *child_stack, *stack;
+	unsigned long rbs, child_rbs, rbs_size;
 	struct pt_regs *child_ptregs;
 	int retval = 0;
 
@@ -306,16 +387,13 @@ copy_thread (int nr, unsigned long clone_flags,
 		return 0;
 #endif
 
-	stack_top = (unsigned long) current + IA64_STK_OFFSET;
 	stack = ((struct switch_stack *) regs) - 1;
-	stack_used = stack_top - (unsigned long) stack;
-	stack_offset = IA64_STK_OFFSET - stack_used;
 
-	child_stack = (struct switch_stack *) ((unsigned long) p + stack_offset);
-	child_ptregs = (struct pt_regs *) (child_stack + 1);
+	child_ptregs = (struct pt_regs *) ((unsigned long) p + IA64_STK_OFFSET) - 1;
+	child_stack = (struct switch_stack *) child_ptregs - 1;
 
 	/* copy parent's switch_stack & pt_regs to child: */
-	memcpy(child_stack, stack, stack_used);
+	memcpy(child_stack, stack, sizeof(*child_ptregs) + sizeof(*child_stack));
 
 	rbs = (unsigned long) current + IA64_RBS_OFFSET;
 	child_rbs = (unsigned long) p + IA64_RBS_OFFSET;
@@ -324,7 +402,7 @@ copy_thread (int nr, unsigned long clone_flags,
 	/* copy the parent's register backing store to the child: */
 	memcpy((void *) child_rbs, (void *) rbs, rbs_size);
 
-	if (user_mode(child_ptregs)) {
+	if (likely(user_mode(child_ptregs))) {
 		if ((clone_flags & CLONE_SETTLS) && !IS_IA32_PROCESS(regs))
 			child_ptregs->r13 = regs->r16;	/* see sys_clone2() in entry.S */
 		if (user_stack_base) {
@@ -341,14 +419,14 @@ copy_thread (int nr, unsigned long clone_flags,
 		 * been taken care of by the caller of sys_clone()
 		 * already.
 		 */
-		child_ptregs->r12 = (unsigned long) (child_ptregs + 1); /* kernel sp */
+		child_ptregs->r12 = (unsigned long) child_ptregs - 16; /* kernel sp */
 		child_ptregs->r13 = (unsigned long) p;		/* set `current' pointer */
 	}
+	child_stack->ar_bspstore = child_rbs + rbs_size;
 	if (IS_IA32_PROCESS(regs))
 		child_stack->b0 = (unsigned long) &ia32_ret_from_clone;
 	else
 		child_stack->b0 = (unsigned long) &ia64_ret_from_clone;
-	child_stack->ar_bspstore = child_rbs + rbs_size;
 
 	/* copy parts of thread_struct: */
 	p->thread.ksp = (unsigned long) child_stack - 16;
@@ -358,8 +436,8 @@ copy_thread (int nr, unsigned long clone_flags,
 	 * therefore we must specify them explicitly here and not include them in
 	 * IA64_PSR_BITS_TO_CLEAR.
 	 */
-	child_ptregs->cr_ipsr =  ((child_ptregs->cr_ipsr | IA64_PSR_BITS_TO_SET)
-			      & ~(IA64_PSR_BITS_TO_CLEAR | IA64_PSR_PP | IA64_PSR_UP));
+	child_ptregs->cr_ipsr = ((child_ptregs->cr_ipsr | IA64_PSR_BITS_TO_SET)
+				 & ~(IA64_PSR_BITS_TO_CLEAR | IA64_PSR_PP | IA64_PSR_UP));
 
 	/*
 	 * NOTE: The calling convention considers all floating point
@@ -392,6 +470,10 @@ copy_thread (int nr, unsigned long clone_flags,
 		ia32_save_state(p);
 		if (clone_flags & CLONE_SETTLS)
 			retval = ia32_clone_tls(p, child_ptregs);
+
+		/* Copy partially mapped page list */
+		if (!retval)
+			retval = ia32_copy_partial_page_list(p, clone_flags);
 	}
 #endif
 
@@ -550,53 +632,62 @@ dump_fpu (struct pt_regs *pt, elf_fpregset_t dst)
 	return 1;	/* f0-f31 are always valid so we always return 1 */
 }
 
-asmlinkage long
-sys_execve (char *filename, char **argv, char **envp, struct pt_regs *regs)
+long
+sys_execve (char __user *filename, char __user * __user *argv, char __user * __user *envp,
+	    struct pt_regs *regs)
 {
+	char *fname;
 	int error;
 
-	filename = getname(filename);
-	error = PTR_ERR(filename);
-	if (IS_ERR(filename))
+	fname = getname(filename);
+	error = PTR_ERR(fname);
+	if (IS_ERR(fname))
 		goto out;
-	error = do_execve(filename, argv, envp, regs);
-	putname(filename);
+	error = do_execve(fname, argv, envp, regs);
+	putname(fname);
 out:
 	return error;
-}
-
-void
-ia64_set_personality (struct elf64_hdr *elf_ex, int ibcs2_interpreter)
-{
-	set_personality(PER_LINUX);
-	if (elf_ex->e_flags & EF_IA_64_LINUX_EXECUTABLE_STACK)
-		current->thread.flags |= IA64_THREAD_XSTACK;
-	else
-		current->thread.flags &= ~IA64_THREAD_XSTACK;
 }
 
 pid_t
 kernel_thread (int (*fn)(void *), void *arg, unsigned long flags)
 {
-	struct task_struct *parent = current;
-	int result; 
-	pid_t tid;
+	extern void start_kernel_thread (void);
+	unsigned long *helper_fptr = (unsigned long *) &start_kernel_thread;
+	struct {
+		struct switch_stack sw;
+		struct pt_regs pt;
+	} regs;
 
-	tid = clone(flags | CLONE_VM | CLONE_UNTRACED, 0);
-	if (parent != current) {
+	memset(&regs, 0, sizeof(regs));
+	regs.pt.cr_iip = helper_fptr[0];	/* set entry point (IP) */
+	regs.pt.r1 = helper_fptr[1];		/* set GP */
+	regs.pt.r9 = (unsigned long) fn;	/* 1st argument */
+	regs.pt.r11 = (unsigned long) arg;	/* 2nd argument */
+	/* Preserve PSR bits, except for bits 32-34 and 37-45, which we can't read.  */
+	regs.pt.cr_ipsr = ia64_getreg(_IA64_REG_PSR) | IA64_PSR_BN;
+	regs.pt.cr_ifs = 1UL << 63;		/* mark as valid, empty frame */
+	regs.sw.ar_fpsr = regs.pt.ar_fpsr = ia64_getreg(_IA64_REG_AR_FPSR);
+	regs.sw.ar_bspstore = (unsigned long) current + IA64_RBS_OFFSET;
+	regs.sw.pr = (1 << PRED_KERNEL_STACK);
+	return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0, &regs.pt, 0, NULL, NULL);
+}
+EXPORT_SYMBOL(kernel_thread);
+
+/* This gets called from kernel_thread() via ia64_invoke_thread_helper().  */
+int
+kernel_thread_helper (int (*fn)(void *), void *arg)
+{
 #ifdef CONFIG_IA32_SUPPORT
-		if (IS_IA32_PROCESS(ia64_task_regs(current))) {
-			/* A kernel thread is always a 64-bit process. */
-			current->thread.map_base  = DEFAULT_MAP_BASE;
-			current->thread.task_size = DEFAULT_TASK_SIZE;
-			ia64_set_kr(IA64_KR_IO_BASE, current->thread.old_iob);
-			ia64_set_kr(IA64_KR_TSSD, current->thread.old_k1);
-		}
-#endif
-		result = (*fn)(arg);
-		_exit(result);
+	if (IS_IA32_PROCESS(ia64_task_regs(current))) {
+		/* A kernel thread is always a 64-bit process. */
+		current->thread.map_base  = DEFAULT_MAP_BASE;
+		current->thread.task_size = DEFAULT_TASK_SIZE;
+		ia64_set_kr(IA64_KR_IO_BASE, current->thread.old_iob);
+		ia64_set_kr(IA64_KR_TSSD, current->thread.old_k1);
 	}
-	return tid;
+#endif
+	return (*fn)(arg);
 }
 
 /*
@@ -608,6 +699,8 @@ flush_thread (void)
 	/* drop floating-point and debug-register state if it exists: */
 	current->thread.flags &= ~(IA64_THREAD_FPH_VALID | IA64_THREAD_DBG_VALID);
 	ia64_drop_fpu(current);
+	if (IS_IA32_PROCESS(ia64_task_regs(current)))
+		ia32_drop_partial_page_list(current);
 }
 
 /*
@@ -627,6 +720,8 @@ exit_thread (void)
 	if (current->thread.flags & IA64_THREAD_DBG_VALID)
 		pfm_release_debug_registers(current);
 #endif
+	if (IS_IA32_PROCESS(ia64_task_regs(current)))
+		ia32_drop_partial_page_list(current);
 }
 
 unsigned long
@@ -635,13 +730,6 @@ get_wchan (struct task_struct *p)
 	struct unw_frame_info info;
 	unsigned long ip;
 	int count = 0;
-	/*
-	 * These bracket the sleeping functions..
-	 */
-	extern void scheduling_functions_start_here(void);
-	extern void scheduling_functions_end_here(void);
-#	define first_sched	((unsigned long) scheduling_functions_start_here)
-#	define last_sched	((unsigned long) scheduling_functions_end_here)
 
 	/*
 	 * Note: p may not be a blocked task (it could be current or
@@ -656,12 +744,10 @@ get_wchan (struct task_struct *p)
 		if (unw_unwind(&info) < 0)
 			return 0;
 		unw_get_ip(&info, &ip);
-		if (ip < first_sched || ip >= last_sched)
+		if (!in_sched_functions(ip))
 			return ip;
 	} while (count++ < 16);
 	return 0;
-#	undef first_sched
-#	undef last_sched
 }
 
 void
@@ -690,7 +776,7 @@ cpu_halt (void)
 void
 machine_restart (char *restart_cmd)
 {
-	(*efi.reset_system)(EFI_RESET_WARM, 0, 0, 0);
+	(*efi.reset_system)(EFI_RESET_WARM, 0, 0, NULL);
 }
 
 EXPORT_SYMBOL(machine_restart);

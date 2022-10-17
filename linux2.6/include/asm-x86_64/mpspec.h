@@ -14,9 +14,9 @@
 #define SMP_MAGIC_IDENT	(('_'<<24)|('P'<<16)|('M'<<8)|'_')
 
 /*
- * a maximum of 16 APICs with the current APIC ID architecture.
+ * A maximum of 255 APICs with the current APIC ID architecture.
  */
-#define MAX_APICS 16
+#define MAX_APICS 128
 
 struct intel_mp_floating
 {
@@ -156,8 +156,8 @@ struct mpc_config_lintsrc
  *	7	2 CPU MCA+PCI
  */
 
+#define MAX_MP_BUSSES 270
 #define MAX_IRQ_SOURCES 256
-#define MAX_MP_BUSSES 32
 enum mp_bustype {
 	MP_BUS_ISA = 1,
 	MP_BUS_EISA,
@@ -166,7 +166,6 @@ enum mp_bustype {
 };
 extern unsigned char mp_bus_id_to_type [MAX_MP_BUSSES];
 extern int mp_bus_id_to_pci_bus [MAX_MP_BUSSES];
-extern cpumask_t mp_bus_to_cpumask [MAX_MP_BUSSES];
 
 extern unsigned int boot_cpu_physical_apicid;
 extern int smp_found_config;
@@ -186,14 +185,12 @@ extern void mp_register_lapic (u8 id, u8 enabled);
 extern void mp_register_lapic_address (u64 address);
 
 #ifdef CONFIG_X86_IO_APIC
-extern void mp_register_ioapic (u8 id, u32 address, u32 irq_base);
-extern void mp_override_legacy_irq (u8 bus_irq, u8 polarity, u8 trigger, u32 global_irq);
+extern void mp_register_ioapic (u8 id, u32 address, u32 gsi_base);
+extern void mp_override_legacy_irq (u8 bus_irq, u8 polarity, u8 trigger, u32 gsi);
 extern void mp_config_acpi_legacy_irqs (void);
-extern void mp_parse_prt (void);
+extern int mp_register_gsi (u32 gsi, int edge_level, int active_high_low);
 #endif /*CONFIG_X86_IO_APIC*/
 #endif
-
-extern void mp_config_ioapic_for_sci(int irq);
 
 extern int using_apic_timer;
 
@@ -213,8 +210,8 @@ typedef struct physid_mask physid_mask_t;
 
 #define physids_and(dst, src1, src2)		bitmap_and((dst).mask, (src1).mask, (src2).mask, MAX_APICS)
 #define physids_or(dst, src1, src2)		bitmap_or((dst).mask, (src1).mask, (src2).mask, MAX_APICS)
-#define physids_clear(map)			bitmap_clear((map).mask, MAX_APICS)
-#define physids_complement(map)			bitmap_complement((map).mask, MAX_APICS)
+#define physids_clear(map)			bitmap_zero((map).mask, MAX_APICS)
+#define physids_complement(dst, src)		bitmap_complement((dst).mask, (src).mask, MAX_APICS)
 #define physids_empty(map)			bitmap_empty((map).mask, MAX_APICS)
 #define physids_equal(map1, map2)		bitmap_equal((map1).mask, (map2).mask, MAX_APICS)
 #define physids_weight(map)			bitmap_weight((map).mask, MAX_APICS)

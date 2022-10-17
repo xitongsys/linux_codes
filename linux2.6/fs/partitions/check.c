@@ -29,7 +29,6 @@
 #include "ldm.h"
 #include "mac.h"
 #include "msdos.h"
-#include "nec98.h"
 #include "osf.h"
 #include "sgi.h"
 #include "sun.h"
@@ -74,6 +73,9 @@ static int (*check_part[])(struct parsed_partitions *, struct block_device *) = 
 #ifdef CONFIG_EFI_PARTITION
 	efi_partition,		/* this must come before msdos */
 #endif
+#ifdef CONFIG_SGI_PARTITION
+	sgi_partition,
+#endif
 #ifdef CONFIG_LDM_PARTITION
 	ldm_partition,		/* this must come before msdos */
 #endif
@@ -97,9 +99,6 @@ static int (*check_part[])(struct parsed_partitions *, struct block_device *) = 
 #endif
 #ifdef CONFIG_MAC_PARTITION
 	mac_partition,
-#endif
-#ifdef CONFIG_SGI_PARTITION
-	sgi_partition,
 #endif
 #ifdef CONFIG_ULTRIX_PARTITION
 	ultrix_partition,
@@ -138,25 +137,14 @@ const char *bdevname(struct block_device *bdev, char *buf)
 EXPORT_SYMBOL(bdevname);
 
 /*
- * NOTE: this cannot be called from interrupt context.
- *
- * But in interrupt context you should really have a struct
- * block_device anyway and use bdevname() above.
+ * There's very little reason to use this, you should really
+ * have a struct block_device just about everywhere and use
+ * bdevname() instead.
  */
 const char *__bdevname(dev_t dev, char *buffer)
 {
-	struct gendisk *disk;
-	int part;
-
-	disk = get_gendisk(dev, &part);
-	if (disk) {
-		buffer = disk_name(disk, part, buffer);
-		put_disk(disk);
-	} else {
-		snprintf(buffer, BDEVNAME_SIZE, "unknown-block(%u,%u)",
+	scnprintf(buffer, BDEVNAME_SIZE, "unknown-block(%u,%u)",
 				MAJOR(dev), MINOR(dev));
-	}
-
 	return buffer;
 }
 
@@ -315,7 +303,10 @@ void add_partition(struct gendisk *disk, int part, sector_t start, sector_t len)
 			S_IFBLK|S_IRUSR|S_IWUSR,
 			"%s/part%d", disk->devfs_name, part);
 
-	snprintf(p->kobj.name,KOBJ_NAME_LEN,"%s%d",disk->kobj.name,part);
+	if (isdigit(disk->kobj.name[strlen(disk->kobj.name)-1]))
+		snprintf(p->kobj.name,KOBJ_NAME_LEN,"%sp%d",disk->kobj.name,part);
+	else
+		snprintf(p->kobj.name,KOBJ_NAME_LEN,"%s%d",disk->kobj.name,part);
 	p->kobj.parent = &disk->kobj;
 	p->kobj.ktype = &ktype_part;
 	kobject_register(&p->kobj);
@@ -334,10 +325,8 @@ static void disk_sysfs_symlinks(struct gendisk *disk)
 /* Not exported, helper to add_disk(). */
 void register_disk(struct gendisk *disk)
 {
-	struct parsed_partitions *state;
 	struct block_device *bdev;
 	char *s;
-	int j;
 	int err;
 
 	strlcpy(disk->kobj.name,disk->disk_name,KOBJ_NAME_LEN);
@@ -364,25 +353,13 @@ void register_disk(struct gendisk *disk)
 		return;
 
 	bdev = bdget_disk(disk, 0);
-	if (blkdev_get(bdev, FMODE_READ, 0, BDEV_RAW) < 0)
+	if (!bdev)
 		return;
-	state = check_partition(disk, bdev);
-	if (state) {
-		for (j = 1; j < state->limit; j++) {
-			sector_t size = state->parts[j].size;
-			sector_t from = state->parts[j].from;
-			if (!size)
-				continue;
-			add_partition(disk, j, from, size);
-#ifdef CONFIG_BLK_DEV_MD
-			if (!state->parts[j].flags)
-				continue;
-			md_autodetect_dev(bdev->bd_dev+j);
-#endif
-		}
-		kfree(state);
-	}
-	blkdev_put(bdev, BDEV_RAW);
+
+	bdev->bd_invalidated = 1;
+	if (blkdev_get(bdev, FMODE_READ, 0) < 0)
+		return;
+	blkdev_put(bdev);
 }
 
 int rescan_partitions(struct gendisk *disk, struct block_device *bdev)
@@ -401,7 +378,7 @@ int rescan_partitions(struct gendisk *disk, struct block_device *bdev)
 	if (disk->fops->revalidate_disk)
 		disk->fops->revalidate_disk(disk);
 	if (!get_capacity(disk) || !(state = check_partition(disk, bdev)))
-		return res;
+		return 0;
 	for (p = 1; p < state->limit; p++) {
 		sector_t size = state->parts[p].size;
 		sector_t from = state->parts[p].from;
@@ -414,7 +391,7 @@ int rescan_partitions(struct gendisk *disk, struct block_device *bdev)
 #endif
 	}
 	kfree(state);
-	return res;
+	return 0;
 }
 
 unsigned char *read_dev_sector(struct block_device *bdev, sector_t n, Sector *p)

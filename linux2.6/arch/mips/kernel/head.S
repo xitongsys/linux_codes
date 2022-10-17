@@ -20,7 +20,6 @@
 #include <asm/asm.h>
 #include <asm/regdef.h>
 #include <asm/page.h>
-#include <asm/processor.h>
 #include <asm/mipsregs.h>
 #include <asm/stackframe.h>
 #ifdef CONFIG_SGI_IP27
@@ -91,6 +90,39 @@
 	.endm
 
 	/*
+	 * For the moment disable interrupts, mark the kernel mode and
+	 * set ST0_KX so that the CPU does not spit fire when using
+	 * 64-bit addresses.  A full initialization of the CPU's status
+	 * register is done later in per_cpu_trap_init().
+	 */
+	.macro	setup_c0_status set clr
+	.set	push
+	mfc0	t0, CP0_STATUS
+	or	t0, ST0_CU0|\set|0x1f|\clr
+	xor	t0, 0x1f|\clr
+	mtc0	t0, CP0_STATUS
+	.set	noreorder
+	sll	zero,3				# ehb
+	.set	pop
+	.endm
+
+	.macro	setup_c0_status_pri
+#ifdef CONFIG_MIPS64
+	setup_c0_status ST0_KX 0
+#else
+	setup_c0_status 0 0
+#endif
+	.endm
+
+	.macro	setup_c0_status_sec
+#ifdef CONFIG_MIPS64
+	setup_c0_status ST0_KX ST0_BEV
+#else
+	setup_c0_status 0 ST0_BEV
+#endif
+	.endm
+
+	/*
 	 * Reserved space for exception handlers.
 	 * Necessary for machines which link their kernels at KSEG0.
 	 */
@@ -102,6 +134,8 @@ EXPORT(_stext)
 	__INIT
 
 NESTED(kernel_entry, 16, sp)			# kernel entry point
+	setup_c0_status_pri
+
 #ifdef CONFIG_SGI_IP27
 	GET_NASID_ASM	t1
 	move	t2, t1				# text and data are here
@@ -110,20 +144,7 @@ NESTED(kernel_entry, 16, sp)			# kernel entry point
 
 	ARC64_TWIDDLE_PC
 
-	CLI					# disable interrupts
-
-	PTR_LA		$28, init_thread_union
-	PTR_ADDIU	sp, $28, _THREAD_SIZE - 32
-	set_saved_sp	sp, t0, t1
-	PTR_SUBU	sp, 4 * SZREG		# init stack pointer
-
-	/*
-	 * The firmware/bootloader passes argc/argp/envp
-	 * to us as arguments.  But clear bss first because
-	 * the romvec and other important info is stored there
-	 * by prom_init().
-	 */
-	PTR_LA		t0, __bss_start
+	PTR_LA		t0, __bss_start		# clear .bss
 	LONG_S		zero, (t0)
 	PTR_LA		t1, __bss_stop - LONGSIZE
 1:
@@ -131,7 +152,17 @@ NESTED(kernel_entry, 16, sp)			# kernel entry point
 	LONG_S		zero, (t0)
 	bne		t0, t1, 1b
 
-	jal		init_arch
+	LONG_S		a0, fw_arg0		# firmware arguments
+	LONG_S		a1, fw_arg1
+	LONG_S		a2, fw_arg2
+	LONG_S		a3, fw_arg3
+
+	PTR_LA		$28, init_thread_union
+	PTR_ADDIU	sp, $28, _THREAD_SIZE - 32
+	set_saved_sp	sp, t0, t1
+	PTR_SUBU	sp, 4 * SZREG		# init stack pointer
+
+	j		start_kernel
 	END(kernel_entry)
 
 #ifdef CONFIG_SMP
@@ -140,10 +171,12 @@ NESTED(kernel_entry, 16, sp)			# kernel entry point
  * function after setting up the stack and gp registers.
  */
 NESTED(smp_bootstrap, 16, sp)
+	setup_c0_status_sec
+
 #ifdef CONFIG_SGI_IP27
 	GET_NASID_ASM	t1
-	li	t0, KLDIR_OFFSET + (KLI_KERN_VARS * KLDIR_ENT_SIZE) + \
-		    KLDIR_OFF_POINTER + K0BASE
+	dli	t0, KLDIR_OFFSET + (KLI_KERN_VARS * KLDIR_ENT_SIZE) + \
+		    KLDIR_OFF_POINTER + CAC_BASE
 	dsll	t1, NASID_SHFT
 	or	t0, t0, t1
 	ld	t0, 0(t0)			# t0 points to kern_vars struct
@@ -153,19 +186,7 @@ NESTED(smp_bootstrap, 16, sp)
 	ARC64_TWIDDLE_PC
 #endif /* CONFIG_SGI_IP27 */
 
-	CLI
-
-#ifdef CONFIG_MIPS64
-	/*
-	 * For the moment set ST0_KU so the CPU will not spit fire when
-	 * executing 64-bit instructions.  The full initialization of the
-	 * CPU's status register is done later in per_cpu_trap_init().
-	 */
-	mfc0	t0, CP0_STATUS
-	or	t0, ST0_KX
-	mtc0	t0, CP0_STATUS
-#endif
-	jal	start_secondary
+	j	start_secondary
 	END(smp_bootstrap)
 #endif /* CONFIG_SMP */
 
@@ -173,6 +194,11 @@ NESTED(smp_bootstrap, 16, sp)
 
 	.comm	kernelsp,    NR_CPUS * 8, 8
 	.comm	pgd_current, NR_CPUS * 8, 8
+
+	.comm	fw_arg0, SZREG, SZREG		# firmware arguments
+	.comm	fw_arg1, SZREG, SZREG
+	.comm	fw_arg2, SZREG, SZREG
+	.comm	fw_arg3, SZREG, SZREG
 
 	.macro	page name, order=0
 	.globl	\name
@@ -184,27 +210,12 @@ NESTED(smp_bootstrap, 16, sp)
 	.data
 	.align	PAGE_SHIFT
 
-#ifdef CONFIG_MIPS32
-	/*
-	 * Here we only have a two-level pagetable structure ...
-	 */
-	page	swapper_pg_dir, _PGD_ORDER
-	page	invalid_pte_table, _PTE_ORDER
-#endif
-#ifdef CONFIG_MIPS64
 	/*
 	 * ... but on 64-bit we've got three-level pagetables with a
 	 * slightly different layout ...
 	 */
 	page	swapper_pg_dir, _PGD_ORDER
+#ifdef CONFIG_MIPS64
 	page	invalid_pmd_table, _PMD_ORDER
-	page	invalid_pte_table, _PTE_ORDER
-
-	/*
-	 * 64-bit kernel mappings are really screwed up ...
-	 */
-	page	kptbl, _PGD_ORDER
-	.globl	ekptbl
-	page	kpmdtbl, 0
-ekptbl:
 #endif
+	page	invalid_pte_table, _PTE_ORDER

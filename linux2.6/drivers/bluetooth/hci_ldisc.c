@@ -32,7 +32,6 @@
 #include <linux/config.h>
 #include <linux/module.h>
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/sched.h>
@@ -52,6 +51,7 @@
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
+
 #include "hci_uart.h"
 
 #ifndef CONFIG_BT_HCIUART_DEBUG
@@ -60,6 +60,8 @@
 #undef  BT_DMP
 #define BT_DMP( A... )
 #endif
+
+static int reset = 0;
 
 static struct hci_uart_proto *hup[HCI_UART_MAX_PROTO];
 
@@ -96,7 +98,7 @@ static struct hci_uart_proto *hci_uart_get_proto(unsigned int id)
 
 static inline void hci_uart_tx_complete(struct hci_uart *hu, int pkt_type)
 {
-	struct hci_dev *hdev = &hu->hdev;
+	struct hci_dev *hdev = hu->hdev;
 	
 	/* Update HCI stat counters */
 	switch (pkt_type) {
@@ -127,7 +129,7 @@ static inline struct sk_buff *hci_uart_dequeue(struct hci_uart *hu)
 int hci_uart_tx_wakeup(struct hci_uart *hu)
 {
 	struct tty_struct *tty = hu->tty;
-	struct hci_dev *hdev = &hu->hdev;
+	struct hci_dev *hdev = hu->hdev;
 	struct sk_buff *skb;
 	
 	if (test_and_set_bit(HCI_UART_SENDING, &hu->tx_state)) {
@@ -144,7 +146,7 @@ restart:
 		int len;
 	
 		set_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
-		len = tty->driver->write(tty, 0, skb->data, skb->len);
+		len = tty->driver->write(tty, skb->data, skb->len);
 		hdev->stat.byte_tx += len;
 
 		skb_pull(skb, len);
@@ -189,9 +191,7 @@ static int hci_uart_flush(struct hci_dev *hdev)
 	}
 
 	/* Flush any pending characters in the driver and discipline. */
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
-
+	tty_ldisc_flush(tty);
 	if (tty->driver->flush_buffer)
 		tty->driver->flush_buffer(tty);
 
@@ -281,7 +281,9 @@ static int hci_uart_tty_open(struct tty_struct *tty)
 
 	spin_lock_init(&hu->rx_lock);
 
-	/* Flush any pending characters in the driver and line discipline */
+	/* Flush any pending characters in the driver and line discipline. */
+	/* FIXME: why is this needed. Note don't use ldisc_ref here as the
+	   open path is before the ldisc is referencable */
 	if (tty->ldisc.flush_buffer)
 		tty->ldisc.flush_buffer(tty);
 
@@ -306,12 +308,13 @@ static void hci_uart_tty_close(struct tty_struct *tty)
 	tty->disc_data = NULL;
 
 	if (hu) {
-		struct hci_dev *hdev = &hu->hdev;
+		struct hci_dev *hdev = hu->hdev;
 		hci_uart_close(hdev);
 
 		if (test_and_clear_bit(HCI_UART_PROTO_SET, &hu->flags)) {
 			hu->proto->close(hu);
 			hci_unregister_dev(hdev);
+			hci_free_dev(hdev);
 		}
 	}
 }
@@ -380,7 +383,7 @@ static void hci_uart_tty_receive(struct tty_struct *tty, const __u8 *data, char 
 	
 	spin_lock(&hu->rx_lock);
 	hu->proto->recv(hu, (void *) data, count);
-	hu->hdev.stat.byte_rx += count;
+	hu->hdev->stat.byte_rx += count;
 	spin_unlock(&hu->rx_lock);
 
 	if (test_and_clear_bit(TTY_THROTTLED,&tty->flags) && tty->driver->unthrottle)
@@ -394,7 +397,13 @@ static int hci_uart_register_dev(struct hci_uart *hu)
 	BT_DBG("");
 
 	/* Initialize and register HCI device */
-	hdev = &hu->hdev;
+	hdev = hci_alloc_dev();
+	if (!hdev) {
+		BT_ERR("Can't allocate HCI device");
+		return -ENOMEM;
+	}
+
+	hu->hdev = hdev;
 
 	hdev->type = HCI_UART;
 	hdev->driver_data = hu;
@@ -406,9 +415,13 @@ static int hci_uart_register_dev(struct hci_uart *hu)
 	hdev->destruct = hci_uart_destruct;
 
 	hdev->owner = THIS_MODULE;
-	
+
+	if (reset)
+		set_bit(HCI_QUIRK_RESET_ON_INIT, &hdev->quirks);
+
 	if (hci_register_dev(hdev) < 0) {
-		BT_ERR("Can't register HCI device %s", hdev->name);
+		BT_ERR("Can't register HCI device");
+		hci_free_dev(hdev);
 		return -ENODEV;
 	}
 
@@ -491,7 +504,7 @@ static int hci_uart_tty_ioctl(struct tty_struct *tty, struct file * file,
 /*
  * We don't provide read/write/poll interface for user space.
  */
-static ssize_t hci_uart_tty_read(struct tty_struct *tty, struct file *file, unsigned char *buf, size_t nr)
+static ssize_t hci_uart_tty_read(struct tty_struct *tty, struct file *file, unsigned char __user *buf, size_t nr)
 {
 	return 0;
 }
@@ -513,7 +526,7 @@ int bcsp_init(void);
 int bcsp_deinit(void);
 #endif
 
-int __init hci_uart_init(void)
+static int __init hci_uart_init(void)
 {
 	static struct tty_ldisc hci_uart_ldisc;
 	int err;
@@ -551,7 +564,7 @@ int __init hci_uart_init(void)
 	return 0;
 }
 
-void hci_uart_cleanup(void)
+static void __exit hci_uart_exit(void)
 {
 	int err;
 
@@ -568,9 +581,13 @@ void hci_uart_cleanup(void)
 }
 
 module_init(hci_uart_init);
-module_exit(hci_uart_cleanup);
+module_exit(hci_uart_exit);
 
-MODULE_AUTHOR("Maxim Krasnyansky <maxk@qualcomm.com>");
+module_param(reset, bool, 0644);
+MODULE_PARM_DESC(reset, "Send HCI reset command on initialization");
+
+MODULE_AUTHOR("Maxim Krasnyansky <maxk@qualcomm.com>, Marcel Holtmann <marcel@holtmann.org>");
 MODULE_DESCRIPTION("Bluetooth HCI UART driver ver " VERSION);
+MODULE_VERSION(VERSION);
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_LDISC(N_HCI);

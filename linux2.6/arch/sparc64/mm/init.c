@@ -37,8 +37,6 @@
 #include <asm/spitfire.h>
 #include <asm/sections.h>
 
-DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
-
 extern void device_scan(void);
 
 struct sparc_phys_banks sp_banks[SPARC_PHYS_BANKS];
@@ -47,10 +45,21 @@ unsigned long *sparc64_valid_addr_bitmap;
 
 /* Ugly, but necessary... -DaveM */
 unsigned long phys_base;
+unsigned long kern_base;
+unsigned long kern_size;
 unsigned long pfn_base;
 
+/* This is even uglier. We have a problem where the kernel may not be
+ * located at phys_base. However, initial __alloc_bootmem() calls need to
+ * be adjusted to be within the 4-8Megs that the kernel is mapped to, else
+ * those page mappings wont work. Things are ok after inherit_prom_mappings
+ * is called though. Dave says he'll clean this up some other time.
+ * -- BenC
+ */
+static unsigned long bootmap_base;
+
 /* get_new_mmu_context() uses "cache + 1".  */
-spinlock_t ctx_alloc_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(ctx_alloc_lock);
 unsigned long tlb_context_cache = CTX_FIRST_VERSION - 1;
 #define CTX_BMAP_SLOTS (1UL << (CTX_VERSION_SHIFT - 6))
 unsigned long mmu_context_bmap[CTX_BMAP_SLOTS];
@@ -59,6 +68,7 @@ unsigned long mmu_context_bmap[CTX_BMAP_SLOTS];
 extern char  _start[], _end[];
 
 /* Initial ramdisk setup */
+extern unsigned long sparc_ramdisk_image64;
 extern unsigned int sparc_ramdisk_image;
 extern unsigned int sparc_ramdisk_size;
 
@@ -93,7 +103,7 @@ void check_pgt_cache(void)
                                 if (page2)
                                         page2->lru.next = page->lru.next;
                                 else
-                                        (struct page *)pgd_quicklist = page->lru.next;
+                                        pgd_quicklist = (void *) page->lru.next;
                                 pgd_cache_size -= 2;
                                 __free_page(page);
                                 if (page2)
@@ -126,13 +136,13 @@ __inline__ void flush_dcache_page_impl(struct page *page)
 #endif
 
 #if (L1DCACHE_SIZE > PAGE_SIZE)
-	__flush_dcache_page(page->virtual,
+	__flush_dcache_page(page_address(page),
 			    ((tlb_type == spitfire) &&
-			     page->mapping != NULL));
+			     page_mapping(page) != NULL));
 #else
-	if (page->mapping != NULL &&
+	if (page_mapping(page) != NULL &&
 	    tlb_type == spitfire)
-		__flush_icache_page(__pa(page->virtual));
+		__flush_icache_page(__pa(page_address(page)));
 #endif
 }
 
@@ -141,9 +151,9 @@ __inline__ void flush_dcache_page_impl(struct page *page)
 #define dcache_dirty_cpu(page) \
 	(((page)->flags >> 24) & (NR_CPUS - 1UL))
 
-static __inline__ void set_dcache_dirty(struct page *page)
+static __inline__ void set_dcache_dirty(struct page *page, int this_cpu)
 {
-	unsigned long mask = smp_processor_id();
+	unsigned long mask = this_cpu;
 	unsigned long non_cpu_bits = ~((NR_CPUS - 1UL) << 24UL);
 	mask = (mask << 24) | (1UL << PG_dcache_dirty);
 	__asm__ __volatile__("1:\n\t"
@@ -192,19 +202,22 @@ void update_mmu_cache(struct vm_area_struct *vma, unsigned long address, pte_t p
 
 	pfn = pte_pfn(pte);
 	if (pfn_valid(pfn) &&
-	    (page = pfn_to_page(pfn), page->mapping) &&
+	    (page = pfn_to_page(pfn), page_mapping(page)) &&
 	    ((pg_flags = page->flags) & (1UL << PG_dcache_dirty))) {
 		int cpu = ((pg_flags >> 24) & (NR_CPUS - 1UL));
+		int this_cpu = get_cpu();
 
 		/* This is just to optimize away some function calls
 		 * in the SMP case.
 		 */
-		if (cpu == smp_processor_id())
+		if (cpu == this_cpu)
 			flush_dcache_page_impl(page);
 		else
 			smp_flush_dcache_page_impl(page, cpu);
 
 		clear_dcache_dirty_cpu(page, cpu);
+
+		put_cpu();
 	}
 	if (get_thread_fault_code())
 		__update_mmu_cache(vma->vm_mm->context & TAG_CONTEXT_BITS,
@@ -213,107 +226,29 @@ void update_mmu_cache(struct vm_area_struct *vma, unsigned long address, pte_t p
 
 void flush_dcache_page(struct page *page)
 {
+	struct address_space *mapping = page_mapping(page);
 	int dirty = test_bit(PG_dcache_dirty, &page->flags);
 	int dirty_cpu = dcache_dirty_cpu(page);
+	int this_cpu = get_cpu();
 
-	if (page->mapping &&
-	    list_empty(&page->mapping->i_mmap) &&
-	    list_empty(&page->mapping->i_mmap_shared)) {
+	if (mapping && !mapping_mapped(mapping)) {
 		if (dirty) {
-			if (dirty_cpu == smp_processor_id())
-				return;
+			if (dirty_cpu == this_cpu)
+				goto out;
 			smp_flush_dcache_page_impl(page, dirty_cpu);
 		}
-		set_dcache_dirty(page);
+		set_dcache_dirty(page, this_cpu);
 	} else {
-		/* We could delay the flush for the !page->mapping
+		/* We could delay the flush for the !page_mapping
 		 * case too.  But that case is for exec env/arg
 		 * pages and those are %99 certainly going to get
 		 * faulted into the tlb (and thus flushed) anyways.
 		 */
 		flush_dcache_page_impl(page);
 	}
-}
 
-/* When shared+writable mmaps of files go away, we lose all dirty
- * page state, so we have to deal with D-cache aliasing here.
- *
- * This code relies on the fact that flush_cache_range() is always
- * called for an area composed by a single VMA.  It also assumes that
- * the MM's page_table_lock is held.
- */
-static inline void flush_cache_pte_range(struct mm_struct *mm, pmd_t *pmd, unsigned long address, unsigned long size)
-{
-	unsigned long offset;
-	pte_t *ptep;
-
-	if (pmd_none(*pmd))
-		return;
-	ptep = pte_offset_map(pmd, address);
-	offset = address & ~PMD_MASK;
-	if (offset + size > PMD_SIZE)
-		size = PMD_SIZE - offset;
-	size &= PAGE_MASK;
-	for (offset = 0; offset < size; ptep++, offset += PAGE_SIZE) {
-		pte_t pte = *ptep;
-
-		if (pte_none(pte))
-			continue;
-
-		if (pte_present(pte) && pte_dirty(pte)) {
-			struct page *page;
-			unsigned long pgaddr, uaddr;
-			unsigned long pfn = pte_pfn(pte);
-
-			if (!pfn_valid(pfn))
-				continue;
-			page = pfn_to_page(pfn);
-			if (PageReserved(page) || !page->mapping)
-				continue;
-			pgaddr = (unsigned long) page_address(page);
-			uaddr = address + offset;
-			if ((pgaddr ^ uaddr) & (1 << 13))
-				flush_dcache_page_all(mm, page);
-		}
-	}
-	pte_unmap(ptep - 1);
-}
-
-static inline void flush_cache_pmd_range(struct mm_struct *mm, pgd_t *dir, unsigned long address, unsigned long size)
-{
-	pmd_t *pmd;
-	unsigned long end;
-
-	if (pgd_none(*dir))
-		return;
-	pmd = pmd_offset(dir, address);
-	end = address + size;
-	if (end > ((address + PGDIR_SIZE) & PGDIR_MASK))
-		end = ((address + PGDIR_SIZE) & PGDIR_MASK);
-	do {
-		flush_cache_pte_range(mm, pmd, address, end - address);
-		address = (address + PMD_SIZE) & PMD_MASK;
-		pmd++;
-	} while (address < end);
-}
-
-void flush_cache_range(struct vm_area_struct *vma, unsigned long start, unsigned long end)
-{
-	struct mm_struct *mm = vma->vm_mm;
-	pgd_t *dir = pgd_offset(mm, start);
-
-	if (mm == current->mm)
-		flushw_user();
-
-	if (vma->vm_file == NULL ||
-	    ((vma->vm_flags & (VM_SHARED|VM_WRITE)) != (VM_SHARED|VM_WRITE)))
-		return;
-
-	do {
-		flush_cache_pmd_range(mm, dir, start, end - start);
-		start = (start + PGDIR_SIZE) & PGDIR_MASK;
-		dir++;
-	} while (start && (start < end));
+out:
+	put_cpu();
 }
 
 void flush_icache_range(unsigned long start, unsigned long end)
@@ -327,11 +262,21 @@ void flush_icache_range(unsigned long start, unsigned long end)
 	}
 }
 
+unsigned long page_to_pfn(struct page *page)
+{
+	return (unsigned long) ((page - mem_map) + pfn_base);
+}
+
+struct page *pfn_to_page(unsigned long pfn)
+{
+	return (mem_map + (pfn - pfn_base));
+}
+
 void show_mem(void)
 {
 	printk("Mem-info:\n");
 	show_free_areas();
-	printk("Free swap:       %6dkB\n",
+	printk("Free swap:       %6ldkB\n",
 	       nr_swap_pages << (PAGE_SHIFT-10));
 	printk("%ld pages of RAM\n", num_physpages);
 	printk("%d free pages\n", nr_free_pages());
@@ -433,7 +378,7 @@ static void inherit_prom_mappings(void)
 	n += 5 * sizeof(struct linux_prom_translation);
 	for (tsz = 1; tsz < n; tsz <<= 1)
 		/* empty */;
-	trans = __alloc_bootmem(tsz, SMP_CACHE_BYTES, 0UL);
+	trans = __alloc_bootmem(tsz, SMP_CACHE_BYTES, bootmap_base);
 	if (trans == NULL) {
 		prom_printf("inherit_prom_mappings: Cannot alloc translations.\n");
 		prom_halt();
@@ -453,7 +398,7 @@ static void inherit_prom_mappings(void)
 	 * in inherit_locked_prom_mappings()).
 	 */
 #define OBP_PMD_SIZE 2048
-	prompmd = __alloc_bootmem(OBP_PMD_SIZE, OBP_PMD_SIZE, 0UL);
+	prompmd = __alloc_bootmem(OBP_PMD_SIZE, OBP_PMD_SIZE, bootmap_base);
 	if (prompmd == NULL)
 		early_pgtable_allocfail("pmd");
 	memset(prompmd, 0, OBP_PMD_SIZE);
@@ -471,7 +416,7 @@ static void inherit_prom_mappings(void)
 				if (pmd_none(*pmdp)) {
 					ptep = __alloc_bootmem(BASE_PAGE_SIZE,
 							       BASE_PAGE_SIZE,
-							       0UL);
+							       bootmap_base);
 					if (ptep == NULL)
 						early_pgtable_allocfail("pte");
 					memset(ptep, 0, BASE_PAGE_SIZE);
@@ -1146,7 +1091,7 @@ struct pgtable_cache_struct pgt_quicklists;
 #else
 #define DC_ALIAS_SHIFT	0
 #endif
-pte_t *pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
+pte_t *__pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
 {
 	struct page *page;
 	unsigned long color;
@@ -1293,6 +1238,10 @@ unsigned long __init bootmem_init(unsigned long *pages_avail)
 	unsigned long bootmap_pfn, bytes_avail, size;
 	int i;
 
+#ifdef CONFIG_DEBUG_BOOTMEM
+	prom_printf("bootmem_init: Scan sp_banks, ");
+#endif
+
 	bytes_avail = 0UL;
 	for (i = 0; sp_banks[i].num_bytes != 0; i++) {
 		end_of_phys_memory = sp_banks[i].base_addr +
@@ -1323,25 +1272,20 @@ unsigned long __init bootmem_init(unsigned long *pages_avail)
 	 * image.  The kernel is hard mapped below PAGE_OFFSET in a
 	 * 4MB locked TLB translation.
 	 */
-	start_pfn  = PAGE_ALIGN((unsigned long) _end) -
-		((unsigned long) KERNBASE);
+	start_pfn = PAGE_ALIGN(kern_base + kern_size) >> PAGE_SHIFT;
 
-	/* Adjust up to the physical address where the kernel begins. */
-	start_pfn += phys_base;
-
-	/* Now shift down to get the real physical page frame number. */
-	start_pfn >>= PAGE_SHIFT;
-	
 	bootmap_pfn = start_pfn;
 
 	end_pfn = end_of_phys_memory >> PAGE_SHIFT;
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	/* Now have to check initial ramdisk, so that bootmap does not overwrite it */
-	if (sparc_ramdisk_image) {
-		if (sparc_ramdisk_image >= (unsigned long)_end - 2 * PAGE_SIZE)
-			sparc_ramdisk_image -= KERNBASE;
-		initrd_start = sparc_ramdisk_image + phys_base;
+	if (sparc_ramdisk_image || sparc_ramdisk_image64) {
+		unsigned long ramdisk_image = sparc_ramdisk_image ?
+			sparc_ramdisk_image : sparc_ramdisk_image64;
+		if (ramdisk_image >= (unsigned long)_end - 2 * PAGE_SIZE)
+			ramdisk_image -= KERNBASE;
+		initrd_start = ramdisk_image + phys_base;
 		initrd_end = initrd_start + sparc_ramdisk_size;
 		if (initrd_end > end_of_phys_memory) {
 			printk(KERN_CRIT "initrd extends beyond end of memory "
@@ -1359,20 +1303,35 @@ unsigned long __init bootmem_init(unsigned long *pages_avail)
 	/* Initialize the boot-time allocator. */
 	max_pfn = max_low_pfn = end_pfn;
 	min_low_pfn = pfn_base;
+
+#ifdef CONFIG_DEBUG_BOOTMEM
+	prom_printf("init_bootmem(min[%lx], bootmap[%lx], max[%lx])\n",
+		    min_low_pfn, bootmap_pfn, max_low_pfn);
+#endif
 	bootmap_size = init_bootmem_node(NODE_DATA(0), bootmap_pfn, pfn_base, end_pfn);
+
+	bootmap_base = bootmap_pfn << PAGE_SHIFT;
 
 	/* Now register the available physical memory with the
 	 * allocator.
 	 */
-	for (i = 0; sp_banks[i].num_bytes != 0; i++)
-		free_bootmem(sp_banks[i].base_addr,
-			     sp_banks[i].num_bytes);
+	for (i = 0; sp_banks[i].num_bytes != 0; i++) {
+#ifdef CONFIG_DEBUG_BOOTMEM
+		prom_printf("free_bootmem(sp_banks:%d): base[%lx] size[%lx]\n",
+			    i, sp_banks[i].base_addr, sp_banks[i].num_bytes);
+#endif
+		free_bootmem(sp_banks[i].base_addr, sp_banks[i].num_bytes);
+	}
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (initrd_start) {
 		size = initrd_end - initrd_start;
 
 		/* Resert the initrd image area. */
+#ifdef CONFIG_DEBUG_BOOTMEM
+		prom_printf("reserve_bootmem(initrd): base[%llx] size[%lx]\n",
+			initrd_start, initrd_end);
+#endif
 		reserve_bootmem(initrd_start, size);
 		*pages_avail -= PAGE_ALIGN(size) >> PAGE_SHIFT;
 
@@ -1381,15 +1340,21 @@ unsigned long __init bootmem_init(unsigned long *pages_avail)
 	}
 #endif
 	/* Reserve the kernel text/data/bss. */
-	size = (start_pfn << PAGE_SHIFT) - phys_base;
-	reserve_bootmem(phys_base, size);
-	*pages_avail -= PAGE_ALIGN(size) >> PAGE_SHIFT;
+#ifdef CONFIG_DEBUG_BOOTMEM
+	prom_printf("reserve_bootmem(kernel): base[%lx] size[%lx]\n", kern_base, kern_size);
+#endif
+	reserve_bootmem(kern_base, kern_size);
+	*pages_avail -= PAGE_ALIGN(kern_size) >> PAGE_SHIFT;
 
 	/* Reserve the bootmem map.   We do not account for it
 	 * in pages_avail because we will release that memory
 	 * in free_all_bootmem.
 	 */
 	size = bootmap_size;
+#ifdef CONFIG_DEBUG_BOOTMEM
+	prom_printf("reserve_bootmem(bootmap): base[%lx] size[%lx]\n",
+		    (bootmap_pfn << PAGE_SHIFT), size);
+#endif
 	reserve_bootmem((bootmap_pfn << PAGE_SHIFT), size);
 	*pages_avail -= PAGE_ALIGN(size) >> PAGE_SHIFT;
 
@@ -1398,7 +1363,6 @@ unsigned long __init bootmem_init(unsigned long *pages_avail)
 
 /* paging_init() sets up the page tables */
 
-extern void sun_serial_setup(void);
 extern void cheetah_ecache_flush_init(void);
 
 static unsigned long last_valid_pfn;
@@ -1408,7 +1372,7 @@ void __init paging_init(void)
 	extern pmd_t swapper_pmd_dir[1024];
 	extern unsigned int sparc64_vpte_patchme1[1];
 	extern unsigned int sparc64_vpte_patchme2[1];
-	unsigned long alias_base = phys_base + PAGE_OFFSET;
+	unsigned long alias_base = kern_base + PAGE_OFFSET;
 	unsigned long second_alias_page = 0;
 	unsigned long pt, flags, end_pfn, pages_avail;
 	unsigned long shift = alias_base - ((unsigned long)KERNBASE);
@@ -1420,7 +1384,7 @@ void __init paging_init(void)
 	if ((real_end > ((unsigned long)KERNBASE + 0x400000)))
 		bigkernel = 1;
 #ifdef CONFIG_BLK_DEV_INITRD
-	if (sparc_ramdisk_image)
+	if (sparc_ramdisk_image || sparc_ramdisk_image64)
 		real_end = (PAGE_ALIGN(real_end) + PAGE_ALIGN(sparc_ramdisk_size));
 #endif
 
@@ -1428,7 +1392,7 @@ void __init paging_init(void)
 	 * if this were not true we wouldn't boot up to this point
 	 * anyways.
 	 */
-	pt  = phys_base | _PAGE_VALID | _PAGE_SZ4MB;
+	pt  = kern_base | _PAGE_VALID | _PAGE_SZ4MB;
 	pt |= _PAGE_CP | _PAGE_CV | _PAGE_P | _PAGE_L | _PAGE_W;
 	local_irq_save(flags);
 	if (tlb_type == spitfire) {
@@ -1498,10 +1462,13 @@ void __init paging_init(void)
 	memset(swapper_pmd_dir, 0, sizeof(swapper_pmd_dir));
 
 	/* Now can init the kernel/bad page tables. */
-	pgd_set(&swapper_pg_dir[0], swapper_pmd_dir + (shift / sizeof(pgd_t)));
+	pud_set(pud_offset(&swapper_pg_dir[0], 0),
+		swapper_pmd_dir + (shift / sizeof(pgd_t)));
 	
-	sparc64_vpte_patchme1[0] |= (pgd_val(init_mm.pgd[0]) >> 10);
-	sparc64_vpte_patchme2[0] |= (pgd_val(init_mm.pgd[0]) & 0x3ff);
+	sparc64_vpte_patchme1[0] |=
+		(((unsigned long)pgd_val(init_mm.pgd[0])) >> 10);
+	sparc64_vpte_patchme2[0] |=
+		(((unsigned long)pgd_val(init_mm.pgd[0])) & 0x3ff);
 	flushi((long)&sparc64_vpte_patchme1[0]);
 	
 	/* Setup bootmem... */
@@ -1522,7 +1489,7 @@ void __init paging_init(void)
 	}
 
 	inherit_locked_prom_mappings(1);
-	
+
 	/* We only created DTLB mapping of this stuff. */
 	spitfire_flush_dtlb_nucleus_page(alias_base);
 	if (second_alias_page)
@@ -1543,7 +1510,7 @@ void __init paging_init(void)
 		zones_size[ZONE_DMA] = npages;
 		zholes_size[ZONE_DMA] = npages - pages_avail;
 
-		free_area_init_node(0, &contig_page_data, NULL, zones_size,
+		free_area_init_node(0, &contig_page_data, zones_size,
 				    phys_base >> PAGE_SHIFT, zholes_size);
 		mem_map = contig_page_data.node_mem_map;
 	}
@@ -1557,7 +1524,7 @@ void __init paging_init(void)
  * prom_set_traptable() call, and OBP is allocating a scratchpad
  * for saving client program register state etc.
  */
-void __init sort_memlist(struct linux_mlist_p1275 *thislist)
+static void __init sort_memlist(struct linux_mlist_p1275 *thislist)
 {
 	int swapi = 0;
 	int i, mitr;
@@ -1693,17 +1660,15 @@ void __init mem_init(void)
 	i = last_valid_pfn >> ((22 - PAGE_SHIFT) + 6);
 	i += 1;
 	sparc64_valid_addr_bitmap = (unsigned long *)
-		__alloc_bootmem(i << 3, SMP_CACHE_BYTES, 0UL);
+		__alloc_bootmem(i << 3, SMP_CACHE_BYTES, bootmap_base);
 	if (sparc64_valid_addr_bitmap == NULL) {
 		prom_printf("mem_init: Cannot alloc valid_addr_bitmap.\n");
 		prom_halt();
 	}
 	memset(sparc64_valid_addr_bitmap, 0, i << 3);
 
-	addr = PAGE_OFFSET + phys_base;
-	last = PAGE_ALIGN((unsigned long)_end) -
-		((unsigned long) KERNBASE);
-	last += PAGE_OFFSET + phys_base;
+	addr = PAGE_OFFSET + kern_base;
+	last = PAGE_ALIGN(kern_size) + addr;
 	while (addr < last) {
 		set_bit(__pa(addr) >> 22, sparc64_valid_addr_bitmap);
 		addr += PAGE_SIZE;
@@ -1714,19 +1679,21 @@ void __init mem_init(void)
 	max_mapnr = last_valid_pfn - pfn_base;
 	high_memory = __va(last_valid_pfn << PAGE_SHIFT);
 
+#ifdef CONFIG_DEBUG_BOOTMEM
+	prom_printf("mem_init: Calling free_all_bootmem().\n");
+#endif
 	totalram_pages = num_physpages = free_all_bootmem() - 1;
 
 	/*
 	 * Set up the zero page, mark it reserved, so that page count
 	 * is not manipulated when freeing the page from user ptes.
 	 */
-	mem_map_zero = alloc_pages(GFP_KERNEL, 0);
+	mem_map_zero = alloc_pages(GFP_KERNEL|__GFP_ZERO, 0);
 	if (mem_map_zero == NULL) {
 		prom_printf("paging_init: Cannot alloc zero page.\n");
 		prom_halt();
 	}
 	SetPageReserved(mem_map_zero);
-	clear_page(page_address(mem_map_zero));
 
 	codepages = (((unsigned long) _etext) - ((unsigned long) _start));
 	codepages = PAGE_ALIGN(codepages) >> PAGE_SHIFT;
@@ -1740,7 +1707,7 @@ void __init mem_init(void)
 		/* Put empty_pg_dir on pgd_quicklist */
 		extern pgd_t empty_pg_dir[1024];
 		unsigned long addr = (unsigned long)empty_pg_dir;
-		unsigned long alias_base = phys_base + PAGE_OFFSET -
+		unsigned long alias_base = kern_base + PAGE_OFFSET -
 			(long)(KERNBASE);
 		
 		memset(empty_pg_dir, 0, sizeof(empty_pg_dir));
@@ -1776,8 +1743,9 @@ void free_initmem (void)
 		struct page *p;
 
 		page = (addr +
-			((unsigned long) __va(phys_base)) -
+			((unsigned long) __va(kern_base)) -
 			((unsigned long) KERNBASE));
+		memset((void *)addr, 0xcc, PAGE_SIZE);
 		p = virt_to_page(page);
 
 		ClearPageReserved(p);

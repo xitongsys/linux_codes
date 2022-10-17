@@ -1,6 +1,6 @@
 /*
  * AGPGART driver.
- * Copyright (C) 2002-2003 Dave Jones.
+ * Copyright (C) 2002-2004 Dave Jones.
  * Copyright (C) 1999 Jeff Hartmann.
  * Copyright (C) 1999 Precision Insight, Inc.
  * Copyright (C) 1999 Xi Graphics, Inc.
@@ -18,12 +18,12 @@
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
  * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * JEFF HARTMANN, OR ANY OTHER CONTRIBUTORS BE LIABLE FOR ANY CLAIM, 
- * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR 
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE 
+ * JEFF HARTMANN, OR ANY OTHER CONTRIBUTORS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+ * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
  * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  *
- * TODO: 
+ * TODO:
  * - Allocate more than order 0 pages to avoid too much linear map splitting.
  */
 #include <linux/config.h>
@@ -35,9 +35,13 @@
 #include <linux/pm.h>
 #include <linux/agp_backend.h>
 #include <linux/vmalloc.h>
+#include <linux/mm.h>
+#include <asm/io.h>
+#include <asm/cacheflush.h>
+#include <asm/pgtable.h>
 #include "agp.h"
 
-__u32 *agp_gatt_table; 
+__u32 *agp_gatt_table;
 int agp_memory_reserved;
 
 /*
@@ -46,7 +50,27 @@ int agp_memory_reserved;
  */
 EXPORT_SYMBOL_GPL(agp_memory_reserved);
 
-/* 
+#if defined(CONFIG_X86)
+int map_page_into_agp(struct page *page)
+{
+	int i;
+	i = change_page_attr(page, 1, PAGE_KERNEL_NOCACHE);
+	global_flush_tlb();
+	return i;
+}
+EXPORT_SYMBOL_GPL(map_page_into_agp);
+
+int unmap_page_from_agp(struct page *page)
+{
+	int i;
+	i = change_page_attr(page, 1, PAGE_KERNEL);
+	global_flush_tlb();
+	return i;
+}
+EXPORT_SYMBOL_GPL(unmap_page_from_agp);
+#endif
+
+/*
  * Generic routines for handling agp_memory structures -
  * They use the basic page allocation routines to do the brunt of the work.
  */
@@ -142,12 +166,12 @@ EXPORT_SYMBOL(agp_free_memory);
  *	agp_allocate_memory  -  allocate a group of pages of a certain type.
  *
  *	@page_count:	size_t argument of the number of pages
- *	@type:	u32 argument of the type of memory to be allocated.  
+ *	@type:	u32 argument of the type of memory to be allocated.
  *
  *	Every agp bridge device will allow you to allocate AGP_NORMAL_MEMORY which
  *	maps to physical ram.  Any other type is device dependent.
  *
- *	It returns NULL whenever memory is unavailable. 
+ *	It returns NULL whenever memory is unavailable.
  */
 struct agp_memory *agp_allocate_memory(size_t page_count, u32 type)
 {
@@ -310,7 +334,7 @@ EXPORT_SYMBOL(agp_copy_info);
 
 /**
  *	agp_bind_memory  -  Bind an agp_memory structure into the GATT.
- * 
+ *
  *	@curr:		agp_memory pointer
  *	@pg_start:	an offset into the graphics aperture translation table
  *
@@ -346,9 +370,9 @@ EXPORT_SYMBOL(agp_bind_memory);
 
 /**
  *	agp_unbind_memory  -  Removes an agp_memory structure from the GATT
- * 
+ *
  * @curr:	agp_memory pointer to be removed from the GATT.
- * 
+ *
  * It returns -EINVAL if this piece of agp_memory is not currently bound to
  * the graphics aperture translation table or if the agp_memory pointer == NULL
  */
@@ -403,12 +427,18 @@ static void agp_v2_parse_one(u32 *mode, u32 *cmd, u32 *tmp)
 		*cmd &= ~(AGPSTAT2_1X | AGPSTAT2_4X);	/* 2X */
 
 	if (*cmd & AGPSTAT2_1X)
-		*cmd &= ~(AGPSTAT2_2X | AGPSTAT2_4X);	/* 1Xf */
+		*cmd &= ~(AGPSTAT2_2X | AGPSTAT2_4X);	/* 1X */
 }
 
-
+/*
+ * mode = requested mode.
+ * cmd = PCI_AGP_STATUS from agp bridge.
+ * tmp = PCI_AGP_STATUS from graphic card.
+ */
 static void agp_v3_parse_one(u32 *mode, u32 *cmd, u32 *tmp)
 {
+	u32 origcmd=*cmd, origtmp=*tmp;
+
 	/* ARQSZ - Set the value to the maximum one.
 	 * Don't allow the mode register to override values. */
 	*cmd = ((*cmd & ~AGPSTAT_ARQSZ) |
@@ -451,17 +481,43 @@ static void agp_v3_parse_one(u32 *mode, u32 *cmd, u32 *tmp)
 		*mode |= AGPSTAT3_4X;
 	}
 
-	if (!((*cmd & AGPSTAT3_8X) && (*tmp & AGPSTAT3_8X) && (*mode & AGPSTAT3_8X)))
-		*cmd &= ~AGPSTAT3_8X;
-
-	if (!((*cmd & AGPSTAT3_4X) && (*tmp & AGPSTAT3_4X) && (*mode & AGPSTAT3_4X)))
-		*cmd &= ~AGPSTAT3_4X;
-
-	/* Clear out unwanted bits. */
-	if (*cmd & AGPSTAT3_8X)
+	if (*mode & AGPSTAT3_8X) {
+		if (!(*cmd & AGPSTAT3_8X)) {
+			*cmd &= ~(AGPSTAT3_8X | AGPSTAT3_RSVD);
+			*cmd |= AGPSTAT3_4X;
+			printk ("%s requested AGPx8 but bridge not capable.\n", current->comm);
+			return;
+		}
+		if (!(*tmp & AGPSTAT3_8X)) {
+			*cmd &= ~(AGPSTAT3_8X | AGPSTAT3_RSVD);
+			*cmd |= AGPSTAT3_4X;
+			printk ("%s requested AGPx8 but graphic card not capable.\n", current->comm);
+			return;
+		}
+		/* All set, bridge & device can do AGP x8*/
 		*cmd &= ~(AGPSTAT3_4X | AGPSTAT3_RSVD);
-	if (*cmd & AGPSTAT3_4X)
+		return;
+
+	} else {
+
+		/*
+		 * If we didn't specify AGPx8, we can only do x4.
+		 * If the hardware can't do x4, we're up shit creek, and never
+		 *  should have got this far.
+		 */
 		*cmd &= ~(AGPSTAT3_8X | AGPSTAT3_RSVD);
+		if ((*cmd & AGPSTAT3_4X) && (*tmp & AGPSTAT3_4X))
+			*cmd |= AGPSTAT3_4X;
+		else {
+			printk (KERN_INFO PFX "Badness. Don't know which AGP mode to set. "
+							"[cmd:%x tmp:%x fell back to:- cmd:%x tmp:%x]\n",
+							origcmd, origtmp, *cmd, *tmp);
+			if (!(*cmd & AGPSTAT3_4X))
+				printk (KERN_INFO PFX "Bridge couldn't do AGP x4.\n");
+			if (!(*tmp & AGPSTAT3_4X))
+				printk (KERN_INFO PFX "Graphic card couldn't do AGP x4.\n");
+		}
+	}
 }
 
 //FIXME: This doesn't smell right.
@@ -473,13 +529,15 @@ u32 agp_collect_device_status(u32 mode, u32 cmd)
 	u32 tmp;
 	u32 agp3;
 
-	while ((device = pci_find_device(PCI_ANY_ID, PCI_ANY_ID, device)) != NULL) {
+	for_each_pci_dev(device) {
 		cap_ptr = pci_find_capability(device, PCI_CAP_ID_AGP);
 		if (!cap_ptr)
 			continue;
 
+		//FIXME: We should probably skip anything here that
+		// isn't an AGP graphic card.
 		/*
-		 * Ok, here we have a AGP device. Disable impossible 
+		 * Ok, here we have a AGP device. Disable impossible
 		 * settings, and adjust the readqueue to the minimum.
 		 */
 		pci_read_config_dword(device, cap_ptr+PCI_AGP_STATUS, &tmp);
@@ -488,7 +546,7 @@ u32 agp_collect_device_status(u32 mode, u32 cmd)
 		cmd = ((cmd & ~AGPSTAT_RQ_DEPTH) |
 		     min_t(u32, (mode & AGPSTAT_RQ_DEPTH),
 			 min_t(u32, (cmd & AGPSTAT_RQ_DEPTH), (tmp & AGPSTAT_RQ_DEPTH))));
-		
+
 		/* disable FW if it's not supported */
 		if (!((cmd & AGPSTAT_FW) && (tmp & AGPSTAT_FW) && (mode & AGPSTAT_FW)))
 			cmd &= ~AGPSTAT_FW;
@@ -515,7 +573,7 @@ void agp_device_command(u32 command, int agp_v3)
 	if (agp_v3)
 		mode *= 4;
 
-	while ((device = pci_find_device(PCI_ANY_ID, PCI_ANY_ID, device)) != NULL) {
+	for_each_pci_dev(device) {
 		u8 agp = pci_find_capability(device, PCI_CAP_ID_AGP);
 		if (!agp)
 			continue;
@@ -560,9 +618,6 @@ void agp_generic_enable(u32 mode)
 
 	command = agp_collect_device_status(mode, command);
 	command |= AGPSTAT_AGP_ENABLE;
-
-	pci_write_config_dword(agp_bridge->dev,
-		       agp_bridge->capndx + PCI_AGP_COMMAND, command);
 
 	/* Do AGP version specific frobbing. */
 	if(agp_bridge->major_version >= 3) {
@@ -665,7 +720,7 @@ int agp_generic_create_gatt_table(void)
 					    agp_bridge->current_size;
 					break;
 				}
-				temp = agp_bridge->current_size;	
+				temp = agp_bridge->current_size;
 			} else {
 				agp_bridge->aperture_size_idx = i;
 			}
@@ -686,7 +741,7 @@ int agp_generic_create_gatt_table(void)
 		SetPageReserved(page);
 
 	agp_bridge->gatt_table_real = (u32 *) table;
-	agp_gatt_table = (void *)table; 
+	agp_gatt_table = (void *)table;
 
 	agp_bridge->driver->cache_flush();
 	agp_bridge->gatt_table = ioremap_nocache(virt_to_phys(table),
@@ -704,8 +759,10 @@ int agp_generic_create_gatt_table(void)
 	agp_bridge->gatt_bus_addr = virt_to_phys(agp_bridge->gatt_table_real);
 
 	/* AK: bogus, should encode addresses > 4GB */
-	for (i = 0; i < num_entries; i++)
-		agp_bridge->gatt_table[i] = (unsigned long) agp_bridge->scratch_page;
+	for (i = 0; i < num_entries; i++) {
+		writel(agp_bridge->scratch_page, agp_bridge->gatt_table+i);
+		readl(agp_bridge->gatt_table+i);	/* PCI Posting. */
+	}
 
 	return 0;
 }
@@ -811,9 +868,8 @@ int agp_generic_insert_memory(struct agp_memory * mem, off_t pg_start, int type)
 	j = pg_start;
 
 	while (j < (pg_start + mem->page_count)) {
-		if (!PGE_EMPTY(agp_bridge, agp_bridge->gatt_table[j])) {
+		if (!PGE_EMPTY(agp_bridge, readl(agp_bridge->gatt_table+j)))
 			return -EBUSY;
-		}
 		j++;
 	}
 
@@ -822,10 +878,10 @@ int agp_generic_insert_memory(struct agp_memory * mem, off_t pg_start, int type)
 		mem->is_flushed = TRUE;
 	}
 
-	for (i = 0, j = pg_start; i < mem->page_count; i++, j++)
-		agp_bridge->gatt_table[j] =
-				agp_bridge->driver->mask_memory(
-						mem->memory[i], mem->type);
+	for (i = 0, j = pg_start; i < mem->page_count; i++, j++) {
+		writel(agp_bridge->driver->mask_memory(mem->memory[i], mem->type), agp_bridge->gatt_table+j);
+		readl(agp_bridge->gatt_table+j);	/* PCI Posting. */
+	}
 
 	agp_bridge->driver->tlb_flush(mem);
 	return 0;
@@ -844,10 +900,11 @@ int agp_generic_remove_memory(struct agp_memory *mem, off_t pg_start, int type)
 
 	/* AK: bogus, should encode addresses > 4GB */
 	for (i = pg_start; i < (mem->page_count + pg_start); i++) {
-		agp_bridge->gatt_table[i] =
-		    (unsigned long) agp_bridge->scratch_page;
+		writel(agp_bridge->scratch_page, agp_bridge->gatt_table+i);
+		readl(agp_bridge->gatt_table+i);	/* PCI Posting. */
 	}
 
+	global_cache_flush();
 	agp_bridge->driver->tlb_flush(mem);
 	return 0;
 }
@@ -872,9 +929,9 @@ void agp_generic_free_by_type(struct agp_memory *curr)
 EXPORT_SYMBOL(agp_generic_free_by_type);
 
 
-/* 
+/*
  * Basic Page Allocation Routines -
- * These routines handle page allocation and by default they reserve the allocated 
+ * These routines handle page allocation and by default they reserve the allocated
  * memory.  They also handle incrementing the current_memory_agp value, Which is checked
  * against a maximum value.
  */
@@ -882,10 +939,10 @@ EXPORT_SYMBOL(agp_generic_free_by_type);
 void *agp_generic_alloc_page(void)
 {
 	struct page * page;
-	
+
 	page = alloc_page(GFP_KERNEL);
 	if (page == NULL)
-		return 0;
+		return NULL;
 
 	map_page_into_agp(page);
 
@@ -916,9 +973,9 @@ EXPORT_SYMBOL(agp_generic_destroy_page);
 /* End Basic Page Allocation Routines */
 
 
-/** 
+/**
  * agp_enable  -  initialise the agp point-to-point connection.
- * 
+ *
  * @mode:	agp mode register value to configure with.
  */
 void agp_enable(u32 mode)
@@ -930,21 +987,15 @@ void agp_enable(u32 mode)
 EXPORT_SYMBOL(agp_enable);
 
 
-#ifdef CONFIG_SMP
 static void ipi_handler(void *null)
 {
 	flush_agp_cache();
 }
-#endif
 
 void global_cache_flush(void)
 {
-#ifdef CONFIG_SMP
 	if (on_each_cpu(ipi_handler, NULL, 1, 1) != 0)
 		panic(PFX "timed out waiting for the other CPUs!\n");
-#else
-	flush_agp_cache();
-#endif
 }
 EXPORT_SYMBOL(global_cache_flush);
 
@@ -957,4 +1008,86 @@ unsigned long agp_generic_mask_memory(unsigned long addr, int type)
 		return addr;
 }
 EXPORT_SYMBOL(agp_generic_mask_memory);
+
+/*
+ * These functions are implemented according to the AGPv3 spec,
+ * which covers implementation details that had previously been
+ * left open.
+ */
+
+int agp3_generic_fetch_size(void)
+{
+	u16 temp_size;
+	int i;
+	struct aper_size_info_16 *values;
+
+	pci_read_config_word(agp_bridge->dev, agp_bridge->capndx+AGPAPSIZE, &temp_size);
+	values = A_SIZE_16(agp_bridge->driver->aperture_sizes);
+
+	for (i = 0; i < agp_bridge->driver->num_aperture_sizes; i++) {
+		if (temp_size == values[i].size_value) {
+			agp_bridge->previous_size =
+				agp_bridge->current_size = (void *) (values + i);
+
+			agp_bridge->aperture_size_idx = i;
+			return values[i].size;
+		}
+	}
+	return 0;
+}
+EXPORT_SYMBOL(agp3_generic_fetch_size);
+
+void agp3_generic_tlbflush(struct agp_memory *mem)
+{
+	u32 ctrl;
+	pci_read_config_dword(agp_bridge->dev, agp_bridge->capndx+AGPCTRL, &ctrl);
+	pci_write_config_dword(agp_bridge->dev, agp_bridge->capndx+AGPCTRL, ctrl & ~AGPCTRL_GTLBEN);
+	pci_write_config_dword(agp_bridge->dev, agp_bridge->capndx+AGPCTRL, ctrl);
+}
+EXPORT_SYMBOL(agp3_generic_tlbflush);
+
+int agp3_generic_configure(void)
+{
+	u32 temp;
+	struct aper_size_info_16 *current_size;
+
+	current_size = A_SIZE_16(agp_bridge->current_size);
+
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
+	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
+
+	/* set aperture size */
+	pci_write_config_word(agp_bridge->dev, agp_bridge->capndx+AGPAPSIZE, current_size->size_value);
+	/* set gart pointer */
+	pci_write_config_dword(agp_bridge->dev, agp_bridge->capndx+AGPGARTLO, agp_bridge->gatt_bus_addr);
+	/* enable aperture and GTLB */
+	pci_read_config_dword(agp_bridge->dev, agp_bridge->capndx+AGPCTRL, &temp);
+	pci_write_config_dword(agp_bridge->dev, agp_bridge->capndx+AGPCTRL, temp | AGPCTRL_APERENB | AGPCTRL_GTLBEN);
+	return 0;
+}
+EXPORT_SYMBOL(agp3_generic_configure);
+
+void agp3_generic_cleanup(void)
+{
+	u32 ctrl;
+	pci_read_config_dword(agp_bridge->dev, agp_bridge->capndx+AGPCTRL, &ctrl);
+	pci_write_config_dword(agp_bridge->dev, agp_bridge->capndx+AGPCTRL, ctrl & ~AGPCTRL_APERENB);
+}
+EXPORT_SYMBOL(agp3_generic_cleanup);
+
+struct aper_size_info_16 agp3_generic_sizes[AGP_GENERIC_SIZES_ENTRIES] =
+{
+	{4096, 1048576, 10,0x000},
+	{2048,  524288, 9, 0x800},
+	{1024,  262144, 8, 0xc00},
+	{ 512,  131072, 7, 0xe00},
+	{ 256,   65536, 6, 0xf00},
+	{ 128,   32768, 5, 0xf20},
+	{  64,   16384, 4, 0xf30},
+	{  32,    8192, 3, 0xf38},
+	{  16,    4096, 2, 0xf3c},
+	{   8,    2048, 1, 0xf3e},
+	{   4,    1024, 0, 0xf3f}
+};
+EXPORT_SYMBOL(agp3_generic_sizes);
 

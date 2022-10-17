@@ -35,6 +35,7 @@
 
 #ifndef __ASSEMBLY__
 
+#include <linux/bcd.h>
 #include <linux/spinlock.h>
 #include <linux/efi.h>
 
@@ -71,7 +72,9 @@ extern spinlock_t sal_lock;
 # define SAL_CALL_REENTRANT(result,args...) do {	\
 	struct ia64_fpreg __ia64_scs_fr[6];		\
 	ia64_save_scratch_fpregs(__ia64_scs_fr);	\
+	preempt_disable();				\
 	__SAL_CALL(result, args);			\
+	preempt_enable();				\
 	ia64_load_scratch_fpregs(__ia64_scs_fr);	\
 } while (0)
 
@@ -227,6 +230,10 @@ typedef struct ia64_sal_desc_ap_wakeup {
 extern ia64_sal_handler ia64_sal;
 extern struct ia64_sal_desc_ptc *ia64_ptc_domain_info;
 
+extern unsigned short sal_revision;	/* supported SAL spec revision */
+extern unsigned short sal_version;	/* SAL version; OEM dependent */
+#define SAL_VERSION_CODE(major, minor) ((BIN2BCD(major) << 8) | BIN2BCD(minor))
+
 extern const char *ia64_sal_strerror (long status);
 extern void ia64_sal_init (struct ia64_sal_systab *sal_systab);
 
@@ -318,6 +325,10 @@ typedef struct sal_log_record_header {
 	efi_guid_t platform_guid;	/* Unique OEM Platform ID */
 } sal_log_record_header_t;
 
+#define sal_log_severity_recoverable	0
+#define sal_log_severity_fatal		1
+#define sal_log_severity_corrected	2
+
 /* Definition of log section header structures */
 typedef struct sal_log_sec_header {
     efi_guid_t guid;			/* Unique Section ID */
@@ -357,7 +368,7 @@ typedef struct sal_processor_static_info {
 	u64 cr[128];
 	u64 ar[128];
 	u64 rr[8];
-	struct ia64_fpreg fr[128];
+	struct ia64_fpreg __attribute__ ((packed)) fr[128];
 } sal_processor_static_info_t;
 
 struct sal_cpuid_info {
@@ -725,22 +736,24 @@ ia64_sal_mc_rendez (void)
  * Allow the OS to specify the interrupt number to be used by SAL to interrupt OS during
  * the machine check rendezvous sequence as well as the mechanism to wake up the
  * non-monarch processor at the end of machine check processing.
+ * Returns the complete ia64_sal_retval because some calls return more than just a status
+ * value.
  */
-static inline s64
+static inline struct ia64_sal_retval
 ia64_sal_mc_set_params (u64 param_type, u64 i_or_m, u64 i_or_m_val, u64 timeout, u64 rz_always)
 {
 	struct ia64_sal_retval isrv;
 	SAL_CALL(isrv, SAL_MC_SET_PARAMS, param_type, i_or_m, i_or_m_val,
 		 timeout, rz_always, 0, 0);
-	return isrv.status;
+	return isrv;
 }
 
 /* Read from PCI configuration space */
 static inline s64
-ia64_sal_pci_config_read (u64 pci_config_addr, u64 size, u64 *value)
+ia64_sal_pci_config_read (u64 pci_config_addr, int type, u64 size, u64 *value)
 {
 	struct ia64_sal_retval isrv;
-	SAL_CALL(isrv, SAL_PCI_CONFIG_READ, pci_config_addr, size, 0, 0, 0, 0, 0);
+	SAL_CALL(isrv, SAL_PCI_CONFIG_READ, pci_config_addr, size, type, 0, 0, 0, 0);
 	if (value)
 		*value = isrv.v0;
 	return isrv.status;
@@ -748,11 +761,11 @@ ia64_sal_pci_config_read (u64 pci_config_addr, u64 size, u64 *value)
 
 /* Write to PCI configuration space */
 static inline s64
-ia64_sal_pci_config_write (u64 pci_config_addr, u64 size, u64 value)
+ia64_sal_pci_config_write (u64 pci_config_addr, int type, u64 size, u64 value)
 {
 	struct ia64_sal_retval isrv;
 	SAL_CALL(isrv, SAL_PCI_CONFIG_WRITE, pci_config_addr, size, value,
-	         0, 0, 0, 0);
+	         type, 0, 0, 0);
 	return isrv.status;
 }
 
@@ -804,10 +817,24 @@ ia64_sal_update_pal (u64 param_buf, u64 scratch_buf, u64 scratch_buf_size,
 
 extern unsigned long sal_platform_features;
 
+extern int (*salinfo_platform_oemdata)(const u8 *, u8 **, u64 *);
+
 struct sal_ret_values {
 	long r8; long r9; long r10; long r11;
 };
 
+#define IA64_SAL_OEMFUNC_MIN		0x02000000
+#define IA64_SAL_OEMFUNC_MAX		0x03ffffff
+
+extern int ia64_sal_oemcall(struct ia64_sal_retval *, u64, u64, u64, u64, u64,
+			    u64, u64, u64);
+extern int ia64_sal_oemcall_nolock(struct ia64_sal_retval *, u64, u64, u64,
+				   u64, u64, u64, u64, u64);
+extern int ia64_sal_oemcall_reentrant(struct ia64_sal_retval *, u64, u64, u64,
+				      u64, u64, u64, u64, u64);
+
+extern void ia64_sal_handler_init(void *entry_point, void *gpval);
+
 #endif /* __ASSEMBLY__ */
 
-#endif /* _ASM_IA64_PAL_H */
+#endif /* _ASM_IA64_SAL_H */

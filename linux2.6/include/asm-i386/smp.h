@@ -34,27 +34,27 @@
 extern void smp_alloc_memory(void);
 extern int pic_mode;
 extern int smp_num_siblings;
-extern int cpu_sibling_map[];
+extern cpumask_t cpu_sibling_map[];
 
 extern void smp_flush_tlb(void);
 extern void smp_message_irq(int cpl, void *dev_id, struct pt_regs *regs);
-extern void smp_send_reschedule(int cpu);
 extern void smp_invalidate_rcv(void);		/* Process an NMI */
 extern void (*mtrr_hook) (void);
 extern void zap_low_mappings (void);
 
 #define MAX_APICID 256
+extern u8 x86_cpu_to_apicid[];
 
 /*
  * This function is needed by all SMP systems. It must _always_ be valid
  * from the initial startup. We map APIC_BASE very early in page_setup(),
  * so this is correct in the x86 case.
  */
-#define smp_processor_id() (current_thread_info()->cpu)
+#define __smp_processor_id() (current_thread_info()->cpu)
 
 extern cpumask_t cpu_callout_map;
-
-#define cpu_possible(cpu) cpu_isset(cpu, cpu_callout_map)
+extern cpumask_t cpu_callin_map;
+#define cpu_possible_map cpu_callout_map
 
 /* We don't mark CPUs online until __cpu_up(), so we need another measure */
 static inline int num_booting_cpus(void)

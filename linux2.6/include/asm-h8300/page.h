@@ -1,12 +1,12 @@
-#ifndef _H8300NOMMU_PAGE_H
-#define _H8300NOMMU_PAGE_H
+#ifndef _H8300_PAGE_H
+#define _H8300_PAGE_H
 
 #include <linux/config.h>
 
 /* PAGE_SHIFT determines the page size */
 
 #define PAGE_SHIFT	(12)
-#define PAGE_SIZE	(4096)
+#define PAGE_SIZE	(1UL << PAGE_SHIFT)
 #define PAGE_MASK	(~(PAGE_SIZE-1))
 
 #ifdef __KERNEL__
@@ -29,6 +29,9 @@
 
 #define clear_user_page(page, vaddr, pg)	clear_page(page)
 #define copy_user_page(to, from, vaddr, pg)	copy_page(to, from)
+
+#define alloc_zeroed_user_highpage(vma, vaddr) alloc_page_vma(GFP_HIGHUSER | __GFP_ZERO, vma, vaddr)
+#define __HAVE_ARCH_ALLOC_ZEROED_USER_HIGHPAGE
 
 /*
  * These are used to make use of C type-checking..
@@ -98,4 +101,4 @@ extern unsigned long memory_end;
 
 #endif /* __KERNEL__ */
 
-#endif /* _H8300NOMMU_PAGE_H */
+#endif /* _H8300_PAGE_H */

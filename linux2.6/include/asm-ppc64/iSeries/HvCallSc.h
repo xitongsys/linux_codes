@@ -16,22 +16,19 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
-
-#ifndef  _HVTYPES_H
-#include <asm/iSeries/HvTypes.h>
-#endif
-
 #ifndef _HVCALLSC_H
 #define _HVCALLSC_H
 
-#define HvCallBase		0x8000000000000000
-#define HvCallCc		0x8001000000000000
-#define HvCallCfg		0x8002000000000000
-#define HvCallEvent		0x8003000000000000
-#define HvCallHpt		0x8004000000000000
-#define HvCallPci		0x8005000000000000
-#define HvCallSm		0x8007000000000000
-#define HvCallXm		0x8009000000000000
+#include <asm/iSeries/HvTypes.h>
+
+#define HvCallBase		0x8000000000000000ul
+#define HvCallCc		0x8001000000000000ul
+#define HvCallCfg		0x8002000000000000ul
+#define HvCallEvent		0x8003000000000000ul
+#define HvCallHpt		0x8004000000000000ul
+#define HvCallPci		0x8005000000000000ul
+#define HvCallSm		0x8007000000000000ul
+#define HvCallXm		0x8009000000000000ul
 
 u64 HvCall0( u64 );
 u64 HvCall1( u64, u64 );

@@ -98,6 +98,7 @@ static struct sysrq_key_op sysrq_unraw_op = {
 static void sysrq_handle_reboot(int key, struct pt_regs *pt_regs,
 				struct tty_struct *tty) 
 {
+	local_irq_enable();
 	machine_restart(NULL);
 }
 
@@ -216,9 +217,19 @@ static struct sysrq_key_op sysrq_kill_op = {
 
 /* END SIGNAL SYSRQ HANDLERS BLOCK */
 
+static void sysrq_handle_unrt(int key, struct pt_regs *pt_regs,
+				struct tty_struct *tty)
+{
+	normalize_rt_tasks();
+}
+static struct sysrq_key_op sysrq_unrt_op = {
+	.handler	= sysrq_handle_unrt,
+	.help_msg	= "Nice",
+	.action_msg	= "Nice All RT Tasks"
+};
 
 /* Key Operations table and lock */
-static spinlock_t sysrq_key_table_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(sysrq_key_table_lock);
 #define SYSRQ_KEY_TABLE_LENGTH 36
 static struct sysrq_key_op *sysrq_key_table[SYSRQ_KEY_TABLE_LENGTH] = {
 /* 0 */	&sysrq_loglevel_op,
@@ -250,7 +261,7 @@ static struct sysrq_key_op *sysrq_key_table[SYSRQ_KEY_TABLE_LENGTH] = {
 #endif
 /* l */	NULL,
 /* m */	&sysrq_showmem_op,
-/* n */	NULL,
+/* n */	&sysrq_unrt_op,
 /* o */	NULL, /* This will often be registered
 		 as 'Off' at init time */
 /* p */	&sysrq_showregs_op,
@@ -271,25 +282,17 @@ static struct sysrq_key_op *sysrq_key_table[SYSRQ_KEY_TABLE_LENGTH] = {
 };
 
 /* key2index calculation, -1 on invalid index */
-static __inline__ int sysrq_key_table_key2index(int key) {
+static int sysrq_key_table_key2index(int key) {
 	int retval;
-	if ((key >= '0') & (key <= '9')) {
+	if ((key >= '0') && (key <= '9')) {
 		retval = key - '0';
-	} else if ((key >= 'a') & (key <= 'z')) {
+	} else if ((key >= 'a') && (key <= 'z')) {
 		retval = key + 10 - 'a';
 	} else {
 		retval = -1;
 	}
 	return retval;
 }
-
-/*
- * table lock and unlocking functions, exposed to modules
- */
-
-void __sysrq_lock_table (void) { spin_lock(&sysrq_key_table_lock); }
-
-void __sysrq_unlock_table (void) { spin_unlock(&sysrq_key_table_lock); }
 
 /*
  * get and put functions for the table, exposed to modules.
@@ -313,36 +316,19 @@ void __sysrq_put_key_op (int key, struct sysrq_key_op *op_p) {
 }
 
 /*
- * This function is called by the keyboard handler when SysRq is pressed
- * and any other keycode arrives.
- */
-
-void handle_sysrq(int key, struct pt_regs *pt_regs, struct tty_struct *tty)
-{
-	if (!sysrq_enabled)
-		return;
-
-	__sysrq_lock_table();
-	__handle_sysrq_nolock(key, pt_regs, tty);
-	__sysrq_unlock_table();
-}
-
-/*
  * This is the non-locking version of handle_sysrq
  * It must/can only be called by sysrq key handlers,
  * as they are inside of the lock
  */
 
-void __handle_sysrq_nolock(int key, struct pt_regs *pt_regs,
-		  	   struct tty_struct *tty) 
+void __handle_sysrq(int key, struct pt_regs *pt_regs, struct tty_struct *tty)
 {
 	struct sysrq_key_op *op_p;
 	int orig_log_level;
 	int i, j;
-	
-	if (!sysrq_enabled)
-		return;
+	unsigned long flags;
 
+	spin_lock_irqsave(&sysrq_key_table_lock, flags);
 	orig_log_level = console_loglevel;
 	console_loglevel = 7;
 	printk(KERN_INFO "SysRq : ");
@@ -364,11 +350,49 @@ void __handle_sysrq_nolock(int key, struct pt_regs *pt_regs,
 		printk ("\n");
 		console_loglevel = orig_log_level;
 	}
+	spin_unlock_irqrestore(&sysrq_key_table_lock, flags);
+}
+
+/*
+ * This function is called by the keyboard handler when SysRq is pressed
+ * and any other keycode arrives.
+ */
+
+void handle_sysrq(int key, struct pt_regs *pt_regs, struct tty_struct *tty)
+{
+	if (!sysrq_enabled)
+		return;
+	__handle_sysrq(key, pt_regs, tty);
+}
+
+int __sysrq_swap_key_ops(int key, struct sysrq_key_op *insert_op_p,
+                                struct sysrq_key_op *remove_op_p) {
+
+	int retval;
+	unsigned long flags;
+
+	spin_lock_irqsave(&sysrq_key_table_lock, flags);
+	if (__sysrq_get_key_op(key) == remove_op_p) {
+		__sysrq_put_key_op(key, insert_op_p);
+		retval = 0;
+	} else {
+		retval = -1;
+	}
+	spin_unlock_irqrestore(&sysrq_key_table_lock, flags);
+
+	return retval;
+}
+
+int register_sysrq_key(int key, struct sysrq_key_op *op_p)
+{
+	return __sysrq_swap_key_ops(key, op_p, NULL);
+}
+
+int unregister_sysrq_key(int key, struct sysrq_key_op *op_p)
+{
+	return __sysrq_swap_key_ops(key, NULL, op_p);
 }
 
 EXPORT_SYMBOL(handle_sysrq);
-EXPORT_SYMBOL(__handle_sysrq_nolock);
-EXPORT_SYMBOL(__sysrq_lock_table);
-EXPORT_SYMBOL(__sysrq_unlock_table);
-EXPORT_SYMBOL(__sysrq_get_key_op);
-EXPORT_SYMBOL(__sysrq_put_key_op);
+EXPORT_SYMBOL(register_sysrq_key);
+EXPORT_SYMBOL(unregister_sysrq_key);

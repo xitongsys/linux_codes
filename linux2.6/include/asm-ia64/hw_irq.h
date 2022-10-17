@@ -34,6 +34,8 @@ typedef u8 ia64_vector;
 #define IA64_MAX_VECTORED_IRQ		255
 #define IA64_NUM_VECTORS		256
 
+#define AUTO_ASSIGN			-1
+
 #define IA64_SPURIOUS_INT_VECTOR	0x0f
 
 /*
@@ -48,6 +50,7 @@ typedef u8 ia64_vector;
  */
 #define IA64_FIRST_DEVICE_VECTOR	0x30
 #define IA64_LAST_DEVICE_VECTOR		0xe7
+#define IA64_NUM_DEVICE_VECTORS		(IA64_LAST_DEVICE_VECTOR - IA64_FIRST_DEVICE_VECTOR + 1)
 
 #define IA64_MCA_RENDEZ_VECTOR		0xe8	/* MCA rendez interrupt */
 #define IA64_PERFMON_VECTOR		0xee	/* performanc monitor interrupt vector */
@@ -76,11 +79,10 @@ enum {
 extern __u8 isa_irq_to_vector_map[16];
 #define isa_irq_to_vector(x)	isa_irq_to_vector_map[(x)]
 
-extern unsigned long ipi_base_addr;
-
 extern struct hw_interrupt_type irq_type_ia64_lsapic;	/* CPU-internal interrupt controller */
 
-extern int ia64_alloc_vector (void);	/* allocate a free vector */
+extern int assign_irq_vector (int irq);	/* allocate a free vector */
+extern void free_irq_vector (int vector);
 extern void ia64_send_ipi (int cpu, int vector, int delivery_mode, int redirect);
 extern void register_percpu_irq (ia64_vector vec, struct irqaction *action);
 
@@ -94,21 +96,9 @@ hw_resend_irq (struct hw_interrupt_type *h, unsigned int vector)
  * Default implementations for the irq-descriptor API:
  */
 
-extern irq_desc_t _irq_desc[NR_IRQS];
+extern irq_desc_t irq_desc[NR_IRQS];
 
 #ifndef CONFIG_IA64_GENERIC
-static inline irq_desc_t *
-__ia64_irq_desc (unsigned int irq)
-{
-	return _irq_desc + irq;
-}
-
-static inline ia64_vector
-__ia64_irq_to_vector (unsigned int irq)
-{
-	return (ia64_vector) irq;
-}
-
 static inline unsigned int
 __ia64_local_vector_to_irq (ia64_vector vec)
 {
@@ -130,14 +120,14 @@ __ia64_local_vector_to_irq (ia64_vector vec)
 static inline irq_desc_t *
 irq_descp (int irq)
 {
-	return platform_irq_desc(irq);
+	return irq_desc + irq;
 }
 
 /* Extract the IA-64 vector that corresponds to IRQ.  */
 static inline ia64_vector
 irq_to_vector (int irq)
 {
-	return platform_irq_to_vector(irq);
+	return (ia64_vector) irq;
 }
 
 /*

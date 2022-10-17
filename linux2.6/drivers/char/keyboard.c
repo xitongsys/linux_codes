@@ -31,7 +31,6 @@
 #include <linux/tty_flip.h>
 #include <linux/mm.h>
 #include <linux/string.h>
-#include <linux/random.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 
@@ -52,13 +51,12 @@ extern void ctrl_alt_del(void);
 
 /*
  * Some laptops take the 789uiojklm,. keys as number pad when NumLock is on.
- * This seems a good reason to start with NumLock off. On PC9800 and HIL keyboards 
+ * This seems a good reason to start with NumLock off. On HIL keyboards
  * of PARISC machines however there is no NumLock key and everyone expects the keypad 
  * to be used for numbers.
  */
 
-#if defined(CONFIG_X86_PC9800) || \
-    defined(CONFIG_PARISC) && (defined(CONFIG_KEYBOARD_HIL) || defined(CONFIG_KEYBOARD_HIL_OLD))
+#if defined(CONFIG_PARISC) && (defined(CONFIG_KEYBOARD_HIL) || defined(CONFIG_KEYBOARD_HIL_OLD))
 #define KBD_DEFLEDS (1 << VC_NUMLOCK)
 #else
 #define KBD_DEFLEDS 0
@@ -124,7 +122,7 @@ int shift_state = 0;
  */
 
 static struct input_handler kbd_handler;
-static unsigned long key_down[256/BITS_PER_LONG];	/* keyboard key bitmap */
+static unsigned long key_down[NBITS(KEY_MAX)];		/* keyboard key bitmap */
 static unsigned char shift_down[NR_SHIFT];		/* shift state counters.. */
 static int dead_key_next;
 static int npadch = -1;					/* -1 or number assembled on pad */
@@ -143,7 +141,7 @@ static struct ledptr {
 /* Simple translation table for the SysRq keys */
 
 #ifdef CONFIG_MAGIC_SYSRQ
-unsigned char kbd_sysrq_xlate[128] =
+unsigned char kbd_sysrq_xlate[KEY_MAX] =
         "\000\0331234567890-=\177\t"                    /* 0x00 - 0x0f */
         "qwertyuiop[]\r\000as"                          /* 0x10 - 0x1f */
         "dfghjkl;'`\000\\zxcv"                          /* 0x20 - 0x2f */
@@ -200,9 +198,10 @@ int setkeycode(unsigned int scancode, unsigned int keycode)
 
 	if (scancode < 0 || scancode >= dev->keycodemax)
 		return -EINVAL;
+	if (keycode < 0 || keycode > KEY_MAX)
+		return -EINVAL;
 
-	oldkey = INPUT_KEYCODE(dev, scancode);
-	INPUT_KEYCODE(dev, scancode) = keycode;
+	oldkey = SET_INPUT_KEYCODE(dev, scancode, keycode);
 
 	clear_bit(oldkey, dev->keybit);
 	set_bit(keycode, dev->keybit);
@@ -332,7 +331,7 @@ static void applkey(struct vc_data *vc, int key, char mode)
  * in utf-8 already. UTF-8 is defined for words of up to 31 bits,
  * but we need only 16 bits here
  */
-void to_utf8(struct vc_data *vc, ushort c) 
+static void to_utf8(struct vc_data *vc, ushort c)
 {
 	if (c < 0x80)
 		/*  0******* */
@@ -394,7 +393,7 @@ void compute_shiftstate(void)
  * Otherwise, conclude that DIACR was not combining after all,
  * queue it and return CH.
  */
-unsigned char handle_diacr(struct vc_data *vc, unsigned char ch)
+static unsigned char handle_diacr(struct vc_data *vc, unsigned char ch)
 {
 	int d = diacr;
 	int i;
@@ -493,9 +492,13 @@ static void fn_lastcons(struct vc_data *vc, struct pt_regs *regs)
 
 static void fn_dec_console(struct vc_data *vc, struct pt_regs *regs)
 {
-	int i;
- 
-	for (i = fg_console-1; i != fg_console; i--) {
+	int i, cur = fg_console;
+
+	/* Currently switching?  Queue this next switch relative to that. */
+	if (want_console != -1)
+		cur = want_console;
+
+	for (i = cur-1; i != cur; i--) {
 		if (i == -1)
 			i = MAX_NR_CONSOLES-1;
 		if (vc_cons_allocated(i))
@@ -506,9 +509,13 @@ static void fn_dec_console(struct vc_data *vc, struct pt_regs *regs)
 
 static void fn_inc_console(struct vc_data *vc, struct pt_regs *regs)
 {
-	int i;
+	int i, cur = fg_console;
 
-	for (i = fg_console+1; i != fg_console; i++) {
+	/* Currently switching?  Queue this next switch relative to that. */
+	if (want_console != -1)
+		cur = want_console;
+
+	for (i = cur+1; i != cur; i++) {
 		if (i == MAX_NR_CONSOLES)
 			i = 0;
 		if (vc_cons_allocated(i))
@@ -847,18 +854,6 @@ void setledstate(struct kbd_struct *kbd, unsigned int led)
 	set_leds();
 }
 
-void register_leds(struct kbd_struct *kbd, unsigned int led,
-		   unsigned int *addr, unsigned int mask)
-{
-	if (led < 3) {
-		ledptrs[led].addr = addr;
-		ledptrs[led].mask = mask;
-		ledptrs[led].valid = 1;
-		kbd->ledmode = LED_SHOW_MEM;
-	} else
-		kbd->ledmode = LED_SHOW_FLAGS;
-}
-
 static inline unsigned char getleds(void)
 {
 	struct kbd_struct *kbd = kbd_table + fg_console;
@@ -919,7 +914,7 @@ DECLARE_TASKLET_DISABLED(keyboard_tasklet, kbd_bh, 0);
 /*
  * This allows a newly plugged keyboard to pick the LED state.
  */
-void kbd_refresh_leds(struct input_handle *handle)
+static void kbd_refresh_leds(struct input_handle *handle)
 {
 	unsigned char leds = ledstate;
 
@@ -933,7 +928,13 @@ void kbd_refresh_leds(struct input_handle *handle)
 	tasklet_enable(&keyboard_tasklet);
 }
 
-#if defined(CONFIG_X86) || defined(CONFIG_IA64) || defined(CONFIG_ALPHA) || defined(CONFIG_MIPS) || defined(CONFIG_PPC) || defined(CONFIG_SPARC32) || defined(CONFIG_SPARC64) || defined(CONFIG_PARISC)
+#if defined(CONFIG_X86) || defined(CONFIG_IA64) || defined(CONFIG_ALPHA) ||\
+    defined(CONFIG_MIPS) || defined(CONFIG_PPC) || defined(CONFIG_SPARC32) ||\
+    defined(CONFIG_SPARC64) || defined(CONFIG_PARISC) || defined(CONFIG_SUPERH) ||\
+    (defined(CONFIG_ARM) && defined(CONFIG_KEYBOARD_ATKBD) && !defined(CONFIG_RPC))
+
+#define HW_RAW(dev) (test_bit(EV_MSC, dev->evbit) && test_bit(MSC_RAW, dev->mscbit) &&\
+			((dev)->id.bustype == BUS_I8042) && ((dev)->id.vendor == 0x0001) && ((dev)->id.product == 0x0001))
 
 static unsigned short x86_keycodes[256] =
 	{ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
@@ -941,16 +942,16 @@ static unsigned short x86_keycodes[256] =
 	 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
 	 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
 	 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
-	 80, 81, 82, 83, 43, 85, 86, 87, 88,115,119,120,121,375,123, 90,
+	 80, 81, 82, 83, 84,118, 86, 87, 88,115,120,119,121,112,123, 92,
 	284,285,309,298,312, 91,327,328,329,331,333,335,336,337,338,339,
-	367,288,302,304,350, 92,334,512,116,377,109,111,373,347,348,349,
-	360, 93, 94, 95, 98,376,100,101,321,316,354,286,289,102,351,355,
+	367,288,302,304,350, 89,334,326,267,126,268,269,125,347,348,349,
+	360,261,262,263,268,376,100,101,321,316,373,286,289,102,351,355,
 	103,104,105,275,287,279,306,106,274,107,294,364,358,363,362,361,
-	291,108,381,281,290,272,292,305,280, 99,112,257,258,359,270,114,
-	118,117,125,374,379,115,112,125,121,123,264,265,266,267,268,269,
-	271,273,276,277,278,282,283,295,296,297,299,300,301,293,303,307,
-	308,310,313,314,315,317,318,319,320,357,322,323,324,325,326,330,
-	332,340,365,342,343,344,345,346,356,113,341,368,369,370,371,372 };
+	291,108,381,281,290,272,292,305,280, 99,112,257,258,359,113,114,
+	264,117,271,374,379,265,266, 93, 94, 95, 85,259,375,260, 90,116,
+	377,109,111,277,278,282,283,295,296,297,299,300,301,293,303,307,
+	308,310,313,314,315,317,318,319,320,357,322,323,324,325,276,330,
+	332,340,365,342,343,344,345,346,356,270,341,368,369,370,371,372 };
 
 #ifdef CONFIG_MAC_EMUMOUSEBTN
 extern int mac_hid_mouse_emulate_buttons(int, int, int);
@@ -964,19 +965,21 @@ extern void sun_do_break(void);
 static int emulate_raw(struct vc_data *vc, unsigned int keycode, 
 		       unsigned char up_flag)
 {
-#ifdef CONFIG_MAC_EMUMOUSEBTN
-	if (mac_hid_mouse_emulate_buttons(1, keycode, !up_flag))
-		return 0;
-#endif /* CONFIG_MAC_EMUMOUSEBTN */
-
 	if (keycode > 255 || !x86_keycodes[keycode])
 		return -1; 
 
-	if (keycode == KEY_PAUSE) {
-		put_queue(vc, 0xe1);
-		put_queue(vc, 0x1d | up_flag);
-		put_queue(vc, 0x45 | up_flag);
-		return 0;
+	switch (keycode) {
+		case KEY_PAUSE:
+			put_queue(vc, 0xe1);
+			put_queue(vc, 0x1d | up_flag);
+			put_queue(vc, 0x45 | up_flag);
+			return 0;
+		case KEY_HANGUEL:
+			if (!up_flag) put_queue(vc, 0xf1);
+			return 0;
+		case KEY_HANJA:
+			if (!up_flag) put_queue(vc, 0xf2);
+			return 0;
 	} 
 
 	if (keycode == KEY_SYSRQ && sysrq_alt) {
@@ -999,6 +1002,8 @@ static int emulate_raw(struct vc_data *vc, unsigned int keycode,
 
 #else
 
+#define HW_RAW(dev)	0
+
 #warning "Cannot generate rawmode keyboard for your architecture yet."
 
 static int emulate_raw(struct vc_data *vc, unsigned int keycode, unsigned char up_flag)
@@ -1011,16 +1016,21 @@ static int emulate_raw(struct vc_data *vc, unsigned int keycode, unsigned char u
 }
 #endif
 
-void kbd_keycode(unsigned int keycode, int down, struct pt_regs *regs)
+static void kbd_rawcode(unsigned char data)
+{
+	struct vc_data *vc = vc_cons[fg_console].d;
+	kbd = kbd_table + fg_console;
+	if (kbd->kbdmode == VC_RAW)
+		put_queue(vc, data);
+}
+
+void kbd_keycode(unsigned int keycode, int down, int hw_raw, struct pt_regs *regs)
 {
 	struct vc_data *vc = vc_cons[fg_console].d;
 	unsigned short keysym, *key_map;
 	unsigned char type, raw_mode;
 	struct tty_struct *tty;
 	int shift_final;
-
-	if (down != 2)
-		add_keyboard_randomness((keycode << 1) ^ down);
 
 	tty = vc->vc_tty;
 
@@ -1040,7 +1050,12 @@ void kbd_keycode(unsigned int keycode, int down, struct pt_regs *regs)
 
 	rep = (down == 2);
 
-	if ((raw_mode = (kbd->kbdmode == VC_RAW)))
+#ifdef CONFIG_MAC_EMUMOUSEBTN
+	if (mac_hid_mouse_emulate_buttons(1, keycode, down))
+		return;
+#endif /* CONFIG_MAC_EMUMOUSEBTN */
+
+	if ((raw_mode = (kbd->kbdmode == VC_RAW)) && !hw_raw)
 		if (emulate_raw(vc, keycode, !down << 7))
 			if (keycode < BTN_MISC)
 				printk(KERN_WARNING "keyboard.c: can't emulate rawmode for keycode %d\n", keycode);
@@ -1106,6 +1121,9 @@ void kbd_keycode(unsigned int keycode, int down, struct pt_regs *regs)
 		return;
 	}
 
+	if (keycode > NR_KEYS)
+		return;
+
 	keysym = key_map[keycode];
 	type = KTYP(keysym);
 
@@ -1135,11 +1153,12 @@ void kbd_keycode(unsigned int keycode, int down, struct pt_regs *regs)
 }
 
 static void kbd_event(struct input_handle *handle, unsigned int event_type, 
-		      unsigned int keycode, int down)
+		      unsigned int event_code, int value)
 {
-	if (event_type != EV_KEY)
-		return;
-	kbd_keycode(keycode, down, handle->dev->regs);
+	if (event_type == EV_MSC && event_code == MSC_RAW && HW_RAW(handle->dev))
+		kbd_rawcode(value);
+	if (event_type == EV_KEY)
+		kbd_keycode(event_code, value, HW_RAW(handle->dev), handle->dev->regs);
 	tasklet_schedule(&keyboard_tasklet);
 	do_poke_blanked_console = 1;
 	schedule_console_callback();

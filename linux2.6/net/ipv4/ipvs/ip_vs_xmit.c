@@ -15,10 +15,7 @@
  *
  */
 
-#include <linux/config.h>
-#include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/compiler.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>                  /* for tcphdr */
 #include <net/tcp.h>                    /* for csum_tcpudp_magic */
@@ -54,7 +51,7 @@ __ip_vs_dst_check(struct ip_vs_dest *dest, u32 rtos, u32 cookie)
 		return NULL;
 	if ((dst->obsolete || rtos != dest->dst_rtos) &&
 	    dst->ops->check(dst, cookie) == NULL) {
-		dest->dst_cache = 0;
+		dest->dst_cache = NULL;
 		return NULL;
 	}
 	dst_hold(dst);
@@ -127,10 +124,11 @@ ip_vs_dst_reset(struct ip_vs_dest *dest)
 	dst_release(old_dst);
 }
 
-
 #define IP_VS_XMIT(skb, rt)				\
 do {							\
+	nf_reset_debug(skb);				\
 	(skb)->nfcache |= NFC_IPVS_PROPERTY;		\
+	(skb)->ip_summed = CHECKSUM_NONE;		\
 	NF_HOOK(PF_INET, NF_IP_LOCAL_OUT, (skb), NULL,	\
 		(rt)->u.dst.dev, dst_output);		\
 } while (0)
@@ -204,9 +202,6 @@ ip_vs_bypass_xmit(struct sk_buff *skb, struct ip_vs_conn *cp,
 	/* Another hack: avoid icmp_send in ip_fragment */
 	skb->local_df = 1;
 
-#ifdef CONFIG_NETFILTER_DEBUG
-	skb->nf_debug = 0;
-#endif /* CONFIG_NETFILTER_DEBUG */
 	IP_VS_XMIT(skb, rt);
 
 	LeaveFunction(10);
@@ -237,11 +232,12 @@ ip_vs_nat_xmit(struct sk_buff *skb, struct ip_vs_conn *cp,
 
 	/* check if it is a connection of no-client-port */
 	if (unlikely(cp->flags & IP_VS_CONN_F_NO_CPORT)) {
-		__u16 pt;
-		if (skb_copy_bits(skb, iph->ihl*4, &pt, sizeof(pt)) < 0)
+		__u16 _pt, *p;
+		p = skb_header_pointer(skb, iph->ihl*4, sizeof(_pt), &_pt);
+		if (p == NULL)
 			goto tx_error;
-		ip_vs_conn_fill_cport(cp, pt);
-		IP_VS_DBG(10, "filled cport=%d\n", ntohs(pt));
+		ip_vs_conn_fill_cport(cp, *p);
+		IP_VS_DBG(10, "filled cport=%d\n", ntohs(*p));
 	}
 
 	if (!(rt = __ip_vs_get_out_rt(cp, RT_TOS(iph->tos))))
@@ -282,9 +278,6 @@ ip_vs_nat_xmit(struct sk_buff *skb, struct ip_vs_conn *cp,
 	/* Another hack: avoid icmp_send in ip_fragment */
 	skb->local_df = 1;
 
-#ifdef CONFIG_NETFILTER_DEBUG
-	skb->nf_debug = 0;
-#endif /* CONFIG_NETFILTER_DEBUG */
 	IP_VS_XMIT(skb, rt);
 
 	LeaveFunction(10);
@@ -370,7 +363,7 @@ ip_vs_tunnel_xmit(struct sk_buff *skb, struct ip_vs_conn *cp,
 	/*
 	 * Okay, now see if we can stuff it in the buffer as-is.
 	 */
-	max_headroom = (((tdev->hard_header_len+15)&~15)+sizeof(struct iphdr));
+	max_headroom = LL_RESERVED_SPACE(tdev) + sizeof(struct iphdr);
 
 	if (skb_headroom(skb) < max_headroom
 	    || skb_cloned(skb) || skb_shared(skb)) {
@@ -415,14 +408,8 @@ ip_vs_tunnel_xmit(struct sk_buff *skb, struct ip_vs_conn *cp,
 	ip_select_ident(iph, &rt->u.dst, NULL);
 	ip_send_check(iph);
 
-	skb->ip_summed = CHECKSUM_NONE;
-
 	/* Another hack: avoid icmp_send in ip_fragment */
 	skb->local_df = 1;
-
-#ifdef CONFIG_NETFILTER_DEBUG
-	skb->nf_debug = 0;
-#endif /* CONFIG_NETFILTER_DEBUG */
 
 	IP_VS_XMIT(skb, rt);
 
@@ -482,9 +469,6 @@ ip_vs_dr_xmit(struct sk_buff *skb, struct ip_vs_conn *cp,
 	/* Another hack: avoid icmp_send in ip_fragment */
 	skb->local_df = 1;
 
-#ifdef CONFIG_NETFILTER_DEBUG
-	skb->nf_debug = 0;
-#endif /* CONFIG_NETFILTER_DEBUG */
 	IP_VS_XMIT(skb, rt);
 
 	LeaveFunction(10);
@@ -559,9 +543,6 @@ ip_vs_icmp_xmit(struct sk_buff *skb, struct ip_vs_conn *cp,
 	/* Another hack: avoid icmp_send in ip_fragment */
 	skb->local_df = 1;
 
-#ifdef CONFIG_NETFILTER_DEBUG
-	skb->nf_debug = 0;
-#endif /* CONFIG_NETFILTER_DEBUG */
 	IP_VS_XMIT(skb, rt);
 
 	rc = NF_STOLEN;

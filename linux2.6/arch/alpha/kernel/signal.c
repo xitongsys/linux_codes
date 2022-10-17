@@ -19,8 +19,8 @@
 #include <linux/stddef.h>
 #include <linux/tty.h>
 #include <linux/binfmts.h>
+#include <linux/bitops.h>
 
-#include <asm/bitops.h>
 #include <asm/uaccess.h>
 #include <asm/sigcontext.h>
 #include <asm/ucontext.h>
@@ -53,8 +53,7 @@ static int do_signal(sigset_t *, struct pt_regs *, struct switch_stack *,
  * operation, as all of this is local to this thread.
  */
 asmlinkage unsigned long
-osf_sigprocmask(int how, unsigned long newmask, long a2, long a3,
-		long a4, long a5, struct pt_regs regs)
+do_osf_sigprocmask(int how, unsigned long newmask, struct pt_regs *regs)
 {
 	unsigned long oldmask = -EINVAL;
 
@@ -78,14 +77,14 @@ osf_sigprocmask(int how, unsigned long newmask, long a2, long a3,
 		recalc_sigpending();
 		spin_unlock_irq(&current->sighand->siglock);
 
-		(&regs)->r0 = 0;		/* special no error return */
+		regs->r0 = 0;		/* special no error return */
 	}
 	return oldmask;
 }
 
 asmlinkage int 
-osf_sigaction(int sig, const struct osf_sigaction *act,
-	      struct osf_sigaction *oact)
+osf_sigaction(int sig, const struct osf_sigaction __user *act,
+	      struct osf_sigaction __user *oact)
 {
 	struct k_sigaction new_ka, old_ka;
 	int ret;
@@ -114,9 +113,10 @@ osf_sigaction(int sig, const struct osf_sigaction *act,
 	return ret;
 }
 
-asmlinkage int 
-sys_rt_sigaction(int sig, const struct sigaction *act, struct sigaction *oact,
-		 size_t sigsetsize, void *restorer)
+asmlinkage long
+sys_rt_sigaction(int sig, const struct sigaction __user *act,
+		 struct sigaction __user *oact,
+		 size_t sigsetsize, void __user *restorer)
 {
 	struct k_sigaction new_ka, old_ka;
 	int ret;
@@ -145,7 +145,7 @@ sys_rt_sigaction(int sig, const struct sigaction *act, struct sigaction *oact,
  * Atomically swap in the new signal mask, and wait for a signal.
  */
 asmlinkage int
-do_sigsuspend(old_sigset_t mask, struct pt_regs *reg, struct switch_stack *sw)
+do_sigsuspend(old_sigset_t mask, struct pt_regs *regs, struct switch_stack *sw)
 {
 	sigset_t oldset;
 
@@ -156,17 +156,22 @@ do_sigsuspend(old_sigset_t mask, struct pt_regs *reg, struct switch_stack *sw)
 	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
 
+	/* Indicate EINTR on return from any possible signal handler,
+	   which will not come back through here, but via sigreturn.  */
+	regs->r0 = EINTR;
+	regs->r19 = 1;
+
 	while (1) {
 		current->state = TASK_INTERRUPTIBLE;
 		schedule();
-		if (do_signal(&oldset, reg, sw, 0, 0))
+		if (do_signal(&oldset, regs, sw, 0, 0))
 			return -EINTR;
 	}
 }
 
 asmlinkage int
-do_rt_sigsuspend(sigset_t *uset, size_t sigsetsize,
-		 struct pt_regs *reg, struct switch_stack *sw)
+do_rt_sigsuspend(sigset_t __user *uset, size_t sigsetsize,
+		 struct pt_regs *regs, struct switch_stack *sw)
 {
 	sigset_t oldset, set;
 
@@ -183,16 +188,21 @@ do_rt_sigsuspend(sigset_t *uset, size_t sigsetsize,
 	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
 
+	/* Indicate EINTR on return from any possible signal handler,
+	   which will not come back through here, but via sigreturn.  */
+	regs->r0 = EINTR;
+	regs->r19 = 1;
+
 	while (1) {
 		current->state = TASK_INTERRUPTIBLE;
 		schedule();
-		if (do_signal(&oldset, reg, sw, 0, 0))
+		if (do_signal(&oldset, regs, sw, 0, 0))
 			return -EINTR;
 	}
 }
 
 asmlinkage int
-sys_sigaltstack(const stack_t *uss, stack_t *uoss)
+sys_sigaltstack(const stack_t __user *uss, stack_t __user *uoss)
 {
 	return do_sigaltstack(uss, uoss, rdusp());
 }
@@ -201,10 +211,13 @@ sys_sigaltstack(const stack_t *uss, stack_t *uoss)
  * Do a signal return; undo the signal stack.
  */
 
+#if _NSIG_WORDS > 1
+# error "Non SA_SIGINFO frame needs rearranging"
+#endif
+
 struct sigframe
 {
 	struct sigcontext sc;
-	unsigned long extramask[_NSIG_WORDS-1];
 	unsigned int retcode[3];
 };
 
@@ -215,12 +228,18 @@ struct rt_sigframe
 	unsigned int retcode[3];
 };
 
+/* If this changes, userland unwinders that Know Things about our signal
+   frame will break.  Do not undertake lightly.  It also implies an ABI
+   change wrt the size of siginfo_t, which may cause some pain.  */
+extern char compile_time_assert
+        [offsetof(struct rt_sigframe, uc.uc_mcontext) == 176 ? 1 : -1];
+
 #define INSN_MOV_R30_R16	0x47fe0410
 #define INSN_LDI_R0		0x201f0000
 #define INSN_CALLSYS		0x00000083
 
 static long
-restore_sigcontext(struct sigcontext *sc, struct pt_regs *regs,
+restore_sigcontext(struct sigcontext __user *sc, struct pt_regs *regs,
 		   struct switch_stack *sw)
 {
 	unsigned long usp;
@@ -268,19 +287,20 @@ restore_sigcontext(struct sigcontext *sc, struct pt_regs *regs,
 	return err;
 }
 
+/* Note that this syscall is also used by setcontext(3) to install
+   a given sigcontext.  This because it's impossible to set *all*
+   registers and transfer control from userland.  */
+
 asmlinkage void
-do_sigreturn(struct sigframe *frame, struct pt_regs *regs,
+do_sigreturn(struct sigcontext __user *sc, struct pt_regs *regs,
 	     struct switch_stack *sw)
 {
 	sigset_t set;
 
 	/* Verify that it's a good sigcontext before using it */
-	if (verify_area(VERIFY_READ, frame, sizeof(*frame)))
+	if (verify_area(VERIFY_READ, sc, sizeof(*sc)))
 		goto give_sigsegv;
-	if (__get_user(set.sig[0], &frame->sc.sc_mask)
-	    || (_NSIG_WORDS > 1
-		&& __copy_from_user(&set.sig[1], &frame->extramask,
-				    sizeof(frame->extramask))))
+	if (__get_user(set.sig[0], &sc->sc_mask))
 		goto give_sigsegv;
 
 	sigdelsetmask(&set, ~_BLOCKABLE);
@@ -289,7 +309,7 @@ do_sigreturn(struct sigframe *frame, struct pt_regs *regs,
 	recalc_sigpending();
 	spin_unlock_irq(&current->sighand->siglock);
 
-	if (restore_sigcontext(&frame->sc, regs, sw))
+	if (restore_sigcontext(sc, regs, sw))
 		goto give_sigsegv;
 
 	/* Send SIGTRAP if we're single-stepping: */
@@ -299,7 +319,7 @@ do_sigreturn(struct sigframe *frame, struct pt_regs *regs,
 		info.si_signo = SIGTRAP;
 		info.si_errno = 0;
 		info.si_code = TRAP_BRKPT;
-		info.si_addr = (void *) regs->pc;
+		info.si_addr = (void __user *) regs->pc;
 		info.si_trapno = 0;
 		send_sig_info(SIGTRAP, &info, current);
 	}
@@ -310,14 +330,13 @@ give_sigsegv:
 }
 
 asmlinkage void
-do_rt_sigreturn(struct rt_sigframe *frame, struct pt_regs *regs,
+do_rt_sigreturn(struct rt_sigframe __user *frame, struct pt_regs *regs,
 		struct switch_stack *sw)
 {
 	sigset_t set;
-	stack_t st;
 
-	/* Verify that it's a good sigcontext before using it */
-	if (verify_area(VERIFY_READ, frame, sizeof(*frame)))
+	/* Verify that it's a good ucontext_t before using it */
+	if (verify_area(VERIFY_READ, &frame->uc, sizeof(frame->uc)))
 		goto give_sigsegv;
 	if (__copy_from_user(&set, &frame->uc.uc_sigmask, sizeof(set)))
 		goto give_sigsegv;
@@ -331,12 +350,6 @@ do_rt_sigreturn(struct rt_sigframe *frame, struct pt_regs *regs,
 	if (restore_sigcontext(&frame->uc.uc_mcontext, regs, sw))
 		goto give_sigsegv;
 
-	if (__copy_from_user(&st, &frame->uc.uc_stack, sizeof(st)))
-		goto give_sigsegv;
-	/* It is more difficult to avoid calling this function than to
-	   call it and ignore errors.  */
-	do_sigaltstack(&st, NULL, rdusp());
-
 	/* Send SIGTRAP if we're single-stepping: */
 	if (ptrace_cancel_bpt (current)) {
 		siginfo_t info;
@@ -344,7 +357,7 @@ do_rt_sigreturn(struct rt_sigframe *frame, struct pt_regs *regs,
 		info.si_signo = SIGTRAP;
 		info.si_errno = 0;
 		info.si_code = TRAP_BRKPT;
-		info.si_addr = (void *) regs->pc;
+		info.si_addr = (void __user *) regs->pc;
 		info.si_trapno = 0;
 		send_sig_info(SIGTRAP, &info, current);
 	}
@@ -359,17 +372,17 @@ give_sigsegv:
  * Set up a signal frame.
  */
 
-static inline void *
+static inline void __user *
 get_sigframe(struct k_sigaction *ka, unsigned long sp, size_t frame_size)
 {
 	if ((ka->sa.sa_flags & SA_ONSTACK) != 0 && ! on_sig_stack(sp))
 		sp = current->sas_ss_sp + current->sas_ss_size;
 
-	return (void *)((sp - frame_size) & -32ul);
+	return (void __user *)((sp - frame_size) & -32ul);
 }
 
 static long
-setup_sigcontext(struct sigcontext *sc, struct pt_regs *regs, 
+setup_sigcontext(struct sigcontext __user *sc, struct pt_regs *regs, 
 		 struct switch_stack *sw, unsigned long mask, unsigned long sp)
 {
 	long i, err = 0;
@@ -429,7 +442,7 @@ setup_frame(int sig, struct k_sigaction *ka, sigset_t *set,
 	    struct pt_regs *regs, struct switch_stack * sw)
 {
 	unsigned long oldsp, r26, err = 0;
-	struct sigframe *frame;
+	struct sigframe __user *frame;
 
 	oldsp = rdusp();
 	frame = get_sigframe(ka, oldsp, sizeof(*frame));
@@ -437,10 +450,6 @@ setup_frame(int sig, struct k_sigaction *ka, sigset_t *set,
 		goto give_sigsegv;
 
 	err |= setup_sigcontext(&frame->sc, regs, sw, set->sig[0], oldsp);
-	if (_NSIG_WORDS > 1) {
-		err |= __copy_to_user(frame->extramask, &set->sig[1], 
-				      sizeof(frame->extramask));
-	}
 	if (err)
 		goto give_sigsegv;
 
@@ -476,9 +485,7 @@ setup_frame(int sig, struct k_sigaction *ka, sigset_t *set,
 	return;
 
 give_sigsegv:
-	if (sig == SIGSEGV)
-		ka->sa.sa_handler = SIG_DFL;
-	force_sig(SIGSEGV, current);
+	force_sigsegv(sig, current);
 }
 
 static void
@@ -486,7 +493,7 @@ setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	       sigset_t *set, struct pt_regs *regs, struct switch_stack * sw)
 {
 	unsigned long oldsp, r26, err = 0;
-	struct rt_sigframe *frame;
+	struct rt_sigframe __user *frame;
 
 	oldsp = rdusp();
 	frame = get_sigframe(ka, oldsp, sizeof(*frame));
@@ -540,9 +547,7 @@ setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	return;
 
 give_sigsegv:
-	if (sig == SIGSEGV)
-		ka->sa.sa_handler = SIG_DFL;
-	force_sig(SIGSEGV, current);
+	force_sigsegv(sig, current);
 }
 
 
@@ -615,21 +620,20 @@ do_signal(sigset_t *oldset, struct pt_regs * regs, struct switch_stack * sw,
 	siginfo_t info;
 	int signr;
 	unsigned long single_stepping = ptrace_cancel_bpt(current);
+	struct k_sigaction ka;
 
 	if (!oldset)
 		oldset = &current->blocked;
 
 	/* This lets the debugger run, ... */
-	signr = get_signal_to_deliver(&info, regs, NULL);
+	signr = get_signal_to_deliver(&info, &ka, regs, NULL);
 	/* ... so re-check the single stepping. */
 	single_stepping |= ptrace_cancel_bpt(current);
 
 	if (signr > 0) {
 		/* Whee!  Actually deliver the signal.  */
-		struct k_sigaction *ka = &current->sighand->action[signr-1];
-
-		if (r0) syscall_restart(r0, r19, regs, ka);
-		handle_signal(signr, ka, &info, oldset, regs, sw);
+		if (r0) syscall_restart(r0, r19, regs, &ka);
+		handle_signal(signr, &ka, &info, oldset, regs, sw);
 		if (single_stepping) 
 			ptrace_set_bpt(current); /* re-set bpt */
 		return 1;

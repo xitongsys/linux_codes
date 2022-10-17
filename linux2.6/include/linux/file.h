@@ -53,12 +53,12 @@ extern void filp_ctor(void * objp, struct kmem_cache_s *cachep, unsigned long cf
 extern void filp_dtor(void * objp, struct kmem_cache_s *cachep, unsigned long dflags);
 
 extern struct file ** alloc_fd_array(int);
-extern int expand_fd_array(struct files_struct *, int nr);
 extern void free_fd_array(struct file **, int);
 
 extern fd_set *alloc_fdset(int);
-extern int expand_fdset(struct files_struct *, int nr);
 extern void free_fdset(fd_set *, int);
+
+extern int expand_files(struct files_struct *, int nr);
 
 static inline struct file * fcheck_files(struct files_struct *files, unsigned int fd)
 {
@@ -75,6 +75,10 @@ static inline struct file * fcheck_files(struct files_struct *files, unsigned in
 #define fcheck(fd)	fcheck_files(current->files, fd)
 
 extern void FASTCALL(fd_install(unsigned int fd, struct file * file));
+
+struct task_struct;
+
+struct files_struct *get_files_struct(struct task_struct *);
 void FASTCALL(put_files_struct(struct files_struct *fs));
 
 #endif /* __LINUX_FILE_H */

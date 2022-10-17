@@ -14,7 +14,7 @@
  *	   trini@mvista.com
  * Derived from arch/ppc/boot/prep/head.S (Cort Dougan, many others).
  *
- * 2001-2003 (c) MontaVista, Software, Inc.  This file is licensed under
+ * 2001-2004 (c) MontaVista, Software, Inc.  This file is licensed under
  * the terms of the GNU General Public License version 2.  This program
  * is licensed "as is" without any warranty of any kind, whether express
  * or implied.
@@ -27,6 +27,7 @@
 
 	.text
 
+#ifdef CONFIG_6xx
 	.globl	disable_6xx_mmu
 disable_6xx_mmu:
 	/* Establish default MSR value, exception prefix 0xFFF.
@@ -36,6 +37,13 @@ disable_6xx_mmu:
 	 */
 	li	r8,MSR_IP|MSR_FP
 	mtmsr	r8
+	isync
+
+	/* Test for a 601 */
+	mfpvr	r10
+	srwi	r10,r10,16
+	cmpwi	0,r10,1		/* 601 ? */
+	beq	.clearbats_601
 
 	/* Clear BATs */
 	li	r8,0
@@ -47,6 +55,7 @@ disable_6xx_mmu:
 	mtspr	DBAT2L,r8
 	mtspr	DBAT3U,r8
 	mtspr	DBAT3L,r8
+.clearbats_601:
 	mtspr	IBAT0U,r8
 	mtspr	IBAT0L,r8
 	mtspr	IBAT1U,r8
@@ -68,6 +77,7 @@ disable_6xx_mmu:
 	addi	r8,r8,0x111	/* increment VSID */
 	addis	r10,r10,0x1000	/* address of next segment */
 	bdnz	3b
+	blr
 
 	.globl	disable_6xx_l1cache
 disable_6xx_l1cache:
@@ -85,6 +95,7 @@ disable_6xx_l1cache:
 	sync
 	isync
 	blr
+#endif
 
 	.globl	_setup_L2CR
 _setup_L2CR:
@@ -108,9 +119,9 @@ _setup_L2CR:
 	/* Wait for the invalidation to complete */
 	mfspr   r8,PVR
 	srwi    r8,r8,16
-	cmpli	cr0,r8,0x8000			/* 7450 */
-	cmpli	cr1,r8,0x8001			/* 7455 */
-	cmpli	cr2,r8,0x8002			/* 7457 */
+	cmplwi	cr0,r8,0x8000			/* 7450 */
+	cmplwi	cr1,r8,0x8001			/* 7455 */
+	cmplwi	cr2,r8,0x8002			/* 7457 */
 	cror	4*cr0+eq,4*cr0+eq,4*cr1+eq	/* Now test if any are true. */
 	cror	4*cr0+eq,4*cr0+eq,4*cr2+eq
 	bne     2f
@@ -181,7 +192,7 @@ timebase_period_ns:
 udelay:
 	mfspr	r4,PVR
 	srwi	r4,r4,16
-	cmpi	0,r4,1		/* 601 ? */
+	cmpwi	0,r4,1		/* 601 ? */
 	bne	.udelay_not_601
 00:	li	r0,86	/* Instructions / microsecond? */
 	mtctr	r0
@@ -204,16 +215,16 @@ udelay:
 1:	mftbu	r5
 	mftb	r6
 	mftbu	r7
-	cmp	0,r5,r7
+	cmpw	0,r5,r7
 	bne	1b		/* Get [synced] base time */
 	addc	r9,r6,r4	/* Compute end time */
 	addze	r8,r5
 2:	mftbu	r5
-	cmp	0,r5,r8
+	cmpw	0,r5,r8
 	blt	2b
 	bgt	3f
 	mftb	r6
-	cmp	0,r6,r9
+	cmpw	0,r6,r9
 	blt	2b
 3:	blr
 

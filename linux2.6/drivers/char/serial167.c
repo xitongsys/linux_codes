@@ -39,6 +39,9 @@
  * - don't use the panic function in serial167_init
  * - do resource release on failure on serial167_init
  * - include missing restore_flags in mvme167_serial_console_setup
+ *
+ * Kars de Jong <jongk@linux-m68k.org> - 2004/09/06
+ * - replace bottom half handler with task queue handler
  */
 
 #include <linux/config.h>
@@ -59,10 +62,10 @@
 #include <linux/mm.h>
 #include <linux/console.h>
 #include <linux/module.h>
+#include <linux/bitops.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/bitops.h>
 #include <asm/mvme16xhw.h>
 #include <asm/bootinfo.h>
 #include <asm/setup.h>
@@ -83,17 +86,11 @@
 #undef  CYCLOM_16Y_HACK
 #define  CYCLOM_ENABLE_MONITORING
 
-#ifndef MIN
-#define MIN(a,b)	((a) < (b) ? (a) : (b))
-#endif
-
 #define WAKEUP_CHARS 256
 
 #define STD_COM_FLAGS (0)
 
 #define SERIAL_TYPE_NORMAL  1
-
-DECLARE_TASK_QUEUE(tq_cyclades);
 
 static struct tty_driver *cy_serial_driver;
 extern int serial_console;
@@ -377,8 +374,7 @@ static inline void
 cy_sched_event(struct cyclades_port *info, int event)
 {
     info->event |= 1 << event; /* remember what kind of event and who */
-    queue_task(&info->tqueue, &tq_cyclades); /* it belongs to */
-    mark_bh(CYCLADES_BH);                       /* then trigger event */
+    schedule_work(&info->tqueue);
 } /* cy_sched_event */
 
 
@@ -471,7 +467,7 @@ cd2401_rxerr_interrupt(int irq, void *dev_id, struct pt_regs *fp)
 	       and nothing could be done about it!!! */
 	}
     }
-    queue_task(&tty->flip.tqueue, &tq_timer);
+    schedule_delayed_work(&tty->flip.work, 1);
     /* end of service */
     base_addr[CyREOIR] = rfoc ? 0 : CyNOTRANS;
     return IRQ_HANDLED;
@@ -706,7 +702,7 @@ cd2401_rx_interrupt(int irq, void *dev_id, struct pt_regs *fp)
 	    udelay(10L);
 #endif
         }
-	queue_task(&tty->flip.tqueue, &tq_timer);
+	schedule_delayed_work(&tty->flip.work, 1);
     }
     /* end of service */
     base_addr[CyREOIR] = save_cnt ? 0 : CyNOTRANS;
@@ -717,7 +713,7 @@ cd2401_rx_interrupt(int irq, void *dev_id, struct pt_regs *fp)
  * This routine is used to handle the "bottom half" processing for the
  * serial driver, known also the "software interrupt" processing.
  * This processing is done at the kernel interrupt level, after the
- * cy_interrupt() has returned, BUT WITH INTERRUPTS TURNED ON.  This
+ * cy#/_interrupt() has returned, BUT WITH INTERRUPTS TURNED ON.  This
  * is where time-consuming activities which can not be done in the
  * interrupt driver proper are done; the interrupt driver schedules
  * them using cy_sched_event(), and they get done here.
@@ -725,9 +721,7 @@ cd2401_rx_interrupt(int irq, void *dev_id, struct pt_regs *fp)
  * This is done through one level of indirection--the task queue.
  * When a hardware interrupt service routine wants service by the
  * driver's bottom half, it enqueues the appropriate tq_struct (one
- * per port) to the tq_cyclades work queue and sets a request flag
- * via mark_bh for processing that queue.  When the time is right,
- * do_cyclades_bh is called (because of the mark_bh) and it requests
+ * per port) to the keventd work queue and sets a request flag
  * that the work queue be processed.
  *
  * Although this may seem unwieldy, it gives the system a way to
@@ -735,12 +729,6 @@ cd2401_rx_interrupt(int irq, void *dev_id, struct pt_regs *fp)
  * structure) to the bottom half of the driver.  Previous kernels
  * had to poll every port to see if that port needed servicing.
  */
-static void
-do_cyclades_bh(void)
-{
-    run_task_queue(&tq_cyclades);
-} /* do_cyclades_bh */
-
 static void
 do_softint(void *private_)
 {
@@ -760,11 +748,7 @@ do_softint(void *private_)
 	wake_up_interruptible(&info->open_wait);
     }
     if (test_and_clear_bit(Cy_EVENT_WRITE_WAKEUP, &info->event)) {
-	if((tty->flags & (1<< TTY_DO_WRITE_WAKEUP))
-	&& tty->ldisc.write_wakeup){
-	    (tty->ldisc.write_wakeup)(tty);
-	}
-	wake_up_interruptible(&tty->write_wait);
+    	tty_wakeup(tty);
     }
 } /* do_softint */
 
@@ -1216,7 +1200,7 @@ cy_flush_chars(struct tty_struct *tty)
     port is already active, there is no need to kick it.
  */
 static int
-cy_write(struct tty_struct * tty, int from_user,
+cy_write(struct tty_struct * tty,
            const unsigned char *buf, int count)
 {
   struct cyclades_port *info = (struct cyclades_port *)tty->driver_data;
@@ -1235,53 +1219,23 @@ cy_write(struct tty_struct * tty, int from_user,
         return 0;
     }
 
-    if (from_user) {
-	    down(&tmp_buf_sem);
-	    while (1) {
-		    c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
-				       SERIAL_XMIT_SIZE - info->xmit_head));
-		    if (c <= 0)
-			    break;
-
-		    c -= copy_from_user(tmp_buf, buf, c);
-		    if (!c) {
-			    if (!total)
-				    total = -EFAULT;
-			    break;
-		    }
-
-		    local_irq_save(flags);
-		    c = MIN(c, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
-				   SERIAL_XMIT_SIZE - info->xmit_head));
-		    memcpy(info->xmit_buf + info->xmit_head, tmp_buf, c);
-		    info->xmit_head = (info->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
-		    info->xmit_cnt += c;
+    while (1) {
+	    local_irq_save(flags);
+	    c = min_t(int, count, min(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
+				      SERIAL_XMIT_SIZE - info->xmit_head));
+	    if (c <= 0) {
 		    local_irq_restore(flags);
-
-		    buf += c;
-		    count -= c;
-		    total += c;
+		    break;
 	    }
-	    up(&tmp_buf_sem);
-    } else {
-	    while (1) {
-		    local_irq_save(flags);
-		    c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
-				       SERIAL_XMIT_SIZE - info->xmit_head));
-		    if (c <= 0) {
-			    local_irq_restore(flags);
-			    break;
-		    }
 
-		    memcpy(info->xmit_buf + info->xmit_head, buf, c);
-		    info->xmit_head = (info->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
-		    info->xmit_cnt += c;
-		    local_irq_restore(flags);
+	    memcpy(info->xmit_buf + info->xmit_head, buf, c);
+	    info->xmit_head = (info->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
+	    info->xmit_cnt += c;
+	    local_irq_restore(flags);
 
-		    buf += c;
-		    count -= c;
-		    total += c;
-	    }
+	    buf += c;
+	    count -= c;
+	    total += c;
     }
 
     if (info->xmit_cnt
@@ -1343,10 +1297,7 @@ cy_flush_buffer(struct tty_struct *tty)
     local_irq_save(flags);
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
     local_irq_restore(flags);
-    wake_up_interruptible(&tty->write_wait);
-    if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP))
-    && tty->ldisc.write_wakeup)
-	(tty->ldisc.write_wakeup)(tty);
+    tty_wakeup(tty);
 } /* cy_flush_buffer */
 
 
@@ -1492,8 +1443,9 @@ check_and_exit:
 } /* set_serial_info */
 
 static int
-get_modem_info(struct cyclades_port * info, unsigned int *value)
+cy_tiocmget(struct tty_struct *tty, struct file *file)
 {
+  struct cyclades_port * info = (struct cyclades_port *)tty->driver_data;
   int channel;
   volatile unsigned char *base_addr = (u_char *)BASE_ADDR;
   unsigned long flags;
@@ -1507,36 +1459,32 @@ get_modem_info(struct cyclades_port * info, unsigned int *value)
         status = base_addr[CyMSVR1] | base_addr[CyMSVR2];
     local_irq_restore(flags);
 
-    result =  ((status  & CyRTS) ? TIOCM_RTS : 0)
+    return    ((status  & CyRTS) ? TIOCM_RTS : 0)
             | ((status  & CyDTR) ? TIOCM_DTR : 0)
             | ((status  & CyDCD) ? TIOCM_CAR : 0)
             | ((status  & CyDSR) ? TIOCM_DSR : 0)
             | ((status  & CyCTS) ? TIOCM_CTS : 0);
-    return put_user(result,(unsigned int *) value);
-} /* get_modem_info */
+} /* cy_tiocmget */
 
 static int
-set_modem_info(struct cyclades_port * info, unsigned int cmd,
-                          unsigned int *value)
+cy_tiocmset(struct tty_struct *tty, struct file *file,
+	    unsigned int set, unsigned int clear)
 {
+  struct cyclades_port * info = (struct cyclades_port *)tty->driver_data;
   int channel;
   volatile unsigned char *base_addr = (u_char *)BASE_ADDR;
   unsigned long flags;
   unsigned int arg;
 	  
-    if (get_user(arg, (unsigned long *) value))
-	return -EFAULT;
     channel = info->line;
 
-    switch (cmd) {
-    case TIOCMBIS:
-	if (arg & TIOCM_RTS){
+	if (set & TIOCM_RTS){
 	    local_irq_save(flags);
 		base_addr[CyCAR] = (u_char)channel;
 		base_addr[CyMSVR1] = CyRTS;
 	    local_irq_restore(flags);
 	}
-	if (arg & TIOCM_DTR){
+	if (set & TIOCM_DTR){
 	    local_irq_save(flags);
 	    base_addr[CyCAR] = (u_char)channel;
 /* CP('S');CP('2'); */
@@ -1547,15 +1495,14 @@ set_modem_info(struct cyclades_port * info, unsigned int cmd,
 #endif
 	    local_irq_restore(flags);
 	}
-	break;
-    case TIOCMBIC:
-	if (arg & TIOCM_RTS){
+
+	if (clear & TIOCM_RTS){
 	    local_irq_save(flags);
 		base_addr[CyCAR] = (u_char)channel;
 		base_addr[CyMSVR1] = 0;
 	    local_irq_restore(flags);
 	}
-	if (arg & TIOCM_DTR){
+	if (clear & TIOCM_DTR){
 	    local_irq_save(flags);
 	    base_addr[CyCAR] = (u_char)channel;
 /* CP('C');CP('2'); */
@@ -1566,44 +1513,7 @@ set_modem_info(struct cyclades_port * info, unsigned int cmd,
 #endif
 	    local_irq_restore(flags);
 	}
-	break;
-    case TIOCMSET:
-	if (arg & TIOCM_RTS){
-	    local_irq_save(flags);
-		base_addr[CyCAR] = (u_char)channel;
-		base_addr[CyMSVR1] = CyRTS;
-	    local_irq_restore(flags);
-	}else{
-	    local_irq_save(flags);
-		base_addr[CyCAR] = (u_char)channel;
-		base_addr[CyMSVR1] = 0;
-	    local_irq_restore(flags);
-	}
-	if (arg & TIOCM_DTR){
-	    local_irq_save(flags);
-	    base_addr[CyCAR] = (u_char)channel;
-/* CP('S');CP('3'); */
-	    base_addr[CyMSVR2] = CyDTR;
-#ifdef SERIAL_DEBUG_DTR
-            printk("cyc: %d: raising DTR\n", __LINE__);
-            printk("     status: 0x%x, 0x%x\n", base_addr[CyMSVR1], base_addr[CyMSVR2]);
-#endif
-	    local_irq_restore(flags);
-	}else{
-	    local_irq_save(flags);
-	    base_addr[CyCAR] = (u_char)channel;
-/* CP('C');CP('3'); */
-	    base_addr[CyMSVR2] = 0;
-#ifdef SERIAL_DEBUG_DTR
-            printk("cyc: %d: dropping DTR\n", __LINE__);
-            printk("     status: 0x%x, 0x%x\n", base_addr[CyMSVR1], base_addr[CyMSVR2]);
-#endif
-	    local_irq_restore(flags);
-	}
-	break;
-    default:
-		return -EINVAL;
-        }
+
     return 0;
 } /* set_modem_info */
 
@@ -1777,11 +1687,6 @@ cy_ioctl(struct tty_struct *tty, struct file * file,
             tty_wait_until_sent(tty,0);
             send_break(info, arg ? arg*(HZ/10) : HZ/4);
             break;
-        case TIOCMBIS:
-        case TIOCMBIC:
-        case TIOCMSET:
-            ret_val = set_modem_info(info, cmd, (unsigned int *) arg);
-            break;
 
 /* The following commands are incompletely implemented!!! */
         case TIOCGSOFTCAR:
@@ -1793,9 +1698,6 @@ cy_ioctl(struct tty_struct *tty, struct file * file,
 		    break;
             tty->termios->c_cflag =
                     ((tty->termios->c_cflag & ~CLOCAL) | (val ? CLOCAL : 0));
-            break;
-        case TIOCMGET:
-            ret_val = get_modem_info(info, (unsigned int *) arg);
             break;
         case TIOCGSERIAL:
             ret_val = get_serial_info(info, (struct serial_struct *) arg);
@@ -1895,22 +1797,12 @@ cy_close(struct tty_struct * tty, struct file * filp)
     shutdown(info);
     if (tty->driver->flush_buffer)
 	tty->driver->flush_buffer(tty);
-    if (tty->ldisc.flush_buffer)
-	tty->ldisc.flush_buffer(tty);
+    tty_ldisc_flush(tty);
     info->event = 0;
     info->tty = 0;
-    if (tty->ldisc.num != ldiscs[N_TTY].num) {
-	if (tty->ldisc.close)
-	    (tty->ldisc.close)(tty);
-	tty->ldisc = ldiscs[N_TTY];
-	tty->termios->c_line = N_TTY;
-	if (tty->ldisc.open)
-	    (tty->ldisc.open)(tty);
-    }
     if (info->blocked_open) {
 	if (info->close_delay) {
-	    current->state = TASK_INTERRUPTIBLE;
-	    schedule_timeout(info->close_delay);
+	    msleep_interruptible(jiffies_to_msecs(info->close_delay));
 	}
 	wake_up_interruptible(&info->open_wait);
     }
@@ -2299,6 +2191,8 @@ static struct tty_operations cy_ops = {
 	.stop = cy_stop,
 	.start = cy_start,
 	.hangup = cy_hangup,
+	.tiocmget = cy_tiocmget,
+	.tiocmset = cy_tiocmset,
 };
 /* The serial driver boot-time initialization code!
     Hardware I/O ports are mapped to character special devices on a
@@ -2376,8 +2270,6 @@ scrn[1] = '\0';
 	    return ret;
     }
 
-    init_bh(CYCLADES_BH, do_cyclades_bh);
-
     port_num = 0;
     info = cy_port;
     for (index = 0; index < 1; index++) {
@@ -2415,8 +2307,7 @@ scrn[1] = '\0';
 		info->blocked_open = 0;
 		info->default_threshold = 0;
 		info->default_timeout = 0;
-		info->tqueue.routine = do_softint;
-		info->tqueue.data = info;
+		INIT_WORK(&info->tqueue, do_softint, info);
 		init_waitqueue_head(&info->open_wait);
 		init_waitqueue_head(&info->close_wait);
 		/* info->session */
@@ -2426,7 +2317,7 @@ scrn[1] = '\0';
                                        | CyPARITY| CyFRAME| CyOVERRUN;
 		/* info->timeout */
 
-		printk("ttyS%1d ", info->line);
+		printk("ttyS%d ", info->line);
 		port_num++;info++;
 		if(!(port_num & 7)){
 		    printk("\n               ");

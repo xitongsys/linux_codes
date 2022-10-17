@@ -4,15 +4,12 @@
  *  Copyright (C) 2000 Geert Uytterhoeven <geert@sonycom.com>
  *                     Sony Software Development Center Europe (SDCE), Brussels
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kbd_ll.h>
 #include <linux/kernel.h>
 #include <linux/kdev_t.h>
 #include <linux/types.h>
-#include <linux/console.h>
 #include <linux/sched.h>
-#include <linux/mc146818rtc.h>
 #include <linux/pci.h>
 #include <linux/ide.h>
 #include <linux/ioport.h>
@@ -27,20 +24,6 @@
 #include <asm/nile4.h>
 #include <asm/ddb5xxx/ddb5074.h>
 #include <asm/ddb5xxx/ddb5xxx.h>
-
-
-#ifdef CONFIG_KGDB
-extern void rs_kgdb_hook(int);
-extern void breakpoint(void);
-#endif
-
-#if defined(CONFIG_SERIAL_CONSOLE)
-extern void console_setup(char *);
-#endif
-
-extern struct ide_ops std_ide_ops;
-extern struct kbd_ops std_kbd_ops;
-extern struct rtc_ops ddb_rtc_ops;
 
 static void (*back_to_prom) (void) = (void (*)(void)) 0xbfc00000;
 
@@ -74,7 +57,6 @@ static void ddb_machine_power_off(void)
 	} while (1);
 }
 
-extern void ddb_irq_setup(void);
 extern void rtc_ds1386_init(unsigned long base);
 
 extern void (*board_timer_setup) (struct irqaction * irq);
@@ -97,17 +79,14 @@ static void __init ddb_timer_init(struct irqaction *irq)
 
 static void __init ddb_time_init(void)
 {
-    /* we have ds1396 RTC chip */
+	/* we have ds1396 RTC chip */
 	rtc_ds1386_init(KSEG1ADDR(DDB_PCI_MEM_BASE));
 }
 
 
 
-void __init ddb_setup(void)
+static void __init ddb5074_setup(void)
 {
-	extern int panic_timeout;
-
-	irq_setup = ddb_irq_setup;
 	set_io_port_base(NILE4_PCI_IO_BASE);
 	isa_slot_offset = NILE4_PCI_MEM_BASE;
 	board_timer_setup = ddb_timer_init;
@@ -118,25 +97,16 @@ void __init ddb_setup(void)
 	_machine_halt = ddb_machine_halt;
 	_machine_power_off = ddb_machine_power_off;
 
-#ifdef CONFIG_BLK_DEV_IDE
-	ide_ops = &std_ide_ops;
-#endif
-
-	rtc_ops = &ddb_rtc_ops;
-
-    ddb_out32(DDB_BAR0, 0);
+	ddb_out32(DDB_BAR0, 0);
 
 	ddb_set_pmr(DDB_PCIINIT0, DDB_PCICMD_IO, 0, 0x10);
 	ddb_set_pmr(DDB_PCIINIT1, DDB_PCICMD_MEM, DDB_PCI_MEM_BASE , 0x10);
-
-#ifdef CONFIG_FB
-    conswitchp = &dummy_con;
-#endif
 
 	/* Reboot on panic */
 	panic_timeout = 180;
 }
 
+early_initcall(ddb5074_setup);
 
 #define USE_NILE4_SERIAL	0
 

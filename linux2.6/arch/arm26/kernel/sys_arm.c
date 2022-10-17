@@ -13,6 +13,7 @@
  *  have a non-standard calling sequence on the Linux/arm
  *  platform.
  */
+#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -21,6 +22,7 @@
 #include <linux/msg.h>
 #include <linux/shm.h>
 #include <linux/stat.h>
+#include <linux/syscalls.h>
 #include <linux/mman.h>
 #include <linux/fs.h>
 #include <linux/file.h>
@@ -100,7 +102,7 @@ asmlinkage int old_mmap(struct mmap_arg_struct *arg)
 	struct mmap_arg_struct a;
 
 	if (copy_from_user(&a, arg, sizeof(a)))
-		goto out;;
+		goto out;
 
 	error = -EINVAL;
 	if (a.offset & ~PAGE_MASK)
@@ -138,7 +140,6 @@ out:
  * Perform the select(nd, in, out, ex, tv) and mmap() system
  * calls.
  */
-extern asmlinkage int sys_select(int, fd_set *, fd_set *, fd_set *, struct timeval *);
 
 struct sel_arg_struct {
 	unsigned long n;
@@ -211,7 +212,7 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 		switch (version) {
 		default: {
 			ulong raddr;
-			ret = sys_shmat (first, (char *) ptr, second, &raddr);
+			ret = do_shmat (first, (char *) ptr, second, &raddr);
 			if (ret)
 				return ret;
 			return put_user (raddr, (ulong *) third);
@@ -219,7 +220,7 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 		case 1:	/* iBCS2 emulator entry point */
 			if (!segment_eq(get_fs(), get_ds()))
 				return -EINVAL;
-			return sys_shmat (first, (char *) ptr,
+			return do_shmat (first, (char *) ptr,
 					  second, (ulong *) third);
 		}
 	case SHMDT: 
@@ -256,7 +257,7 @@ asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp, struct 
 	if (!newsp)
 		newsp = regs->ARM_sp;
 
-	return do_fork(clone_flags & ~CLONE_IDLETASK, newsp, regs, 0, NULL, NULL);
+	return do_fork(clone_flags, newsp, regs, 0, NULL, NULL);
 }
 
 asmlinkage int sys_vfork(struct pt_regs *regs)
@@ -281,3 +282,43 @@ asmlinkage int sys_execve(char *filenamei, char **argv, char **envp, struct pt_r
 out:
 	return error;
 }
+
+/* FIXME - see if this is correct for arm26 */
+long execve(const char *filename, char **argv, char **envp)
+{
+	struct pt_regs regs;
+        int ret;
+         memset(&regs, 0, sizeof(struct pt_regs));
+        ret = do_execve((char *)filename, (char __user * __user *)argv,                         (char __user * __user *)envp, &regs);
+        if (ret < 0)
+                goto out;
+
+        /*
+         * Save argc to the register structure for userspace.
+         */
+        regs.ARM_r0 = ret;
+
+        /*
+         * We were successful.  We won't be returning to our caller, but
+         * instead to user space by manipulating the kernel stack.
+         */
+        asm(    "add    r0, %0, %1\n\t"
+                "mov    r1, %2\n\t"
+                "mov    r2, %3\n\t"
+                "bl     memmove\n\t"    /* copy regs to top of stack */
+                "mov    r8, #0\n\t"     /* not a syscall */
+                "mov    r9, %0\n\t"     /* thread structure */
+                "mov    sp, r0\n\t"     /* reposition stack pointer */
+                "b      ret_to_user"
+                :
+                : "r" (current_thread_info()),
+                  "Ir" (THREAD_SIZE - 8 - sizeof(regs)),
+                  "r" (&regs),
+                  "Ir" (sizeof(regs))
+                : "r0", "r1", "r2", "r3", "ip", "memory");
+
+ out:
+        return ret;
+}
+
+EXPORT_SYMBOL(execve);

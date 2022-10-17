@@ -32,6 +32,7 @@
 #include <linux/i2c.h>
 #include <linux/smp_lock.h>
 #include <linux/pci.h>
+#include <linux/delay.h>
 #include <asm/io.h>
 
 #include <linux/scx200.h>
@@ -43,13 +44,11 @@ MODULE_DESCRIPTION("NatSemi SCx200 ACCESS.bus Driver");
 MODULE_LICENSE("GPL");
 
 #define MAX_DEVICES 4
-static int base[MAX_DEVICES] = { 0x840 };
-MODULE_PARM(base, "1-4i");
+static int base[MAX_DEVICES] = { 0x820, 0x840 };
+module_param_array(base, int, NULL, 0);
 MODULE_PARM_DESC(base, "Base addresses for the ACCESS.bus controllers");
 
-#define DEBUG 0
-
-#if DEBUG
+#ifdef DEBUG
 #define DBG(x...) printk(KERN_DEBUG NAME ": " x)
 #else
 #define DBG(x...)
@@ -256,7 +255,7 @@ static void scx200_acb_poll(struct scx200_acb_iface *iface)
 			scx200_acb_machine(iface, status);
 			return;
 		}
-		schedule_timeout(HZ/100+1);
+		msleep(10);
 	}
 
 	scx200_acb_timeout(iface);
@@ -374,8 +373,8 @@ static s32 scx200_acb_smbus_xfer(struct i2c_adapter *adapter,
 	if (rc == 0 && size == I2C_SMBUS_WORD_DATA && rw == I2C_SMBUS_READ)
 	    	data->word = le16_to_cpu(cur_word);
 
-#if DEBUG
-	printk(KERN_DEBUG NAME ": transfer done, result: %d", rc);
+#ifdef DEBUG
+	DBG(": transfer done, result: %d", rc);
 	if (buffer) {
 		int i;
 		printk(" data:");
@@ -403,9 +402,9 @@ static struct i2c_algorithm scx200_acb_algorithm = {
 	.functionality	= scx200_acb_func,
 };
 
-struct scx200_acb_iface *scx200_acb_list;
+static struct scx200_acb_iface *scx200_acb_list;
 
-int scx200_acb_probe(struct scx200_acb_iface *iface)
+static int scx200_acb_probe(struct scx200_acb_iface *iface)
 {
 	u8 val;
 
@@ -460,6 +459,7 @@ static int  __init scx200_acb_create(int base, int index)
 	adapter->owner = THIS_MODULE;
 	adapter->id = I2C_ALGO_SMBUS;
 	adapter->algo = &scx200_acb_algorithm;
+	adapter->class = I2C_CLASS_HWMON;
 
 	init_MUTEX(&iface->sem);
 
@@ -502,17 +502,21 @@ static int  __init scx200_acb_create(int base, int index)
 	return rc;
 }
 
+static struct pci_device_id scx200[] = {
+	{ PCI_DEVICE(PCI_VENDOR_ID_NS, PCI_DEVICE_ID_NS_SCx200_BRIDGE) },
+	{ PCI_DEVICE(PCI_VENDOR_ID_NS, PCI_DEVICE_ID_NS_SC1100_BRIDGE) },
+	{ },
+};
+
 static int __init scx200_acb_init(void)
 {
 	int i;
 	int rc;
 
-	printk(KERN_DEBUG NAME ": NatSemi SCx200 ACCESS.bus Driver\n");
+	pr_debug(NAME ": NatSemi SCx200 ACCESS.bus Driver\n");
 
 	/* Verify that this really is a SCx200 processor */
-	if (pci_find_device(PCI_VENDOR_ID_NS,
-			    PCI_DEVICE_ID_NS_SCx200_BRIDGE,
-			    NULL) == NULL)
+	if (pci_dev_present(scx200) == 0)
 		return -ENODEV;
 
 	rc = -ENXIO;

@@ -11,21 +11,27 @@
 
 #include <linux/config.h>
 #include <linux/seq_file.h>
+#include <linux/init.h>
+#include <linux/dma-mapping.h>
+
+#include <asm/setup.h>
 
 struct pt_regs;
 struct pci_bus;	
 struct device_node;
-struct TceTable;
+struct iommu_table;
 struct rtc_time;
 
 #ifdef CONFIG_SMP
 struct smp_ops_t {
-	void  (*message_pass)(int target, int msg, unsigned long data, int wait);
+	void  (*message_pass)(int target, int msg);
 	int   (*probe)(void);
 	void  (*kick_cpu)(int nr);
 	void  (*setup_cpu)(int nr);
 	void  (*take_timebase)(void);
 	void  (*give_timebase)(void);
+	int   (*cpu_disable)(void);
+	void  (*cpu_die)(unsigned int nr);
 };
 #endif
 
@@ -52,29 +58,39 @@ struct machdep_calls {
 	void		(*flush_hash_range)(unsigned long context,
 					    unsigned long number,
 					    int local);
+	/* special for kexec, to be called in real mode, linar mapping is
+	 * destroyed as well */
+	void		(*hpte_clear_all)(void);
 
-	void		(*tce_build)(struct TceTable * tbl,
-				     long tcenum,
+	void		(*tce_build)(struct iommu_table * tbl,
+				     long index,
+				     long npages,
 				     unsigned long uaddr,
-				     int direction);
-	void		(*tce_free_one)(struct TceTable *tbl,
-				        long tcenum);    
+				     enum dma_data_direction direction);
+	void		(*tce_free)(struct iommu_table *tbl,
+				    long index,
+				    long npages);
+	void		(*tce_flush)(struct iommu_table *tbl);
+	void		(*iommu_dev_setup)(struct pci_dev *dev);
+	void		(*iommu_bus_setup)(struct pci_bus *bus);
 
+	int		(*probe)(int platform);
 	void		(*setup_arch)(void);
-	/* Optional, may be NULL. */
-	void		(*setup_residual)(struct seq_file *m, int cpu_id);
+	void		(*init_early)(void);
 	/* Optional, may be NULL. */
 	void		(*get_cpuinfo)(struct seq_file *m);
 
 	void		(*init_IRQ)(void);
 	int		(*get_irq)(struct pt_regs *);
 
-	/* Optional, may be NULL. */
-	void		(*init)(void);
+	/* PCI stuff */
+	void		(*pcibios_fixup)(void);
 
 	void		(*restart)(char *cmd);
 	void		(*power_off)(void);
 	void		(*halt)(void);
+	void		(*panic)(char *str);
+	void		(*cpu_die)(void);
 
 	int		(*set_rtc_time)(struct rtc_time *);
 	void		(*get_rtc_time)(struct rtc_time *);
@@ -89,14 +105,34 @@ struct machdep_calls {
 	unsigned char	(*udbg_getc)(void);
 	int		(*udbg_getc_poll)(void);
 
-#ifdef CONFIG_SMP
-	/* functions for dealing with other cpus */
-	struct smp_ops_t smp_ops;
-#endif /* CONFIG_SMP */
+	/* Interface for platform error logging */
+	void 		(*log_error)(char *buf, unsigned int err_type, int fatal);
+
+	ssize_t		(*nvram_write)(char *buf, size_t count, loff_t *index);
+	ssize_t		(*nvram_read)(char *buf, size_t count, loff_t *index);	
+	ssize_t		(*nvram_size)(void);		
+	int		(*nvram_sync)(void);
+
+	/* Exception handlers */
+	void		(*system_reset_exception)(struct pt_regs *regs);
+	int 		(*machine_check_exception)(struct pt_regs *regs);
+
+	/* Motherboard/chipset features. This is a kind of general purpose
+	 * hook used to control some machine specific features (like reset
+	 * lines, chip power control, etc...).
+	 */
+	long	 	(*feature_call)(unsigned int feature, ...);
+
+	/* Check availability of legacy devices like i8042 */
+	int 		(*check_legacy_ioport)(unsigned int baseport);
+
+	/* Get legacy PCI/IDE interrupt mapping */ 
+	int		(*pci_get_legacy_ide_irq)(struct pci_dev *dev, int channel);
+	
 };
 
 extern struct machdep_calls ppc_md;
-extern char cmd_line[512];
+extern char cmd_line[COMMAND_LINE_SIZE];
 
 /* Functions to produce codes on the leds.
  * The SRC code should be unique for the message category and should
@@ -112,6 +148,12 @@ void ppc64_terminate_msg(unsigned int src, const char *msg);
 void ppc64_attention_msg(unsigned int src, const char *msg);
 /* Print a dump progress message. */
 void ppc64_dump_msg(unsigned int src, const char *msg);
+
+static inline void log_error(char *buf, unsigned int err_type, int fatal)
+{
+	if (ppc_md.log_error)
+		ppc_md.log_error(buf, err_type, fatal);
+}
 
 #endif /* _PPC64_MACHDEP_H */
 #endif /* __KERNEL__ */

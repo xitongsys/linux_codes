@@ -36,7 +36,7 @@
 static unsigned char days_in_mo[] =
 {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
-static char rtc_status = 0;
+static char rtc_status;
 
 static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		     unsigned long arg)
@@ -44,7 +44,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	volatile RtcPtr_t rtc = (RtcPtr_t)BVME_RTC_BASE;
 	unsigned char msr;
 	unsigned long flags;
-	struct rtc_time wtime; 
+	struct rtc_time wtime;
 
 	switch (cmd) {
 	case RTC_RD_TIME:	/* Read the time/date from RTC	*/
@@ -53,6 +53,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		/* Ensure clock and real-time-mode-register are accessible */
 		msr = rtc->msr & 0xc0;
 		rtc->msr = 0x40;
+		memset(&wtime, 0, sizeof(struct rtc_time));
 		do {
 			wtime.tm_sec =  BCD2BIN(rtc->bcd_sec);
 			wtime.tm_min =  BCD2BIN(rtc->bcd_min);
@@ -104,7 +105,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 
 		if (yrs >= 2070)
 			return -EINVAL;
-		
+
 		local_irq_save(flags);
 		/* Ensure clock and real-time-mode-register are accessible */
 		msr = rtc->msr & 0xc0;
@@ -164,11 +165,10 @@ static struct file_operations rtc_fops = {
 	.release =	rtc_release,
 };
 
-static struct miscdevice rtc_dev=
-{
-	RTC_MINOR,
-	"rtc",
-	&rtc_fops
+static struct miscdevice rtc_dev = {
+	.minor =	RTC_MINOR,
+	.name =		"rtc",
+	.fops =		&rtc_fops
 };
 
 int __init rtc_DP8570A_init(void)

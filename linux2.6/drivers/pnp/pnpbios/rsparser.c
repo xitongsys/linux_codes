@@ -8,6 +8,12 @@
 #include <linux/pnp.h>
 #include <linux/pnpbios.h>
 
+#ifdef CONFIG_PCI
+#include <linux/pci.h>
+#else
+inline void pcibios_penalize_isa_irq(int irq) {}
+#endif /* CONFIG_PCI */
+
 #include "pnpbios.h"
 
 /* standard resource tags */
@@ -49,7 +55,7 @@ static void
 pnpbios_parse_allocated_irqresource(struct pnp_resource_table * res, int irq)
 {
 	int i = 0;
-	while ((res->irq_resource[i].flags & IORESOURCE_IRQ) && i < PNP_MAX_IRQ) i++;
+	while (!(res->irq_resource[i].flags & IORESOURCE_UNSET) && i < PNP_MAX_IRQ) i++;
 	if (i < PNP_MAX_IRQ) {
 		res->irq_resource[i].flags = IORESOURCE_IRQ;  // Also clears _UNSET flag
 		if (irq == -1) {
@@ -58,6 +64,7 @@ pnpbios_parse_allocated_irqresource(struct pnp_resource_table * res, int irq)
 		}
 		res->irq_resource[i].start =
 		res->irq_resource[i].end = (unsigned long) irq;
+		pcibios_penalize_isa_irq(irq);
 	}
 }
 
@@ -65,7 +72,7 @@ static void
 pnpbios_parse_allocated_dmaresource(struct pnp_resource_table * res, int dma)
 {
 	int i = 0;
-	while ((res->dma_resource[i].flags & IORESOURCE_DMA) && i < PNP_MAX_DMA) i++;
+	while (!(res->dma_resource[i].flags & IORESOURCE_UNSET) && i < PNP_MAX_DMA) i++;
 	if (i < PNP_MAX_DMA) {
 		res->dma_resource[i].flags = IORESOURCE_DMA;  // Also clears _UNSET flag
 		if (dma == -1) {
@@ -81,7 +88,7 @@ static void
 pnpbios_parse_allocated_ioresource(struct pnp_resource_table * res, int io, int len)
 {
 	int i = 0;
-	while ((res->port_resource[i].flags & IORESOURCE_IO) && i < PNP_MAX_PORT) i++;
+	while (!(res->port_resource[i].flags & IORESOURCE_UNSET) && i < PNP_MAX_PORT) i++;
 	if (i < PNP_MAX_PORT) {
 		res->port_resource[i].flags = IORESOURCE_IO;  // Also clears _UNSET flag
 		if (len <= 0 || (io + len -1) >= 0x10003) {
@@ -97,7 +104,7 @@ static void
 pnpbios_parse_allocated_memresource(struct pnp_resource_table * res, int mem, int len)
 {
 	int i = 0;
-	while ((res->mem_resource[i].flags & IORESOURCE_MEM) && i < PNP_MAX_MEM) i++;
+	while (!(res->mem_resource[i].flags & IORESOURCE_UNSET) && i < PNP_MAX_MEM) i++;
 	if (i < PNP_MAX_MEM) {
 		res->mem_resource[i].flags = IORESOURCE_MEM;  // Also clears _UNSET flag
 		if (len <= 0) {
@@ -285,10 +292,13 @@ static void
 pnpbios_parse_irq_option(unsigned char *p, int size, struct pnp_option *option)
 {
 	struct pnp_irq * irq;
+	unsigned long bits;
+
 	irq = pnpbios_kmalloc(sizeof(struct pnp_irq), GFP_KERNEL);
 	if (!irq)
 		return;
-	irq->map = (p[2] << 8) | p[1];
+	bits = (p[2] << 8) | p[1];
+	bitmap_copy(irq->map, &bits, 16);
 	if (size > 2)
 		irq->flags = p[3];
 	else
@@ -346,12 +356,12 @@ pnpbios_parse_resource_option_data(unsigned char * p, unsigned char * end, struc
 {
 	unsigned int len, tag;
 	int priority = 0;
-	struct pnp_option *option;
+	struct pnp_option *option, *option_independent;
 
 	if (!p)
 		return NULL;
 
-	option = pnp_register_independent_option(dev);
+	option_independent = option = pnp_register_independent_option(dev);
 	if (!option)
 		return NULL;
 
@@ -428,9 +438,14 @@ pnpbios_parse_resource_option_data(unsigned char * p, unsigned char * end, struc
 		case SMALL_TAG_ENDDEP:
 			if (len != 0)
 				goto len_err;
+			if (option_independent == option)
+				printk(KERN_WARNING "PnPBIOS: Missing SMALL_TAG_STARTDEP tag\n");
+			option = option_independent;
 			break;
 
 		case SMALL_TAG_END:
+			if (option_independent != option)
+				printk(KERN_WARNING "PnPBIOS: Missing SMALL_TAG_ENDDEP tag\n");
 			p = p + 2;
         		return (unsigned char *)p;
 			break;
@@ -504,6 +519,11 @@ pnpbios_parse_compatible_ids(unsigned char *p, unsigned char *end, struct pnp_de
 		}
 
 		switch (tag) {
+
+		case LARGE_TAG_ANSISTR:
+			strncpy(dev->name, p + 3, len >= PNP_NAME_LEN ? PNP_NAME_LEN - 2 : len);
+			dev->name[len >= PNP_NAME_LEN ? PNP_NAME_LEN - 1 : len] = '\0';
+			break;
 
 		case SMALL_TAG_COMPATDEVID: /* compatible ID */
 			if (len != 4)

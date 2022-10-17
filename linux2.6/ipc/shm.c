@@ -26,6 +26,7 @@
 #include <linux/proc_fs.h>
 #include <linux/shmem_fs.h>
 #include <linux/security.h>
+#include <linux/syscalls.h>
 #include <asm/uaccess.h>
 
 #include "util.h"
@@ -60,7 +61,7 @@ void __init shm_init (void)
 {
 	ipc_init_ids(&shm_ids, 1);
 #ifdef CONFIG_PROC_FS
-	create_proc_read_entry("sysvipc/shm", 0, 0, sysvipc_shm_read_proc, NULL);
+	create_proc_read_entry("sysvipc/shm", 0, NULL, sysvipc_shm_read_proc, NULL);
 #endif
 }
 
@@ -78,7 +79,7 @@ static inline struct shmid_kernel *shm_rmid(int id)
 
 static inline int shm_addid(struct shmid_kernel *shp)
 {
-	return ipc_addid(&shm_ids, &shp->shm_perm, shm_ctlmni+1);
+	return ipc_addid(&shm_ids, &shp->shm_perm, shm_ctlmni);
 }
 
 
@@ -114,10 +115,13 @@ static void shm_destroy (struct shmid_kernel *shp)
 	shm_rmid (shp->id);
 	shm_unlock(shp);
 	if (!is_file_hugepages(shp->shm_file))
-		shmem_lock(shp->shm_file, 0);
+		shmem_lock(shp->shm_file, 0, shp->mlock_user);
+	else
+		user_shm_unlock(shp->shm_file->f_dentry->d_inode->i_size,
+						shp->mlock_user);
 	fput (shp->shm_file);
 	security_shm_free(shp);
-	ipc_rcu_free(shp, sizeof(struct shmid_kernel));
+	ipc_rcu_putref(shp);
 }
 
 /*
@@ -149,7 +153,7 @@ static void shm_close (struct vm_area_struct *shmd)
 
 static int shm_mmap(struct file * file, struct vm_area_struct * vma)
 {
-	update_atime(file->f_dentry->d_inode);
+	file_accessed(file);
 	vma->vm_ops = &shm_vm_ops;
 	shm_inc(file->f_dentry->d_inode->i_ino);
 	return 0;
@@ -163,6 +167,10 @@ static struct vm_operations_struct shm_vm_ops = {
 	.open	= shm_open,	/* callback for a new vm-area open */
 	.close	= shm_close,	/* callback for when the vm-area is released */
 	.nopage	= shmem_nopage,
+#ifdef CONFIG_NUMA
+	.set_policy = shmem_set_policy,
+	.get_policy = shmem_get_policy,
+#endif
 };
 
 static int newseg (key_t key, int shmflg, size_t size)
@@ -186,17 +194,20 @@ static int newseg (key_t key, int shmflg, size_t size)
 
 	shp->shm_perm.key = key;
 	shp->shm_flags = (shmflg & S_IRWXUGO);
+	shp->mlock_user = NULL;
 
 	shp->shm_perm.security = NULL;
 	error = security_shm_alloc(shp);
 	if (error) {
-		ipc_rcu_free(shp, sizeof(*shp));
+		ipc_rcu_putref(shp);
 		return error;
 	}
 
-	if (shmflg & SHM_HUGETLB)
+	if (shmflg & SHM_HUGETLB) {
+		/* hugetlb_zero_setup takes care of mlock user accounting */
 		file = hugetlb_zero_setup(size);
-	else {
+		shp->mlock_user = current->user;
+	} else {
 		sprintf (name, "SYSV%08x", key);
 		file = shmem_file_setup(name, size, VM_ACCOUNT);
 	}
@@ -230,7 +241,7 @@ no_id:
 	fput(file);
 no_file:
 	security_shm_free(shp);
-	ipc_rcu_free(shp, sizeof(*shp));
+	ipc_rcu_putref(shp);
 	return error;
 }
 
@@ -380,9 +391,7 @@ static void shm_get_stat(unsigned long *rss, unsigned long *swp)
 
 		if (is_file_hugepages(shp->shm_file)) {
 			struct address_space *mapping = inode->i_mapping;
-			spin_lock(&mapping->page_lock);
 			*rss += (HPAGE_SIZE/PAGE_SIZE)*mapping->nrpages;
-			spin_unlock(&mapping->page_lock);
 		} else {
 			struct shmem_inode_info *info = SHMEM_I(inode);
 			spin_lock(&info->lock);
@@ -502,14 +511,6 @@ asmlinkage long sys_shmctl (int shmid, int cmd, struct shmid_ds __user *buf)
 	case SHM_LOCK:
 	case SHM_UNLOCK:
 	{
-/* Allow superuser to lock segment in memory */
-/* Should the pages be faulted in here or leave it to user? */
-/* need to determine interaction with current->swappable */
-		if (!capable(CAP_IPC_LOCK)) {
-			err = -EPERM;
-			goto out;
-		}
-
 		shp = shm_lock(shmid);
 		if(shp==NULL) {
 			err = -EINVAL;
@@ -519,18 +520,33 @@ asmlinkage long sys_shmctl (int shmid, int cmd, struct shmid_ds __user *buf)
 		if(err)
 			goto out_unlock;
 
+		if (!capable(CAP_IPC_LOCK)) {
+			err = -EPERM;
+			if (current->euid != shp->shm_perm.uid &&
+			    current->euid != shp->shm_perm.cuid)
+				goto out_unlock;
+			if (cmd == SHM_LOCK &&
+			    !current->signal->rlim[RLIMIT_MEMLOCK].rlim_cur)
+				goto out_unlock;
+		}
+
 		err = security_shm_shmctl(shp, cmd);
 		if (err)
 			goto out_unlock;
 		
 		if(cmd==SHM_LOCK) {
-			if (!is_file_hugepages(shp->shm_file))
-				shmem_lock(shp->shm_file, 1);
-			shp->shm_flags |= SHM_LOCKED;
-		} else {
-			if (!is_file_hugepages(shp->shm_file))
-				shmem_lock(shp->shm_file, 0);
+			struct user_struct * user = current->user;
+			if (!is_file_hugepages(shp->shm_file)) {
+				err = shmem_lock(shp->shm_file, 1, user);
+				if (!err) {
+					shp->shm_flags |= SHM_LOCKED;
+					shp->mlock_user = user;
+				}
+			}
+		} else if (!is_file_hugepages(shp->shm_file)) {
+			shmem_lock(shp->shm_file, 0, shp->mlock_user);
 			shp->shm_flags &= ~SHM_LOCKED;
+			shp->mlock_user = NULL;
 		}
 		shm_unlock(shp);
 		goto out;
@@ -635,7 +651,7 @@ out:
  * "raddr" thing points to kernel space, and there has to be a wrapper around
  * this.
  */
-long sys_shmat(int shmid, char __user *shmaddr, int shmflg, ulong *raddr)
+long do_shmat(int shmid, char __user *shmaddr, int shmflg, ulong *raddr)
 {
 	struct shmid_kernel *shp;
 	unsigned long addr;
@@ -656,7 +672,10 @@ long sys_shmat(int shmid, char __user *shmaddr, int shmflg, ulong *raddr)
 			if (shmflg & SHM_RND)
 				addr &= ~(SHMLBA-1);	   /* round down */
 			else
-				return -EINVAL;
+#ifndef __ARCH_FORCE_SHMLBA
+				if (addr & ~PAGE_MASK)
+#endif
+					return -EINVAL;
 		}
 		flags = MAP_SHARED | MAP_FIXED;
 	} else {
@@ -674,6 +693,10 @@ long sys_shmat(int shmid, char __user *shmaddr, int shmflg, ulong *raddr)
 		prot = PROT_READ | PROT_WRITE;
 		o_flags = O_RDWR;
 		acc_mode = S_IRUGO | S_IWUGO;
+	}
+	if (shmflg & SHM_EXEC) {
+		prot |= PROT_EXEC;
+		acc_mode |= S_IXUGO;
 	}
 
 	/*
@@ -759,6 +782,21 @@ asmlinkage long sys_shmdt(char __user *shmaddr)
 
 	down_write(&mm->mmap_sem);
 
+	/*
+	 * This function tries to be smart and unmap shm segments that
+	 * were modified by partial mlock or munmap calls:
+	 * - It first determines the size of the shm segment that should be
+	 *   unmapped: It searches for a vma that is backed by shm and that
+	 *   started at address shmaddr. It records it's size and then unmaps
+	 *   it.
+	 * - Then it unmaps all shm vmas that started at shmaddr and that
+	 *   are within the initially determined size.
+	 * Errors from do_munmap are ignored: the function only fails if
+	 * it's called with invalid parameters or if it's called to unmap
+	 * a part of a vma. Both calls in this function are for full vmas,
+	 * the parameters are directly copied from the vma itself and always
+	 * valid - therefore do_munmap cannot fail. (famous last words?)
+	 */
 	/*
 	 * If it had been mremap()'d, the starting address would not
 	 * match the usual checks anyway. So assume all vma's are

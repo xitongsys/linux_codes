@@ -13,6 +13,8 @@
 #ifndef _ASM_S390_PGTABLE_H
 #define _ASM_S390_PGTABLE_H
 
+#include <asm-generic/4level-fixup.h>
+
 /*
  * The Linux memory management assumes a three-level page table setup. For
  * s390 31 bit we "fold" the mid level into the top-level page table, so
@@ -29,8 +31,11 @@
  * the S390 page table tree.
  */
 #ifndef __ASSEMBLY__
+#include <asm/bug.h>
 #include <asm/processor.h>
 #include <linux/threads.h>
+
+struct vm_area_struct; /* forward declaration (include/linux/mm.h) */
 
 extern pgd_t swapper_pg_dir[] __attribute__ ((aligned (4096)));
 extern void paging_init(void);
@@ -210,9 +215,6 @@ extern char empty_zero_page[PAGE_SIZE];
 #define _PAGE_RO        0x200          /* HW read-only                     */
 #define _PAGE_INVALID   0x400          /* HW invalid                       */
 
-/* Software bits in the page table entry */
-#define _PAGE_ISCLEAN   0x002
-
 /* Mask and four different kinds of invalid pages. */
 #define _PAGE_INVALID_MASK	0x601
 #define _PAGE_INVALID_EMPTY	0x400
@@ -280,12 +282,12 @@ extern char empty_zero_page[PAGE_SIZE];
  * No mapping available
  */
 #define PAGE_NONE_SHARED  __pgprot(_PAGE_INVALID_NONE)
-#define PAGE_NONE_PRIVATE __pgprot(_PAGE_INVALID_NONE|_PAGE_ISCLEAN)
+#define PAGE_NONE_PRIVATE __pgprot(_PAGE_INVALID_NONE)
 #define PAGE_RO_SHARED	  __pgprot(_PAGE_RO)
-#define PAGE_RO_PRIVATE	  __pgprot(_PAGE_RO|_PAGE_ISCLEAN)
-#define PAGE_COPY	  __pgprot(_PAGE_RO|_PAGE_ISCLEAN)
+#define PAGE_RO_PRIVATE	  __pgprot(_PAGE_RO)
+#define PAGE_COPY	  __pgprot(_PAGE_RO)
 #define PAGE_SHARED	  __pgprot(0)
-#define PAGE_KERNEL	  __pgprot(_PAGE_ISCLEAN)
+#define PAGE_KERNEL	  __pgprot(0)
 
 /*
  * The S390 can't do page protection for execute, and considers that the
@@ -400,20 +402,28 @@ extern inline int pte_write(pte_t pte)
 
 extern inline int pte_dirty(pte_t pte)
 {
-	int skey;
-
-	if (pte_val(pte) & _PAGE_ISCLEAN)
-		return 0;
-	asm volatile ("iske %0,%1" : "=d" (skey) : "a" (pte_val(pte)));
-	return skey & _PAGE_CHANGED;
+	/* A pte is neither clean nor dirty on s/390. The dirty bit
+	 * is in the storage key. See page_test_and_clear_dirty for
+	 * details.
+	 */
+	return 0;
 }
 
 extern inline int pte_young(pte_t pte)
 {
-	int skey;
+	/* A pte is neither young nor old on s/390. The young bit
+	 * is in the storage key. See page_test_and_clear_young for
+	 * details.
+	 */
+	return 0;
+}
 
-	asm volatile ("iske %0,%1" : "=d" (skey) : "a" (pte_val(pte)));
-	return skey & _PAGE_REFERENCED;
+extern inline int pte_read(pte_t pte)
+{
+	/* All pages are readable since we don't use the fetch
+	 * protection bit in the storage key.
+	 */
+	return 1;
 }
 
 /*
@@ -458,20 +468,22 @@ extern inline void pte_clear(pte_t *ptep)
  */
 extern inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 {
-	pte_val(pte) &= PAGE_MASK | _PAGE_ISCLEAN;
-	pte_val(pte) |= pgprot_val(newprot) & ~_PAGE_ISCLEAN;
+	pte_val(pte) &= PAGE_MASK;
+	pte_val(pte) |= pgprot_val(newprot);
 	return pte;
 }
 
 extern inline pte_t pte_wrprotect(pte_t pte)
 {
-	pte_val(pte) |= _PAGE_RO;
+	/* Do not clobber _PAGE_INVALID_NONE pages!  */
+	if (!(pte_val(pte) & _PAGE_INVALID))
+		pte_val(pte) |= _PAGE_RO;
 	return pte;
 }
 
 extern inline pte_t pte_mkwrite(pte_t pte) 
 {
-	pte_val(pte) &= ~(_PAGE_RO | _PAGE_ISCLEAN);
+	pte_val(pte) &= ~_PAGE_RO;
 	return pte;
 }
 
@@ -490,55 +502,77 @@ extern inline pte_t pte_mkdirty(pte_t pte)
 	 * sske instruction is slow. It is faster to let the
 	 * next instruction set the dirty bit.
 	 */
-	pte_val(pte) &= ~ _PAGE_ISCLEAN;
 	return pte;
 }
 
 extern inline pte_t pte_mkold(pte_t pte)
 {
-	asm volatile ("rrbe 0,%0" : : "a" (pte_val(pte)) : "cc" );
+	/* S/390 doesn't keep its dirty/referenced bit in the pte.
+	 * There is no point in clearing the real referenced bit.
+	 */
 	return pte;
 }
 
 extern inline pte_t pte_mkyoung(pte_t pte)
 {
-	/* To set the referenced bit we read the first word from the real
-	 * page with a special instruction: load using real address (lura).
-	 * Isn't S/390 a nice architecture ?! */
-	asm volatile ("lura 0,%0" : : "a" (pte_val(pte) & PAGE_MASK) : "0" );
+	/* S/390 doesn't keep its dirty/referenced bit in the pte.
+	 * There is no point in setting the real referenced bit.
+	 */
 	return pte;
 }
 
 static inline int ptep_test_and_clear_young(pte_t *ptep)
 {
-	int ccode;
+	return 0;
+}
 
-	asm volatile ("rrbe 0,%1\n\t"
-		      "ipm  %0\n\t"
-		      "srl  %0,28\n\t" 
-                      : "=d" (ccode) : "a" (pte_val(*ptep)) : "cc" );
-	return ccode & 2;
+static inline int
+ptep_clear_flush_young(struct vm_area_struct *vma,
+			unsigned long address, pte_t *ptep)
+{
+	/* No need to flush TLB; bits are in storage key */
+	return ptep_test_and_clear_young(ptep);
 }
 
 static inline int ptep_test_and_clear_dirty(pte_t *ptep)
 {
-	int skey;
+	return 0;
+}
 
-	if (pte_val(*ptep) & _PAGE_ISCLEAN)
-		return 0;
-	asm volatile ("iske %0,%1" : "=d" (skey) : "a" (*ptep));
-	if ((skey & _PAGE_CHANGED) == 0)
-		return 0;
-	/* We can't clear the changed bit atomically. For now we
-         * clear (!) the page referenced bit. */
-	asm volatile ("sske %0,%1" 
-	              : : "d" (0), "a" (*ptep));
-	return 1;
+static inline int
+ptep_clear_flush_dirty(struct vm_area_struct *vma,
+			unsigned long address, pte_t *ptep)
+{
+	/* No need to flush TLB; bits are in storage key */
+	return ptep_test_and_clear_dirty(ptep);
 }
 
 static inline pte_t ptep_get_and_clear(pte_t *ptep)
 {
 	pte_t pte = *ptep;
+	pte_clear(ptep);
+	return pte;
+}
+
+static inline pte_t
+ptep_clear_flush(struct vm_area_struct *vma,
+		 unsigned long address, pte_t *ptep)
+{
+	pte_t pte = *ptep;
+#ifndef __s390x__
+	if (!(pte_val(pte) & _PAGE_INVALID)) {
+		/* S390 has 1mb segments, we are emulating 4MB segments */
+		pte_t *pto = (pte_t *) (((unsigned long) ptep) & 0x7ffffc00);
+		__asm__ __volatile__ ("ipte %2,%3"
+				      : "=m" (*ptep) : "m" (*ptep),
+				        "a" (pto), "a" (address) );
+	}
+#else /* __s390x__ */
+	if (!(pte_val(pte) & _PAGE_INVALID)) 
+		__asm__ __volatile__ ("ipte %2,%3"
+				      : "=m" (*ptep) : "m" (*ptep),
+				        "a" (ptep), "a" (address) );
+#endif /* __s390x__ */
 	pte_clear(ptep);
 	return pte;
 }
@@ -553,6 +587,50 @@ static inline void ptep_mkdirty(pte_t *ptep)
 {
 	pte_mkdirty(*ptep);
 }
+
+static inline void
+ptep_establish(struct vm_area_struct *vma, 
+	       unsigned long address, pte_t *ptep,
+	       pte_t entry)
+{
+	ptep_clear_flush(vma, address, ptep);
+	set_pte(ptep, entry);
+}
+
+#define ptep_set_access_flags(__vma, __address, __ptep, __entry, __dirty) \
+	ptep_establish(__vma, __address, __ptep, __entry)
+
+/*
+ * Test and clear dirty bit in storage key.
+ * We can't clear the changed bit atomically. This is a potential
+ * race against modification of the referenced bit. This function
+ * should therefore only be called if it is not mapped in any
+ * address space.
+ */
+#define page_test_and_clear_dirty(_page)				  \
+({									  \
+	struct page *__page = (_page);					  \
+	unsigned long __physpage = __pa((__page-mem_map) << PAGE_SHIFT);  \
+	int __skey = page_get_storage_key(__physpage);			  \
+	if (__skey & _PAGE_CHANGED)					  \
+		page_set_storage_key(__physpage, __skey & ~_PAGE_CHANGED);\
+	(__skey & _PAGE_CHANGED);					  \
+})
+
+/*
+ * Test and clear referenced bit in storage key.
+ */
+#define page_test_and_clear_young(page)					  \
+({									  \
+	struct page *__page = (page);					  \
+	unsigned long __physpage = __pa((__page-mem_map) << PAGE_SHIFT);  \
+	int __ccode;							  \
+	asm volatile ("rrbe 0,%1\n\t"					  \
+		      "ipm  %0\n\t"					  \
+		      "srl  %0,28\n\t" 					  \
+                      : "=d" (__ccode) : "a" (__physpage) : "cc" );	  \
+	(__ccode & 2);							  \
+})
 
 /*
  * Conversion functions: convert a page and protection to a page entry,
@@ -582,10 +660,11 @@ static inline pte_t mk_pte_phys(unsigned long physpage, pgprot_t pgprot)
 	__pte;                                                            \
 })
 
-#define arch_set_page_uptodate(__page)					  \
-	do {								  \
-		asm volatile ("sske %0,%1" : : "d" (0),			  \
-			      "a" (__pa((__page-mem_map) << PAGE_SHIFT)));\
+#define SetPageUptodate(_page) \
+	do {								      \
+		struct page *__page = (_page);				      \
+		if (!test_and_set_bit(PG_uptodate, &__page->flags))	      \
+			page_test_and_clear_dirty(_page);		      \
 	} while (0)
 
 #ifdef __s390x__
@@ -610,7 +689,7 @@ static inline pte_t mk_pte_phys(unsigned long physpage, pgprot_t pgprot)
 #define pgd_page_kernel(pgd) (pgd_val(pgd) & PAGE_MASK)
 
 /* to find an entry in a page-table-directory */
-#define pgd_index(address) ((address >> PGDIR_SHIFT) & (PTRS_PER_PGD-1))
+#define pgd_index(address) (((address) >> PGDIR_SHIFT) & (PTRS_PER_PGD-1))
 #define pgd_offset(mm, address) ((mm)->pgd+pgd_index(address))
 
 /* to find an entry in a kernel page-table-directory */
@@ -651,14 +730,14 @@ extern inline pmd_t * pmd_offset(pgd_t * dir, unsigned long address)
  * information in the lowcore.
  * Bit 21 and bit 22 are the page invalid bit and the page protection
  * bit. We set both to indicate a swapped page.
- * Bit 31 is used as the software page present bit. If a page is
- * swapped this obviously has to be zero.
- * This leaves the bits 1-19 and bits 24-30 to store type and offset.
- * We use the 7 bits from 24-30 for the type and the 19 bits from 1-19
- * for the offset.
- * 0|     offset      |0110|type |0
- * 00000000001111111111222222222233
- * 01234567890123456789012345678901
+ * Bit 30 and 31 are used to distinguish the different page types. For
+ * a swapped page these bits need to be zero.
+ * This leaves the bits 1-19 and bits 24-29 to store type and offset.
+ * We use the 5 bits from 25-29 for the type and the 20 bits from 1-19
+ * plus 24 for the offset.
+ * 0|     offset        |0110|o|type |00|
+ * 0 0000000001111111111 2222 2 22222 33
+ * 0 1234567890123456789 0123 4 56789 01
  *
  * 64 bit swap entry format:
  * A page-table entry has some bits we have to treat in a special way.
@@ -668,35 +747,29 @@ extern inline pmd_t * pmd_offset(pgd_t * dir, unsigned long address)
  * information in the lowcore.
  * Bit 53 and bit 54 are the page invalid bit and the page protection
  * bit. We set both to indicate a swapped page.
- * Bit 63 is used as the software page present bit. If a page is
- * swapped this obviously has to be zero.
- * This leaves the bits 0-51 and bits 56-62 to store type and offset.
- * We use the 7 bits from 56-62 for the type and the 52 bits from 0-51
- * for the offset.
- * |                     offset                       |0110|type |0
- * 0000000000111111111122222222223333333333444444444455555555556666
- * 0123456789012345678901234567890123456789012345678901234567890123
+ * Bit 62 and 63 are used to distinguish the different page types. For
+ * a swapped page these bits need to be zero.
+ * This leaves the bits 0-51 and bits 56-61 to store type and offset.
+ * We use the 5 bits from 57-61 for the type and the 53 bits from 0-51
+ * plus 56 for the offset.
+ * |                      offset                        |0110|o|type |00|
+ *  0000000000111111111122222222223333333333444444444455 5555 5 55566 66
+ *  0123456789012345678901234567890123456789012345678901 2345 6 78901 23
  */
 extern inline pte_t mk_swap_pte(unsigned long type, unsigned long offset)
 {
 	pte_t pte;
-	pte_val(pte) = (type << 1) | (offset << 12) | _PAGE_INVALID_SWAP;
-#ifndef __s390x__
-	pte_val(pte) &= 0x7ffff6fe;  /* better to be paranoid */
-#else /* __s390x__ */
-	pte_val(pte) &= 0xfffffffffffff6fe;  /* better to be paranoid */
-#endif /* __s390x__ */
+	pte_val(pte) = _PAGE_INVALID_SWAP | ((type & 0x1f) << 2) |
+		((offset & 1) << 7) | ((offset & 0xffffe) << 11);
 	return pte;
 }
 
-#define __swp_type(entry)	(((entry).val >> 1) & 0x3f)
-#define __swp_offset(entry)	((entry).val >> 12)
+#define __swp_type(entry)	(((entry).val >> 2) & 0x1f)
+#define __swp_offset(entry)	(((entry).val >> 11) | (((entry).val >> 7) & 1))
 #define __swp_entry(type,offset) ((swp_entry_t) { pte_val(mk_swap_pte((type),(offset))) })
 
 #define __pte_to_swp_entry(pte)	((swp_entry_t) { pte_val(pte) })
 #define __swp_entry_to_pte(x)	((pte_t) { (x).val })
-
-typedef pte_t *pte_addr_t;
 
 #ifndef __s390x__
 # define PTE_FILE_MAX_BITS	26
@@ -720,9 +793,20 @@ typedef pte_t *pte_addr_t;
  */
 #define pgtable_cache_init()	do { } while (0)
 
-#ifdef __s390x__
-# define HAVE_ARCH_UNMAPPED_AREA
-#endif /* __s390x__ */
+#define __HAVE_ARCH_PTEP_ESTABLISH
+#define __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
+#define __HAVE_ARCH_PTEP_TEST_AND_CLEAR_YOUNG
+#define __HAVE_ARCH_PTEP_CLEAR_YOUNG_FLUSH
+#define __HAVE_ARCH_PTEP_TEST_AND_CLEAR_DIRTY
+#define __HAVE_ARCH_PTEP_CLEAR_DIRTY_FLUSH
+#define __HAVE_ARCH_PTEP_GET_AND_CLEAR
+#define __HAVE_ARCH_PTEP_CLEAR_FLUSH
+#define __HAVE_ARCH_PTEP_SET_WRPROTECT
+#define __HAVE_ARCH_PTEP_MKDIRTY
+#define __HAVE_ARCH_PTE_SAME
+#define __HAVE_ARCH_PAGE_TEST_AND_CLEAR_DIRTY
+#define __HAVE_ARCH_PAGE_TEST_AND_CLEAR_YOUNG
+#include <asm-generic/pgtable.h>
 
 #endif /* _S390_PAGE_H */
 

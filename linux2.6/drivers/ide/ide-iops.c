@@ -23,81 +23,12 @@
 #include <linux/delay.h>
 #include <linux/hdreg.h>
 #include <linux/ide.h>
+#include <linux/bitops.h>
 
 #include <asm/byteorder.h>
 #include <asm/irq.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
-#include <asm/bitops.h>
-
-/*
- *	IDE operator we assign to an unplugged device so that
- *	we don't trash new hardware assigned the same resources
- */
- 
-static u8 ide_unplugged_inb (unsigned long port)
-{
-	return 0xFF;
-}
-
-static u16 ide_unplugged_inw (unsigned long port)
-{
-	return 0xFFFF;
-}
-
-static void ide_unplugged_insw (unsigned long port, void *addr, u32 count)
-{
-}
-
-static u32 ide_unplugged_inl (unsigned long port)
-{
-	return 0xFFFFFFFF;
-}
-
-static void ide_unplugged_insl (unsigned long port, void *addr, u32 count)
-{
-}
-
-static void ide_unplugged_outb (u8 val, unsigned long port)
-{
-}
-
-static void ide_unplugged_outbsync (ide_drive_t *drive, u8 addr, unsigned long port)
-{
-}
-
-static void ide_unplugged_outw (u16 val, unsigned long port)
-{
-}
-
-static void ide_unplugged_outsw (unsigned long port, void *addr, u32 count)
-{
-}
-
-static void ide_unplugged_outl (u32 val, unsigned long port)
-{
-}
-
-static void ide_unplugged_outsl (unsigned long port, void *addr, u32 count)
-{
-}
-
-void unplugged_hwif_iops (ide_hwif_t *hwif)
-{
-	hwif->OUTB	= ide_unplugged_outb;
-	hwif->OUTBSYNC	= ide_unplugged_outbsync;
-	hwif->OUTW	= ide_unplugged_outw;
-	hwif->OUTL	= ide_unplugged_outl;
-	hwif->OUTSW	= ide_unplugged_outsw;
-	hwif->OUTSL	= ide_unplugged_outsl;
-	hwif->INB	= ide_unplugged_inb;
-	hwif->INW	= ide_unplugged_inw;
-	hwif->INL	= ide_unplugged_inl;
-	hwif->INSW	= ide_unplugged_insw;
-	hwif->INSL	= ide_unplugged_insl;
-}
-
-EXPORT_SYMBOL(unplugged_hwif_iops);
 
 /*
  *	Conventional PIO operations for ATA devices
@@ -115,7 +46,7 @@ static u16 ide_inw (unsigned long port)
 
 static void ide_insw (unsigned long port, void *addr, u32 count)
 {
-	return insw(port, addr, count);
+	insw(port, addr, count);
 }
 
 static u32 ide_inl (unsigned long port)
@@ -181,57 +112,57 @@ EXPORT_SYMBOL(default_hwif_iops);
 
 static u8 ide_mm_inb (unsigned long port)
 {
-	return (u8) readb(port);
+	return (u8) readb((void __iomem *) port);
 }
 
 static u16 ide_mm_inw (unsigned long port)
 {
-	return (u16) readw(port);
+	return (u16) readw((void __iomem *) port);
 }
 
 static void ide_mm_insw (unsigned long port, void *addr, u32 count)
 {
-	__ide_mm_insw(port, addr, count);
+	__ide_mm_insw((void __iomem *) port, addr, count);
 }
 
 static u32 ide_mm_inl (unsigned long port)
 {
-	return (u32) readl(port);
+	return (u32) readl((void __iomem *) port);
 }
 
 static void ide_mm_insl (unsigned long port, void *addr, u32 count)
 {
-	__ide_mm_insl(port, addr, count);
+	__ide_mm_insl((void __iomem *) port, addr, count);
 }
 
 static void ide_mm_outb (u8 value, unsigned long port)
 {
-	writeb(value, port);
+	writeb(value, (void __iomem *) port);
 }
 
 static void ide_mm_outbsync (ide_drive_t *drive, u8 value, unsigned long port)
 {
-	writeb(value, port);	
+	writeb(value, (void __iomem *) port);
 }
 
 static void ide_mm_outw (u16 value, unsigned long port)
 {
-	writew(value, port);
+	writew(value, (void __iomem *) port);
 }
 
 static void ide_mm_outsw (unsigned long port, void *addr, u32 count)
 {
-	__ide_mm_outsw(port, addr, count);
+	__ide_mm_outsw((void __iomem *) port, addr, count);
 }
 
 static void ide_mm_outl (u32 value, unsigned long port)
 {
-	writel(value, port);
+	writel(value, (void __iomem *) port);
 }
 
 static void ide_mm_outsl (unsigned long port, void *addr, u32 count)
 {
-	__ide_mm_outsl(port, addr, count);
+	__ide_mm_outsl((void __iomem *) port, addr, count);
 }
 
 void default_hwif_mmiops (ide_hwif_t *hwif)
@@ -253,16 +184,6 @@ void default_hwif_mmiops (ide_hwif_t *hwif)
 
 EXPORT_SYMBOL(default_hwif_mmiops);
 
-void default_hwif_transport (ide_hwif_t *hwif)
-{
-	hwif->ata_input_data		= ata_input_data;
-	hwif->ata_output_data		= ata_output_data;
-	hwif->atapi_input_bytes		= atapi_input_bytes;
-	hwif->atapi_output_bytes	= atapi_output_bytes;
-}
-
-EXPORT_SYMBOL(default_hwif_transport);
-
 u32 ide_read_24 (ide_drive_t *drive)
 {
 	u8 hcyl = HWIF(drive)->INB(IDE_HCYL_REG);
@@ -270,8 +191,6 @@ u32 ide_read_24 (ide_drive_t *drive)
 	u8 sect = HWIF(drive)->INB(IDE_SECTOR_REG);
 	return (hcyl<<16)|(lcyl<<8)|sect;
 }
-
-EXPORT_SYMBOL(ide_read_24);
 
 void SELECT_DRIVE (ide_drive_t *drive)
 {
@@ -290,23 +209,17 @@ void SELECT_INTERRUPT (ide_drive_t *drive)
 		HWIF(drive)->OUTB(drive->ctl|2, IDE_CONTROL_REG);
 }
 
-EXPORT_SYMBOL(SELECT_INTERRUPT);
-
 void SELECT_MASK (ide_drive_t *drive, int mask)
 {
 	if (HWIF(drive)->maskproc)
 		HWIF(drive)->maskproc(drive, mask);
 }
 
-EXPORT_SYMBOL(SELECT_MASK);
-
 void QUIRK_LIST (ide_drive_t *drive)
 {
 	if (HWIF(drive)->quirkproc)
 		drive->quirk_list = HWIF(drive)->quirkproc(drive);
 }
-
-EXPORT_SYMBOL(QUIRK_LIST);
 
 /*
  * Some localbus EIDE interfaces require a special access sequence
@@ -315,19 +228,17 @@ EXPORT_SYMBOL(QUIRK_LIST);
  * of the sector count register location, with interrupts disabled
  * to ensure that the reads all happen together.
  */
-void ata_vlb_sync (ide_drive_t *drive, unsigned long port)
+static void ata_vlb_sync(ide_drive_t *drive, unsigned long port)
 {
 	(void) HWIF(drive)->INB(port);
 	(void) HWIF(drive)->INB(port);
 	(void) HWIF(drive)->INB(port);
 }
 
-EXPORT_SYMBOL(ata_vlb_sync);
-
 /*
  * This is used for most PIO data transfers *from* the IDE interface
  */
-void ata_input_data (ide_drive_t *drive, void *buffer, u32 wcount)
+static void ata_input_data(ide_drive_t *drive, void *buffer, u32 wcount)
 {
 	ide_hwif_t *hwif	= HWIF(drive);
 	u8 io_32bit		= drive->io_32bit;
@@ -346,12 +257,10 @@ void ata_input_data (ide_drive_t *drive, void *buffer, u32 wcount)
 	}
 }
 
-EXPORT_SYMBOL(ata_input_data);
-
 /*
  * This is used for most PIO data transfers *to* the IDE interface
  */
-void ata_output_data (ide_drive_t *drive, void *buffer, u32 wcount)
+static void ata_output_data(ide_drive_t *drive, void *buffer, u32 wcount)
 {
 	ide_hwif_t *hwif	= HWIF(drive);
 	u8 io_32bit		= drive->io_32bit;
@@ -370,8 +279,6 @@ void ata_output_data (ide_drive_t *drive, void *buffer, u32 wcount)
 	}
 }
 
-EXPORT_SYMBOL(ata_output_data);
-
 /*
  * The following routines are mainly used by the ATAPI drivers.
  *
@@ -380,7 +287,7 @@ EXPORT_SYMBOL(ata_output_data);
  * extra byte allocated for the buffer.
  */
 
-void atapi_input_bytes (ide_drive_t *drive, void *buffer, u32 bytecount)
+static void atapi_input_bytes(ide_drive_t *drive, void *buffer, u32 bytecount)
 {
 	ide_hwif_t *hwif = HWIF(drive);
 
@@ -397,9 +304,7 @@ void atapi_input_bytes (ide_drive_t *drive, void *buffer, u32 bytecount)
 		hwif->INSW(IDE_DATA_REG, ((u8 *)buffer)+(bytecount & ~0x03), 1);
 }
 
-EXPORT_SYMBOL(atapi_input_bytes);
-
-void atapi_output_bytes (ide_drive_t *drive, void *buffer, u32 bytecount)
+static void atapi_output_bytes(ide_drive_t *drive, void *buffer, u32 bytecount)
 {
 	ide_hwif_t *hwif = HWIF(drive);
 
@@ -416,7 +321,15 @@ void atapi_output_bytes (ide_drive_t *drive, void *buffer, u32 bytecount)
 		hwif->OUTSW(IDE_DATA_REG, ((u8*)buffer)+(bytecount & ~0x03), 1);
 }
 
-EXPORT_SYMBOL(atapi_output_bytes);
+void default_hwif_transport(ide_hwif_t *hwif)
+{
+	hwif->ata_input_data		= ata_input_data;
+	hwif->ata_output_data		= ata_output_data;
+	hwif->atapi_input_bytes		= atapi_input_bytes;
+	hwif->atapi_output_bytes	= atapi_output_bytes;
+}
+
+EXPORT_SYMBOL(default_hwif_transport);
 
 /*
  * Beginning of Taskfile OPCODE Library and feature sets.
@@ -518,6 +431,7 @@ void ide_fix_driveid (struct hd_driveid *id)
 #endif
 }
 
+/* FIXME: exported for use by the USB storage (isd200.c) code only */
 EXPORT_SYMBOL(ide_fix_driveid);
 
 void ide_fixstring (u8 *s, const int bytecount, const int byteswap)
@@ -647,8 +561,17 @@ int ide_wait_stat (ide_startstop_t *startstop, ide_drive_t *drive, u8 good, u8 b
 		timeout += jiffies;
 		while ((stat = hwif->INB(IDE_STATUS_REG)) & BUSY_STAT) {
 			if (time_after(jiffies, timeout)) {
+				/*
+				 * One last read after the timeout in case
+				 * heavy interrupt load made us not make any
+				 * progress during the timeout..
+				 */
+				stat = hwif->INB(IDE_STATUS_REG);
+				if (!(stat & BUSY_STAT))
+					break;
+
 				local_irq_restore(flags);
-				*startstop = DRIVER(drive)->error(drive, "status timeout", stat);
+				*startstop = ide_error(drive, "status timeout", stat);
 				return 1;
 			}
 		}
@@ -666,7 +589,7 @@ int ide_wait_stat (ide_startstop_t *startstop, ide_drive_t *drive, u8 good, u8 b
 		if (OK_STAT((stat = hwif->INB(IDE_STATUS_REG)), good, bad))
 			return 0;
 	}
-	*startstop = DRIVER(drive)->error(drive, "status error", stat);
+	*startstop = ide_error(drive, "status error", stat);
 	return 1;
 }
 
@@ -745,8 +668,6 @@ int ide_ata66_check (ide_drive_t *drive, ide_task_t *args)
 	return 0;
 }
 
-EXPORT_SYMBOL(ide_ata66_check);
-
 /*
  * Backside of HDIO_DRIVE_CMD call of SETFEATURES_XFER.
  * 1 : Safe to update drive->id DMA registers.
@@ -765,9 +686,8 @@ int set_transfer (ide_drive_t *drive, ide_task_t *args)
 	return 0;
 }
 
-EXPORT_SYMBOL(set_transfer);
-
-u8 ide_auto_reduce_xfer (ide_drive_t *drive)
+#ifdef CONFIG_BLK_DEV_IDEDMA
+static u8 ide_auto_reduce_xfer (ide_drive_t *drive)
 {
 	if (!drive->crc_count)
 		return drive->current_speed;
@@ -791,8 +711,7 @@ u8 ide_auto_reduce_xfer (ide_drive_t *drive)
 		default:		return XFER_PIO_4;
 	}
 }
-
-EXPORT_SYMBOL(ide_auto_reduce_xfer);
+#endif /* CONFIG_BLK_DEV_IDEDMA */
 
 /*
  * Update the 
@@ -827,7 +746,7 @@ int ide_driveid_update (ide_drive_t *drive)
 	SELECT_MASK(drive, 1);
 	if (IDE_CONTROL_REG)
 		hwif->OUTB(drive->ctl,IDE_CONTROL_REG);
-	ide_delay_50ms();
+	msleep(50);
 	hwif->OUTB(WIN_IDENTIFY, IDE_COMMAND_REG);
 	timeout = jiffies + WAIT_WORSTCASE;
 	do {
@@ -835,9 +754,9 @@ int ide_driveid_update (ide_drive_t *drive)
 			SELECT_MASK(drive, 0);
 			return 0;	/* drive timed-out */
 		}
-		ide_delay_50ms();	/* give drive a breather */
+		msleep(50);	/* give drive a breather */
 	} while (hwif->INB(IDE_ALTSTATUS_REG) & BUSY_STAT);
-	ide_delay_50ms();	/* wait for IRQ and DRQ_STAT */
+	msleep(50);	/* wait for IRQ and DRQ_STAT */
 	if (!OK_STAT(hwif->INB(IDE_STATUS_REG),DRQ_STAT,BAD_R_STAT)) {
 		SELECT_MASK(drive, 0);
 		printk("%s: CHECK for good STATUS\n", drive->name);
@@ -867,8 +786,6 @@ int ide_driveid_update (ide_drive_t *drive)
 #endif
 }
 
-EXPORT_SYMBOL(ide_driveid_update);
-
 /*
  * Similar to ide_wait_stat(), except it never calls ide_error internally.
  * This is a kludge to handle the new ide_config_drive_speed() function,
@@ -887,11 +804,12 @@ int ide_config_drive_speed (ide_drive_t *drive, u8 speed)
 	u8 stat;
 
 //	while (HWGROUP(drive)->busy)
-//		ide_delay_50ms();
+//		msleep(50);
 
-#if defined(CONFIG_BLK_DEV_IDEDMA) && !defined(CONFIG_DMA_NONPCI)
-	hwif->ide_dma_host_off(drive);
-#endif /* (CONFIG_BLK_DEV_IDEDMA) && !(CONFIG_DMA_NONPCI) */
+#ifdef CONFIG_BLK_DEV_IDEDMA
+	if (hwif->ide_dma_check)	 /* check if host supports DMA */
+		hwif->ide_dma_host_off(drive);
+#endif
 
 	/*
 	 * Don't use ide_wait_cmd here - it will
@@ -965,12 +883,12 @@ int ide_config_drive_speed (ide_drive_t *drive, u8 speed)
 	drive->id->dma_mword &= ~0x0F00;
 	drive->id->dma_1word &= ~0x0F00;
 
-#if defined(CONFIG_BLK_DEV_IDEDMA) && !defined(CONFIG_DMA_NONPCI)
+#ifdef CONFIG_BLK_DEV_IDEDMA
 	if (speed >= XFER_SW_DMA_0)
 		hwif->ide_dma_host_on(drive);
-	else
+	else if (hwif->ide_dma_check)	/* check if host supports DMA */
 		hwif->ide_dma_off_quietly(drive);
-#endif /* (CONFIG_BLK_DEV_IDEDMA) && !(CONFIG_DMA_NONPCI) */
+#endif
 
 	switch(speed) {
 		case XFER_UDMA_7:   drive->id->dma_ultra |= 0x8080; break;
@@ -1007,7 +925,7 @@ EXPORT_SYMBOL(ide_config_drive_speed);
  *
  * See also ide_execute_command
  */
-void __ide_set_handler (ide_drive_t *drive, ide_handler_t *handler,
+static void __ide_set_handler (ide_drive_t *drive, ide_handler_t *handler,
 		      unsigned int timeout, ide_expiry_t *expiry)
 {
 	ide_hwgroup_t *hwgroup = HWGROUP(drive);
@@ -1022,8 +940,6 @@ void __ide_set_handler (ide_drive_t *drive, ide_handler_t *handler,
 	hwgroup->timer.expires	= jiffies + timeout;
 	add_timer(&hwgroup->timer);
 }
-
-EXPORT_SYMBOL(__ide_set_handler);
 
 void ide_set_handler (ide_drive_t *drive, ide_handler_t *handler,
 		      unsigned int timeout, ide_expiry_t *expiry)
@@ -1107,14 +1023,14 @@ static ide_startstop_t atapi_reset_pollfunc (ide_drive_t *drive)
 			return ide_started;
 		}
 		/* end of polling */
-		hwgroup->poll_timeout = 0;
+		hwgroup->polling = 0;
 		printk("%s: ATAPI reset timed-out, status=0x%02x\n",
 				drive->name, stat);
 		/* do it the old fashioned way */
 		return do_reset1(drive, 1);
 	}
 	/* done polling */
-	hwgroup->poll_timeout = 0;
+	hwgroup->polling = 0;
 	return ide_stopped;
 }
 
@@ -1155,7 +1071,6 @@ static ide_startstop_t reset_pollfunc (ide_drive_t *drive)
 			drive->failures = 0;
 		} else {
 			drive->failures++;
-#if FANCY_STATUS_DUMPS
 			printk("master: ");
 			switch (tmp & 0x7f) {
 				case 1: printk("passed");
@@ -1173,28 +1088,26 @@ static ide_startstop_t reset_pollfunc (ide_drive_t *drive)
 			if (tmp & 0x80)
 				printk("; slave: failed");
 			printk("\n");
-#else
-			printk("failed\n");
-#endif /* FANCY_STATUS_DUMPS */
 		}
 	}
-	hwgroup->poll_timeout = 0;	/* done polling */
+	hwgroup->polling = 0;	/* done polling */
 	return ide_stopped;
 }
 
-void check_dma_crc (ide_drive_t *drive)
+static void check_dma_crc(ide_drive_t *drive)
 {
+#ifdef CONFIG_BLK_DEV_IDEDMA
 	if (drive->crc_count) {
 		(void) HWIF(drive)->ide_dma_off_quietly(drive);
 		ide_set_xfer_rate(drive, ide_auto_reduce_xfer(drive));
 		if (drive->current_speed >= XFER_SW_DMA_0)
 			(void) HWIF(drive)->ide_dma_on(drive);
-	} else {
-		(void) HWIF(drive)->ide_dma_off(drive);
-	}
+	} else
+		(void)__ide_dma_off(drive);
+#endif
 }
 
-void pre_reset (ide_drive_t *drive)
+static void pre_reset(ide_drive_t *drive)
 {
 	DRIVER(drive)->pre_reset(drive);
 
@@ -1252,6 +1165,7 @@ static ide_startstop_t do_reset1 (ide_drive_t *drive, int do_not_try_atapi)
 		udelay (20);
 		hwif->OUTB(WIN_SRST, IDE_COMMAND_REG);
 		hwgroup->poll_timeout = jiffies + WAIT_WORSTCASE;
+		hwgroup->polling = 1;
 		__ide_set_handler(drive, &atapi_reset_pollfunc, HZ/20, NULL);
 		spin_unlock_irqrestore(&ide_lock, flags);
 		return ide_started;
@@ -1292,6 +1206,7 @@ static ide_startstop_t do_reset1 (ide_drive_t *drive, int do_not_try_atapi)
 	/* more than enough time */
 	udelay(10);
 	hwgroup->poll_timeout = jiffies + WAIT_WORSTCASE;
+	hwgroup->polling = 1;
 	__ide_set_handler(drive, &reset_pollfunc, HZ/20, NULL);
 
 	/*

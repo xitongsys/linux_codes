@@ -101,9 +101,6 @@ mtrr_write(struct file *file, const char __user *buf, size_t len, loff_t * ppos)
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
-	/*  Can't seek (pwrite) on this device  */
-	if (ppos != &file->f_pos)
-		return -ESPIPE;
 	memset(line, 0, LINE_SIZE);
 	if (len > LINE_SIZE)
 		len = LINE_SIZE;
@@ -160,7 +157,7 @@ mtrr_ioctl(struct inode *inode, struct file *file,
 
 	switch (cmd) {
 	default:
-		return -ENOIOCTLCMD;
+		return -ENOTTY;
 	case MTRRIOC_ADD_ENTRY:
 		if (!capable(CAP_SYS_ADMIN))
 			return -EPERM;
@@ -352,6 +349,14 @@ static int mtrr_seq_show(struct seq_file *seq, void *offset)
 
 static int __init mtrr_if_init(void)
 {
+	struct cpuinfo_x86 *c = &boot_cpu_data;
+
+	if ((!cpu_has(c, X86_FEATURE_MTRR)) &&
+	    (!cpu_has(c, X86_FEATURE_K6_MTRR)) &&
+	    (!cpu_has(c, X86_FEATURE_CYRIX_ARR)) &&
+	    (!cpu_has(c, X86_FEATURE_CENTAUR_MCR)))
+		return -ENODEV;
+
 	proc_root_mtrr =
 	    create_proc_entry("mtrr", S_IWUSR | S_IRUGO, &proc_root);
 	if (proc_root_mtrr) {

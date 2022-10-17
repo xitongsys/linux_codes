@@ -1,4 +1,4 @@
-/* $Id: sys_cris.c,v 1.5 2003/07/04 08:27:52 starvik Exp $
+/* $Id: sys_cris.c,v 1.6 2004/03/11 11:38:40 starvik Exp $
  *
  * linux/arch/cris/kernel/sys_cris.c
  *
@@ -11,6 +11,7 @@
 
 #include <linux/errno.h>
 #include <linux/sched.h>
+#include <linux/syscalls.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
@@ -155,7 +156,7 @@ asmlinkage int sys_ipc (uint call, int first, int second,
 
 	case SHMAT: {
                 ulong raddr;
-                ret = sys_shmat (first, (char __user *) ptr, second, &raddr);
+                ret = do_shmat (first, (char __user *) ptr, second, &raddr);
                 if (ret)
                         return ret;
                 return put_user (raddr, (ulong __user *) third);

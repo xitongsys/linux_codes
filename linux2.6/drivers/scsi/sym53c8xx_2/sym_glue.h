@@ -22,32 +22,19 @@
  *
  *-----------------------------------------------------------------------------
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
- * combined work to also be released under the terms of the GPL, the terms
- * and conditions of this License will apply in addition to those of the
- * GPL with the exception of any terms or conditions of this License that
- * conflict with, or are expressly prohibited by, the GPL.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHORS AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifndef SYM_GLUE_H
@@ -66,24 +53,14 @@
 #  include <asm/irq.h>
 #endif
 
+#include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
+#include <scsi/scsi_device.h>
 #include <scsi/scsi_host.h>
-#include "../scsi.h"		/* XXX: DID_* */
 
-#ifndef bzero
-#define bzero(d, n)	memset((d), 0, (n))
-#endif
-
-#ifndef bcmp
-#define bcmp(a, b, n)	memcmp((a), (b), (n))
-#endif
-
-/*
- *  General driver includes.
- */
-#include "sym_misc.h"
 #include "sym_conf.h"
 #include "sym_defs.h"
+#include "sym_misc.h"
 
 /*
  * Configuration addendum for Linux.
@@ -92,11 +69,8 @@
 
 #define SYM_OPT_HANDLE_DIR_UNKNOWN
 #define SYM_OPT_HANDLE_DEVICE_QUEUEING
-#define SYM_OPT_NVRAM_PRE_READ
-#define SYM_OPT_SNIFF_INQUIRY
 #define SYM_OPT_LIMIT_COMMAND_REORDERING
 #define	SYM_OPT_ANNOUNCE_TRANSFER_RATE
-#define	SYM_OPT_BUS_DMA_ABSTRACTION
 
 /*
  *  Print a message with severity.
@@ -112,10 +86,29 @@
 #define	printf(args...)		printk(args)
 
 /*
- *  Insert a delay in micro-seconds and milli-seconds.
+ *  Insert a delay in micro-seconds
  */
 #define sym_udelay(us)	udelay(us)
-#define sym_mdelay(ms)	mdelay(ms)
+
+/*
+ *  A 'read barrier' flushes any data that have been prefetched 
+ *  by the processor due to out of order execution. Such a barrier 
+ *  must notably be inserted prior to looking at data that have 
+ *  been DMAed, assuming that program does memory READs in proper 
+ *  order and that the device ensured proper ordering of WRITEs.
+ *
+ *  A 'write barrier' prevents any previous WRITEs to pass further 
+ *  WRITEs. Such barriers must be inserted each time another agent 
+ *  relies on ordering of WRITEs.
+ *
+ *  Note that, due to posting of PCI memory writes, we also must 
+ *  insert dummy PCI read transactions when some ordering involving 
+ *  both directions over the PCI does matter. PCI transactions are 
+ *  fully ordered in each direction.
+ */
+
+#define MEMORY_READ_BARRIER()	rmb()
+#define MEMORY_WRITE_BARRIER()	wmb()
 
 /*
  *  Let the compiler know about driver data structure names.
@@ -123,14 +116,6 @@
 typedef struct sym_tcb *tcb_p;
 typedef struct sym_lcb *lcb_p;
 typedef struct sym_ccb *ccb_p;
-typedef struct sym_hcb *hcb_p;
-
-/*
- *  Define a reference to the O/S dependent IO request.
- */
-typedef struct scsi_cmnd *cam_ccb_p;	/* Generic */
-typedef struct scsi_cmnd *cam_scsiio_p;/* SCSI I/O */
-
 
 /*
  *  IO functions definition for big/little endian CPU support.
@@ -273,32 +258,32 @@ typedef struct scsi_cmnd *cam_scsiio_p;/* SCSI I/O */
  *  MEMORY mapped IO input / output
  */
 
-#define INB_OFF(o)        readb((char *)np->s.mmio_va + sym_offb(o))
-#define OUTB_OFF(o, val)  writeb((val), (char *)np->s.mmio_va + sym_offb(o))
+#define INB_OFF(o)        readb(np->s.mmio_va + sym_offb(o))
+#define OUTB_OFF(o, val)  writeb((val), np->s.mmio_va + sym_offb(o))
 
 #if	defined(__BIG_ENDIAN) && !defined(SYM_CONF_CHIP_BIG_ENDIAN)
 
-#define INW_OFF(o)        readw_l2b((char *)np->s.mmio_va + sym_offw(o))
-#define INL_OFF(o)        readl_l2b((char *)np->s.mmio_va + (o))
+#define INW_OFF(o)        readw_l2b(np->s.mmio_va + sym_offw(o))
+#define INL_OFF(o)        readl_l2b(np->s.mmio_va + (o))
 
-#define OUTW_OFF(o, val)  writew_b2l((val), (char *)np->s.mmio_va + sym_offw(o))
-#define OUTL_OFF(o, val)  writel_b2l((val), (char *)np->s.mmio_va + (o))
+#define OUTW_OFF(o, val)  writew_b2l((val), np->s.mmio_va + sym_offw(o))
+#define OUTL_OFF(o, val)  writel_b2l((val), np->s.mmio_va + (o))
 
 #elif	defined(__LITTLE_ENDIAN) && defined(SYM_CONF_CHIP_BIG_ENDIAN)
 
-#define INW_OFF(o)        readw_b2l((char *)np->s.mmio_va + sym_offw(o))
-#define INL_OFF(o)        readl_b2l((char *)np->s.mmio_va + (o))
+#define INW_OFF(o)        readw_b2l(np->s.mmio_va + sym_offw(o))
+#define INL_OFF(o)        readl_b2l(np->s.mmio_va + (o))
 
-#define OUTW_OFF(o, val)  writew_l2b((val), (char *)np->s.mmio_va + sym_offw(o))
-#define OUTL_OFF(o, val)  writel_l2b((val), (char *)np->s.mmio_va + (o))
+#define OUTW_OFF(o, val)  writew_l2b((val), np->s.mmio_va + sym_offw(o))
+#define OUTL_OFF(o, val)  writel_l2b((val), np->s.mmio_va + (o))
 
 #else
 
-#define INW_OFF(o)        readw_raw((char *)np->s.mmio_va + sym_offw(o))
-#define INL_OFF(o)        readl_raw((char *)np->s.mmio_va + (o))
+#define INW_OFF(o)        readw_raw(np->s.mmio_va + sym_offw(o))
+#define INL_OFF(o)        readl_raw(np->s.mmio_va + (o))
 
-#define OUTW_OFF(o, val)  writew_raw((val), (char *)np->s.mmio_va + sym_offw(o))
-#define OUTL_OFF(o, val)  writel_raw((val), (char *)np->s.mmio_va + (o))
+#define OUTW_OFF(o, val)  writew_raw((val), np->s.mmio_va + sym_offw(o))
+#define OUTL_OFF(o, val)  writel_raw((val), np->s.mmio_va + (o))
 
 #endif
 
@@ -326,18 +311,12 @@ typedef struct scsi_cmnd *cam_scsiio_p;/* SCSI I/O */
 #define	CAM_RESRC_UNAVAIL	DID_ERROR
 
 /*
- *  Remap SCSI data direction values.
+ *  Remap data direction values.
  */
-#ifndef	SCSI_DATA_UNKNOWN
-#define	SCSI_DATA_UNKNOWN	0
-#define	SCSI_DATA_WRITE		1
-#define	SCSI_DATA_READ		2
-#define	SCSI_DATA_NONE		3
-#endif
-#define CAM_DIR_NONE		SCSI_DATA_NONE
-#define CAM_DIR_IN		SCSI_DATA_READ
-#define CAM_DIR_OUT		SCSI_DATA_WRITE
-#define CAM_DIR_UNKNOWN		SCSI_DATA_UNKNOWN
+#define CAM_DIR_NONE		DMA_NONE
+#define CAM_DIR_IN		DMA_FROM_DEVICE
+#define CAM_DIR_OUT		DMA_TO_DEVICE
+#define CAM_DIR_UNKNOWN		DMA_BIDIRECTIONAL
 
 /*
  *  These ones are used as return code from 
@@ -381,14 +360,11 @@ struct sym_shcb {
 
 	struct Scsi_Host *host;
 
-	void *		mmio_va;	/* MMIO kernel virtual address	*/
-	void *		ram_va;		/* RAM  kernel virtual address	*/
+	void __iomem *	mmio_va;	/* MMIO kernel virtual address	*/
+	void __iomem *	ram_va;		/* RAM  kernel virtual address	*/
 	u_long		io_port;	/* IO port address cookie	*/
 	u_short		io_ws;		/* IO window size		*/
 	int		irq;		/* IRQ number			*/
-
-	SYM_QUEHEAD	wait_cmdq;	/* Awaiting SCSI commands	*/
-	SYM_QUEHEAD	busy_cmdq;	/* Enqueued SCSI commands	*/
 
 	struct timer_list timer;	/* Timer handler link header	*/
 	u_long		lasttime;
@@ -414,9 +390,11 @@ struct sym_slot {
 	int	irq;
 /* port and address fields to fit INB, OUTB macros */
 	u_long	io_port;
-	void *	mmio_va;
+	void __iomem *	mmio_va;
 	char	inst_name[16];
 };
+
+struct sym_nvram;
 
 struct sym_device {
 	struct pci_dev *pdev;
@@ -425,12 +403,14 @@ struct sym_device {
 	struct sym_nvram *nvram;
 	u_short device_id;
 	u_char host_id;
-#ifdef	SYM_CONF_PQS_PDS_SUPPORT
-	u_char pqs_pds;
-#endif
 };
 
-typedef struct sym_device *sdev_p;
+/*
+ *  Driver host data structure.
+ */
+struct host_data {
+	struct sym_hcb *ncb;
+};
 
 /*
  *  The driver definitions (sym_hipd.h) must know about a 
@@ -474,7 +454,7 @@ void sym_mfree(void *m, int size, char *name);
 
 static __inline m_addr_t sym_m_get_dma_mem_cluster(m_pool_p mp, m_vtob_p vbp)
 {
-	void *vaddr = 0;
+	void *vaddr = NULL;
 	dma_addr_t baddr = 0;
 
 	vaddr = pci_alloc_consistent(mp->dev_dmat,SYM_MEM_CLUSTER_SIZE, &baddr);
@@ -530,7 +510,7 @@ sym_get_cam_status(struct scsi_cmnd *ccb)
 /*
  *  Async handler for negotiations.
  */
-void sym_xpt_async_nego_wide(hcb_p np, int target);
+void sym_xpt_async_nego_wide(struct sym_hcb *np, int target);
 #define sym_xpt_async_nego_sync(np, target)	\
 	sym_announce_transfer_rate(np, target)
 #define sym_xpt_async_nego_ppr(np, target)	\
@@ -539,14 +519,14 @@ void sym_xpt_async_nego_wide(hcb_p np, int target);
 /*
  *  Build CAM result for a successful IO and for a failed IO.
  */
-static __inline void sym_set_cam_result_ok(hcb_p np, ccb_p cp, int resid)
+static __inline void sym_set_cam_result_ok(struct sym_hcb *np, ccb_p cp, int resid)
 {
 	struct scsi_cmnd *cmd = cp->cam_ccb;
 
 	cmd->resid = resid;
 	cmd->result = (((DID_OK) << 16) + ((cp->ssss_status) & 0x7f));
 }
-void sym_set_cam_result_error(hcb_p np, ccb_p cp, int resid);
+void sym_set_cam_result_error(struct sym_hcb *np, ccb_p cp, int resid);
 
 /*
  *  Other O/S specific methods.
@@ -554,13 +534,12 @@ void sym_set_cam_result_error(hcb_p np, ccb_p cp, int resid);
 #define sym_cam_target_id(ccb)	(ccb)->target
 #define sym_cam_target_lun(ccb)	(ccb)->lun
 #define	sym_freeze_cam_ccb(ccb)	do { ; } while (0)
-void sym_xpt_done(hcb_p np, cam_ccb_p ccb);
-void sym_xpt_done2(hcb_p np, cam_ccb_p ccb, int cam_status);
+void sym_xpt_done(struct sym_hcb *np, struct scsi_cmnd *ccb);
 void sym_print_addr (ccb_p cp);
-void sym_xpt_async_bus_reset(hcb_p np);
-void sym_xpt_async_sent_bdr(hcb_p np, int target);
-int  sym_setup_data_and_start (hcb_p np, cam_scsiio_p csio, ccb_p cp);
-void sym_log_bus_error(hcb_p np);
-void sym_sniff_inquiry(hcb_p np, struct scsi_cmnd *cmd, int resid);
+void sym_xpt_async_bus_reset(struct sym_hcb *np);
+void sym_xpt_async_sent_bdr(struct sym_hcb *np, int target);
+int  sym_setup_data_and_start (struct sym_hcb *np, struct scsi_cmnd *csio, ccb_p cp);
+void sym_log_bus_error(struct sym_hcb *np);
+void sym_sniff_inquiry(struct sym_hcb *np, struct scsi_cmnd *cmd, int resid);
 
 #endif /* SYM_GLUE_H */

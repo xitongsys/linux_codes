@@ -10,10 +10,15 @@
 
 #include <linux/stat.h>
 #include <linux/param.h>	/* for HZ */
+#include <linux/sem.h>
+
 #include <asm/compat.h>
+#include <asm/siginfo.h>
 
 #define compat_jiffies_to_clock_t(x)	\
 		(((unsigned long)(x) * COMPAT_USER_HZ) / HZ)
+
+struct rusage;
 
 struct compat_itimerspec { 
 	struct compat_timespec it_interval;
@@ -43,9 +48,9 @@ typedef struct {
 	compat_sigset_word	sig[_COMPAT_NSIG_WORDS];
 } compat_sigset_t;
 
-extern int cp_compat_stat(struct kstat *, struct compat_stat *);
-extern int get_compat_timespec(struct timespec *, struct compat_timespec *);
-extern int put_compat_timespec(struct timespec *, struct compat_timespec *);
+extern int cp_compat_stat(struct kstat *, struct compat_stat __user *);
+extern int get_compat_timespec(struct timespec *, const struct compat_timespec __user *);
+extern int put_compat_timespec(const struct timespec *, struct compat_timespec __user *);
 
 struct compat_iovec {
 	compat_uptr_t	iov_base;
@@ -76,19 +81,7 @@ struct compat_rusage {
 	compat_long_t	ru_nivcsw;
 };
 
-struct compat_statfs64 {
-	__u32 f_type;
-	__u32 f_bsize;
-	__u64 f_blocks;
-	__u64 f_bfree;
-	__u64 f_bavail;
-	__u64 f_files;
-	__u64 f_ffree;
-	__kernel_fsid_t f_fsid;
-	__u32 f_namelen;
-	__u32 f_frsize;
-	__u32 f_spare[5];
-};
+extern int put_compat_rusage(const struct rusage *, struct compat_rusage __user *);
 
 struct compat_dirent {
 	u32		d_ino;
@@ -97,5 +90,63 @@ struct compat_dirent {
 	char		d_name[256];
 };
 
+typedef union compat_sigval {
+	compat_int_t	sival_int;
+	compat_uptr_t	sival_ptr;
+} compat_sigval_t;
+
+typedef struct compat_sigevent {
+	compat_sigval_t sigev_value;
+	compat_int_t sigev_signo;
+	compat_int_t sigev_notify;
+	union {
+		compat_int_t _pad[SIGEV_PAD_SIZE];
+		compat_int_t _tid;
+
+		struct {
+			compat_uptr_t _function;
+			compat_uptr_t _attribute;
+		} _sigev_thread;
+	} _sigev_un;
+} compat_sigevent_t;
+
+
+long compat_sys_semctl(int first, int second, int third, void __user *uptr);
+long compat_sys_msgsnd(int first, int second, int third, void __user *uptr);
+long compat_sys_msgrcv(int first, int second, int msgtyp, int third,
+		int version, void __user *uptr);
+long compat_sys_msgctl(int first, int second, void __user *uptr);
+long compat_sys_shmat(int first, int second, compat_uptr_t third, int version,
+		void __user *uptr);
+long compat_sys_shmctl(int first, int second, void __user *uptr);
+long compat_sys_semtimedop(int semid, struct sembuf __user *tsems,
+		unsigned nsems, const struct compat_timespec __user *timeout);
+asmlinkage long compat_sys_keyctl(u32 option,
+			      u32 arg2, u32 arg3, u32 arg4, u32 arg5);
+
+asmlinkage ssize_t compat_sys_readv(unsigned long fd,
+		const struct compat_iovec __user *vec, unsigned long vlen);
+asmlinkage ssize_t compat_sys_writev(unsigned long fd,
+		const struct compat_iovec __user *vec, unsigned long vlen);
+
+int compat_do_execve(char * filename, compat_uptr_t __user *argv,
+	        compat_uptr_t __user *envp, struct pt_regs * regs);
+
+asmlinkage long compat_sys_select(int n, compat_ulong_t __user *inp,
+		compat_ulong_t __user *outp, compat_ulong_t __user *exp,
+		struct compat_timeval __user *tvp);
+
+#define BITS_PER_COMPAT_LONG    (8*sizeof(compat_long_t))
+
+#define BITS_TO_COMPAT_LONGS(bits) \
+	(((bits)+BITS_PER_COMPAT_LONG-1)/BITS_PER_COMPAT_LONG)
+
+long compat_get_bitmap(unsigned long *mask, compat_ulong_t __user *umask,
+		       unsigned long bitmap_size);
+long compat_put_bitmap(compat_ulong_t __user *umask, unsigned long *mask,
+		       unsigned long bitmap_size);
+struct compat_siginfo;
+int copy_siginfo_from_user32(siginfo_t *to, struct compat_siginfo __user *from);
+int copy_siginfo_to_user32(struct compat_siginfo __user *to, siginfo_t *from);
 #endif /* CONFIG_COMPAT */
 #endif /* _LINUX_COMPAT_H */

@@ -4,11 +4,9 @@
  * Copyright (c) 2003 Patrick Mochel
  * Copyright (c) 2003 Open Source Development Lab
  * 
- * This file is release under the GPLv2
+ * This file is released under the GPLv2
  *
  */
-
-#define DEBUG
 
 #include <linux/suspend.h>
 #include <linux/kobject.h>
@@ -24,7 +22,7 @@
 DECLARE_MUTEX(pm_sem);
 
 struct pm_ops * pm_ops = NULL;
-u32 pm_disk_mode = PM_DISK_SHUTDOWN;
+suspend_disk_method_t pm_disk_mode = PM_DISK_SHUTDOWN;
 
 /**
  *	pm_set_ops - Set the global power method table. 
@@ -35,8 +33,6 @@ void pm_set_ops(struct pm_ops * ops)
 {
 	down(&pm_sem);
 	pm_ops = ops;
-	if (ops->pm_disk_mode && ops->pm_disk_mode < PM_DISK_MAX)
-		pm_disk_mode = ops->pm_disk_mode;
 	up(&pm_sem);
 }
 
@@ -50,7 +46,7 @@ void pm_set_ops(struct pm_ops * ops)
  *	the platform can enter the requested state.
  */
 
-static int suspend_prepare(u32 state)
+static int suspend_prepare(suspend_state_t state)
 {
 	int error = 0;
 
@@ -69,7 +65,7 @@ static int suspend_prepare(u32 state)
 			goto Thaw;
 	}
 
-	if ((error = device_suspend(state)))
+	if ((error = device_suspend(PMSG_SUSPEND)))
 		goto Finish;
 	return 0;
  Finish:
@@ -82,13 +78,14 @@ static int suspend_prepare(u32 state)
 }
 
 
-static int suspend_enter(u32 state)
+static int suspend_enter(suspend_state_t state)
 {
 	int error = 0;
 	unsigned long flags;
 
 	local_irq_save(flags);
-	if ((error = device_power_down(state)))
+
+	if ((error = device_power_down(PMSG_SUSPEND)))
 		goto Done;
 	error = pm_ops->enter(state);
 	device_power_up();
@@ -103,10 +100,10 @@ static int suspend_enter(u32 state)
  *	@state:		State we're coming out of.
  *
  *	Call platform code to clean up, restart processes, and free the 
- *	console that we've allocated.
+ *	console that we've allocated. This is not called for suspend-to-disk.
  */
 
-static void suspend_finish(u32 state)
+static void suspend_finish(suspend_state_t state)
 {
 	device_resume();
 	if (pm_ops && pm_ops->finish)
@@ -137,21 +134,21 @@ char * pm_states[] = {
  *	we've woken up).
  */
 
-static int enter_state(u32 state)
+static int enter_state(suspend_state_t state)
 {
 	int error;
 
 	if (down_trylock(&pm_sem))
 		return -EBUSY;
 
-	/* Suspend is hard to get right on SMP. */
-	if (num_online_cpus() != 1) {
-		error = -EPERM;
+	if (state == PM_SUSPEND_DISK) {
+		error = pm_suspend_disk();
 		goto Unlock;
 	}
 
-	if (state == PM_SUSPEND_DISK) {
-		error = pm_suspend_disk();
+	/* Suspend is hard to get right on SMP. */
+	if (num_online_cpus() != 1) {
+		error = -EPERM;
 		goto Unlock;
 	}
 
@@ -169,6 +166,15 @@ static int enter_state(u32 state)
 	return error;
 }
 
+/*
+ * This is main interface to the outside world. It needs to be
+ * called from process context.
+ */
+int software_suspend(void)
+{
+	return enter_state(PM_SUSPEND_DISK);
+}
+
 
 /**
  *	pm_suspend - Externally visible function for suspending system.
@@ -178,7 +184,7 @@ static int enter_state(u32 state)
  *	structure, and enter (above).
  */
 
-int pm_suspend(u32 state)
+int pm_suspend(suspend_state_t state)
 {
 	if (state > PM_SUSPEND_ON && state < PM_SUSPEND_MAX)
 		return enter_state(state);
@@ -216,12 +222,17 @@ static ssize_t state_show(struct subsystem * subsys, char * buf)
 
 static ssize_t state_store(struct subsystem * subsys, const char * buf, size_t n)
 {
-	u32 state = PM_SUSPEND_STANDBY;
+	suspend_state_t state = PM_SUSPEND_STANDBY;
 	char ** s;
+	char *p;
 	int error;
+	int len;
 
-	for (s = &pm_states[state]; *s; s++, state++) {
-		if (!strcmp(buf,*s))
+	p = memchr(buf, '\n', n);
+	len = p ? p - buf : n;
+
+	for (s = &pm_states[state]; state < PM_SUSPEND_MAX; s++, state++) {
+		if (*s && !strncmp(buf, *s, len))
 			break;
 	}
 	if (*s)

@@ -91,7 +91,7 @@ static struct dongle_reg dongle_plus = {
  *	So, we register a dongle of each sort and let irattach
  * pick the right one...
  */
-int __init actisys_init(void)
+static int __init actisys_init(void)
 {
 	int ret;
 
@@ -108,7 +108,7 @@ int __init actisys_init(void)
 	return 0;
 }
 
-void __exit actisys_cleanup(void)
+static void __exit actisys_cleanup(void)
 {
 	/* We have to remove both dongles */
 	irda_device_unregister_dongle(&dongle);
@@ -238,7 +238,7 @@ static int actisys_reset(struct irda_task *task)
 		self->set_dtr_rts(self->dev, TRUE, TRUE);
 		
 		/* Sleep 50 ms to make sure capacitor is charged */
-		ret = MSECS_TO_JIFFIES(50);
+		ret = msecs_to_jiffies(50);
 		irda_task_next_state(task, IRDA_TASK_WAIT);
 		break;
 	case IRDA_TASK_WAIT:			

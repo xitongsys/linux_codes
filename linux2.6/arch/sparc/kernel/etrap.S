@@ -5,14 +5,12 @@
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
 
-#include <asm/cprefix.h>
 #include <asm/head.h>
 #include <asm/asi.h>
 #include <asm/contregs.h>
 #include <asm/page.h>
 #include <asm/psr.h>
 #include <asm/ptrace.h>
-#include <asm/asm_offsets.h>
 #include <asm/winmacro.h>
 #include <asm/asmmacro.h>
 #include <asm/thread_info.h>
@@ -57,7 +55,7 @@ tsetup_7win_patch6:	and	%g2, 0x7f, %g2
 	 *
 	 * sethi	%hi(trap_setup), %l4
 	 * jmpl		%l4 + %lo(trap_setup), %l6
-	 * mov		1, %l4
+	 * nop
 	 */
 
 	/* 2 3 4  window number
@@ -156,9 +154,8 @@ trap_setup_from_user:
 	and	%t_kstack, %curptr, %curptr
 #endif
 
-	/* Clear current->thread.w_saved */
-	ld	[%curptr + TI_TASK], %g2
-	st	%g0, [%g2 + AOFF_task_thread + AOFF_thread_w_saved]
+	/* Clear current_thread_info->w_saved */
+	st	%g0, [%curptr + TI_W_SAVED]
 
 	/* See if we are in the trap window. */
 	andcc	%t_twinmask, %t_wim, %g0
@@ -219,9 +216,9 @@ tsetup_patch6:
 	/* Call MMU-architecture dependent stack checking
 	 * routine.
 	 */
-	.globl	C_LABEL(tsetup_mmu_patchme)
-C_LABEL(tsetup_mmu_patchme):
-	b	C_LABEL(tsetup_sun4c_stackchk)
+	.globl	tsetup_mmu_patchme
+tsetup_mmu_patchme:
+	b	tsetup_sun4c_stackchk
 	 andcc	%sp, 0x7, %g0
 
 	/* Architecture specific stack checking routines.  When either
@@ -231,8 +228,8 @@ C_LABEL(tsetup_mmu_patchme):
 	 */
 #define glob_tmp     g1
 
-	.globl	C_LABEL(tsetup_sun4c_stackchk)
-C_LABEL(tsetup_sun4c_stackchk):
+	.globl	tsetup_sun4c_stackchk
+tsetup_sun4c_stackchk:
 	/* Done by caller: andcc %sp, 0x7, %g0 */
 	bne	trap_setup_user_stack_is_bolixed
 	 sra	%sp, 29, %glob_tmp
@@ -278,8 +275,8 @@ tsetup_sun4c_onepage:
 	jmpl	%t_retpc + 0x8, %g0
 	 mov	%t_kstack, %sp
 
-	.globl	C_LABEL(tsetup_srmmu_stackchk)
-C_LABEL(tsetup_srmmu_stackchk):
+	.globl	tsetup_srmmu_stackchk
+tsetup_srmmu_stackchk:
 	/* Check results of callers andcc %sp, 0x7, %g0 */
 	bne	trap_setup_user_stack_is_bolixed
 	 sethi   %hi(PAGE_OFFSET), %glob_tmp
@@ -292,8 +289,7 @@ trap_setup_user_stack_is_bolixed:
 	/* From user/kernel into invalid window w/bad user
 	 * stack. Save bad user stack, and return to caller.
 	 */
-	ld	[%curptr + TI_TASK], %glob_tmp
-	SAVE_BOLIXED_USER_STACK(glob_tmp, g3)
+	SAVE_BOLIXED_USER_STACK(curptr, g3)
 	restore	%g0, %g0, %g0
 
 	jmpl	%t_retpc + 0x8, %g0

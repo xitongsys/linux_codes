@@ -33,6 +33,8 @@ struct sh_machine_vector mv_se __initmv = {
 	.mv_nr_irqs		= 32,
 #elif defined(CONFIG_CPU_SUBTYPE_SH7709)
 	.mv_nr_irqs		= 61,
+#elif defined(CONFIG_CPU_SUBTYPE_SH7705)
+	.mv_nr_irqs		= 86,
 #endif
 
 	.mv_inb			= se_inb,
@@ -55,16 +57,6 @@ struct sh_machine_vector mv_se __initmv = {
 	.mv_outsb		= se_outsb,
 	.mv_outsw		= se_outsw,
 	.mv_outsl		= se_outsl,
-
-	.mv_readb		= se_readb,
-	.mv_readw		= se_readw,
-	.mv_readl		= se_readl,
-	.mv_writeb		= se_writeb,
-	.mv_writew		= se_writew,
-	.mv_writel		= se_writel,
-
-	.mv_ioremap		= generic_ioremap,
-	.mv_iounmap		= generic_iounmap,
 
 	.mv_isa_port2addr	= se_isa_port2addr,
 

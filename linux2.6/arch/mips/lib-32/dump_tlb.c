@@ -32,6 +32,8 @@ static inline const char *msk2str(unsigned int mask)
 	case PM_256M:	return "256Mb";
 #endif
 	}
+
+	return "unknown";
 }
 
 #define BARRIER()					\
@@ -143,7 +145,7 @@ void dump_list_process(struct task_struct *t, void *address)
 
 	addr = (unsigned long) address;
 
-	printk("Addr                 == %08x\n", addr);
+	printk("Addr                 == %08lx\n", addr);
 	printk("task                 == %8p\n", t);
 	printk("task->mm             == %8p\n", t->mm);
 	//printk("tasks->mm.pgd        == %08x\n", (unsigned int) t->mm->pgd);
@@ -211,10 +213,10 @@ void dump16(unsigned long *p)
 {
 	int i;
 
-	for(i = 0; i < 8; i++) {
-		printk("*%8p = %08lx, ", p, *p);
+	for (i = 0; i < 8; i++) {
+		printk("*%08lx == %08lx, ", (unsigned long)p, *p);
 		p++;
-		printk("*%8p = %08lx\n", p, *p);
+		printk("*%08lx == %08lx\n", (unsigned long)p, *p);
 		p++;
 	}
 }

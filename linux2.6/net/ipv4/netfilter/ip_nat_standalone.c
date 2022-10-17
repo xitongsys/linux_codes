@@ -4,9 +4,15 @@
    These are not required by the compatibility layer.
 */
 
-/* (c) 1999 Paul `Rusty' Russell.  Licenced under the GNU General
- * Public Licence.
+/* (C) 1999-2001 Paul `Rusty' Russell
+ * (C) 2002-2004 Netfilter Core Team <coreteam@netfilter.org>
  *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/*
  * 23 Apr 2001: Harald Welte <laforge@gnumonks.org>
  * 	- new API and handling of conntrack/nat helpers
  * 	- now capable of multiple expectations for one master
@@ -21,6 +27,7 @@
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/proc_fs.h>
+#include <net/ip.h>
 #include <net/checksum.h>
 #include <linux/spinlock.h>
 
@@ -48,15 +55,6 @@
 			         : ((hooknum) == NF_IP_LOCAL_IN ? "LOCAL_IN"  \
 				    : "*ERROR*")))
 
-static inline int call_expect(struct ip_conntrack *master,
-			      struct sk_buff **pskb,
-			      unsigned int hooknum,
-			      struct ip_conntrack *ct,
-			      struct ip_nat_info *info)
-{
-	return master->nat.info.helper->expect(pskb, hooknum, ct, info);
-}
-
 static unsigned int
 ip_nat_fn(unsigned int hooknum,
 	  struct sk_buff **pskb,
@@ -79,7 +77,8 @@ ip_nat_fn(unsigned int hooknum,
 
 	/* If we had a hardware checksum before, it's now invalid */
 	if ((*pskb)->ip_summed == CHECKSUM_HW)
-		(*pskb)->ip_summed = CHECKSUM_NONE;
+		if (skb_checksum_help(*pskb, (out == NULL)))
+			return NF_DROP;
 
 	ct = ip_conntrack_get(*pskb, &ctinfo);
 	/* Can't track?  It's not due to stress, or conntrack would
@@ -91,11 +90,13 @@ ip_nat_fn(unsigned int hooknum,
                    hash table yet).  We must not let this through, in
                    case we're doing NAT to the same network. */
 		if ((*pskb)->nh.iph->protocol == IPPROTO_ICMP) {
-			struct icmphdr hdr;
+			struct icmphdr _hdr, *hp;
 
-			if (skb_copy_bits(*pskb, (*pskb)->nh.iph->ihl*4,
-					  &hdr, sizeof(hdr)) == 0
-			    && hdr.type == ICMP_REDIRECT)
+			hp = skb_header_pointer(*pskb,
+						(*pskb)->nh.iph->ihl*4,
+						sizeof(_hdr), &_hdr);
+			if (hp != NULL &&
+			    hp->type == ICMP_REDIRECT)
 				return NF_DROP;
 		}
 		return NF_ACCEPT;
@@ -105,7 +106,7 @@ ip_nat_fn(unsigned int hooknum,
 	case IP_CT_RELATED:
 	case IP_CT_RELATED+IP_CT_IS_REPLY:
 		if ((*pskb)->nh.iph->protocol == IPPROTO_ICMP) {
-			if (!icmp_reply_translation(pskb, ct, hooknum,
+			if (!icmp_reply_translation(pskb, ct, maniptype,
 						    CTINFO2DIR(ctinfo)))
 				return NF_DROP;
 			else
@@ -115,38 +116,26 @@ ip_nat_fn(unsigned int hooknum,
 	case IP_CT_NEW:
 		info = &ct->nat.info;
 
-		WRITE_LOCK(&ip_nat_lock);
 		/* Seen it before?  This can happen for loopback, retrans,
 		   or local packets.. */
-		if (!(info->initialized & (1 << maniptype))) {
+		if (!ip_nat_initialized(ct, maniptype)) {
 			unsigned int ret;
 
-			if (ct->master
-			    && master_ct(ct)->nat.info.helper
-			    && master_ct(ct)->nat.info.helper->expect) {
-				ret = call_expect(master_ct(ct), pskb, 
-						  hooknum, ct, info);
-			} else {
-#ifdef CONFIG_IP_NF_NAT_LOCAL
-				/* LOCAL_IN hook doesn't have a chain!  */
-				if (hooknum == NF_IP_LOCAL_IN)
-					ret = alloc_null_binding(ct, info,
-								 hooknum);
-				else
-#endif
-				ret = ip_nat_rule_find(pskb, hooknum, in, out,
-						       ct, info);
-			}
+			/* LOCAL_IN hook doesn't have a chain!  */
+			if (hooknum == NF_IP_LOCAL_IN)
+				ret = alloc_null_binding(ct, info, hooknum);
+			else
+				ret = ip_nat_rule_find(pskb, hooknum,
+						       in, out, ct,
+						       info);
 
 			if (ret != NF_ACCEPT) {
-				WRITE_UNLOCK(&ip_nat_lock);
 				return ret;
 			}
 		} else
 			DEBUGP("Already setup manip %s for ct %p\n",
 			       maniptype == IP_NAT_MANIP_SRC ? "SRC" : "DST",
 			       ct);
-		WRITE_UNLOCK(&ip_nat_lock);
 		break;
 
 	default:
@@ -157,7 +146,30 @@ ip_nat_fn(unsigned int hooknum,
 	}
 
 	IP_NF_ASSERT(info);
-	return do_bindings(ct, ctinfo, info, hooknum, pskb);
+	return nat_packet(ct, ctinfo, hooknum, pskb);
+}
+
+static unsigned int
+ip_nat_in(unsigned int hooknum,
+          struct sk_buff **pskb,
+          const struct net_device *in,
+          const struct net_device *out,
+          int (*okfn)(struct sk_buff *))
+{
+	u_int32_t saddr, daddr;
+	unsigned int ret;
+
+	saddr = (*pskb)->nh.iph->saddr;
+	daddr = (*pskb)->nh.iph->daddr;
+
+	ret = ip_nat_fn(hooknum, pskb, in, out, okfn);
+	if (ret != NF_DROP && ret != NF_STOLEN
+	    && ((*pskb)->nh.iph->saddr != saddr
+	        || (*pskb)->nh.iph->daddr != daddr)) {
+		dst_release((*pskb)->dst);
+		(*pskb)->dst = NULL;
+	}
+	return ret;
 }
 
 static unsigned int
@@ -183,7 +195,7 @@ ip_nat_out(unsigned int hooknum,
 	   I'm starting to have nightmares about fragments.  */
 
 	if ((*pskb)->nh.iph->frag_off & htons(IP_MF|IP_OFFSET)) {
-		*pskb = ip_ct_gather_frags(*pskb);
+		*pskb = ip_ct_gather_frags(*pskb, IP_DEFRAG_NAT_OUT);
 
 		if (!*pskb)
 			return NF_STOLEN;
@@ -192,7 +204,6 @@ ip_nat_out(unsigned int hooknum,
 	return ip_nat_fn(hooknum, pskb, in, out, okfn);
 }
 
-#ifdef CONFIG_IP_NF_NAT_LOCAL
 static unsigned int
 ip_nat_local_fn(unsigned int hooknum,
 		struct sk_buff **pskb,
@@ -218,13 +229,12 @@ ip_nat_local_fn(unsigned int hooknum,
 		return ip_route_me_harder(pskb) == 0 ? ret : NF_DROP;
 	return ret;
 }
-#endif
 
 /* We must be after connection tracking and before packet filtering. */
 
 /* Before packet filtering, change destination */
 static struct nf_hook_ops ip_nat_in_ops = {
-	.hook		= ip_nat_fn,
+	.hook		= ip_nat_in,
 	.owner		= THIS_MODULE,
 	.pf		= PF_INET,
 	.hooknum	= NF_IP_PRE_ROUTING,
@@ -240,7 +250,6 @@ static struct nf_hook_ops ip_nat_out_ops = {
 	.priority	= NF_IP_PRI_NAT_SRC,
 };
 
-#ifdef CONFIG_IP_NF_NAT_LOCAL
 /* Before packet filtering, change destination */
 static struct nf_hook_ops ip_nat_local_out_ops = {
 	.hook		= ip_nat_local_fn,
@@ -258,39 +267,6 @@ static struct nf_hook_ops ip_nat_local_in_ops = {
 	.hooknum	= NF_IP_LOCAL_IN,
 	.priority	= NF_IP_PRI_NAT_SRC,
 };
-#endif
-
-/* Protocol registration. */
-int ip_nat_protocol_register(struct ip_nat_protocol *proto)
-{
-	int ret = 0;
-	struct list_head *i;
-
-	WRITE_LOCK(&ip_nat_lock);
-	list_for_each(i, &protos) {
-		if (((struct ip_nat_protocol *)i)->protonum
-		    == proto->protonum) {
-			ret = -EBUSY;
-			goto out;
-		}
-	}
-
-	list_prepend(&protos, proto);
- out:
-	WRITE_UNLOCK(&ip_nat_lock);
-	return ret;
-}
-
-/* Noone stores the protocol anywhere; simply delete it. */
-void ip_nat_protocol_unregister(struct ip_nat_protocol *proto)
-{
-	WRITE_LOCK(&ip_nat_lock);
-	LIST_DELETE(&protos, proto);
-	WRITE_UNLOCK(&ip_nat_lock);
-
-	/* Someone could be still looking at the proto in a bh. */
-	synchronize_net();
-}
 
 static int init_or_cleanup(int init)
 {
@@ -320,7 +296,6 @@ static int init_or_cleanup(int init)
 		printk("ip_nat_init: can't register out hook.\n");
 		goto cleanup_inops;
 	}
-#ifdef CONFIG_IP_NF_NAT_LOCAL
 	ret = nf_register_hook(&ip_nat_local_out_ops);
 	if (ret < 0) {
 		printk("ip_nat_init: can't register local out hook.\n");
@@ -331,16 +306,13 @@ static int init_or_cleanup(int init)
 		printk("ip_nat_init: can't register local in hook.\n");
 		goto cleanup_localoutops;
 	}
-#endif
 	return ret;
 
  cleanup:
-#ifdef CONFIG_IP_NF_NAT_LOCAL
 	nf_unregister_hook(&ip_nat_local_in_ops);
  cleanup_localoutops:
 	nf_unregister_hook(&ip_nat_local_out_ops);
  cleanup_outops:
-#endif
 	nf_unregister_hook(&ip_nat_out_ops);
  cleanup_inops:
 	nf_unregister_hook(&ip_nat_in_ops);
@@ -369,10 +341,9 @@ module_exit(fini);
 EXPORT_SYMBOL(ip_nat_setup_info);
 EXPORT_SYMBOL(ip_nat_protocol_register);
 EXPORT_SYMBOL(ip_nat_protocol_unregister);
-EXPORT_SYMBOL(ip_nat_helper_register);
-EXPORT_SYMBOL(ip_nat_helper_unregister);
 EXPORT_SYMBOL(ip_nat_cheat_check);
 EXPORT_SYMBOL(ip_nat_mangle_tcp_packet);
 EXPORT_SYMBOL(ip_nat_mangle_udp_packet);
 EXPORT_SYMBOL(ip_nat_used_tuple);
+EXPORT_SYMBOL(ip_nat_follow_master);
 MODULE_LICENSE("GPL");

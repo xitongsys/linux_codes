@@ -38,7 +38,7 @@
  */
 
 
-spinlock_t dma_spin_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(dma_spin_lock);
 
 /*
  *	If our port doesn't define this it has no PC like DMA
@@ -58,14 +58,7 @@ struct dma_chan {
 };
 
 static struct dma_chan dma_chan_busy[MAX_DMA_CHANNELS] = {
-	{ 0, 0 },
-	{ 0, 0 },
-	{ 0, 0 },
-	{ 0, 0 },
-	{ 1, "cascade" },
-	{ 0, 0 },
-	{ 0, 0 },
-	{ 0, 0 }
+	[4] = { 1, "cascade" },
 };
 
 
@@ -136,20 +129,7 @@ static int proc_dma_show(struct seq_file *m, void *v)
 
 static int proc_dma_open(struct inode *inode, struct file *file)
 {
-	char *buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
-	struct seq_file *m;
-	int res;
-
-	if (!buf)
-		return -ENOMEM;
-	res = single_open(file, proc_dma_show, NULL);
-	if (!res) {
-		m = file->private_data;
-		m->buf = buf;
-		m->size = PAGE_SIZE;
-	} else
-		kfree(buf);
-	return res;
+	return single_open(file, proc_dma_show, NULL);
 }
 
 static struct file_operations proc_dma_operations = {

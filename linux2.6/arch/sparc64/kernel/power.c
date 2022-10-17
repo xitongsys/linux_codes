@@ -20,8 +20,14 @@
 #define __KERNEL_SYSCALLS__
 #include <linux/unistd.h>
 
+/*
+ * sysctl - toggle power-off restriction for serial console 
+ * systems in machine_power_off()
+ */
+int scons_pwroff = 1; 
+
 #ifdef CONFIG_PCI
-static unsigned long power_reg = 0UL;
+static void __iomem *power_reg;
 
 static DECLARE_WAIT_QUEUE_HEAD(powerd_wait);
 static int button_pressed;
@@ -29,8 +35,8 @@ static int button_pressed;
 static irqreturn_t power_handler(int irq, void *dev_id, struct pt_regs *regs)
 {
 	if (button_pressed == 0) {
-		wake_up(&powerd_wait);
 		button_pressed = 1;
+		wake_up(&powerd_wait);
 	}
 
 	/* FIXME: Check registers for status... */
@@ -44,9 +50,9 @@ static void (*poweroff_method)(void) = machine_alt_power_off;
 
 void machine_power_off(void)
 {
-	if (!serial_console) {
+	if (!serial_console || scons_pwroff) {
 #ifdef CONFIG_PCI
-		if (power_reg != 0UL) {
+		if (power_reg) {
 			/* Both register bits seem to have the
 			 * same effect, so until I figure out
 			 * what the difference is...
@@ -69,19 +75,27 @@ static int powerd(void *__unused)
 {
 	static char *envp[] = { "HOME=/", "TERM=linux", "PATH=/sbin:/usr/sbin:/bin:/usr/bin", NULL };
 	char *argv[] = { "/sbin/shutdown", "-h", "now", NULL };
+	DECLARE_WAITQUEUE(wait, current);
 
 	daemonize("powerd");
 
+	add_wait_queue(&powerd_wait, &wait);
 again:
-	while (button_pressed == 0) {
+	for (;;) {
+		set_task_state(current, TASK_INTERRUPTIBLE);
+		if (button_pressed)
+			break;
 		flush_signals(current);
-		interruptible_sleep_on(&powerd_wait);
+		schedule();
 	}
+	__set_current_state(TASK_RUNNING);
+	remove_wait_queue(&powerd_wait, &wait);
 
 	/* Ok, down we go... */
+	button_pressed = 0;
 	if (execve("/sbin/shutdown", argv, envp) < 0) {
 		printk("powerd: shutdown execution failed\n");
-		button_pressed = 0;
+		add_wait_queue(&powerd_wait, &wait);
 		goto again;
 	}
 	return 0;
@@ -116,19 +130,18 @@ void __init power_init(void)
 	return;
 
 found:
-	power_reg = (unsigned long)ioremap(edev->resource[0].start, 0x4);
-	printk("power: Control reg at %016lx ... ", power_reg);
+	power_reg = ioremap(edev->resource[0].start, 0x4);
+	printk("power: Control reg at %p ... ", power_reg);
 	poweroff_method = machine_halt;  /* able to use the standard halt */
 	if (has_button_interrupt(edev)) {
-		if (kernel_thread(powerd, 0, CLONE_FS) < 0) {
+		if (kernel_thread(powerd, NULL, CLONE_FS) < 0) {
 			printk("Failed to start power daemon.\n");
 			return;
 		}
 		printk("powerd running.\n");
 
 		if (request_irq(edev->irqs[0],
-				power_handler, SA_SHIRQ, "power",
-				(void *) power_reg) < 0)
+				power_handler, SA_SHIRQ, "power", NULL) < 0)
 			printk("power: Error, cannot register IRQ handler.\n");
 	} else {
 		printk("not using powerd.\n");

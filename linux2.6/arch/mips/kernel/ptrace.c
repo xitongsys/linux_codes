@@ -108,7 +108,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	/* Read the word at location addr in the USER area. */
 	case PTRACE_PEEKUSR: {
 		struct pt_regs *regs;
-		unsigned long tmp;
+		unsigned long tmp = 0;
 
 		regs = (struct pt_regs *) ((unsigned long) child->thread_info +
 		       THREAD_SIZE - 32 - sizeof(struct pt_regs));
@@ -119,7 +119,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			tmp = regs->regs[addr];
 			break;
 		case FPR_BASE ... FPR_BASE + 31:
-			if (child->used_math) {
+			if (tsk_used_math(child)) {
 				fpureg_t *fregs = get_fpu_regs(child);
 
 #ifdef CONFIG_MIPS32
@@ -205,7 +205,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		case FPR_BASE ... FPR_BASE + 31: {
 			fpureg_t *fregs = get_fpu_regs(child);
 
-			if (!child->used_math) {
+			if (!tsk_used_math(child)) {
 				/* FP not yet used  */
 				memset(&child->thread.fpu.hard, ~0,
 				       sizeof(child->thread.fpu.hard));
@@ -277,7 +277,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	 */
 	case PTRACE_KILL:
 		ret = 0;
-		if (child->state == TASK_ZOMBIE)	/* already dead */
+		if (child->exit_state == EXIT_ZOMBIE)	/* already dead */
 			break;
 		child->exit_code = SIGKILL;
 		wake_up_process(child);
@@ -303,8 +303,17 @@ out:
  * Notification of system call entry/exit
  * - triggered by current->work.syscall_trace
  */
-asmlinkage void do_syscall_trace(void)
+asmlinkage void do_syscall_trace(struct pt_regs *regs, int entryexit)
 {
+	if (unlikely(current->audit_context)) {
+		if (!entryexit)
+			audit_syscall_entry(current, regs->orig_eax,
+			                    regs->regs[4], regs->regs[5],
+			                    regs->regs[6], regs->regs[7]);
+		else
+			audit_syscall_exit(current, regs->regs[2]);
+	}
+
 	if (!test_thread_flag(TIF_SYSCALL_TRACE))
 		return;
 	if (!(current->ptrace & PT_PTRACED))
@@ -312,13 +321,9 @@ asmlinkage void do_syscall_trace(void)
 
 	/* The 0x80 provides a way for the tracing parent to distinguish
 	   between a syscall stop and SIGTRAP delivery */
-	current->exit_code = SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
-	                                ? 0x80 : 0);
-	preempt_disable();
-	current->state = TASK_STOPPED;
-	notify_parent(current, SIGCHLD);
-	schedule();
-	preempt_enable();
+	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD) ?
+	                         0x80 : 0));
+
 	/*
 	 * this isn't the same as continuing with a signal, but it will do
 	 * for normal use.  strace only continues with a signal if the

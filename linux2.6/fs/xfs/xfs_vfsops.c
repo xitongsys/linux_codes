@@ -1,7 +1,7 @@
 /*
  * XFS filesystem operations.
  *
- * Copyright (c) 2000-2003 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2004 Silicon Graphics, Inc.  All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of version 2 of the GNU General Public License as
@@ -60,6 +60,7 @@
 #include "xfs_bmap.h"
 #include "xfs_da_btree.h"
 #include "xfs_rw.h"
+#include "xfs_refcache.h"
 #include "xfs_buf_item.h"
 #include "xfs_extfree_item.h"
 #include "xfs_quota.h"
@@ -74,24 +75,11 @@ STATIC int xfs_sync(bhv_desc_t *, int, cred_t *);
 int
 xfs_init(void)
 {
-	extern kmem_zone_t	*xfs_da_state_zone;
 	extern kmem_zone_t	*xfs_bmap_free_item_zone;
 	extern kmem_zone_t	*xfs_btree_cur_zone;
-	extern kmem_zone_t	*xfs_inode_zone;
-	extern kmem_zone_t	*xfs_chashlist_zone;
 	extern kmem_zone_t	*xfs_trans_zone;
 	extern kmem_zone_t	*xfs_buf_item_zone;
-	extern kmem_zone_t	*xfs_efd_zone;
-	extern kmem_zone_t	*xfs_efi_zone;
 	extern kmem_zone_t	*xfs_dabuf_zone;
-#ifdef DEBUG_NOT
-	extern ktrace_t	        *xfs_alloc_trace_buf;
-	extern ktrace_t	        *xfs_bmap_trace_buf;
-	extern ktrace_t	        *xfs_bmbt_trace_buf;
-	extern ktrace_t	        *xfs_dir_trace_buf;
-	extern ktrace_t	        *xfs_attr_trace_buf;
-	extern ktrace_t	        *xfs_dir2_trace_buf;
-#endif	/* DEBUG */
 #ifdef XFS_DABUF_DEBUG
 	extern lock_t	        xfs_dabuf_global_lock;
 	spinlock_init(&xfs_dabuf_global_lock, "xfsda");
@@ -130,15 +118,7 @@ xfs_init(void)
 	xfs_ili_zone = kmem_zone_init(sizeof(xfs_inode_log_item_t), "xfs_ili");
 	xfs_chashlist_zone = kmem_zone_init(sizeof(xfs_chashlist_t),
 					    "xfs_chashlist");
-	_ACL_ZONE_INIT(xfs_acl_zone, "xfs_acl");
-
-#ifdef CONFIG_XFS_VNODE_TRACING
-	ktrace_init(VNODE_TRACE_SIZE);
-#else
-#ifdef DEBUG
-	ktrace_init(64);
-#endif
-#endif
+	xfs_acl_zone_init(xfs_acl_zone, "xfs_acl");
 
 	/*
 	 * Allocate global trace buffers.
@@ -189,6 +169,27 @@ xfs_cleanup(void)
 
 	xfs_cleanup_procfs();
 	xfs_sysctl_unregister();
+	xfs_refcache_destroy();
+	xfs_acl_zone_destroy(xfs_acl_zone);
+
+#ifdef XFS_DIR2_TRACE
+	ktrace_free(xfs_dir2_trace_buf);
+#endif
+#ifdef XFS_ATTR_TRACE
+	ktrace_free(xfs_attr_trace_buf);
+#endif
+#ifdef XFS_DIR_TRACE
+	ktrace_free(xfs_dir_trace_buf);
+#endif
+#ifdef XFS_BMBT_TRACE
+	ktrace_free(xfs_bmbt_trace_buf);
+#endif
+#ifdef XFS_BMAP_TRACE
+	ktrace_free(xfs_bmap_trace_buf);
+#endif
+#ifdef XFS_ALLOC_TRACE
+	ktrace_free(xfs_alloc_trace_buf);
+#endif
 
 	kmem_cache_destroy(xfs_bmap_free_item_zone);
 	kmem_cache_destroy(xfs_btree_cur_zone);
@@ -202,10 +203,6 @@ xfs_cleanup(void)
 	kmem_cache_destroy(xfs_ifork_zone);
 	kmem_cache_destroy(xfs_ili_zone);
 	kmem_cache_destroy(xfs_chashlist_zone);
-	_ACL_ZONE_DESTROY(xfs_acl_zone);
-#if  (defined(DEBUG) || defined(CONFIG_XFS_VNODE_TRACING))
-	ktrace_uninit();
-#endif
 }
 
 /*
@@ -216,9 +213,9 @@ xfs_cleanup(void)
  */
 STATIC int
 xfs_start_flags(
+	struct vfs		*vfs,
 	struct xfs_mount_args	*ap,
-	struct xfs_mount	*mp,
-	int			ronly)
+	struct xfs_mount	*mp)
 {
 	/* Values are in BBs */
 	if ((ap->flags & XFSMNT_NOALIGN) != XFSMNT_NOALIGN) {
@@ -232,7 +229,10 @@ xfs_start_flags(
 		mp->m_swidth = ap->swidth;
 	}
 
-	if (ap->logbufs != 0 && ap->logbufs != -1 &&
+	if (ap->logbufs != -1 &&
+#if defined(DEBUG) || defined(XLOG_NOLOG)
+	    ap->logbufs != 0 &&
+#endif
 	    (ap->logbufs < XLOG_MIN_ICLOGS ||
 	     ap->logbufs > XLOG_MAX_ICLOGS)) {
 		cmn_err(CE_WARN,
@@ -252,6 +252,7 @@ xfs_start_flags(
 			ap->logbufsize);
 		return XFS_ERROR(EINVAL);
 	}
+	mp->m_ihsize = ap->ihashsize;
 	mp->m_logbsize = ap->logbufsize;
 	mp->m_fsname_len = strlen(ap->fsname) + 1;
 	mp->m_fsname = kmem_alloc(mp->m_fsname_len, KM_SLEEP);
@@ -279,6 +280,9 @@ xfs_start_flags(
 	if (ap->flags & XFSMNT_NOALIGN)
 		mp->m_flags |= XFS_MOUNT_NOALIGN;
 
+	if (ap->flags & XFSMNT_SWALLOC)
+		mp->m_flags |= XFS_MOUNT_SWALLOC;
+
 	if (ap->flags & XFSMNT_OSYNCISOSYNC)
 		mp->m_flags |= XFS_MOUNT_OSYNCISOSYNC;
 
@@ -305,7 +309,7 @@ xfs_start_flags(
 	 * no recovery flag requires a read-only mount
 	 */
 	if (ap->flags & XFSMNT_NORECOVERY) {
-		if (!ronly) {
+		if (!(vfs->vfs_flag & VFS_RDONLY)) {
 			cmn_err(CE_WARN,
 	"XFS: tried to mount a FS read-write without recovery!");
 			return XFS_ERROR(EINVAL);
@@ -327,10 +331,12 @@ xfs_start_flags(
  */
 STATIC int
 xfs_finish_flags(
+	struct vfs		*vfs,
 	struct xfs_mount_args	*ap,
-	struct xfs_mount	*mp,
-	int			ronly)
+	struct xfs_mount	*mp)
 {
+	int			ronly = (vfs->vfs_flag & VFS_RDONLY);
+
 	/* Fail a mount where the logbuf is smaller then the log stripe */
 	if (XFS_SB_VERSION_HASLOGV2(&mp->m_sb)) {
 		if ((ap->logbufsize == -1) &&
@@ -420,11 +426,20 @@ xfs_mount(
 	struct bhv_desc		*p;
 	struct xfs_mount	*mp = XFS_BHVTOM(bhvp);
 	struct block_device	*ddev, *logdev, *rtdev;
-	int			ronly = (vfsp->vfs_flag & VFS_RDONLY);
 	int			flags = 0, error;
 
 	ddev = vfsp->vfs_super->s_bdev;
 	logdev = rtdev = NULL;
+
+	/*
+	 * Setup xfs_mount function vectors from available behaviors
+	 */
+	p = vfs_bhv_lookup(vfsp, VFS_POSITION_DM);
+	mp->m_dm_ops = p ? *(xfs_dmops_t *) vfs_bhv_custom(p) : xfs_dmcore_stub;
+	p = vfs_bhv_lookup(vfsp, VFS_POSITION_QM);
+	mp->m_qm_ops = p ? *(xfs_qmops_t *) vfs_bhv_custom(p) : xfs_qmcore_stub;
+	p = vfs_bhv_lookup(vfsp, VFS_POSITION_IO);
+	mp->m_io_ops = p ? *(xfs_ioops_t *) vfs_bhv_custom(p) : xfs_iocore_xfs;
 
 	/*
 	 * Open real time and log devices - order is important.
@@ -451,68 +466,73 @@ xfs_mount(
 	}
 
 	/*
-	 * Setup xfs_mount function vectors from available behaviors
-	 */
-	p = vfs_bhv_lookup(vfsp, VFS_POSITION_DM);
-	mp->m_dm_ops = p ? *(xfs_dmops_t *) vfs_bhv_custom(p) : xfs_dmcore_xfs;
-	p = vfs_bhv_lookup(vfsp, VFS_POSITION_QM);
-	mp->m_qm_ops = p ? *(xfs_qmops_t *) vfs_bhv_custom(p) : xfs_qmcore_xfs;
-	p = vfs_bhv_lookup(vfsp, VFS_POSITION_IO);
-	mp->m_io_ops = p ? *(xfs_ioops_t *) vfs_bhv_custom(p) : xfs_iocore_xfs;
-
-	/*
 	 * Setup xfs_mount buffer target pointers
 	 */
-	mp->m_ddev_targp = xfs_alloc_buftarg(ddev);
-	if (rtdev)
-		mp->m_rtdev_targp = xfs_alloc_buftarg(rtdev);
+	error = ENOMEM;
+	mp->m_ddev_targp = xfs_alloc_buftarg(ddev, 0);
+	if (!mp->m_ddev_targp) {
+		xfs_blkdev_put(logdev);
+		xfs_blkdev_put(rtdev);
+		return error;
+	}
+	if (rtdev) {
+		mp->m_rtdev_targp = xfs_alloc_buftarg(rtdev, 1);
+		if (!mp->m_rtdev_targp)
+			goto error0;
+	}
 	mp->m_logdev_targp = (logdev && logdev != ddev) ?
-				xfs_alloc_buftarg(logdev) : mp->m_ddev_targp;
+				xfs_alloc_buftarg(logdev, 1) : mp->m_ddev_targp;
+	if (!mp->m_logdev_targp)
+		goto error0;
 
 	/*
 	 * Setup flags based on mount(2) options and then the superblock
 	 */
-	error = xfs_start_flags(args, mp, ronly);
+	error = xfs_start_flags(vfsp, args, mp);
 	if (error)
-		goto error;
+		goto error1;
 	error = xfs_readsb(mp);
 	if (error)
-		goto error;
-	error = xfs_finish_flags(args, mp, ronly);
-	if (error) {
-		xfs_freesb(mp);
-		goto error;
-	}
+		goto error1;
+	error = xfs_finish_flags(vfsp, args, mp);
+	if (error)
+		goto error2;
 
 	/*
 	 * Setup xfs_mount buffer target pointers based on superblock
 	 */
-	xfs_setsize_buftarg(mp->m_ddev_targp, mp->m_sb.sb_blocksize,
-			    mp->m_sb.sb_sectsize);
-	if (logdev && logdev != ddev) {
+	error = xfs_setsize_buftarg(mp->m_ddev_targp, mp->m_sb.sb_blocksize,
+				    mp->m_sb.sb_sectsize);
+	if (!error && logdev && logdev != ddev) {
 		unsigned int	log_sector_size = BBSIZE;
 
 		if (XFS_SB_VERSION_HASSECTOR(&mp->m_sb))
 			log_sector_size = mp->m_sb.sb_logsectsize;
-		xfs_setsize_buftarg(mp->m_logdev_targp, mp->m_sb.sb_blocksize,
-				    log_sector_size);
+		error = xfs_setsize_buftarg(mp->m_logdev_targp,
+					    mp->m_sb.sb_blocksize,
+					    log_sector_size);
 	}
-	if (rtdev)
-		xfs_setsize_buftarg(mp->m_rtdev_targp, mp->m_sb.sb_blocksize,
-				    mp->m_sb.sb_blocksize);
+	if (!error && rtdev)
+		error = xfs_setsize_buftarg(mp->m_rtdev_targp,
+					    mp->m_sb.sb_blocksize,
+					    mp->m_sb.sb_sectsize);
+	if (error)
+		goto error2;
 
-	if (!(error = XFS_IOINIT(vfsp, args, flags)))
+	error = XFS_IOINIT(vfsp, args, flags);
+	if (!error)
 		return 0;
-
- error:
+error2:
+	if (mp->m_sb_bp)
+		xfs_freesb(mp);
+error1:
 	xfs_binval(mp->m_ddev_targp);
-	if (logdev != NULL && logdev != ddev) {
+	if (logdev && logdev != ddev)
 		xfs_binval(mp->m_logdev_targp);
-	}
-	if (rtdev != NULL) {
+	if (rtdev)
 		xfs_binval(mp->m_rtdev_targp);
-	}
-	xfs_unmountfs_close(mp, NULL);
+error0:
+	xfs_unmountfs_close(mp, credp);
 	return error;
 }
 
@@ -535,7 +555,7 @@ xfs_unmount(
 	rvp = XFS_ITOV(rip);
 
 	if (vfsp->vfs_flag & VFS_DMI) {
-		error = XFS_SEND_NAMESP(mp, DM_EVENT_PREUNMOUNT,
+		error = XFS_SEND_PREUNMOUNT(mp, vfsp,
 				rvp, DM_RIGHT_NULL, rvp, DM_RIGHT_NULL,
 				NULL, NULL, 0, 0,
 				(mp->m_dmevmask & (1<<DM_EVENT_PREUNMOUNT))?
@@ -546,6 +566,12 @@ xfs_unmount(
 		unmount_event_flags = (mp->m_dmevmask & (1<<DM_EVENT_UNMOUNT))?
 					0 : DM_FLAGS_UNWANTED;
 	}
+
+	/*
+	 * First blow any referenced inode from this file system
+	 * out of the reference cache, and delete the timer.
+	 */
+	xfs_refcache_purge_mp(mp);
 
 	XFS_bflush(mp->m_ddev_targp);
 	error = xfs_unmount_flush(mp, 0);
@@ -617,7 +643,8 @@ xfs_mntupdate(
 	}
 
 	if (*flags & MS_RDONLY) {
-		pagebuf_delwri_flush(mp->m_ddev_targp, 0, NULL);
+		xfs_refcache_purge_mp(mp);
+		xfs_flush_buftarg(mp->m_ddev_targp, 0);
 		xfs_finish_reclaim_all(mp, 0);
 
 		/* This loop must run at least twice.
@@ -629,9 +656,11 @@ xfs_mntupdate(
 		 */ 
 		do {
 			VFS_SYNC(vfsp, REMOUNT_READONLY_FLAGS, NULL, error);
-			pagebuf_delwri_flush(mp->m_ddev_targp, PBDF_WAIT,
-								&pincount);
-			if(0 == pincount) { delay(50); count++; }
+			pincount = xfs_flush_buftarg(mp->m_ddev_targp, 1);
+			if (!pincount) {
+				delay(50);
+				count++;
+			}
 		} while (count < 2);
 
 		/* Ok now write out an unmount record */
@@ -758,7 +787,7 @@ xfs_root(
 STATIC int
 xfs_statvfs(
 	bhv_desc_t	*bdp,
-	struct kstatfs	*statp,
+	xfs_statfs_t	*statp,
 	vnode_t		*vp)
 {
 	__uint64_t	fakeinos;
@@ -788,8 +817,9 @@ xfs_statvfs(
 #if XFS_BIG_INUMS
 		if (!mp->m_inoadd)
 #endif
-			statp->f_files =
-			    min_t(sector_t, statp->f_files, mp->m_maxicount);
+			statp->f_files = min_t(typeof(statp->f_files),
+						statp->f_files,
+						mp->m_maxicount);
 	statp->f_ffree = statp->f_files - (sbp->sb_icount - sbp->sb_ifree);
 	XFS_SB_UNLOCK(mp, s);
 
@@ -1023,6 +1053,11 @@ xfs_sync_inodes(
 				xfs_iunlock(ip, XFS_ILOCK_EXCL);
 				ip = ip->i_mnext;
 			}
+			continue;
+		}
+
+		if (VN_BAD(vp)) {
+			ip = ip->i_mnext;
 			continue;
 		}
 
@@ -1479,8 +1514,10 @@ xfs_syncsub(
 			 */
 			if (XFS_BUF_ISPINNED(bp))
 				xfs_log_force(mp, (xfs_lsn_t)0, XFS_LOG_FORCE);
-			if (!(flags & SYNC_WAIT))
-				XFS_BUF_BFLAGS(bp) |= XFS_B_ASYNC;
+			if (flags & SYNC_WAIT)
+				XFS_BUF_UNASYNC(bp);
+			else
+				XFS_BUF_ASYNC(bp);
 			error = xfs_bwrite(mp, bp);
 		}
 		if (error) {
@@ -1489,8 +1526,18 @@ xfs_syncsub(
 	}
 
 	/*
+	 * If this is the periodic sync, then kick some entries out of
+	 * the reference cache.  This ensures that idle entries are
+	 * eventually kicked out of the cache.
+	 */
+	if (flags & SYNC_REFCACHE) {
+		xfs_refcache_purge_some(mp);
+	}
+
+	/*
 	 * Now check to see if the log needs a "dummy" transaction.
 	 */
+
 	if (!(flags & SYNC_REMOUNT) && xfs_log_need_covered(mp)) {
 		xfs_trans_t *tp;
 		xfs_inode_t *ip;
@@ -1533,7 +1580,7 @@ xfs_syncsub(
 }
 
 /*
- * xfs_vget - called by DMAPI to get vnode from file handle
+ * xfs_vget - called by DMAPI and NFSD to get vnode from file handle
  */
 STATIC int
 xfs_vget(
@@ -1541,37 +1588,41 @@ xfs_vget(
 	vnode_t		**vpp,
 	fid_t		*fidp)
 {
-	xfs_fid_t	*xfid;
+	xfs_mount_t	*mp = XFS_BHVTOM(bdp);
+	xfs_fid_t	*xfid = (struct xfs_fid *)fidp;
 	xfs_inode_t	*ip;
 	int		error;
 	xfs_ino_t	ino;
 	unsigned int	igen;
-	xfs_mount_t	*mp;
 
-	xfid  = (struct xfs_fid *)fidp;
-	if (xfid->xfs_fid_len == sizeof(*xfid) - sizeof(xfid->xfs_fid_len)) {
-		ino  = xfid->xfs_fid_ino;
-		igen = xfid->xfs_fid_gen;
-	} else {
-		/*
-		 * Invalid.  Since handles can be created in user space
-		 * and passed in via gethandle(), this is not cause for
-		 * a panic.
-		 */
+	/*
+	 * Invalid.  Since handles can be created in user space and passed in
+	 * via gethandle(), this is not cause for a panic.
+	 */
+	if (xfid->xfs_fid_len != sizeof(*xfid) - sizeof(xfid->xfs_fid_len))
 		return XFS_ERROR(EINVAL);
-	}
-	mp = XFS_BHVTOM(bdp);
-	error = xfs_iget(mp, NULL, ino, XFS_ILOCK_SHARED, &ip, 0);
+
+	ino  = xfid->xfs_fid_ino;
+	igen = xfid->xfs_fid_gen;
+
+	/*
+	 * NFS can sometimes send requests for ino 0.  Fail them gracefully.
+	 */
+	if (ino == 0)
+		return XFS_ERROR(ESTALE);
+
+	error = xfs_iget(mp, NULL, ino, 0, XFS_ILOCK_SHARED, &ip, 0);
 	if (error) {
 		*vpp = NULL;
 		return error;
 	}
+
 	if (ip == NULL) {
 		*vpp = NULL;
 		return XFS_ERROR(EIO);
 	}
 
-	if (ip->i_d.di_mode == 0 || (igen && (ip->i_d.di_gen != igen))) {
+	if (ip->i_d.di_mode == 0 || ip->i_d.di_gen != igen) {
 		xfs_iput_new(ip, XFS_ILOCK_SHARED);
 		*vpp = NULL;
 		return XFS_ERROR(ENOENT);
@@ -1591,15 +1642,18 @@ xfs_vget(
 #define MNTOPT_WSYNC	"wsync"		/* safe-mode nfs compatible mount */
 #define MNTOPT_INO64	"ino64"		/* force inodes into 64-bit range */
 #define MNTOPT_NOALIGN	"noalign"	/* turn off stripe alignment */
+#define MNTOPT_SWALLOC	"swalloc"	/* turn on stripe width allocation */
 #define MNTOPT_SUNIT	"sunit"		/* data volume stripe unit */
 #define MNTOPT_SWIDTH	"swidth"	/* data volume stripe width */
 #define MNTOPT_NOUUID	"nouuid"	/* ignore filesystem UUID */
 #define MNTOPT_MTPT	"mtpt"		/* filesystem mount point */
+#define MNTOPT_IHASHSIZE    "ihashsize"    /* size of inode hash table */
 #define MNTOPT_NORECOVERY   "norecovery"   /* don't run XFS recovery */
 #define MNTOPT_NOLOGFLUSH   "nologflush"   /* don't hard flush on log writes */
 #define MNTOPT_OSYNCISOSYNC "osyncisosync" /* o_sync is REALLY o_sync */
-#define MNTOPT_64BITINODE   "inode64"  /* inodes can be allocated anywhere */
-#define MNTOPT_IKEEP	"ikeep"		/* free empty inode clusters */
+#define MNTOPT_64BITINODE   "inode64"	/* inodes can be allocated anywhere */
+#define MNTOPT_IKEEP	"ikeep"		/* do not free empty inode clusters */
+#define MNTOPT_NOIKEEP	"noikeep"	/* free empty inode clusters */
 
 
 int
@@ -1614,7 +1668,9 @@ xfs_parseargs(
 	int			dsunit, dswidth, vol_dsunit, vol_dswidth;
 	int			iosize;
 
+#if 0	/* XXX: off by default, until some remaining issues ironed out */
 	args->flags |= XFSMNT_IDELETE; /* default to on */
+#endif
 
 	if (!options)
 		return 0;
@@ -1680,6 +1736,13 @@ xfs_parseargs(
 			iosize = simple_strtoul(value, &eov, 10);
 			args->flags |= XFSMNT_IOSIZE;
 			args->iosizelog = (uint8_t) iosize;
+		} else if (!strcmp(this_char, MNTOPT_IHASHSIZE)) {
+			if (!value || !*value) {
+				printk("XFS: %s option requires an argument\n",
+					this_char); 
+				return EINVAL;
+			}
+			args->ihashsize = simple_strtoul(value, &eov, 10);
 		} else if (!strcmp(this_char, MNTOPT_WSYNC)) {
 			args->flags |= XFSMNT_WSYNC;
 		} else if (!strcmp(this_char, MNTOPT_OSYNCISOSYNC)) {
@@ -1695,6 +1758,8 @@ xfs_parseargs(
 #endif
 		} else if (!strcmp(this_char, MNTOPT_NOALIGN)) {
 			args->flags |= XFSMNT_NOALIGN;
+		} else if (!strcmp(this_char, MNTOPT_SWALLOC)) {
+			args->flags |= XFSMNT_SWALLOC;
 		} else if (!strcmp(this_char, MNTOPT_SUNIT)) {
 			if (!value || !*value) {
 				printk("XFS: %s option requires an argument\n",
@@ -1722,6 +1787,8 @@ xfs_parseargs(
 			args->flags |= XFSMNT_NOLOGFLUSH;
 		} else if (!strcmp(this_char, MNTOPT_IKEEP)) {
 			args->flags &= ~XFSMNT_IDELETE;
+		} else if (!strcmp(this_char, MNTOPT_NOIKEEP)) {
+			args->flags |= XFSMNT_IDELETE;
 		} else if (!strcmp(this_char, "osyncisdsync")) {
 			/* no-op, this is now the default */
 printk("XFS: osyncisdsync is now the default, option is deprecated.\n");
@@ -1784,10 +1851,15 @@ xfs_showargs(
 		char	*str;
 	} xfs_info[] = {
 		/* the few simple ones we can get from the mount struct */
+		{ XFS_MOUNT_WSYNC,		"," MNTOPT_WSYNC },
+		{ XFS_MOUNT_INO64,		"," MNTOPT_INO64 },
 		{ XFS_MOUNT_NOALIGN,		"," MNTOPT_NOALIGN },
+		{ XFS_MOUNT_SWALLOC,		"," MNTOPT_SWALLOC },
+		{ XFS_MOUNT_NOUUID,		"," MNTOPT_NOUUID },
 		{ XFS_MOUNT_NORECOVERY,		"," MNTOPT_NORECOVERY },
 		{ XFS_MOUNT_OSYNCISOSYNC,	"," MNTOPT_OSYNCISOSYNC },
-		{ XFS_MOUNT_NOUUID,		"," MNTOPT_NOUUID },
+		{ XFS_MOUNT_NOLOGFLUSH,		"," MNTOPT_NOLOGFLUSH },
+		{ XFS_MOUNT_IDELETE,		"," MNTOPT_NOIKEEP },
 		{ 0, NULL }
 	};
 	struct proc_xfs_info	*xfs_infop;
@@ -1823,7 +1895,24 @@ xfs_showargs(
 		seq_printf(m, "," MNTOPT_SWIDTH "=%d",
 				(int)XFS_FSB_TO_BB(mp, mp->m_swidth));
 
+	if (!(mp->m_flags & XFS_MOUNT_32BITINOOPT))
+		seq_printf(m, "," MNTOPT_64BITINODE);
+	
 	return 0;
+}
+
+STATIC void
+xfs_freeze(
+	bhv_desc_t	*bdp)
+{
+	xfs_mount_t	*mp = XFS_BHVTOM(bdp);
+
+	while (atomic_read(&mp->m_active_trans) > 0)
+		delay(100);
+
+	/* Push the superblock and write an unmount record */
+	xfs_log_unmount_write(mp);
+	xfs_unmountfs_writesb(mp);
 }
 
 
@@ -1842,4 +1931,5 @@ vfsops_t xfs_vfsops = {
 	.vfs_quotactl		= (vfs_quotactl_t)fs_nosys,
 	.vfs_init_vnode		= xfs_initialize_vnode,
 	.vfs_force_shutdown	= xfs_do_force_shutdown,
+	.vfs_freeze		= xfs_freeze,
 };

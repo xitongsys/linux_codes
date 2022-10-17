@@ -8,6 +8,7 @@
 #define _LINUX_NFS_H
 
 #include <linux/sunrpc/msg_prot.h>
+#include <linux/string.h>
 
 #define NFS_PROGRAM	100003
 #define NFS_PORT	2049
@@ -92,7 +93,7 @@
 	NFSERR_NOT_SAME = 10027,	/*       v4 */
 	NFSERR_LOCK_RANGE = 10028,	/*       v4 */
 	NFSERR_SYMLINK = 10029,		/*       v4 */
-	NFSERR_READDIR_NOSPC = 10030,	/*       v4 */
+	NFSERR_RESTOREFH = 10030,	/*       v4 */
 	NFSERR_LEASE_MOVED = 10031,	/*       v4 */
 	NFSERR_ATTRNOTSUPP = 10032,	/*       v4 */
 	NFSERR_NO_GRACE = 10033,	/*       v4 */
@@ -137,6 +138,22 @@ struct nfs_fh {
 	unsigned short		size;
 	unsigned char		data[NFS_MAXFHSIZE];
 };
+
+/*
+ * Returns a zero iff the size and data fields match.
+ * Checks only "size" bytes in the data field.
+ */
+static inline int nfs_compare_fh(const struct nfs_fh *a, const struct nfs_fh *b)
+{
+	return a->size != b->size || memcmp(a->data, b->data, a->size) != 0;
+}
+
+static inline void nfs_copy_fh(struct nfs_fh *target, const struct nfs_fh *source)
+{
+	target->size = source->size;
+	memcpy(target->data, source->data, source->size);
+}
+
 
 /*
  * This is really a general kernel constant, but since nothing like

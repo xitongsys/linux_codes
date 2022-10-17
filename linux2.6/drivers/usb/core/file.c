@@ -30,7 +30,7 @@
 
 #define MAX_USB_MINORS	256
 static struct file_operations *usb_minors[MAX_USB_MINORS];
-static spinlock_t minor_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(minor_lock);
 
 static int usb_open(struct inode * inode, struct file * file)
 {
@@ -79,14 +79,25 @@ static struct class usb_class = {
 
 int usb_major_init(void)
 {
-	if (register_chrdev(USB_MAJOR, "usb", &usb_fops)) {
+	int error;
+
+	error = register_chrdev(USB_MAJOR, "usb", &usb_fops);
+	if (error) {
 		err("unable to get major %d for usb devices", USB_MAJOR);
-		return -EBUSY;
+		goto out;
+	}
+
+	error = class_register(&usb_class);
+	if (error) {
+		err("class_register failed for usb devices");
+		unregister_chrdev(USB_MAJOR, "usb");
+		goto out;
 	}
 
 	devfs_mk_dir("usb");
-	class_register(&usb_class);
-	return 0;
+
+out:
+	return error;
 }
 
 void usb_major_cleanup(void)

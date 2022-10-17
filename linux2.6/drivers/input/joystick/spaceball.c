@@ -15,18 +15,18 @@
 /*
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or 
+ * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- * 
+ *
  *  Should you need to contact me, the author, you can do so either by
  * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
  * Vojtech Pavlik, Simunkova 1594, Prague 8, 182 00 Czech Republic
@@ -39,8 +39,10 @@
 #include <linux/input.h>
 #include <linux/serio.h>
 
+#define DRIVER_DESC	"SpaceTec SpaceBall 2003/3003/4000 FLX driver"
+
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
-MODULE_DESCRIPTION("SpaceTec SpaceBall 2003/3003/4000 FLX driver");
+MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
 /*
@@ -59,8 +61,8 @@ MODULE_LICENSE("GPL");
 
 static int spaceball_axes[] = { ABS_X, ABS_Z, ABS_Y, ABS_RX, ABS_RZ, ABS_RY };
 static char *spaceball_names[] = {
-	"?", "SpaceTec SpaceBall 1003", "SpaceTec SpaceBall 2003", "SpaceTec SpaceBall 2003B", 
-	"SpaceTec SpaceBall 2003C", "SpaceTec SpaceBall 3003", "SpaceTec SpaceBall SpaceController", 
+	"?", "SpaceTec SpaceBall 1003", "SpaceTec SpaceBall 2003", "SpaceTec SpaceBall 2003B",
+	"SpaceTec SpaceBall 2003C", "SpaceTec SpaceBall 3003", "SpaceTec SpaceBall SpaceController",
 	"SpaceTec SpaceBall 3003C", "SpaceTec SpaceBall 4000FLX", "SpaceTec SpaceBall 4000FLX Lefty" };
 
 /*
@@ -96,7 +98,7 @@ static void spaceball_process_packet(struct spaceball* spaceball, struct pt_regs
 		case 'D':					/* Ball data */
 			if (spaceball->idx != 15) return;
 			for (i = 0; i < 6; i++)
-				input_report_abs(dev, spaceball_axes[i], 
+				input_report_abs(dev, spaceball_axes[i],
 					(__s16)((data[2 * i + 3] << 8) | data[2 * i + 2]));
 			break;
 
@@ -201,7 +203,7 @@ static void spaceball_disconnect(struct serio *serio)
  * it as an input device.
  */
 
-static void spaceball_connect(struct serio *serio, struct serio_dev *dev)
+static void spaceball_connect(struct serio *serio, struct serio_driver *drv)
 {
 	struct spaceball *spaceball;
 	int i, t, id;
@@ -216,7 +218,7 @@ static void spaceball_connect(struct serio *serio, struct serio_dev *dev)
 		return;
 	memset(spaceball, 0, sizeof(struct spaceball));
 
-	spaceball->dev.evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);	
+	spaceball->dev.evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
 
 	switch (id) {
 		case SPACEBALL_4000FLX:
@@ -224,7 +226,7 @@ static void spaceball_connect(struct serio *serio, struct serio_dev *dev)
 			spaceball->dev.keybit[LONG(BTN_0)] |= BIT(BTN_9);
 			spaceball->dev.keybit[LONG(BTN_A)] |= BIT(BTN_A) | BIT(BTN_B) | BIT(BTN_C) | BIT(BTN_MODE);
 		default:
-			spaceball->dev.keybit[LONG(BTN_0)] |= BIT(BTN_2) | BIT(BTN_3) | BIT(BTN_4) 
+			spaceball->dev.keybit[LONG(BTN_0)] |= BIT(BTN_2) | BIT(BTN_3) | BIT(BTN_4)
 				| BIT(BTN_5) | BIT(BTN_6) | BIT(BTN_7) | BIT(BTN_8);
 		case SPACEBALL_3003C:
 			spaceball->dev.keybit[LONG(BTN_0)] |= BIT(BTN_1) | BIT(BTN_8);
@@ -251,10 +253,11 @@ static void spaceball_connect(struct serio *serio, struct serio_dev *dev)
 	spaceball->dev.id.vendor = SERIO_SPACEBALL;
 	spaceball->dev.id.product = id;
 	spaceball->dev.id.version = 0x0100;
-	
+	spaceball->dev.dev = &serio->dev;
+
 	serio->private = spaceball;
 
-	if (serio_open(serio, dev)) {
+	if (serio_open(serio, drv)) {
 		kfree(spaceball);
 		return;
 	}
@@ -269,10 +272,14 @@ static void spaceball_connect(struct serio *serio, struct serio_dev *dev)
  * The serio device structure.
  */
 
-static struct serio_dev spaceball_dev = {
-	.interrupt =	spaceball_interrupt,
-	.connect =	spaceball_connect,
-	.disconnect =	spaceball_disconnect,
+static struct serio_driver spaceball_drv = {
+	.driver		= {
+		.name	= "spaceball",
+	},
+	.description	= DRIVER_DESC,
+	.interrupt	= spaceball_interrupt,
+	.connect	= spaceball_connect,
+	.disconnect	= spaceball_disconnect,
 };
 
 /*
@@ -281,13 +288,13 @@ static struct serio_dev spaceball_dev = {
 
 int __init spaceball_init(void)
 {
-	serio_register_device(&spaceball_dev);
+	serio_register_driver(&spaceball_drv);
 	return 0;
 }
 
 void __exit spaceball_exit(void)
 {
-	serio_unregister_device(&spaceball_dev);
+	serio_unregister_driver(&spaceball_drv);
 }
 
 module_init(spaceball_init);

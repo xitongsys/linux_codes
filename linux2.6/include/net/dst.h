@@ -89,6 +89,8 @@ struct dst_ops
 	int			(*gc)(void);
 	struct dst_entry *	(*check)(struct dst_entry *, __u32 cookie);
 	void			(*destroy)(struct dst_entry *);
+	void			(*ifdown)(struct dst_entry *,
+					  struct net_device *dev, int how);
 	struct dst_entry *	(*negative_advice)(struct dst_entry *);
 	void			(*link_failure)(struct sk_buff *);
 	void			(*update_pmtu)(struct dst_entry *dst, u32 mtu);
@@ -102,19 +104,19 @@ struct dst_ops
 #ifdef __KERNEL__
 
 static inline u32
-dst_metric(struct dst_entry *dst, int metric)
+dst_metric(const struct dst_entry *dst, int metric)
 {
 	return dst->metrics[metric-1];
 }
 
 static inline u32
-dst_path_metric(struct dst_entry *dst, int metric)
+dst_path_metric(const struct dst_entry *dst, int metric)
 {
 	return dst->path->metrics[metric-1];
 }
 
 static inline u32
-dst_pmtu(struct dst_entry *dst)
+dst_pmtu(const struct dst_entry *dst)
 {
 	u32 mtu = dst_path_metric(dst, RTAX_MTU);
 	/* Yes, _exactly_. This is paranoia. */
@@ -145,11 +147,8 @@ static inline
 void dst_release(struct dst_entry * dst)
 {
 	if (dst) {
-		if (atomic_read(&dst->__refcnt) < 1) {
-			printk("BUG: dst underflow %d: %p\n",
-			       atomic_read(&dst->__refcnt),
-			       current_text_addr());
-		}
+		WARN_ON(atomic_read(&dst->__refcnt) < 1);
+		smp_mb__before_atomic_dec();
 		atomic_dec(&dst->__refcnt);
 	}
 }
@@ -180,6 +179,12 @@ static inline void dst_free(struct dst_entry * dst)
 			return;
 	}
 	__dst_free(dst);
+}
+
+static inline void dst_rcu_free(struct rcu_head *head)
+{
+	struct dst_entry *dst = container_of(head, struct dst_entry, rcu_head);
+	dst_free(dst);
 }
 
 static inline void dst_confirm(struct dst_entry *dst)

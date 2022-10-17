@@ -23,7 +23,8 @@
 #define EF_MIPS_ABI_O64		0x00002000	/* O32 extended for 64 bit.  */
 
 #define PT_MIPS_REGINFO		0x70000000
-#define PT_MIPS_OPTIONS		0x70000001
+#define PT_MIPS_RTPROC		0x70000001
+#define PT_MIPS_OPTIONS		0x70000002
 
 /* Flags in the e_flags field of the header */
 #define EF_MIPS_NOREORDER	0x00000001
@@ -40,9 +41,10 @@
 #define DT_MIPS_ICHECKSUM	0x70000003
 #define DT_MIPS_IVERSION	0x70000004
 #define DT_MIPS_FLAGS		0x70000005
-  #define RHF_NONE		  0
-  #define RHF_HARDWAY		  1
-  #define RHF_NOTPOT		  2
+	#define RHF_NONE	0x00000000
+	#define RHF_HARDWAY	0x00000001
+	#define RHF_NOTPOT	0x00000002
+	#define RHF_SGI_ONLY	0x00000010
 #define DT_MIPS_BASE_ADDRESS	0x70000006
 #define DT_MIPS_CONFLICT	0x70000008
 #define DT_MIPS_LIBLIST		0x70000009
@@ -124,30 +126,6 @@ typedef double elf_fpreg_t;
 typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 
 #ifdef CONFIG_MIPS32
-/*
- * This is used to ensure we don't load something for the wrong architecture.
- */
-#define elf_check_arch(hdr)						\
-({									\
-	int __res = 1;							\
-	struct elfhdr *__h = (hdr);					\
-									\
-	if (__h->e_machine != EM_MIPS)					\
-		__res = 0;						\
-	if (__h->e_ident[EI_CLASS] != ELFCLASS64) 			\
-		__res = 0;						\
-									\
-	__res;								\
-})
-
-/*
- * These are used to set parameters in the core dumps.
- */
-#define ELF_CLASS	ELFCLASS32
-
-#endif /* CONFIG_MIPS32 */
-
-#ifdef CONFIG_MIPS64
 
 /*
  * This is used to ensure we don't load something for the wrong architecture.
@@ -165,6 +143,30 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 		__res = 0;						\
 	if (((__h->e_flags & EF_MIPS_ABI) != 0) &&			\
 	    ((__h->e_flags & EF_MIPS_ABI) != EF_MIPS_ABI_O32))		\
+		__res = 0;						\
+									\
+	__res;								\
+})
+
+/*
+ * These are used to set parameters in the core dumps.
+ */
+#define ELF_CLASS	ELFCLASS32
+
+#endif /* CONFIG_MIPS32 */
+
+#ifdef CONFIG_MIPS64
+/*
+ * This is used to ensure we don't load something for the wrong architecture.
+ */
+#define elf_check_arch(hdr)						\
+({									\
+	int __res = 1;							\
+	struct elfhdr *__h = (hdr);					\
+									\
+	if (__h->e_machine != EM_MIPS)					\
+		__res = 0;						\
+	if (__h->e_ident[EI_CLASS] != ELFCLASS64) 			\
 		__res = 0;						\
 									\
 	__res;								\
@@ -222,17 +224,21 @@ do {	current->thread.mflags &= ~MF_ABI_MASK;			\
 
 #endif /* CONFIG_MIPS64 */
 
+extern void dump_regs(elf_greg_t *, struct pt_regs *regs);
+extern int dump_task_fpu(struct task_struct *, elf_fpregset_t *);
+
+#define ELF_CORE_COPY_REGS(elf_regs, regs)			\
+	dump_regs((elf_greg_t *)&(elf_regs), regs);
+#define ELF_CORE_COPY_FPREGS(tsk, elf_fpregs)			\
+	dump_task_fpu(tsk, elf_fpregs)
+
 #endif /* __KERNEL__ */
 
 /* This one accepts IRIX binaries.  */
-#define irix_elf_check_arch(hdr)	((hdr)->e_machine == EM_MIPS)
+#define irix_elf_check_arch(hdr)	((hdr)->e_flags & RHF_SGI_ONLY)
 
 #define USE_ELF_CORE_DUMP
-#define ELF_EXEC_PAGESIZE	4096
-
-#define ELF_CORE_COPY_REGS(_dest,_regs)				\
-	memcpy((char *) &_dest, (char *) _regs,			\
-	       sizeof(struct pt_regs));
+#define ELF_EXEC_PAGESIZE	PAGE_SIZE
 
 /* This yields a mask that user programs can use to figure out what
    instruction set this cpu supports.  This could be done in userspace,

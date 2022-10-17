@@ -1,5 +1,6 @@
 /*
  *  arch/s390/kernel/time.c
+ *    Time of day based timer functions.
  *
  *  S390 version
  *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
@@ -11,6 +12,7 @@
  *    Copyright (C) 1991, 1992, 1995  Linus Torvalds
  */
 
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/sched.h>
@@ -24,16 +26,16 @@
 #include <linux/init.h>
 #include <linux/smp.h>
 #include <linux/types.h>
+#include <linux/profile.h>
+#include <linux/timex.h>
+#include <linux/notifier.h>
 
 #include <asm/uaccess.h>
 #include <asm/delay.h>
 #include <asm/s390_ext.h>
 #include <asm/div64.h>
-
-#include <linux/timex.h>
-#include <linux/config.h>
-
 #include <asm/irq.h>
+#include <asm/timer.h>
 
 /* change this if you have some constant time drift */
 #define USECS_PER_JIFFY     ((unsigned long) 1000000/HZ)
@@ -51,7 +53,7 @@ u64 jiffies_64 = INITIAL_JIFFIES;
 
 EXPORT_SYMBOL(jiffies_64);
 
-static ext_int_info_t ext_int_info_timer;
+static ext_int_info_t ext_int_info_cc;
 static u64 init_timer_cc;
 static u64 jiffies_timer_cc;
 static u64 xtime_cc;
@@ -63,7 +65,7 @@ extern unsigned long wall_jiffies;
  */
 unsigned long long sched_clock(void)
 {
-	return (get_clock() - jiffies_timer_cc) >> 2;
+	return ((get_clock() - jiffies_timer_cc) * 1000) >> 12;
 }
 
 void tod_to_timeval(__u64 todval, struct timespec *xtime)
@@ -142,32 +144,19 @@ int do_settimeofday(struct timespec *tv)
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
 	write_sequnlock_irq(&xtime_lock);
+	clock_was_set();
 	return 0;
 }
 
 EXPORT_SYMBOL(do_settimeofday);
 
-#ifndef CONFIG_ARCH_S390X
 
-static inline __u32
-__calculate_ticks(__u64 elapsed)
-{
-	register_pair rp;
+#ifdef CONFIG_PROFILING
+#define s390_do_profile(regs)	profile_tick(CPU_PROFILING, regs)
+#else
+#define s390_do_profile(regs)  do { ; } while(0)
+#endif /* CONFIG_PROFILING */
 
-	rp.pair = elapsed >> 1;
-	asm ("dr %0,%1" : "+d" (rp) : "d" (CLK_TICKS_PER_JIFFY >> 1));
-	return rp.subreg.odd;
-}
-
-#else /* CONFIG_ARCH_S390X */
-
-static inline __u32
-__calculate_ticks(__u64 elapsed)
-{
-	return elapsed / CLK_TICKS_PER_JIFFY;
-}
-
-#endif /* CONFIG_ARCH_S390X */
 
 /*
  * timer_interrupt() needs to keep up the real-time clock,
@@ -176,12 +165,14 @@ __calculate_ticks(__u64 elapsed)
 void account_ticks(struct pt_regs *regs)
 {
 	__u64 tmp;
-	__u32 ticks;
+	__u32 ticks, xticks;
 
 	/* Calculate how many ticks have passed. */
+	if (S390_lowcore.int_clock < S390_lowcore.jiffy_timer)
+		return;
 	tmp = S390_lowcore.int_clock - S390_lowcore.jiffy_timer;
 	if (tmp >= 2*CLK_TICKS_PER_JIFFY) {  /* more than two ticks ? */
-		ticks = __calculate_ticks(tmp) + 1;
+		ticks = __div(tmp, CLK_TICKS_PER_JIFFY) + 1;
 		S390_lowcore.jiffy_timer +=
 			CLK_TICKS_PER_JIFFY * (__u64) ticks;
 	} else if (tmp >= CLK_TICKS_PER_JIFFY) {
@@ -203,11 +194,9 @@ void account_ticks(struct pt_regs *regs)
 	 */
 	write_seqlock(&xtime_lock);
 	if (S390_lowcore.jiffy_timer > xtime_cc) {
-		__u32 xticks;
-
 		tmp = S390_lowcore.jiffy_timer - xtime_cc;
 		if (tmp >= 2*CLK_TICKS_PER_JIFFY) {
-			xticks = __calculate_ticks(tmp);
+			xticks = __div(tmp, CLK_TICKS_PER_JIFFY);
 			xtime_cc += (__u64) xticks * CLK_TICKS_PER_JIFFY;
 		} else {
 			xticks = 1;
@@ -217,13 +206,97 @@ void account_ticks(struct pt_regs *regs)
 			do_timer(regs);
 	}
 	write_sequnlock(&xtime_lock);
-	while (ticks--)
-		update_process_times(user_mode(regs));
 #else
-	while (ticks--)
+	for (xticks = ticks; xticks > 0; xticks--)
 		do_timer(regs);
 #endif
+
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING
+	account_user_vtime(current);
+#else
+	while (ticks--)
+		update_process_times(user_mode(regs));
+#endif
+
+	s390_do_profile(regs);
 }
+
+#ifdef CONFIG_NO_IDLE_HZ
+
+#ifdef CONFIG_NO_IDLE_HZ_INIT
+int sysctl_hz_timer = 0;
+#else
+int sysctl_hz_timer = 1;
+#endif
+
+/*
+ * Stop the HZ tick on the current CPU.
+ * Only cpu_idle may call this function.
+ */
+static inline void stop_hz_timer(void)
+{
+	__u64 timer;
+
+	if (sysctl_hz_timer != 0)
+		return;
+
+	cpu_set(smp_processor_id(), nohz_cpu_mask);
+
+	/*
+	 * Leave the clock comparator set up for the next timer
+	 * tick if either rcu or a softirq is pending.
+	 */
+	if (rcu_pending(smp_processor_id()) || local_softirq_pending()) {
+		cpu_clear(smp_processor_id(), nohz_cpu_mask);
+		return;
+	}
+
+	/*
+	 * This cpu is going really idle. Set up the clock comparator
+	 * for the next event.
+	 */
+	timer = (__u64) (next_timer_interrupt() - jiffies) + jiffies_64;
+	timer = jiffies_timer_cc + timer * CLK_TICKS_PER_JIFFY;
+	asm volatile ("SCKC %0" : : "m" (timer));
+}
+
+/*
+ * Start the HZ tick on the current CPU.
+ * Only cpu_idle may call this function.
+ */
+static inline void start_hz_timer(void)
+{
+	if (!cpu_isset(smp_processor_id(), nohz_cpu_mask))
+		return;
+	account_ticks(__KSTK_PTREGS(current));
+	cpu_clear(smp_processor_id(), nohz_cpu_mask);
+}
+
+static int nohz_idle_notify(struct notifier_block *self,
+			    unsigned long action, void *hcpu)
+{
+	switch (action) {
+	case CPU_IDLE:
+		stop_hz_timer();
+		break;
+	case CPU_NOT_IDLE:
+		start_hz_timer();
+		break;
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block nohz_idle_nb = {
+	.notifier_call = nohz_idle_notify,
+};
+
+void __init nohz_init(void)
+{
+	if (register_idle_notifier(&nohz_idle_nb))
+		panic("Couldn't register idle notifier");
+}
+
+#endif
 
 /*
  * Start the clock comparator on the current CPU.
@@ -242,6 +315,8 @@ void init_cpu_timer(void)
         cr0 |= 0x800;
 	__ctl_load(cr0, 0, 0);
 }
+
+extern void vtime_init(void);
 
 /*
  * Initialize the TOD clock and the CPU timer of
@@ -280,11 +355,19 @@ void __init time_init(void)
         set_normalized_timespec(&wall_to_monotonic,
                                 -xtime.tv_sec, -xtime.tv_nsec);
 
-        /* request the 0x1004 external interrupt */
+	/* request the clock comparator external interrupt */
         if (register_early_external_interrupt(0x1004, 0,
-					      &ext_int_info_timer) != 0)
+					      &ext_int_info_cc) != 0)
                 panic("Couldn't request external interrupt 0x1004");
 
-        /* init CPU timer */
         init_cpu_timer();
+
+#ifdef CONFIG_NO_IDLE_HZ
+	nohz_init();
+#endif
+
+#ifdef CONFIG_VIRT_TIMER
+	vtime_init();
+#endif
 }
+

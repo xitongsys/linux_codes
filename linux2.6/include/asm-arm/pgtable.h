@@ -10,18 +10,69 @@
 #ifndef _ASMARM_PGTABLE_H
 #define _ASMARM_PGTABLE_H
 
+#include <asm-generic/4level-fixup.h>
+
 #include <asm/memory.h>
 #include <asm/proc-fns.h>
 #include <asm/arch/vmalloc.h>
 
 /*
- * We pull a couple of tricks here:
- *  1. We wrap the PMD into the PGD.
- *  2. We lie about the size of the PTE and PGD.
- * Even though we have 256 PTE entries and 4096 PGD entries, we tell
- * Linux that we actually have 512 PTE entries and 2048 PGD entries.
- * Each "Linux" PGD entry is made up of two hardware PGD entries, and
- * each PTE table is actually two hardware PTE tables.
+ * Hardware-wise, we have a two level page table structure, where the first
+ * level has 4096 entries, and the second level has 256 entries.  Each entry
+ * is one 32-bit word.  Most of the bits in the second level entry are used
+ * by hardware, and there aren't any "accessed" and "dirty" bits.
+ *
+ * Linux on the other hand has a three level page table structure, which can
+ * be wrapped to fit a two level page table structure easily - using the PGD
+ * and PTE only.  However, Linux also expects one "PTE" table per page, and
+ * at least a "dirty" bit.
+ *
+ * Therefore, we tweak the implementation slightly - we tell Linux that we
+ * have 2048 entries in the first level, each of which is 8 bytes (iow, two
+ * hardware pointers to the second level.)  The second level contains two
+ * hardware PTE tables arranged contiguously, followed by Linux versions
+ * which contain the state information Linux needs.  We, therefore, end up
+ * with 512 entries in the "PTE" level.
+ *
+ * This leads to the page tables having the following layout:
+ *
+ *    pgd             pte
+ * |        |
+ * +--------+ +0
+ * |        |-----> +------------+ +0
+ * +- - - - + +4    |  h/w pt 0  |
+ * |        |-----> +------------+ +1024
+ * +--------+ +8    |  h/w pt 1  |
+ * |        |       +------------+ +2048
+ * +- - - - +       | Linux pt 0 |
+ * |        |       +------------+ +3072
+ * +--------+       | Linux pt 1 |
+ * |        |       +------------+ +4096
+ *
+ * See L_PTE_xxx below for definitions of bits in the "Linux pt", and
+ * PTE_xxx for definitions of bits appearing in the "h/w pt".
+ *
+ * PMD_xxx definitions refer to bits in the first level page table.
+ *
+ * The "dirty" bit is emulated by only granting hardware write permission
+ * iff the page is marked "writable" and "dirty" in the Linux PTE.  This
+ * means that a write to a clean page will cause a permission fault, and
+ * the Linux MM layer will mark the page dirty via handle_pte_fault().
+ * For the hardware to notice the permission change, the TLB entry must
+ * be flushed, and ptep_establish() does that for us.
+ *
+ * The "accessed" or "young" bit is emulated by a similar method; we only
+ * allow accesses to the page if the "young" bit is set.  Accesses to the
+ * page will cause a fault, and handle_pte_fault() will set the young bit
+ * for us as long as the page is marked present in the corresponding Linux
+ * PTE entry.  Again, ptep_establish() will ensure that the TLB is up to
+ * date.
+ *
+ * However, when the "young" bit is cleared, we deny access to the page
+ * by clearing the hardware PTE.  Currently Linux does not flush the TLB
+ * for us in this case, which means the TLB will retain the transation
+ * until either the TLB entry is evicted under pressure, or a context
+ * switch which changes the user space mapping occurs.
  */
 #define PTRS_PER_PTE		512
 #define PTRS_PER_PMD		1
@@ -31,7 +82,7 @@
  * PMD_SHIFT determines the size of the area a second-level page table can map
  * PGDIR_SHIFT determines what a third-level page table entry can map
  */
-#define PMD_SHIFT		20
+#define PMD_SHIFT		21
 #define PGDIR_SHIFT		21
 
 #define LIBRARY_TEXT_START	0x0c000000
@@ -152,16 +203,16 @@ extern void __pgd_error(const char *file, int line, unsigned long val);
 /*
  * The following macros handle the cache and bufferable bits...
  */
-#define _L_PTE_DEFAULT	L_PTE_PRESENT | L_PTE_YOUNG
-#define _L_PTE_READ	L_PTE_USER | L_PTE_EXEC | L_PTE_CACHEABLE | L_PTE_BUFFERABLE
+#define _L_PTE_DEFAULT	L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_CACHEABLE | L_PTE_BUFFERABLE
+#define _L_PTE_READ	L_PTE_USER | L_PTE_EXEC
+
+extern pgprot_t		pgprot_kernel;
 
 #define PAGE_NONE       __pgprot(_L_PTE_DEFAULT)
 #define PAGE_COPY       __pgprot(_L_PTE_DEFAULT | _L_PTE_READ)
 #define PAGE_SHARED     __pgprot(_L_PTE_DEFAULT | _L_PTE_READ | L_PTE_WRITE)
 #define PAGE_READONLY   __pgprot(_L_PTE_DEFAULT | _L_PTE_READ)
-#define PAGE_KERNEL     __pgprot(_L_PTE_DEFAULT | L_PTE_CACHEABLE | L_PTE_BUFFERABLE | L_PTE_DIRTY | L_PTE_WRITE | L_PTE_EXEC)
-
-#define _PAGE_CHG_MASK	(PAGE_MASK | L_PTE_DIRTY | L_PTE_YOUNG)
+#define PAGE_KERNEL	pgprot_kernel
 
 #endif /* __ASSEMBLY__ */
 
@@ -259,8 +310,15 @@ PTE_BIT_FUNC(mkyoung,   |= L_PTE_YOUNG);
 
 #define set_pmd(pmdp,pmd)		\
 	do {				\
-		*pmdp = pmd;		\
+		*(pmdp) = pmd;		\
 		flush_pmd_entry(pmdp);	\
+	} while (0)
+
+#define copy_pmd(pmdpd,pmdps)		\
+	do {				\
+		pmdpd[0] = pmdps[0];	\
+		pmdpd[1] = pmdps[1];	\
+		flush_pmd_entry(pmdpd);	\
 	} while (0)
 
 #define pmd_clear(pmdp)			\
@@ -323,7 +381,8 @@ static inline pte_t *pmd_page_kernel(pmd_t pmd)
 
 static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 {
-	pte_val(pte) = (pte_val(pte) & _PAGE_CHG_MASK) | pgprot_val(newprot);
+	const unsigned long mask = L_PTE_EXEC | L_PTE_WRITE | L_PTE_USER;
+	pte_val(pte) = (pte_val(pte) & ~mask) | (pgprot_val(newprot) & mask);
 	return pte;
 }
 
@@ -346,13 +405,16 @@ extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
 #include <asm-generic/pgtable.h>
 
 /*
+ * We provide our own arch_get_unmapped_area to cope with VIPT caches.
+ */
+#define HAVE_ARCH_UNMAPPED_AREA
+
+/*
  * remap a physical address `phys' of size `size' with page protection `prot'
  * into virtual address `from'
  */
 #define io_remap_page_range(vma,from,phys,size,prot) \
-		remap_page_range(vma,from,phys,size,prot)
-
-typedef pte_t *pte_addr_t;
+		remap_pfn_range(vma, from, (phys) >> PAGE_SHIFT, size, prot)
 
 #define pgtable_cache_init() do { } while (0)
 

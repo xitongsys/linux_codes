@@ -63,9 +63,15 @@
 #define PT_TRACE_EXEC	0x00000080
 #define PT_TRACE_VFORK_DONE	0x00000100
 #define PT_TRACE_EXIT	0x00000200
+#define PT_ATTACHED	0x00000400	/* parent != real_parent */
 
 #define PT_TRACE_MASK	0x000003f4
-#define PT_SINGLESTEP	0x80000000	/* single stepping (used on ARM) */
+
+/* single stepping state bits (used on ARM and PA-RISC) */
+#define PT_SINGLESTEP_BIT	31
+#define PT_SINGLESTEP		(1<<PT_SINGLESTEP_BIT)
+#define PT_BLOCKSTEP_BIT	30
+#define PT_BLOCKSTEP		(1<<PT_BLOCKSTEP_BIT)
 
 #include <linux/compiler.h>		/* For unlikely.  */
 #include <linux/sched.h>		/* For struct task_struct.  */
@@ -81,6 +87,7 @@ extern void ptrace_notify(int exit_code);
 extern void __ptrace_link(struct task_struct *child,
 			  struct task_struct *new_parent);
 extern void __ptrace_unlink(struct task_struct *child);
+extern void ptrace_untrace(struct task_struct *child);
 
 static inline void ptrace_link(struct task_struct *child,
 			       struct task_struct *new_parent)

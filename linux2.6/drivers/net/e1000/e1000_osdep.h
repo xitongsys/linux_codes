@@ -1,7 +1,7 @@
 /*******************************************************************************
 
   
-  Copyright(c) 1999 - 2003 Intel Corporation. All rights reserved.
+  Copyright(c) 1999 - 2004 Intel Corporation. All rights reserved.
   
   This program is free software; you can redistribute it and/or modify it 
   under the terms of the GNU General Public License as published by the Free 
@@ -42,13 +42,14 @@
 #include <linux/sched.h>
 
 #ifndef msec_delay
-#define msec_delay(x)	do { if(in_interrupt()) { \
-				/* Don't mdelay in interrupt context! */ \
-	                	BUG(); \
-			} else { \
-				set_current_state(TASK_UNINTERRUPTIBLE); \
-				schedule_timeout((x * HZ)/1000); \
-			} } while(0)
+#define msec_delay(x) msleep(x)
+
+/* Some workarounds require millisecond delays and are run during interrupt
+ * context.  Most notably, when establishing link, the phy may need tweaking
+ * but cannot process phy register reads/writes faster than millisecond
+ * intervals...and we establish link due to a "link status change" interrupt.
+ */
+#define msec_delay_irq(x) mdelay(x)
 #endif
 
 #define PCI_COMMAND_REGISTER   PCI_COMMAND
@@ -63,7 +64,7 @@ typedef enum {
 
 #define MSGOUT(S, A, B)	printk(KERN_DEBUG S "\n", A, B)
 
-#if DBG
+#ifdef DBG
 #define DEBUGOUT(S)		printk(KERN_DEBUG S "\n")
 #define DEBUGOUT1(S, A...)	printk(KERN_DEBUG S "\n", A)
 #else

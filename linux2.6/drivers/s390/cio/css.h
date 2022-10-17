@@ -65,6 +65,8 @@ struct senseid {
 
 struct ccw_device_private {
 	int state;		/* device state */
+	atomic_t onoff;
+	unsigned long registered;
 	__u16 devno;		/* device number */
 	__u16 irq;		/* subchannel number */
 	__u8 imask;		/* lpm mask for SNID/SID/SPGID */
@@ -73,12 +75,15 @@ struct ccw_device_private {
 		unsigned int fast:1;	/* post with "channel end" */
 		unsigned int repall:1;	/* report every interrupt status */
 		unsigned int pgroup:1;  /* do path grouping */
+		unsigned int force:1;   /* allow forced online */
 	} __attribute__ ((packed)) options;
 	struct {
 		unsigned int pgid_single:1; /* use single path for Set PGID */
 		unsigned int esid:1;        /* Ext. SenseID supported by HW */
 		unsigned int dosense:1;	    /* delayed SENSE required */
 		unsigned int doverify:1;    /* delayed path verification */
+		unsigned int donotify:1;    /* call notify function */
+		unsigned int recog_done:1;  /* dev. recog. complete */
 	} __attribute__((packed)) flags;
 	unsigned long intparm;	/* user interruption parameter */
 	struct qdio_irq *qdio_data;
@@ -89,6 +94,10 @@ struct ccw_device_private {
 	struct work_struct kick_work;
 	wait_queue_head_t wait_q;
 	struct timer_list timer;
+	void *cmb;			/* measurement information */
+	struct list_head cmb_list;	/* list of measured devices */
+	u64 cmb_start_time;		/* clock value of cmb reset */
+	void *cmb_wait;			/* deferred cmb enable/disable */
 };
 
 /*
@@ -100,22 +109,45 @@ struct css_driver {
 	unsigned int subchannel_type;
 	struct device_driver drv;
 	void (*irq)(struct device *);
+	int (*notify)(struct device *, int);
+	void (*verify)(struct device *);
+	void (*termination)(struct device *);
 };
 
 /*
  * all css_drivers have the css_bus_type
  */
 extern struct bus_type css_bus_type;
+extern struct css_driver io_subchannel_driver;
 
 int css_probe_device(int irq);
-
+extern struct subchannel * get_subchannel_by_schid(int irq);
 extern unsigned int highest_subchannel;
 extern int css_init_done;
 
 #define __MAX_SUBCHANNELS 65536
-extern struct subchannel *ioinfo[__MAX_SUBCHANNELS];
 
 extern struct bus_type css_bus_type;
 extern struct device css_bus_device;
 
+/* Some helper functions for disconnected state. */
+int device_is_disconnected(struct subchannel *);
+void device_set_disconnected(struct subchannel *);
+void device_trigger_reprobe(struct subchannel *);
+
+/* Helper functions for vary on/off. */
+void device_set_waiting(struct subchannel *);
+
+/* Machine check helper function. */
+void device_kill_pending_timer(struct subchannel *);
+
+/* Helper functions to build lists for the slow path. */
+int css_enqueue_subchannel_slow(unsigned long schid);
+void css_walk_subchannel_slow_list(void (*fn)(unsigned long));
+void css_clear_subchannel_slow_list(void);
+int css_slow_subchannels_exist(void);
+extern int need_rescan;
+
+extern struct workqueue_struct *slow_path_wq;
+extern struct work_struct slow_path_work;
 #endif

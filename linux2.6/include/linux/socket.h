@@ -90,6 +90,10 @@ struct cmsghdr {
 				  (struct cmsghdr *)(ctl) : \
 				  (struct cmsghdr *)NULL)
 #define CMSG_FIRSTHDR(msg)	__CMSG_FIRSTHDR((msg)->msg_control, (msg)->msg_controllen)
+#define CMSG_OK(mhdr, cmsg) ((cmsg)->cmsg_len >= sizeof(struct cmsghdr) && \
+			     (cmsg)->cmsg_len <= (unsigned long) \
+			     ((mhdr)->msg_controllen - \
+			      ((char *)(cmsg) - (char *)(mhdr)->msg_control)))
 
 /*
  *	This mess will go away with glibc
@@ -116,7 +120,7 @@ struct cmsghdr {
  *	Now it always returns valid, not truncated ancillary object
  *	HEADER. But caller still MUST check, that cmsg->cmsg_len is
  *	inside range, given by msg->msg_controllen before using
- *	ansillary object DATA.				--ANK (980731)
+ *	ancillary object DATA.				--ANK (980731)
  */
  
 __KINLINE struct cmsghdr * __cmsg_nxthdr(void *__ctl, __kernel_size_t __size,
@@ -140,7 +144,6 @@ __KINLINE struct cmsghdr * cmsg_nxthdr (struct msghdr *__msg, struct cmsghdr *__
 
 #define	SCM_RIGHTS	0x01		/* rw: access rights (array of int) */
 #define SCM_CREDENTIALS 0x02		/* rw: struct ucred		*/
-#define SCM_CONNECT	0x03		/* rw: struct scm_connect	*/
 
 struct ucred {
 	__u32	pid;
@@ -245,10 +248,6 @@ struct ucred {
 #define MSG_CMSG_COMPAT	0		/* We never have 32 bit fixups */
 #endif
 
-extern asmlinkage long sys_sendmsg(int fd, struct msghdr __user *msg, unsigned flags);
-extern asmlinkage long sys_recvmsg(int fd, struct msghdr __user *msg, unsigned flags);
-
-
 
 /* Setsockoptions(2) level. Thanks to BSD these must match IPPROTO_xxx */
 #define SOL_IP		0
@@ -287,7 +286,6 @@ extern int csum_partial_copy_fromiovecend(unsigned char *kdata,
 
 extern int verify_iovec(struct msghdr *m, struct iovec *iov, char *address, int mode);
 extern int memcpy_toiovec(struct iovec *v, unsigned char *kdata, int len);
-extern void memcpy_tokerneliovec(struct iovec *iov, unsigned char *kdata, int len);
 extern int move_addr_to_user(void *kaddr, int klen, void __user *uaddr, int __user *ulen);
 extern int move_addr_to_kernel(void __user *uaddr, int ulen, void *kaddr);
 extern int put_cmsg(struct msghdr*, int level, int type, int len, void *data);

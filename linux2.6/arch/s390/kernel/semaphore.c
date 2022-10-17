@@ -11,6 +11,7 @@
  */
 #include <linux/sched.h>
 #include <linux/errno.h>
+#include <linux/init.h>
 
 #include <asm/semaphore.h>
 
@@ -33,8 +34,9 @@ static inline int __sem_update_count(struct semaphore *sem, int incr)
                              "   cs    %0,%1,0(%3)\n"
                              "   jl    0b\n"
                              : "=&d" (old_val), "=&d" (new_val),
-			       "+m" (sem->count)
-			     : "a" (&sem->count), "d" (incr) : "cc" );
+			       "=m" (sem->count)
+			     : "a" (&sem->count), "d" (incr), "m" (sem->count)
+			     : "cc" );
 	return old_val;
 }
 
@@ -59,19 +61,19 @@ void __up(struct semaphore *sem)
  *   count > 0: decrement count, wake up queue and exit.
  *   count <= 0: set count to -1, go to sleep.
  */
-void __down(struct semaphore * sem)
+void __sched __down(struct semaphore * sem)
 {
 	struct task_struct *tsk = current;
 	DECLARE_WAITQUEUE(wait, tsk);
 
-	tsk->state = TASK_UNINTERRUPTIBLE;
+	__set_task_state(tsk, TASK_UNINTERRUPTIBLE);
 	add_wait_queue_exclusive(&sem->wait, &wait);
 	while (__sem_update_count(sem, -1) <= 0) {
 		schedule();
-		tsk->state = TASK_UNINTERRUPTIBLE;
+		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
 	}
 	remove_wait_queue(&sem->wait, &wait);
-	tsk->state = TASK_RUNNING;
+	__set_task_state(tsk, TASK_RUNNING);
 	wake_up(&sem->wait);
 }
 
@@ -81,13 +83,13 @@ void __down(struct semaphore * sem)
  *   count > 0: wake up queue and exit.
  *   count <= 0: set count to 0, wake up queue and exit.
  */
-int __down_interruptible(struct semaphore * sem)
+int __sched __down_interruptible(struct semaphore * sem)
 {
 	int retval = 0;
 	struct task_struct *tsk = current;
 	DECLARE_WAITQUEUE(wait, tsk);
 
-	tsk->state = TASK_INTERRUPTIBLE;
+	__set_task_state(tsk, TASK_INTERRUPTIBLE);
 	add_wait_queue_exclusive(&sem->wait, &wait);
 	while (__sem_update_count(sem, -1) <= 0) {
 		if (signal_pending(current)) {
@@ -96,10 +98,10 @@ int __down_interruptible(struct semaphore * sem)
 			break;
 		}
 		schedule();
-		tsk->state = TASK_INTERRUPTIBLE;
+		set_task_state(tsk, TASK_INTERRUPTIBLE);
 	}
 	remove_wait_queue(&sem->wait, &wait);
-	tsk->state = TASK_RUNNING;
+	__set_task_state(tsk, TASK_RUNNING);
 	wake_up(&sem->wait);
 	return retval;
 }

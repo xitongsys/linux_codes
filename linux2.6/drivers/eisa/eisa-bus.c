@@ -187,6 +187,7 @@ static int __init eisa_init_device (struct eisa_root_device *root,
 	edev->dev.parent = root->dev;
 	edev->dev.bus = &eisa_bus_type;
 	edev->dev.dma_mask = &edev->dma_mask;
+	edev->dev.coherent_dma_mask = edev->dma_mask;
 	sprintf (edev->dev.bus_id, "%02X:%02X", root->bus_nr, slot);
 
 	for (i = 0; i < EISA_MAX_RESOURCES; i++) {
@@ -417,8 +418,8 @@ static int __init eisa_init (void)
 	return 0;
 }
 
-module_param_array(enable_dev, int, enable_dev_count, 0444);
-module_param_array(disable_dev, int, disable_dev_count, 0444);
+module_param_array(enable_dev, int, &enable_dev_count, 0444);
+module_param_array(disable_dev, int, &disable_dev_count, 0444);
 
 postcore_initcall (eisa_init);
 

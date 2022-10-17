@@ -15,6 +15,9 @@
 #define PCI_PROBE_BIOS		0x0001
 #define PCI_PROBE_CONF1		0x0002
 #define PCI_PROBE_CONF2		0x0004
+#define PCI_PROBE_MMCONF	0x0008
+#define PCI_PROBE_MASK		0x000f
+
 #define PCI_NO_SORT		0x0100
 #define PCI_BIOS_SORT		0x0200
 #define PCI_NO_CHECKS		0x0400
@@ -22,7 +25,6 @@
 #define PCI_ASSIGN_ROMS		0x1000
 #define PCI_BIOS_IRQ_SCAN	0x2000
 #define PCI_ASSIGN_ALL_BUSSES	0x4000
-#define PCI_NO_ACPI_ROUTING	0x8000
 
 extern unsigned int pci_probe;
 
@@ -68,7 +70,5 @@ extern unsigned int pcibios_irq_mask;
 
 extern int pcibios_scanned;
 extern spinlock_t pci_config_lock;
-
-int pirq_enable_irq(struct pci_dev *dev);
 
 extern int (*pcibios_enable_irq)(struct pci_dev *dev);

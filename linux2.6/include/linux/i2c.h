@@ -88,20 +88,12 @@ extern s32 i2c_smbus_write_byte_data(struct i2c_client * client,
 extern s32 i2c_smbus_read_word_data(struct i2c_client * client, u8 command);
 extern s32 i2c_smbus_write_word_data(struct i2c_client * client,
                                      u8 command, u16 value);
-extern s32 i2c_smbus_process_call(struct i2c_client * client,
-                                  u8 command, u16 value);
-/* Returns the number of read bytes */
-extern s32 i2c_smbus_read_block_data(struct i2c_client * client,
-                                     u8 command, u8 *values);
+/* Returns the number of bytes transferred */
 extern s32 i2c_smbus_write_block_data(struct i2c_client * client,
-                                      u8 command, u8 length,
-                                      u8 *values);
+				      u8 command, u8 length,
+				      u8 *values);
 extern s32 i2c_smbus_read_i2c_block_data(struct i2c_client * client,
-                                         u8 command, u8 *values);
-extern s32 i2c_smbus_write_i2c_block_data(struct i2c_client * client,
-                                          u8 command, u8 length,
-                                          u8 *values);
-
+					 u8 command, u8 *values);
 
 /*
  * A driver is capable of handling one or more physical devices present on
@@ -113,6 +105,7 @@ struct i2c_driver {
 	struct module *owner;
 	char name[32];
 	int id;
+	unsigned int class;
 	unsigned int flags;		/* div., see below		*/
 
 	/* Notifies the driver that a new bus has appeared. This routine
@@ -237,7 +230,6 @@ struct i2c_adapter {
 	/* data fields that are valid for all devices	*/
 	struct semaphore bus_lock;
 	struct semaphore clist_lock;
-	unsigned int flags;/* flags specifying div. data		*/
 
 	int timeout;
 	int retries;
@@ -286,12 +278,14 @@ static inline void i2c_set_adapdata (struct i2c_adapter *dev, void *data)
 						/* Must equal I2C_M_TEN below */
 
 /* i2c adapter classes (bitmask) */
-#define I2C_ADAP_CLASS_SMBUS		(1<<0)	/* lm_sensors, ... */
-#define I2C_ADAP_CLASS_TV_ANALOG	(1<<1)	/* bttv + friends */
-#define I2C_ADAP_CLASS_TV_DIGITAL	(1<<2)	/* dbv cards */
-#define I2C_ADAP_CLASS_DDC		(1<<3)	/* i2c-matroxfb ? */
-#define I2C_ADAP_CLASS_CAM_ANALOG	(1<<4)	/* camera with analog CCD */
-#define I2C_ADAP_CLASS_CAM_DIGITAL	(1<<5)	/* most webcams */
+#define I2C_CLASS_HWMON		(1<<0)	/* lm_sensors, ... */
+#define I2C_CLASS_TV_ANALOG	(1<<1)	/* bttv + friends */
+#define I2C_CLASS_TV_DIGITAL	(1<<2)	/* dvb cards */
+#define I2C_CLASS_DDC		(1<<3)	/* i2c-matroxfb ? */
+#define I2C_CLASS_CAM_ANALOG	(1<<4)	/* camera with analog CCD */
+#define I2C_CLASS_CAM_DIGITAL	(1<<5)	/* most webcams */
+#define I2C_CLASS_SOUND		(1<<6)	/* sound devices */
+#define I2C_CLASS_ALL		(UINT_MAX) /* all of the above */
 
 /* i2c_client_address_data is the struct for holding default client
  * addresses for a driver and for the parameters supplied on the
@@ -564,7 +558,9 @@ union i2c_smbus_data {
 
 #define I2C_CLIENT_MODULE_PARM(var,desc) \
   static unsigned short var[I2C_CLIENT_MAX_OPTS] = I2C_CLIENT_DEFAULTS; \
-  MODULE_PARM(var,I2C_CLIENT_MODPARM); \
+  static unsigned int var##_num; \
+  /*MODULE_PARM(var,I2C_CLIENT_MODPARM);*/ \
+  module_param_array(var, short, &var##_num, 0); \
   MODULE_PARM_DESC(var,desc)
 
 /* This is the one you want to use in your own modules */
@@ -598,12 +594,5 @@ union i2c_smbus_data {
         ((clientptr)->adapter->algo->id == I2C_ALGO_ISA)
 #define i2c_is_isa_adapter(adapptr) \
         ((adapptr)->algo->id == I2C_ALGO_ISA)
-
-/* Tiny delay function used by the i2c bus drivers */
-static inline void i2c_delay(signed long timeout)
-{
-	set_current_state(TASK_INTERRUPTIBLE);
-	schedule_timeout(timeout);
-}
 
 #endif /* _LINUX_I2C_H */

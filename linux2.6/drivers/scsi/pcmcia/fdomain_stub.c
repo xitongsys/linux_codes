@@ -44,7 +44,8 @@
 #include <scsi/scsi_ioctl.h>
 
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
+#include "fdomain.h"
 
 #include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
@@ -60,15 +61,9 @@ MODULE_AUTHOR("David Hinds <dahinds@users.sourceforge.net>");
 MODULE_DESCRIPTION("Future Domain PCMCIA SCSI driver");
 MODULE_LICENSE("Dual MPL/GPL");
 
-/* Bit map of interrupts to choose from */
-static int irq_mask = 0xdeb8;
-MODULE_PARM(irq_mask, "i");
-static int irq_list[4] = { -1 };
-MODULE_PARM(irq_list, "1-4i");
-
 #ifdef PCMCIA_DEBUG
 static int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
+module_param(pc_debug, int, 0);
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
 static char *version =
 "fdomain_cs.c 1.47 2001/10/13 00:08:52 (David Hinds)";
@@ -84,10 +79,6 @@ typedef struct scsi_info_t {
     struct Scsi_Host	*host;
 } scsi_info_t;
 
-extern Scsi_Host_Template fdomain_driver_template;
-extern void fdomain_setup(char *str, int *ints);
-extern struct Scsi_Host *__fdomain_16x0_detect( Scsi_Host_Template *tpnt );
-extern int fdomain_16x0_bus_reset(Scsi_Cmnd *SCpnt);
 
 static void fdomain_release(dev_link_t *link);
 static int fdomain_event(event_t event, int priority,
@@ -106,7 +97,7 @@ static dev_link_t *fdomain_attach(void)
     scsi_info_t *info;
     client_reg_t client_reg;
     dev_link_t *link;
-    int i, ret;
+    int ret;
     
     DEBUG(0, "fdomain_attach()\n");
 
@@ -119,12 +110,7 @@ static dev_link_t *fdomain_attach(void)
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_AUTO;
     link->io.IOAddrLines = 10;
     link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
-    link->irq.IRQInfo1 = IRQ_INFO2_VALID|IRQ_LEVEL_ID;
-    if (irq_list[0] == -1)
-	link->irq.IRQInfo2 = irq_mask;
-    else
-	for (i = 0; i < 4; i++)
-	    link->irq.IRQInfo2 |= 1 << irq_list[i];
+    link->irq.IRQInfo1 = IRQ_LEVEL_ID;
     link->conf.Attributes = CONF_ENABLE_IRQ;
     link->conf.Vcc = 50;
     link->conf.IntType = INT_MEMORY_AND_IO;
@@ -134,7 +120,6 @@ static dev_link_t *fdomain_attach(void)
     link->next = dev_list;
     dev_list = link;
     client_reg.dev_info = &dev_info;
-    client_reg.Attributes = INFO_IO_CLIENT | INFO_CARD_SHARE;
     client_reg.event_handler = &fdomain_event;
     client_reg.EventMask =
 	CS_EVENT_RESET_REQUEST | CS_EVENT_CARD_RESET |
@@ -142,7 +127,7 @@ static dev_link_t *fdomain_attach(void)
 	CS_EVENT_PM_SUSPEND | CS_EVENT_PM_RESUME;
     client_reg.Version = 0x0210;
     client_reg.event_callback_args.client_data = link;
-    ret = CardServices(RegisterClient, &link->handle, &client_reg);
+    ret = pcmcia_register_client(&link->handle, &client_reg);
     if (ret != 0) {
 	cs_error(link->handle, RegisterClient, ret);
 	fdomain_detach(link);
@@ -170,7 +155,7 @@ static void fdomain_detach(dev_link_t *link)
 	fdomain_release(link);
 
     if (link->handle)
-	CardServices(DeregisterClient, link->handle);
+	pcmcia_deregister_client(link->handle);
     
     /* Unlink device structure, free bits */
     *linkp = link->next;
@@ -180,11 +165,8 @@ static void fdomain_detach(dev_link_t *link)
 
 /*====================================================================*/
 
-#define CS_CHECK(fn, args...) \
-while ((last_ret=CardServices(last_fn=(fn), args))!=0) goto cs_failed
-
-#define CFG_CHECK(fn, args...) \
-if (CardServices(fn, args) != 0) goto next_entry
+#define CS_CHECK(fn, ret) \
+do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
 
 static void fdomain_config(dev_link_t *link)
 {
@@ -192,7 +174,7 @@ static void fdomain_config(dev_link_t *link)
     scsi_info_t *info = link->priv;
     tuple_t tuple;
     cisparse_t parse;
-    int i, last_ret, last_fn, ints[3];
+    int i, last_ret, last_fn;
     u_char tuple_data[64];
     char str[16];
     struct Scsi_Host *host;
@@ -203,39 +185,37 @@ static void fdomain_config(dev_link_t *link)
     tuple.TupleData = tuple_data;
     tuple.TupleDataMax = 64;
     tuple.TupleOffset = 0;
-    CS_CHECK(GetFirstTuple, handle, &tuple);
-    CS_CHECK(GetTupleData, handle, &tuple);
-    CS_CHECK(ParseTuple, handle, &tuple, &parse);
+    CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
+    CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
+    CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
     link->conf.ConfigBase = parse.config.base;
 
     /* Configure card */
     link->state |= DEV_CONFIG;
     
     tuple.DesiredTuple = CISTPL_CFTABLE_ENTRY;
-    CS_CHECK(GetFirstTuple, handle, &tuple);
+    CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
     while (1) {
-	CFG_CHECK(GetTupleData, handle, &tuple);
-	CFG_CHECK(ParseTuple, handle, &tuple, &parse);
+	if (pcmcia_get_tuple_data(handle, &tuple) != 0 ||
+		pcmcia_parse_tuple(handle, &tuple, &parse) != 0)
+	    goto next_entry;
 	link->conf.ConfigIndex = parse.cftable_entry.index;
 	link->io.BasePort1 = parse.cftable_entry.io.win[0].base;
-	i = CardServices(RequestIO, handle, &link->io);
+	i = pcmcia_request_io(handle, &link->io);
 	if (i == CS_SUCCESS) break;
     next_entry:
-	CS_CHECK(GetNextTuple, handle, &tuple);
+	CS_CHECK(GetNextTuple, pcmcia_get_next_tuple(handle, &tuple));
     }
 
-    CS_CHECK(RequestIRQ, handle, &link->irq);
-    CS_CHECK(RequestConfiguration, handle, &link->conf);
+    CS_CHECK(RequestIRQ, pcmcia_request_irq(handle, &link->irq));
+    CS_CHECK(RequestConfiguration, pcmcia_request_configuration(handle, &link->conf));
     
     /* A bad hack... */
     release_region(link->io.BasePort1, link->io.NumPorts1);
 
     /* Set configuration options for the fdomain driver */
-    ints[0] = 2;
-    ints[1] = link->io.BasePort1;
-    ints[2] = link->irq.AssignedIRQ;
     sprintf(str, "%d,%d", link->io.BasePort1, link->irq.AssignedIRQ);
-    fdomain_setup(str, ints);
+    fdomain_setup(str);
     
     host = __fdomain_16x0_detect(&fdomain_driver_template);
     if (!host) {
@@ -271,9 +251,9 @@ static void fdomain_release(dev_link_t *link)
     scsi_remove_host(info->host);
     link->dev = NULL;
     
-    CardServices(ReleaseConfiguration, link->handle);
-    CardServices(ReleaseIO, link->handle, &link->io);
-    CardServices(ReleaseIRQ, link->handle, &link->irq);
+    pcmcia_release_configuration(link->handle);
+    pcmcia_release_io(link->handle, &link->io);
+    pcmcia_release_irq(link->handle, &link->irq);
 
     scsi_unregister(info->host);
 
@@ -304,14 +284,14 @@ static int fdomain_event(event_t event, int priority,
 	/* Fall through... */
     case CS_EVENT_RESET_PHYSICAL:
 	if (link->state & DEV_CONFIG)
-	    CardServices(ReleaseConfiguration, link->handle);
+	    pcmcia_release_configuration(link->handle);
 	break;
     case CS_EVENT_PM_RESUME:
 	link->state &= ~DEV_SUSPEND;
 	/* Fall through... */
     case CS_EVENT_CARD_RESET:
 	if (link->state & DEV_CONFIG) {
-	    CardServices(RequestConfiguration, link->handle, &link->conf);
+	    pcmcia_request_configuration(link->handle, &link->conf);
 	    fdomain_16x0_bus_reset(NULL);
 	}
 	break;
@@ -336,10 +316,7 @@ static int __init init_fdomain_cs(void)
 static void __exit exit_fdomain_cs(void)
 {
 	pcmcia_unregister_driver(&fdomain_cs_driver);
-
-	/* XXX: this really needs to move into generic code.. */
-	while (dev_list != NULL)
-		fdomain_detach(dev_list);
+	BUG_ON(dev_list != NULL);
 }
 
 module_init(init_fdomain_cs);

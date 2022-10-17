@@ -19,6 +19,7 @@
 #include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/linkage.h>
 #include <linux/mm.h>
 #include <linux/blkdev.h>
 #include <linux/bootmem.h>
@@ -51,46 +52,49 @@ phys_t board_mem_region_addrs[SIBYTE_MAX_MEM_REGIONS];
 phys_t board_mem_region_sizes[SIBYTE_MAX_MEM_REGIONS];
 unsigned int board_mem_region_count;
 
-/* This is the kernel command line.  Actually, it's
-   copied, eventually, to command_line, and looks to be
-   quite redundant.  But not something to fix just now */
-extern char arcs_cmdline[];
-
 int cfe_cons_handle;
 
-#ifdef CONFIG_EMBEDDED_RAMDISK
-/* These are symbols defined by the ramdisk linker script */
-extern unsigned char __rd_start;
-extern unsigned char __rd_end;
-#endif
-
-#ifdef CONFIG_SMP
-static int reboot_smp = 0;
+#ifdef CONFIG_BLK_DEV_INITRD
+extern unsigned long initrd_start, initrd_end;
 #endif
 
 #ifdef CONFIG_KGDB
 extern int kgdb_port;
 #endif
 
-static void cfe_linux_exit(void)
+static void ATTRIB_NORET cfe_linux_exit(void *arg)
 {
-#ifdef CONFIG_SMP
+	int warm = *(int *)arg;
+
 	if (smp_processor_id()) {
-		if (reboot_smp) {
-			/* Don't repeat the process from another CPU */
-			for (;;);
-		} else {
+		static int reboot_smp;
+
+		/* Don't repeat the process from another CPU */
+		if (!reboot_smp) {
 			/* Get CPU 0 to do the cfe_exit */
 			reboot_smp = 1;
-			smp_call_function((void *)_machine_restart, NULL, 1, 0);
-			for (;;);
+			smp_call_function(cfe_linux_exit, arg, 1, 0);
 		}
+	} else {
+		printk("Passing control back to CFE...\n");
+		cfe_exit(warm, 0);
+		printk("cfe_exit returned??\n");
 	}
-#endif
-	printk("passing control back to CFE\n");
-	cfe_exit(1, 0);
-	printk("cfe_exit returned??\n");
-	while(1);
+	while (1);
+}
+
+static void ATTRIB_NORET cfe_linux_restart(char *command)
+{
+	static const int zero;
+
+	cfe_linux_exit((void *)&zero);
+}
+
+static void ATTRIB_NORET cfe_linux_halt(void)
+{
+	static const int one = 1;
+
+	cfe_linux_exit((void *)&one);
 }
 
 static __init void prom_meminit(void)
@@ -102,17 +106,6 @@ static __init void prom_meminit(void)
 #ifdef CONFIG_BLK_DEV_INITRD
 	unsigned long initrd_pstart;
 	unsigned long initrd_pend;
-
-#ifdef CONFIG_EMBEDDED_RAMDISK
-	/* If we're using an embedded ramdisk, then __rd_start and __rd_end
-	   are defined by the linker to be on either side of the ramdisk
-	   area.  Otherwise, initrd_start should be defined by kernel command
-	   line arguments */
-	if (initrd_start == 0) {
-		initrd_start = (unsigned long)&__rd_start;
-		initrd_end = (unsigned long)&__rd_end;
-	}
-#endif
 
 	initrd_pstart = CPHYSADDR(initrd_start);
 	initrd_pend = CPHYSADDR(initrd_end);
@@ -191,6 +184,8 @@ static int __init initrd_setup(char *str)
 {
 	char rdarg[64];
 	int idx;
+	char *tmp, *endptr;
+	unsigned long initrd_size;
 
 	/* Make a copy of the initrd argument so we can smash it up here */
 	for (idx = 0; idx < sizeof(rdarg)-1; idx++) {
@@ -205,8 +200,6 @@ static int __init initrd_setup(char *str)
 	 *Initrd location comes in the form "<hex size of ramdisk in bytes>@<location in memory>"
 	 *  e.g. initrd=3abfd@80010000.  This is set up by the loader.
 	 */
-	char *tmp, *endptr;
-	unsigned long initrd_size;
 	for (tmp = str; *tmp != '@'; tmp++) {
 		if (!*tmp) {
 			goto fail;
@@ -240,19 +233,22 @@ static int __init initrd_setup(char *str)
 #endif
 
 /*
- * prom_init is called just after the cpu type is determined, from init_arch()
+ * prom_init is called just after the cpu type is determined, from setup_arch()
  */
-__init int prom_init(int argc, char **argv, char **envp, int *prom_vec)
+void __init prom_init(void)
 {
 	uint64_t cfe_ept, cfe_handle;
 	unsigned int cfe_eptseal;
+	int argc = fw_arg0;
+	char **envp = (char **) fw_arg2;
+	int *prom_vec = (int *) fw_arg3;
 #ifdef CONFIG_KGDB
 	char *arg;
 #endif
 
-	_machine_restart   = (void (*)(char *))cfe_linux_exit;
-	_machine_halt      = cfe_linux_exit;
-	_machine_power_off = cfe_linux_exit;
+	_machine_restart   = cfe_linux_restart;
+	_machine_halt      = cfe_linux_halt;
+	_machine_power_off = cfe_linux_halt;
 
 	/*
 	 * Check if a loader was used; if NOT, the 4 arguments are
@@ -345,13 +341,12 @@ __init int prom_init(int argc, char **argv, char **envp, int *prom_vec)
 
 	mips_machgroup = MACH_GROUP_SIBYTE;
 	prom_meminit();
-
-	return 0;
 }
 
-void prom_free_prom_memory(void)
+unsigned long __init prom_free_prom_memory(void)
 {
 	/* Not sure what I'm supposed to do here.  Nothing, I think */
+	return 0;
 }
 
 void prom_putchar(char c)

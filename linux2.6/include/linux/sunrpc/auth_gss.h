@@ -15,11 +15,9 @@
 #define _LINUX_SUNRPC_AUTH_GSS_H
 
 #ifdef __KERNEL__
-#ifdef __linux__
 #include <linux/sunrpc/auth.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/sunrpc/gss_api.h>
-#endif
 
 #define RPC_GSS_VERSION		1
 
@@ -61,8 +59,6 @@ struct rpc_gss_init_res {
 	u32			gr_win;		/* sequence window */
 	struct xdr_netobj	gr_token;	/* token */
 };
-
-#define GSS_SEQ_WIN	5
 
 /* The gss_cl_ctx struct holds all the information the rpcsec_gss client
  * code needs to know about a single security context.  In particular,

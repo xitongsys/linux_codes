@@ -3,7 +3,7 @@
 void *kmap(struct page *page)
 {
 	might_sleep();
-	if (page < highmem_start_page)
+	if (!PageHighMem(page))
 		return page_address(page);
 	return kmap_high(page);
 }
@@ -12,7 +12,7 @@ void kunmap(struct page *page)
 {
 	if (in_interrupt())
 		BUG();
-	if (page < highmem_start_page)
+	if (!PageHighMem(page))
 		return;
 	kunmap_high(page);
 }
@@ -30,8 +30,9 @@ void *kmap_atomic(struct page *page, enum km_type type)
 	enum fixed_addresses idx;
 	unsigned long vaddr;
 
+	/* even !CONFIG_PREEMPT needs this, for in_atomic in do_page_fault */
 	inc_preempt_count();
-	if (page < highmem_start_page)
+	if (!PageHighMem(page))
 		return page_address(page);
 
 	idx = type + KM_TYPE_NR*smp_processor_id();
@@ -54,6 +55,7 @@ void kunmap_atomic(void *kvaddr, enum km_type type)
 
 	if (vaddr < FIXADDR_START) { // FIXME
 		dec_preempt_count();
+		preempt_check_resched();
 		return;
 	}
 
@@ -69,6 +71,7 @@ void kunmap_atomic(void *kvaddr, enum km_type type)
 #endif
 
 	dec_preempt_count();
+	preempt_check_resched();
 }
 
 struct page *kmap_atomic_to_page(void *ptr)

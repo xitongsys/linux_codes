@@ -8,7 +8,7 @@
 #define R14 8
 #define R13 16
 #define R12 24
-#define RBP 36
+#define RBP 32
 #define RBX 40
 /* arguments: interrupts/non tracing syscalls only save upto here*/
 #define R11 48
@@ -31,31 +31,47 @@
 #define ARGOFFSET R11
 #define SWFRAME ORIG_RAX
 
-	.macro SAVE_ARGS addskip=0,norcx=0 	
+	.macro SAVE_ARGS addskip=0,norcx=0,nor891011=0
 	subq  $9*8+\addskip,%rsp
+	CFI_ADJUST_CFA_OFFSET	9*8+\addskip
 	movq  %rdi,8*8(%rsp) 
+	CFI_REL_OFFSET	rdi,8*8
 	movq  %rsi,7*8(%rsp) 
+	CFI_REL_OFFSET	rsi,7*8
 	movq  %rdx,6*8(%rsp)
+	CFI_REL_OFFSET	rdx,6*8
 	.if \norcx
 	.else
 	movq  %rcx,5*8(%rsp)
+	CFI_REL_OFFSET	rcx,5*8
 	.endif
 	movq  %rax,4*8(%rsp) 
+	CFI_REL_OFFSET	rax,4*8
+	.if \nor891011
+	.else
 	movq  %r8,3*8(%rsp) 
+	CFI_REL_OFFSET	r8,3*8
 	movq  %r9,2*8(%rsp) 
+	CFI_REL_OFFSET	r9,2*8
 	movq  %r10,1*8(%rsp) 
+	CFI_REL_OFFSET	r10,1*8
 	movq  %r11,(%rsp) 
+	CFI_REL_OFFSET	r11,0*8
+	.endif
 	.endm
 
 #define ARG_SKIP 9*8
-	.macro RESTORE_ARGS skiprax=0,addskip=0,skiprcx=0,skipr11=0
+	.macro RESTORE_ARGS skiprax=0,addskip=0,skiprcx=0,skipr11=0,skipr8910=0,skiprdx=0
 	.if \skipr11
 	.else
 	movq (%rsp),%r11
 	.endif
+	.if \skipr8910
+	.else
 	movq 1*8(%rsp),%r10
 	movq 2*8(%rsp),%r9
 	movq 3*8(%rsp),%r8
+	.endif
 	.if \skiprax
 	.else
 	movq 4*8(%rsp),%rax
@@ -64,11 +80,15 @@
 	.else
 	movq 5*8(%rsp),%rcx
 	.endif
+	.if \skiprdx
+	.else
 	movq 6*8(%rsp),%rdx
+	.endif
 	movq 7*8(%rsp),%rsi
 	movq 8*8(%rsp),%rdi
 	.if ARG_SKIP+\addskip > 0
 	addq $ARG_SKIP+\addskip,%rsp
+	CFI_ADJUST_CFA_OFFSET	-(ARG_SKIP+\addskip)
 	.endif
 	.endm	
 
@@ -87,12 +107,19 @@
 #define REST_SKIP 6*8			
 	.macro SAVE_REST
 	subq $REST_SKIP,%rsp
+	CFI_ADJUST_CFA_OFFSET	REST_SKIP
 	movq %rbx,5*8(%rsp) 
+	CFI_REL_OFFSET	rbx,5*8
 	movq %rbp,4*8(%rsp) 
+	CFI_REL_OFFSET	rbp,4*8
 	movq %r12,3*8(%rsp) 
+	CFI_REL_OFFSET	r12,3*8
 	movq %r13,2*8(%rsp) 
+	CFI_REL_OFFSET	r13,2*8
 	movq %r14,1*8(%rsp) 
+	CFI_REL_OFFSET	r14,1*8
 	movq %r15,(%rsp) 
+	CFI_REL_OFFSET	r15,0*8
 	.endm		
 
 	.macro RESTORE_REST
@@ -103,6 +130,7 @@
 	movq 4*8(%rsp),%rbp
 	movq 5*8(%rsp),%rbx
 	addq $REST_SKIP,%rsp
+	CFI_ADJUST_CFA_OFFSET	-(REST_SKIP)
 	.endm
 		
 	.macro SAVE_ALL
@@ -113,22 +141,6 @@
 	.macro RESTORE_ALL addskip=0
 	RESTORE_REST
 	RESTORE_ARGS 0,\addskip
-	.endm
-
-	/* push in order ss, rsp, eflags, cs, rip */
-	.macro FAKE_STACK_FRAME child_rip
-	xorl %eax,%eax
-	subq $6*8,%rsp
-	movq %rax,5*8(%rsp)  /* ss */
-	movq %rax,4*8(%rsp)  /* rsp */
-	movq $(1<<9),3*8(%rsp)  /* eflags */
-	movq $__KERNEL_CS,2*8(%rsp) /* cs */
-	movq \child_rip,1*8(%rsp)  /* rip */ 
-	movq %rax,(%rsp)   /* orig_rax */ 
-	.endm
-
-	.macro UNFAKE_STACK_FRAME
-	addq $8*6, %rsp
 	.endm
 
 	.macro icebp

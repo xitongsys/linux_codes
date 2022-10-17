@@ -5,7 +5,7 @@
  *  Not all hid devices use the same protocol. For example, some use PID,
  *  other use their own proprietary procotol.
  *
- *  Copyright (c) 2002 Johann Deneux
+ *  Copyright (c) 2002-2004 Johann Deneux
  */
 
 /*
@@ -24,12 +24,12 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  *
  * Should you need to contact me, the author, you can do so by
- * e-mail - mail your message to <deneux@ifrance.com>
+ * e-mail - mail your message to <johann.deneux@it.uu.se>
  */
 
 #include <linux/input.h>
 
-#define DEBUG
+#undef DEBUG
 #include <linux/usb.h>
 
 #include "hid.h"
@@ -52,8 +52,9 @@ struct hid_ff_initializer {
 
 static struct hid_ff_initializer inits[] = {
 #ifdef CONFIG_LOGITECH_FF
-	{0x46d, 0xc211, hid_lgff_init},
-	{0x46d, 0xc283, hid_lgff_init},
+	{0x46d, 0xc211, hid_lgff_init}, // Logitech Cordless rumble pad
+	{0x46d, 0xc283, hid_lgff_init}, // Logitech Wingman Force 3d
+	{0x46d, 0xc295, hid_lgff_init},	// Logitech MOMO force wheel
 #endif
 #ifdef CONFIG_HID_PID
 	{0x45e, 0x001b, hid_pid_init},
@@ -81,8 +82,8 @@ int hid_ff_init(struct hid_device* hid)
 {
 	struct hid_ff_initializer *init;
 
-	init = hid_get_ff_init(hid->dev->descriptor.idVendor,
-			       hid->dev->descriptor.idProduct);
+	init = hid_get_ff_init(le16_to_cpu(hid->dev->descriptor.idVendor),
+			       le16_to_cpu(hid->dev->descriptor.idProduct));
 
 	if (!init) {
 		dbg("hid_ff_init could not find initializer");

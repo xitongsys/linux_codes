@@ -308,6 +308,9 @@ DECLARE_IO(int,l,"")
 #define readb(c)                        (__readwrite_bug("readb"),0)
 #define readw(c)                        (__readwrite_bug("readw"),0)
 #define readl(c)                        (__readwrite_bug("readl"),0)
+#define readb_relaxed(addr)		readb(addr)
+#define readw_relaxed(addr)		readw(addr)
+#define readl_relaxed(addr)		readl(addr)
 #define writeb(v,c)                     __readwrite_bug("writeb")
 #define writew(v,c)                     __readwrite_bug("writew")
 #define writel(v,c)                     __readwrite_bug("writel")
@@ -316,6 +319,8 @@ DECLARE_IO(int,l,"")
 #define readsl(p,d,l)                 (__readwrite_bug("readsl"),0)
 #define writesw(p,d,l)                        __readwrite_bug("writesw")
 #define writesl(p,d,l)                        __readwrite_bug("writesl")
+
+#define mmiowb()
 
 /* the following macro is depreciated */
 #define ioaddr(port)                    __ioaddr((port))
@@ -383,7 +388,7 @@ extern void _memset_io(unsigned long, int, size_t);
  * ioremap and friends.
  *
  * ioremap takes a PCI memory address, as specified in
- * linux/Documentation/IO-mapping.txt.
+ * Documentation/IO-mapping.txt.
  */
 extern void * __ioremap(unsigned long, size_t, unsigned long, unsigned long);
 extern void __iounmap(void *addr);

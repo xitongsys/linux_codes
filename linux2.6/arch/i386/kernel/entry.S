@@ -74,12 +74,6 @@ DF_MASK		= 0x00000400
 NT_MASK		= 0x00004000
 VM_MASK		= 0x00020000
 
-/*
- * ESP0 is at offset 4. 0x200 is the size of the TSS, and
- * also thus the top-of-stack pointer offset of SYSENTER_ESP
- */
-TSS_ESP0_OFFSET = (4 - 0x200)
-
 #ifdef CONFIG_PREEMPT
 #define preempt_stop		cli
 #else
@@ -137,47 +131,13 @@ TSS_ESP0_OFFSET = (4 - 0x200)
 	movl $(__USER_DS), %edx; \
 	movl %edx, %ds; \
 	movl %edx, %es; \
-	pushl $11;	\
+	movl $11,%eax;	\
 	call do_exit;	\
 .previous;		\
 .section __ex_table,"a";\
 	.align 4;	\
 	.long 1b,2b;	\
 .previous
-
-
-
-ENTRY(lcall7)
-	pushfl			# We get a different stack layout with call
-				# gates, which has to be cleaned up later..
-	pushl %eax
-	SAVE_ALL
-	movl %esp, %ebp
-	pushl %ebp
-	pushl $0x7
-do_lcall:
-	movl EIP(%ebp), %eax	# due to call gates, this is eflags, not eip..
-	movl CS(%ebp), %edx	# this is eip..
-	movl EFLAGS(%ebp), %ecx	# and this is cs..
-	movl %eax,EFLAGS(%ebp)	#
-	movl %edx,EIP(%ebp)	# Now we move them to their "normal" places
-	movl %ecx,CS(%ebp)	#
-	andl $-8192, %ebp	# GET_THREAD_INFO
-	movl TI_EXEC_DOMAIN(%ebp), %edx	# Get the execution domain
-	call *4(%edx)		# Call the lcall7 handler for the domain
-	addl $4, %esp
-	popl %eax
-	jmp resume_userspace
-
-ENTRY(lcall27)
-	pushfl			# We get a different stack layout with call
-				# gates, which has to be cleaned up later..
-	pushl %eax
-	SAVE_ALL
-	movl %esp, %ebp
-	pushl %ebp
-	pushl $0x27
-	jmp do_lcall
 
 
 ENTRY(ret_from_fork)
@@ -208,7 +168,7 @@ ENTRY(resume_userspace)
  	cli				# make sure we don't miss an interrupt
 					# setting need_resched or sigpending
 					# between sampling and the iret
-	movl TI_FLAGS(%ebp), %ecx
+	movl TI_flags(%ebp), %ecx
 	andl $_TIF_WORK_MASK, %ecx	# is there any work to be done on
 					# int/exception return?
 	jne work_pending
@@ -216,19 +176,16 @@ ENTRY(resume_userspace)
 
 #ifdef CONFIG_PREEMPT
 ENTRY(resume_kernel)
-	cmpl $0,TI_PRE_COUNT(%ebp)	# non-zero preempt_count ?
+	cli
+	cmpl $0,TI_preempt_count(%ebp)	# non-zero preempt_count ?
 	jnz restore_all
 need_resched:
-	movl TI_FLAGS(%ebp), %ecx	# need_resched set ?
+	movl TI_flags(%ebp), %ecx	# need_resched set ?
 	testb $_TIF_NEED_RESCHED, %cl
 	jz restore_all
 	testl $IF_MASK,EFLAGS(%esp)     # interrupts off (exception path) ?
 	jz restore_all
-	movl $PREEMPT_ACTIVE,TI_PRE_COUNT(%ebp)
-	sti
-	call schedule
-	movl $0,TI_PRE_COUNT(%ebp)
-	cli
+	call preempt_schedule_irq
 	jmp need_resched
 #endif
 
@@ -237,7 +194,7 @@ need_resched:
 
 	# sysenter call handler stub
 ENTRY(sysenter_entry)
-	movl TSS_ESP0_OFFSET(%esp),%esp
+	movl TSS_sysenter_esp0(%esp),%esp
 sysenter_past_esp:
 	sti
 	pushl $(__USER_DS)
@@ -261,20 +218,21 @@ sysenter_past_esp:
 	pushl %eax
 	SAVE_ALL
 	GET_THREAD_INFO(%ebp)
+
+	testb $(_TIF_SYSCALL_TRACE|_TIF_SYSCALL_AUDIT),TI_flags(%ebp)
+	jnz syscall_trace_entry
 	cmpl $(nr_syscalls), %eax
 	jae syscall_badsys
-
-	testb $_TIF_SYSCALL_TRACE,TI_FLAGS(%ebp)
-	jnz syscall_trace_entry
 	call *sys_call_table(,%eax,4)
 	movl %eax,EAX(%esp)
 	cli
-	movl TI_FLAGS(%ebp), %ecx
+	movl TI_flags(%ebp), %ecx
 	testw $_TIF_ALLWORK_MASK, %cx
 	jne syscall_exit_work
 /* if something modifies registers it must also disable sysexit */
 	movl EIP(%esp), %edx
 	movl OLDESP(%esp), %ecx
+	xorl %ebp,%ebp
 	sti
 	sysexit
 
@@ -284,11 +242,11 @@ ENTRY(system_call)
 	pushl %eax			# save orig_eax
 	SAVE_ALL
 	GET_THREAD_INFO(%ebp)
+					# system call tracing in operation
+	testb $(_TIF_SYSCALL_TRACE|_TIF_SYSCALL_AUDIT),TI_flags(%ebp)
+	jnz syscall_trace_entry
 	cmpl $(nr_syscalls), %eax
 	jae syscall_badsys
-					# system call tracing in operation
-	testb $_TIF_SYSCALL_TRACE,TI_FLAGS(%ebp)
-	jnz syscall_trace_entry
 syscall_call:
 	call *sys_call_table(,%eax,4)
 	movl %eax,EAX(%esp)		# store the return value
@@ -296,7 +254,7 @@ syscall_exit:
 	cli				# make sure we don't miss an interrupt
 					# setting need_resched or sigpending
 					# between sampling and the iret
-	movl TI_FLAGS(%ebp), %ecx
+	movl TI_flags(%ebp), %ecx
 	testw $_TIF_ALLWORK_MASK, %cx	# current->work
 	jne syscall_exit_work
 restore_all:
@@ -312,7 +270,7 @@ work_resched:
 	cli				# make sure we don't miss an interrupt
 					# setting need_resched or sigpending
 					# between sampling and the iret
-	movl TI_FLAGS(%ebp), %ecx
+	movl TI_flags(%ebp), %ecx
 	andl $_TIF_WORK_MASK, %ecx	# is there any work to be done other
 					# than syscall tracing?
 	jz restore_all
@@ -331,8 +289,8 @@ work_notifysig:				# deal with pending signals and
 
 	ALIGN
 work_notifysig_v86:
-	pushl %ecx
-	call save_v86_state
+	pushl %ecx			# save ti_flags for do_notify_resume
+	call save_v86_state		# %eax contains pt_regs pointer
 	popl %ecx
 	movl %eax, %esp
 	xorl %edx, %edx
@@ -354,7 +312,7 @@ syscall_trace_entry:
 	# perform syscall exit tracing
 	ALIGN
 syscall_exit_work:
-	testb $_TIF_SYSCALL_TRACE, %cl
+	testb $(_TIF_SYSCALL_TRACE|_TIF_SYSCALL_AUDIT|_TIF_SINGLESTEP), %cl
 	jz work_pending
 	sti				# could let do_syscall_trace() call
 					# schedule() instead
@@ -399,6 +357,7 @@ vector=vector+1
 	ALIGN
 common_interrupt:
 	SAVE_ALL
+	movl %esp,%eax
 	call do_IRQ
 	jmp ret_from_intr
 
@@ -406,7 +365,8 @@ common_interrupt:
 ENTRY(name)				\
 	pushl $nr-256;			\
 	SAVE_ALL			\
-	call smp_/**/name;	\
+	movl %esp,%eax;			\
+	call smp_/**/name;		\
 	jmp ret_from_intr;
 
 /* The include is where all of the SMP etc. interrupts come from */
@@ -429,18 +389,15 @@ error_code:
 	pushl %ebx
 	cld
 	movl %es, %ecx
-	movl ORIG_EAX(%esp), %esi	# get the error code
 	movl ES(%esp), %edi		# get the function address
+	movl ORIG_EAX(%esp), %edx	# get the error code
 	movl %eax, ORIG_EAX(%esp)
 	movl %ecx, ES(%esp)
-	movl %esp, %edx
-	pushl %esi			# push the error code
-	pushl %edx			# push the pt_regs pointer
-	movl $(__USER_DS), %edx
-	movl %edx, %ds
-	movl %edx, %es
+	movl $(__USER_DS), %ecx
+	movl %ecx, %ds
+	movl %ecx, %es
+	movl %esp,%eax			# pt_regs pointer
 	call *%edi
-	addl $8, %esp
 	jmp ret_from_exception
 
 ENTRY(coprocessor_error)
@@ -473,7 +430,7 @@ device_not_available_emulate:
  * that sets up the real kernel stack. Check here, since we can't
  * allow the wrong stack to be used.
  *
- * "TSS_ESP0_OFFSET+12" is because the NMI/debug handler will have
+ * "TSS_sysenter_esp0+12" is because the NMI/debug handler will have
  * already pushed 3 words if it hits on the sysenter instruction:
  * eflags, cs and eip.
  *
@@ -485,7 +442,7 @@ device_not_available_emulate:
 	cmpw $__KERNEL_CS,4(%esp);		\
 	jne ok;					\
 label:						\
-	movl TSS_ESP0_OFFSET+offset(%esp),%esp;	\
+	movl TSS_sysenter_esp0+offset(%esp),%esp;	\
 	pushfl;					\
 	pushl $__KERNEL_CS;			\
 	pushl $sysenter_past_esp
@@ -495,9 +452,14 @@ ENTRY(debug)
 	jne debug_stack_correct
 	FIX_STACK(12, debug_stack_correct, debug_esp_fix_insn)
 debug_stack_correct:
-	pushl $0
-	pushl $do_debug
-	jmp error_code
+	pushl $-1			# mark this as an int
+	SAVE_ALL
+	xorl %edx,%edx			# error code 0
+	movl %esp,%eax			# pt_regs pointer
+	call do_debug
+	testl %eax,%eax
+	jnz restore_all
+	jmp ret_from_exception
 
 /*
  * NMI is doubly nasty. It can happen _while_ we're handling
@@ -515,8 +477,8 @@ ENTRY(nmi)
 	/* Do not access memory above the end of our stack page,
 	 * it might not exist.
 	 */
-	andl $0x1fff,%eax
-	cmpl $0x1fec,%eax
+	andl $(THREAD_SIZE-1),%eax
+	cmpl $(THREAD_SIZE-20),%eax
 	popl %eax
 	jae nmi_stack_correct
 	cmpl $sysenter_entry,12(%esp)
@@ -524,11 +486,9 @@ ENTRY(nmi)
 nmi_stack_correct:
 	pushl %eax
 	SAVE_ALL
-	movl %esp, %edx
-	pushl $0
-	pushl %edx
+	xorl %edx,%edx		# zero error code
+	movl %esp,%eax		# pt_regs pointer
 	call do_nmi
-	addl $8, %esp
 	RESTORE_ALL
 
 nmi_stack_fixup:
@@ -546,9 +506,14 @@ nmi_debug_stack_fixup:
 	jmp nmi_stack_correct
 
 ENTRY(int3)
-	pushl $0
-	pushl $do_int3
-	jmp error_code
+	pushl $-1			# mark this as an int
+	SAVE_ALL
+	xorl %edx,%edx		# zero error code
+	movl %esp,%eax		# pt_regs pointer
+	call do_int3
+	testl %eax,%eax
+	jnz restore_all
+	jmp ret_from_exception
 
 ENTRY(overflow)
 	pushl $0
@@ -882,5 +847,20 @@ ENTRY(sys_call_table)
 	.long sys_utimes
  	.long sys_fadvise64_64
 	.long sys_ni_syscall	/* sys_vserver */
+	.long sys_mbind
+	.long sys_get_mempolicy
+	.long sys_set_mempolicy
+	.long sys_mq_open
+	.long sys_mq_unlink
+	.long sys_mq_timedsend
+	.long sys_mq_timedreceive	/* 280 */
+	.long sys_mq_notify
+	.long sys_mq_getsetattr
+	.long sys_ni_syscall		/* reserved for kexec */
+	.long sys_waitid
+	.long sys_ni_syscall		/* 285 */ /* available */
+	.long sys_add_key
+	.long sys_request_key
+	.long sys_keyctl
 
 syscall_table_size=(.-sys_call_table)

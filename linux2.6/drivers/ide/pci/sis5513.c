@@ -63,7 +63,8 @@
 #include <asm/irq.h>
 
 #include "ide-timing.h"
-#include "sis5513.h"
+
+#define DISPLAY_SIS_TIMINGS
 
 /* registers layout and init values are chipset family dependant */
 
@@ -670,36 +671,16 @@ static int sis5513_config_drive_xfer_rate (ide_drive_t *drive)
 	drive->init_speed = 0;
 
 	if (id && (id->capability & 1) && drive->autodma) {
-		/* Consult the list of known "bad" drives */
-		if (hwif->ide_dma_bad_drive(drive))
-			goto fast_ata_pio;
-		if (id->field_valid & 4) {
-			if (id->dma_ultra & hwif->ultra_mask) {
-				/* Force if Capable UltraDMA */
-				int dma = config_chipset_for_dma(drive);
-				if ((id->field_valid & 2) && !dma)
-					goto try_dma_modes;
-			}
-		} else if (id->field_valid & 2) {
-try_dma_modes:
-			if ((id->dma_mword & hwif->mwdma_mask) ||
-			    (id->dma_1word & hwif->swdma_mask)) {
-				/* Force if Capable regular DMA modes */
-				if (!config_chipset_for_dma(drive))
-					goto no_dma_set;
-			}
-		} else if (hwif->ide_dma_good_drive(drive) &&
-			   (id->eide_dma_time < 150)) {
-			/* Consult the list of known "good" drives */
-			if (!config_chipset_for_dma(drive))
-				goto no_dma_set;
-		} else {
-			goto fast_ata_pio;
+
+		if (ide_use_dma(drive)) {
+			if (config_chipset_for_dma(drive))
+				return hwif->ide_dma_on(drive);
 		}
-		return hwif->ide_dma_on(drive);
+
+		goto fast_ata_pio;
+
 	} else if ((id->capability & 8) || (id->field_valid & 2)) {
 fast_ata_pio:
-no_dma_set:
 		sis5513_tune_drive(drive, 5);
 		return hwif->ide_dma_off_quietly(drive);
 	}
@@ -787,6 +768,15 @@ static unsigned int __init init_chipset_sis5513 (struct pci_dev *dev, const char
 			if (trueid == 0x5518) {
 				printk(KERN_INFO "SIS5513: SiS 962/963 MuTIOL IDE UDMA133 controller\n");
 				chipset_family = ATA_133;
+
+				/* Check for 5513 compability mapping
+				 * We must use this, else the port enabled code will fail,
+				 * as it expects the enablebits at 0x4a.
+				 */
+				if ((idemisc & 0x40000000) == 0) {
+					pci_write_config_dword(dev, 0x54, idemisc | 0x40000000);
+					printk(KERN_INFO "SIS5513: Switching to 5513 register mapping\n");
+				}
 			}
 	}
 
@@ -881,7 +871,7 @@ static unsigned int __init init_chipset_sis5513 (struct pci_dev *dev, const char
 		if (!sis_proc) {
 			sis_proc = 1;
 			bmide_dev = dev;
-			ide_pci_register_host_proc(&sis_procs[0]);
+			ide_pci_create_host_proc("sis", sis_get_info);
 		}
 #endif
 	}
@@ -944,26 +934,30 @@ static void __init init_hwif_sis5513 (ide_hwif_t *hwif)
 	return;
 }
 
-extern void ide_setup_pci_device(struct pci_dev *, ide_pci_device_t *);
-
+static ide_pci_device_t sis5513_chipset __devinitdata = {
+	.name		= "SIS5513",
+	.init_chipset	= init_chipset_sis5513,
+	.init_hwif	= init_hwif_sis5513,
+	.channels	= 2,
+	.autodma	= NOAUTODMA,
+	.enablebits	= {{0x4a,0x02,0x02}, {0x4a,0x04,0x04}},
+	.bootable	= ON_BOARD,
+};
 
 static int __devinit sis5513_init_one(struct pci_dev *dev, const struct pci_device_id *id)
 {
-	ide_pci_device_t *d = &sis5513_chipsets[id->driver_data];
-	if (dev->device != d->device)
-		BUG();
-	ide_setup_pci_device(dev, d);
-	MOD_INC_USE_COUNT;
-	return 0;
+	return ide_setup_pci_device(dev, &sis5513_chipset);
 }
 
 static struct pci_device_id sis5513_pci_tbl[] = {
 	{ PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_5513, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{ PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_5518, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ 0, },
 };
+MODULE_DEVICE_TABLE(pci, sis5513_pci_tbl);
 
 static struct pci_driver driver = {
-	.name		= "SIS IDE",
+	.name		= "SIS_IDE",
 	.id_table	= sis5513_pci_tbl,
 	.probe		= sis5513_init_one,
 };
@@ -973,13 +967,7 @@ static int sis5513_ide_init(void)
 	return ide_pci_register_driver(&driver);
 }
 
-static void sis5513_ide_exit(void)
-{
-	ide_pci_unregister_driver(&driver);
-}
-
 module_init(sis5513_ide_init);
-module_exit(sis5513_ide_exit);
 
 MODULE_AUTHOR("Lionel Bouton, L C Chang, Andre Hedrick, Vojtech Pavlik");
 MODULE_DESCRIPTION("PCI driver module for SIS IDE");

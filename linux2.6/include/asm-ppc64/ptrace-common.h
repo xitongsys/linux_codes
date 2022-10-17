@@ -9,6 +9,8 @@
  * this archive for more details.
  */
 
+#ifndef _PPC64_PTRACE_COMMON_H
+#define _PPC64_PTRACE_COMMON_H
 /*
  * Set of msr bits that gdb can change on behalf of a process.
  */
@@ -56,6 +58,7 @@ static inline void set_single_step(struct task_struct *task)
 	struct pt_regs *regs = task->thread.regs;
 	if (regs != NULL)
 		regs->msr |= MSR_SE;
+	set_ti_thread_flag(task->thread_info, TIF_SINGLESTEP);
 }
 
 static inline void clear_single_step(struct task_struct *task)
@@ -63,4 +66,7 @@ static inline void clear_single_step(struct task_struct *task)
 	struct pt_regs *regs = task->thread.regs;
 	if (regs != NULL)
 		regs->msr &= ~MSR_SE;
+	clear_ti_thread_flag(task->thread_info, TIF_SINGLESTEP);
 }
+
+#endif /* _PPC64_PTRACE_COMMON_H */

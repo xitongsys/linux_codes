@@ -30,10 +30,7 @@ static struct dentry *afs_mntpt_lookup(struct inode *dir,
 				       struct dentry *dentry,
 				       struct nameidata *nd);
 static int afs_mntpt_open(struct inode *inode, struct file *file);
-
-#ifdef AFS_AUTOMOUNT_SUPPORT
 static int afs_mntpt_follow_link(struct dentry *dentry, struct nameidata *nd);
-#endif
 
 struct file_operations afs_mntpt_file_operations = {
 	.open		= afs_mntpt_open,
@@ -41,14 +38,11 @@ struct file_operations afs_mntpt_file_operations = {
 
 struct inode_operations afs_mntpt_inode_operations = {
 	.lookup		= afs_mntpt_lookup,
-#ifdef AFS_AUTOMOUNT_SUPPORT
 	.follow_link	= afs_mntpt_follow_link,
-#endif
 	.readlink	= page_readlink,
 	.getattr	= afs_inode_getattr,
 };
 
-#ifdef AFS_AUTOMOUNT_SUPPORT
 static LIST_HEAD(afs_vfsmounts);
 
 static void afs_mntpt_expiry_timed_out(struct afs_timer *timer);
@@ -60,25 +54,27 @@ struct afs_timer_ops afs_mntpt_expiry_timer_ops = {
 struct afs_timer afs_mntpt_expiry_timer;
 
 unsigned long afs_mntpt_expiry_timeout = 20;
-#endif
 
 /*****************************************************************************/
 /*
  * check a symbolic link to see whether it actually encodes a mountpoint
  * - sets the AFS_VNODE_MOUNTPOINT flag on the vnode appropriately
  */
-int afs_mntpt_check_symlink(afs_vnode_t *vnode)
+int afs_mntpt_check_symlink(struct afs_vnode *vnode)
 {
 	struct page *page;
+	filler_t *filler;
 	size_t size;
 	char *buf;
 	int ret;
 
-	_enter("{%u,%u}",vnode->fid.vnode,vnode->fid.unique);
+	_enter("{%u,%u}", vnode->fid.vnode, vnode->fid.unique);
 
 	/* read the contents of the symlink into the pagecache */
-	page = read_cache_page(AFS_VNODE_TO_I(vnode)->i_mapping,0,
-			       (filler_t*)AFS_VNODE_TO_I(vnode)->i_mapping->a_ops->readpage,NULL);
+	filler = (filler_t *) AFS_VNODE_TO_I(vnode)->i_mapping->a_ops->readpage;
+
+	page = read_cache_page(AFS_VNODE_TO_I(vnode)->i_mapping, 0,
+			       filler, NULL);
 	if (IS_ERR(page)) {
 		ret = PTR_ERR(page);
 		goto out;
@@ -94,11 +90,11 @@ int afs_mntpt_check_symlink(afs_vnode_t *vnode)
 
 	/* examine the symlink's contents */
 	size = vnode->status.size;
-	_debug("symlink to %*.*s",size,(int)size,buf);
+	_debug("symlink to %*.*s", size, (int) size, buf);
 
-	if (size>2 &&
-	    (buf[0]=='%' || buf[0]=='#') &&
-	    buf[size-1]=='.'
+	if (size > 2 &&
+	    (buf[0] == '%' || buf[0] == '#') &&
+	    buf[size - 1] == '.'
 	    ) {
 		_debug("symlink is a mountpoint");
 		spin_lock(&vnode->lock);
@@ -112,7 +108,7 @@ int afs_mntpt_check_symlink(afs_vnode_t *vnode)
 	kunmap(page);
 	page_cache_release(page);
  out:
-	_leave(" = %d",ret);
+	_leave(" = %d", ret);
 	return ret;
 
 } /* end afs_mntpt_check_symlink() */
@@ -129,7 +125,8 @@ static struct dentry *afs_mntpt_lookup(struct inode *dir,
 	       dir,
 	       dentry,
 	       dentry->d_parent,
-	       dentry->d_parent ? dentry->d_parent->d_name.name : (const unsigned char*)"",
+	       dentry->d_parent ?
+	       dentry->d_parent->d_name.name : (const unsigned char *) "",
 	       dentry->d_name.name);
 
 	return ERR_PTR(-EREMOTE);
@@ -144,13 +141,14 @@ static int afs_mntpt_open(struct inode *inode, struct file *file)
 	kenter("%p,%p{%p{%s},%s}",
 	       inode, file,
 	       file->f_dentry->d_parent,
-	       file->f_dentry->d_parent ? file->f_dentry->d_parent->d_name.name : (const unsigned char*)"",
+	       file->f_dentry->d_parent ?
+	       file->f_dentry->d_parent->d_name.name :
+	       (const unsigned char *) "",
 	       file->f_dentry->d_name.name);
 
 	return -EREMOTE;
 } /* end afs_mntpt_open() */
 
-#ifdef AFS_AUTOMOUNT_SUPPORT
 /*****************************************************************************/
 /*
  * create a vfsmount to be automounted
@@ -162,6 +160,7 @@ static struct vfsmount *afs_mntpt_do_automount(struct dentry *mntpt)
 	struct page *page = NULL;
 	size_t size;
 	char *buf, *devname = NULL, *options = NULL;
+	filler_t *filler;
 	int ret;
 
 	kenter("{%s}", mntpt->d_name.name);
@@ -183,10 +182,9 @@ static struct vfsmount *afs_mntpt_do_automount(struct dentry *mntpt)
 		goto error;
 
 	/* read the contents of the AFS special symlink */
-	page = read_cache_page(mntpt->d_inode->i_mapping,
-			       0,
-			       (filler_t*)mntpt->d_inode->i_mapping->a_ops->readpage,
-			       NULL);
+	filler = (filler_t *)mntpt->d_inode->i_mapping->a_ops->readpage;
+
+	page = read_cache_page(mntpt->d_inode->i_mapping, 0, filler, NULL);
 	if (IS_ERR(page)) {
 		ret = PTR_ERR(page);
 		goto error;
@@ -208,26 +206,26 @@ static struct vfsmount *afs_mntpt_do_automount(struct dentry *mntpt)
 	memcpy(options, "cell=", 5);
 	strcpy(options + 5, super->volume->cell->name);
 	if (super->volume->type == AFSVL_RWVOL)
-		strcat(options,",rwpath");
+		strcat(options, ",rwpath");
 
 	/* try and do the mount */
 	kdebug("--- attempting mount %s -o %s ---", devname, options);
 	mnt = do_kern_mount("afs", 0, devname, options);
 	kdebug("--- mount result %p ---", mnt);
 
-	free_page((unsigned long)devname);
-	free_page((unsigned long)options);
-	kleave(" = %p",mnt);
+	free_page((unsigned long) devname);
+	free_page((unsigned long) options);
+	kleave(" = %p", mnt);
 	return mnt;
 
  error:
 	if (page)
 		page_cache_release(page);
 	if (devname)
-		free_page((unsigned long)devname);
+		free_page((unsigned long) devname);
 	if (options)
-		free_page((unsigned long)options);
-	kleave(" = %d",ret);
+		free_page((unsigned long) options);
+	kleave(" = %d", ret);
 	return ERR_PTR(ret);
 } /* end afs_mntpt_do_automount() */
 
@@ -237,8 +235,8 @@ static struct vfsmount *afs_mntpt_do_automount(struct dentry *mntpt)
  */
 static int afs_mntpt_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
-	struct nameidata newnd;
 	struct vfsmount *newmnt;
+	struct dentry *old_dentry;
 	int err;
 
 	kenter("%p{%s},{%s:%p{%s}}",
@@ -249,15 +247,19 @@ static int afs_mntpt_follow_link(struct dentry *dentry, struct nameidata *nd)
 	       nd->dentry->d_name.name);
 
 	newmnt = afs_mntpt_do_automount(dentry);
-	if (IS_ERR(newmnt))
+	if (IS_ERR(newmnt)) {
+		path_release(nd);
 		return PTR_ERR(newmnt);
+	}
 
-	struct_cpy(&newnd,nd);
-	newnd.dentry = dentry;
-	err = do_add_mount(newmnt, &newnd, 0, &afs_vfsmounts);
+	old_dentry = nd->dentry;
+	nd->dentry = dentry;
+	err = do_add_mount(newmnt, nd, 0, &afs_vfsmounts);
+	nd->dentry = old_dentry;
+
+	path_release(nd);
 
 	if (!err) {
-		path_release(nd);
 		mntget(newmnt);
 		nd->mnt = newmnt;
 		dget(newmnt->mnt_root);
@@ -283,4 +285,3 @@ static void afs_mntpt_expiry_timed_out(struct afs_timer *timer)
 
 	kleave("");
 } /* end afs_mntpt_expiry_timed_out() */
-#endif

@@ -124,22 +124,59 @@ ENTRY(cpu_arm720_reset)
 		mcr	p15, 0, ip, c1, c0, 0		@ ctrl register
 		mov	pc, r0
 
-		__INIT
+	__INIT
 
-		.type	__arm720_setup, #function
-__arm720_setup:	mov	r0, #0
-		mcr	p15, 0, r0, c7, c7, 0		@ invalidate caches
-		mcr	p15, 0, r0, c8, c7, 0		@ flush TLB (v4)
-		mcr	p15, 0, r4, c2, c0		@ load page table pointer
-		mov	r0, #0x1f			@ Domains 0, 1 = client
-		mcr	p15, 0, r0, c3, c0		@ load domain access register
+	.type	__arm710_setup, #function
+__arm710_setup:
+	mov	r0, #0
+	mcr	p15, 0, r0, c7, c7, 0		@ invalidate caches
+	mcr	p15, 0, r0, c8, c7, 0		@ flush TLB (v4)
+	mrc	p15, 0, r0, c1, c0		@ get control register
+	ldr	r5, arm710_cr1_clear
+	bic	r0, r0, r5
+	ldr	r5, arm710_cr1_set
+	orr	r0, r0, r5
+	mov	pc, lr				@ __ret (head.S)
+	.size	__arm710_setup, . - __arm710_setup
 
-		mrc	p15, 0, r0, c1, c0		@ get control register
-		bic	r0, r0, #0x0e00			@ ..V. ..RS BLDP WCAM
-		orr	r0, r0, #0x2100			@ .... .... .111 .... (old)
-		orr	r0, r0, #0x003d			@ ..1. ..01 ..11 1101 (new)
-		mov	pc, lr				@ __ret (head-armv.S)
-		.size	__arm720_setup, . - __arm720_setup
+	/*
+	 *  R
+	 * .RVI ZFRS BLDP WCAM
+	 * .... 0001 ..11 1101
+	 * 
+	 */
+	.type	arm710_cr1_clear, #object
+	.type	arm710_cr1_set, #object
+arm710_cr1_clear:
+	.word	0x0f3f
+arm710_cr1_set:
+	.word	0x013d
+
+	.type	__arm720_setup, #function
+__arm720_setup:
+	mov	r0, #0
+	mcr	p15, 0, r0, c7, c7, 0		@ invalidate caches
+	mcr	p15, 0, r0, c8, c7, 0		@ flush TLB (v4)
+	mrc	p15, 0, r0, c1, c0		@ get control register
+	ldr	r5, arm720_cr1_clear
+	bic	r0, r0, r5
+	ldr	r5, arm720_cr1_set
+	orr	r0, r0, r5
+	mov	pc, lr				@ __ret (head.S)
+	.size	__arm720_setup, . - __arm720_setup
+
+	/*
+	 *  R
+	 * .RVI ZFRS BLDP WCAM
+	 * ..1. 1001 ..11 1101
+	 * 
+	 */
+	.type	arm720_cr1_clear, #object
+	.type	arm720_cr1_set, #object
+arm720_cr1_clear:
+	.word	0x2f3f
+arm720_cr1_set:
+	.word	0x213d
 
 		__INITDATA
 
@@ -169,6 +206,11 @@ cpu_arch_name:	.asciz	"armv4t"
 cpu_elf_name:	.asciz	"v4"
 		.size	cpu_elf_name, . - cpu_elf_name
 
+		.type	cpu_arm710_name, #object
+cpu_arm710_name:
+		.asciz	"ARM710T"
+		.size	cpu_arm710_name, . - cpu_arm710_name
+
 		.type	cpu_arm720_name, #object
 cpu_arm720_name:
 		.asciz	"ARM720T"
@@ -182,11 +224,37 @@ cpu_arm720_name:
 	
 		.section ".proc.info", #alloc, #execinstr
 
+		.type	__arm710_proc_info, #object
+__arm710_proc_info:
+		.long	0x41807100				@ cpu_val
+		.long	0xffffff00				@ cpu_mask
+		.long   PMD_TYPE_SECT | \
+			PMD_SECT_BUFFERABLE | \
+			PMD_SECT_CACHEABLE | \
+			PMD_BIT4 | \
+			PMD_SECT_AP_WRITE | \
+			PMD_SECT_AP_READ
+		b	__arm710_setup				@ cpu_flush
+		.long	cpu_arch_name				@ arch_name
+		.long	cpu_elf_name				@ elf_name
+		.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB	@ elf_hwcap
+		.long	cpu_arm710_name				@ name
+		.long	arm720_processor_functions
+		.long	v4_tlb_fns
+		.long	v4wt_user_fns
+		.long	v4_cache_fns
+		.size	__arm710_proc_info, . - __arm710_proc_info
+
 		.type	__arm720_proc_info, #object
 __arm720_proc_info:
 		.long	0x41807200				@ cpu_val
 		.long	0xffffff00				@ cpu_mask
-		.long	0x00000c1e				@ section_mmu_flags
+		.long   PMD_TYPE_SECT | \
+			PMD_SECT_BUFFERABLE | \
+			PMD_SECT_CACHEABLE | \
+			PMD_BIT4 | \
+			PMD_SECT_AP_WRITE | \
+			PMD_SECT_AP_READ
 		b	__arm720_setup				@ cpu_flush
 		.long	cpu_arch_name				@ arch_name
 		.long	cpu_elf_name				@ elf_name

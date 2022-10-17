@@ -59,6 +59,14 @@ wakeup_code:
 	movl	$swapper_pg_dir-__PAGE_OFFSET, %eax
 	movl	%eax, %cr3
 
+	testl	$1, real_efer_save_restore - wakeup_code
+	jz	4f
+	# restore efer setting
+	movl	real_save_efer_edx - wakeup_code, %edx
+	movl	real_save_efer_eax - wakeup_code, %eax
+	mov     $0xc0000080, %ecx
+	wrmsr
+4:
 	# make sure %cr4 is set correctly (features, etc)
 	movl	real_save_cr4 - wakeup_code, %eax
 	movl	%eax, %cr4
@@ -89,6 +97,9 @@ real_save_cr4:	.long 0
 real_magic:	.long 0
 video_mode:	.long 0
 video_flags:	.long 0
+real_efer_save_restore:	.long 0
+real_save_efer_edx: 	.long 0
+real_save_efer_eax: 	.long 0
 
 bogus_real_magic:
 	movw	$0x0e00 + 'B', %fs:(0x12)
@@ -193,21 +204,12 @@ wakeup_pmode_return:
 	# and restore the stack ... but you need gdt for this to work
 	movl	saved_context_esp, %esp
 
-	movw	$0x0e00 + 'W', 0xb8018
-	outl	%eax, $0x80
-	outl	%eax, $0x80
-	movw	$0x0e00 + 'O', 0xb8018
-
 	movl	%cs:saved_magic, %eax
 	cmpl	$0x12345678, %eax
 	jne	bogus_magic
 
 	# jump to place where we left off
 	movl	saved_eip,%eax
-	movw	$0x0e00 + 'x', 0xb8018
-	outl	%eax, $0x80
-	outl	%eax, $0x80
-	movw	$0x0e00 + '!', 0xb801a
 	jmp	*%eax
 
 bogus_magic:
@@ -231,6 +233,20 @@ ENTRY(acpi_copy_wakeup_routine)
 	sidt	saved_idt
 	sldt	saved_ldt
 	str	saved_tss
+
+	movl	nx_enabled, %edx
+	movl	%edx, real_efer_save_restore - wakeup_start (%eax)
+	testl	$1, real_efer_save_restore - wakeup_start (%eax)
+	jz	2f
+	# save efer setting
+	pushl	%eax
+	movl	%eax, %ebx
+	mov     $0xc0000080, %ecx
+	rdmsr
+	movl	%edx, real_save_efer_edx - wakeup_start (%ebx)
+	movl	%eax, real_save_efer_eax - wakeup_start (%ebx)
+	popl	%eax
+2:
 
 	movl    %cr3, %edx
 	movl    %edx, real_save_cr3 - wakeup_start (%eax)
@@ -262,7 +278,7 @@ save_registers:
 	movl %edi, saved_context_edi
 	pushfl ; popl saved_context_eflags
 
-	movl $ret_point,saved_eip
+	movl $ret_point, saved_eip
 	ret
 
 
@@ -279,6 +295,7 @@ ENTRY(do_suspend_lowlevel)
 	call	save_registers
 	pushl	$3
 	call	acpi_enter_sleep_state
+	addl	$4, %esp
 	ret
 	.p2align 4,,7
 ret_point:

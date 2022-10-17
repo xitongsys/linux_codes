@@ -4,19 +4,20 @@
 #include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
-#include <linux/timex.h>
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/kernel_stat.h>
 #include <linux/sysdev.h>
+#include <linux/bitops.h>
 
+#include <asm/8253pit.h>
 #include <asm/atomic.h>
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/bitops.h>
+#include <asm/timer.h>
 #include <asm/pgtable.h>
 #include <asm/delay.h>
 #include <asm/desc.h>
@@ -37,7 +38,7 @@
  * moves to arch independent land
  */
 
-spinlock_t i8259A_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(i8259A_lock);
 
 static void end_8259A_irq (unsigned int irq)
 {
@@ -225,7 +226,7 @@ spurious_8259A_irq:
 		 * lets ACK and report it. [once per IRQ]
 		 */
 		if (!(spurious_irq_mask & irqmask)) {
-			printk("spurious 8259A interrupt: IRQ%d.\n", irq);
+			printk(KERN_DEBUG "spurious 8259A interrupt: IRQ%d.\n", irq);
 			spurious_irq_mask |= irqmask;
 		}
 		atomic_inc(&irq_err_count);
@@ -238,14 +239,39 @@ spurious_8259A_irq:
 	}
 }
 
+static char irq_trigger[2];
+/**
+ * ELCR registers (0x4d0, 0x4d1) control edge/level of IRQ
+ */
+static void restore_ELCR(char *trigger)
+{
+	outb(trigger[0], 0x4d0);
+	outb(trigger[1], 0x4d1);
+}
+
+static void save_ELCR(char *trigger)
+{
+	/* IRQ 0,1,2,8,13 are marked as reserved */
+	trigger[0] = inb(0x4d0) & 0xF8;
+	trigger[1] = inb(0x4d1) & 0xDE;
+}
+
 static int i8259A_resume(struct sys_device *dev)
 {
 	init_8259A(0);
+	restore_ELCR(irq_trigger);
+	return 0;
+}
+
+static int i8259A_suspend(struct sys_device *dev, u32 state)
+{
+	save_ELCR(irq_trigger);
 	return 0;
 }
 
 static struct sysdev_class i8259_sysdev_class = {
 	set_kset_name("i8259"),
+	.suspend = i8259A_suspend,
 	.resume = i8259A_resume,
 };
 
@@ -258,7 +284,7 @@ static int __init i8259A_init_sysfs(void)
 {
 	int error = sysdev_class_register(&i8259_sysdev_class);
 	if (!error)
-		error = sys_device_register(&device_i8259A);
+		error = sysdev_register(&device_i8259A);
 	return error;
 }
 
@@ -317,19 +343,14 @@ void init_8259A(int auto_eoi)
  * be shot.
  */
  
-/*
- * =PC9800NOTE= In NEC PC-9800, we use irq8 instead of irq13!
- */
 
 static irqreturn_t math_error_irq(int cpl, void *dev_id, struct pt_regs *regs)
 {
-	extern void math_error(void *);
-#ifndef CONFIG_X86_PC9800
+	extern void math_error(void __user *);
 	outb(0,0xF0);
-#endif
 	if (ignore_fpu_irq || !boot_cpu_data.hard_math)
 		return IRQ_NONE;
-	math_error((void *)regs->eip);
+	math_error((void __user *)regs->eip);
 	return IRQ_HANDLED;
 }
 
@@ -337,7 +358,7 @@ static irqreturn_t math_error_irq(int cpl, void *dev_id, struct pt_regs *regs)
  * New motherboards sometimes make IRQ 13 be a PCI interrupt,
  * so allow interrupt sharing.
  */
-static struct irqaction fpu_irq = { math_error_irq, 0, 0, "fpu", NULL, NULL };
+static struct irqaction fpu_irq = { math_error_irq, 0, CPU_MASK_NONE, "fpu", NULL, NULL };
 
 void __init init_ISA_irqs (void)
 {
@@ -350,7 +371,7 @@ void __init init_ISA_irqs (void)
 
 	for (i = 0; i < NR_IRQS; i++) {
 		irq_desc[i].status = IRQ_DISABLED;
-		irq_desc[i].action = 0;
+		irq_desc[i].action = NULL;
 		irq_desc[i].depth = 1;
 
 		if (i < 16) {
@@ -367,46 +388,6 @@ void __init init_ISA_irqs (void)
 	}
 }
 
-static void setup_timer(void)
-{
-	extern spinlock_t i8253_lock;
-	unsigned long flags;
-
-	spin_lock_irqsave(&i8253_lock, flags);
-	outb_p(0x34,PIT_MODE);		/* binary, mode 2, LSB/MSB, ch 0 */
-	udelay(10);
-	outb_p(LATCH & 0xff , PIT_CH0);	/* LSB */
-	udelay(10);
-	outb(LATCH >> 8 , PIT_CH0);	/* MSB */
-	spin_unlock_irqrestore(&i8253_lock, flags);
-}
-
-static int timer_resume(struct sys_device *dev)
-{
-	setup_timer();
-	return 0;
-}
-
-static struct sysdev_class timer_sysclass = {
-	set_kset_name("timer"),
-	.resume	= timer_resume,
-};
-
-static struct sys_device device_timer = {
-	.id	= 0,
-	.cls	= &timer_sysclass,
-};
-
-static int __init init_timer_sysfs(void)
-{
-	int error = sysdev_class_register(&timer_sysclass);
-	if (!error)
-		error = sys_device_register(&device_timer);
-	return error;
-}
-
-device_initcall(init_timer_sysfs);
-
 void __init init_IRQ(void)
 {
 	int i;
@@ -419,8 +400,10 @@ void __init init_IRQ(void)
 	 * us. (some of these will be overridden and become
 	 * 'special' SMP interrupts)
 	 */
-	for (i = 0; i < NR_IRQS; i++) {
+	for (i = 0; i < (NR_VECTORS - FIRST_EXTERNAL_VECTOR); i++) {
 		int vector = FIRST_EXTERNAL_VECTOR + i;
+		if (i >= NR_IRQS)
+			break;
 		if (vector != SYSCALL_VECTOR) 
 			set_intr_gate(vector, interrupt[i]);
 	}
@@ -434,7 +417,7 @@ void __init init_IRQ(void)
 	 * Set the clock to HZ Hz, we already have a valid
 	 * vector now:
 	 */
-	setup_timer();
+	setup_pit_timer();
 
 	/*
 	 * External FPU? Set up irq13 if so, for
@@ -442,4 +425,6 @@ void __init init_IRQ(void)
 	 */
 	if (boot_cpu_data.hard_math && !cpu_has_fpu)
 		setup_irq(FPU_IRQ, &fpu_irq);
+
+	irq_ctx_init(smp_processor_id());
 }

@@ -35,7 +35,7 @@ struct thread_info {
 #define free_thread_info(ti)  free_pages((unsigned long)(ti),1)
 #endif /* PAGE_SHIFT == 13 */
 
-#define init_thread_info	(init_thread_union.thread_info)
+//#define init_thread_info	(init_task.thread.info)
 #define init_stack		(init_thread_union.stack)
 
 #define current_thread_info()	(current->thread_info)
@@ -48,6 +48,7 @@ struct thread_info {
 #define TIF_NOTIFY_RESUME	2	/* resumption notification requested */
 #define TIF_SIGPENDING		3	/* signal pending */
 #define TIF_NEED_RESCHED	4	/* rescheduling necessary */
+#define TIF_MEMDIE		5
 
 extern int thread_flag_fixme(void);
 
@@ -56,7 +57,7 @@ extern int thread_flag_fixme(void);
  * - pass TIF_xxxx constants to these functions
  */
 
-#define __set_tsk_thread_flag(tsk, flag, val) ({ 	\
+#define __set_tsk_thread_flag(tsk, flag, val) ({	\
 	switch (flag) {					\
 	case TIF_SIGPENDING:				\
 		tsk->thread.work.sigpending = val;	\

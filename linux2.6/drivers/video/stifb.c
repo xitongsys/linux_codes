@@ -3,7 +3,7 @@
  * Low level Frame buffer driver for HP workstations with 
  * STI (standard text interface) video firmware.
  *
- * Copyright (C) 2001-2002 Helge Deller <deller@gmx.de>
+ * Copyright (C) 2001-2004 Helge Deller <deller@gmx.de>
  * Portions Copyright (C) 2001 Thomas Bogendoerfer <tsbogend@alpha.franken.de>
  * 
  * Based on:
@@ -39,10 +39,10 @@
  */
 
 /* TODO:
- *	- remove the static fb_info to support multiple cards
  *	- 1bpp mode is completely untested
  *	- add support for h/w acceleration
  *	- add hardware cursor
+ *	- automatically disable double buffering (e.g. on RDI precisionbook laptop)
  */
 
 
@@ -50,6 +50,8 @@
  * #define FALLBACK_TO_1BPP to fall back to 1 bpp, or
  * #undef  FALLBACK_TO_1BPP to reject support for unsupported cards */
 #undef FALLBACK_TO_1BPP
+
+#undef DEBUG_STIFB_REGS		/* debug sti register accesses */
 
 
 #include <linux/config.h>
@@ -110,6 +112,7 @@ struct stifb_info {
 	ngle_rom_t ngle_rom;
 	struct sti_struct *sti;
 	int deviceSpecificConfig;
+	u32 pseudo_palette[16];
 };
 
 static int __initdata bpp = 8;	/* parameter from modprobe */
@@ -154,8 +157,27 @@ static int __initdata stifb_force_bpp[MAX_STI_ROMS];
 
 #define READ_BYTE(fb,reg)		__raw_readb((fb)->info.fix.mmio_start + (reg))
 #define READ_WORD(fb,reg)		__raw_readl((fb)->info.fix.mmio_start + (reg))
-#define WRITE_BYTE(value,fb,reg)	__raw_writeb((value),(fb)->info.fix.mmio_start + (reg))
-#define WRITE_WORD(value,fb,reg)	__raw_writel((value),(fb)->info.fix.mmio_start + (reg))
+
+
+#ifndef DEBUG_STIFB_REGS
+# define  DEBUG_OFF()
+# define  DEBUG_ON()
+# define WRITE_BYTE(value,fb,reg)	__raw_writeb((value),(fb)->info.fix.mmio_start + (reg))
+# define WRITE_WORD(value,fb,reg)	__raw_writel((value),(fb)->info.fix.mmio_start + (reg))
+#else
+  static int debug_on = 1;
+# define  DEBUG_OFF() debug_on=0
+# define  DEBUG_ON()  debug_on=1
+# define WRITE_BYTE(value,fb,reg)	do { if (debug_on) \
+						printk(KERN_DEBUG "%30s: WRITE_BYTE(0x%06x) = 0x%02x (old=0x%02x)\n", \
+							__FUNCTION__, reg, value, READ_BYTE(fb,reg)); 		  \
+					__raw_writeb((value),(fb)->info.fix.mmio_start + (reg)); } while (0)
+# define WRITE_WORD(value,fb,reg)	do { if (debug_on) \
+						printk(KERN_DEBUG "%30s: WRITE_WORD(0x%06x) = 0x%08x (old=0x%08x)\n", \
+							__FUNCTION__, reg, value, READ_WORD(fb,reg)); 		  \
+					__raw_writel((value),(fb)->info.fix.mmio_start + (reg)); } while (0)
+#endif /* DEBUG_STIFB_REGS */
+
 
 #define ENABLE	1	/* for enabling/disabling screen */	
 #define DISABLE 0
@@ -390,7 +412,7 @@ ARTIST_ENABLE_DISABLE_DISPLAY(struct stifb_info *fb, int enable)
 	WRITE_WORD(val, fb, REG_6)
 
 #define NGLE_LONG_FB_ADDRESS(fbaddrbase, x, y) (		\
-	(u32) (fbaddrbase) +				\
+	(u32) (fbaddrbase) +					\
 	    (	(unsigned int)  ( (y) << 13      ) |		\
 		(unsigned int)  ( (x) << 2       )	)	\
 	)
@@ -449,6 +471,13 @@ SETUP_ATTR_ACCESS(struct stifb_info *fb, unsigned BufferNumber)
 static void
 SET_ATTR_SIZE(struct stifb_info *fb, int width, int height) 
 {
+	/* REG_6 seems to have special values when run on a 
+	   RDI precisionbook parisc laptop (INTERNAL_EG_DX1024 or
+	   INTERNAL_EG_X1024).  The values are:
+		0x2f0: internal (LCD) & external display enabled
+		0x2a0: external display only
+		0x000: zero on standard artist graphic cards
+	*/ 
 	WRITE_WORD(0x00000000, fb, REG_6);
 	WRITE_WORD((width<<16) | height, fb, REG_9);
 	WRITE_WORD(0x05000000, fb, REG_6);
@@ -730,7 +759,7 @@ hyperResetPlanes(struct stifb_info *fb, int enable)
 		controlPlaneReg = 0x00000F00; /* 0x00000100 should be enought, but lets clear all 4 bits */
 
 	switch (enable) {
-	case 1:		/* ENABLE */
+	case ENABLE:
 		/* clear screen */
 		if (IS_24_DEVICE(fb))
 			ngleDepth24_ClearImagePlanes(fb);
@@ -750,7 +779,7 @@ hyperResetPlanes(struct stifb_info *fb, int enable)
 		hyperUndoITE(fb);
 		break;
 
-	case 0:		/* DISABLE */
+	case DISABLE:
 		/* clear screen */
 		if (IS_24_DEVICE(fb))
 			ngleDepth24_ClearImagePlanes(fb);
@@ -974,6 +1003,8 @@ stifb_setcolreg(u_int regno, u_int red, u_int green,
 	green >>= 8;
 	blue  >>= 8;
 
+	DEBUG_OFF();
+
 	START_IMAGE_COLORMAP_ACCESS(fb);
 	
 	if (fb->info.var.grayscale) {
@@ -1000,10 +1031,20 @@ stifb_setcolreg(u_int regno, u_int red, u_int green,
 				/* 0x100 is same as used in WRITE_IMAGE_COLOR() */
 		START_COLORMAPLOAD(fb, lutBltCtl.all);
 		SETUP_FB(fb);
+
+		/* info->var.bits_per_pixel == 32 */
+		if (regno < 16) 
+		  ((u32 *)(info->pseudo_palette))[regno] =
+			(red   << info->var.red.offset)   |
+			(green << info->var.green.offset) |
+			(blue  << info->var.blue.offset);
+
 	} else {
 		/* cleanup colormap hardware */
 		FINISH_IMAGE_COLORMAP_ACCESS(fb);
 	}
+
+	DEBUG_ON();
 
 	return 0;
 }
@@ -1144,17 +1185,28 @@ stifb_init_fb(struct sti_struct *sti, int force_bpp)
 
 	/* only supported cards are allowed */
 	switch (fb->id) {
+	case CRT_ID_VISUALIZE_EG:
+		/* look for a double buffering device like e.g. the 
+		   "INTERNAL_EG_DX1024" in the RDI precisionbook laptop
+		   which won't work. The same device in non-double 
+		   buffering mode returns "INTERNAL_EG_X1024". */
+		if (strstr(sti->outptr.dev_name, "EG_DX")) {
+		   printk(KERN_WARNING 
+			"stifb: ignoring '%s'. Disable double buffering in IPL menu.\n",
+			sti->outptr.dev_name);
+		   goto out_err0;
+		}
+		/* fall though */
 	case S9000_ID_ARTIST:
 	case S9000_ID_HCRX:
 	case S9000_ID_TIMBER:
 	case S9000_ID_A1659A:
 	case S9000_ID_A1439A:
-	case CRT_ID_VISUALIZE_EG:
 		break;
 	default:
-		printk(KERN_WARNING "stifb: Unsupported gfx card id 0x%08x\n",
-			fb->id);
-		goto out_err1;
+		printk(KERN_WARNING "stifb: '%s' (id: 0x%08x) not supported.\n",
+			sti->outptr.dev_name, fb->id);
+		goto out_err0;
 	}
 	
 	/* default to 8 bpp on most graphic chips */
@@ -1232,7 +1284,7 @@ stifb_init_fb(struct sti_struct *sti, int force_bpp)
 			"stifb: Unsupported graphics card (id=0x%08x) "
 				"- skipping.\n",
 			fb->id);
-		goto out_err1;
+		goto out_err0;
 #endif
 	}
 
@@ -1255,6 +1307,7 @@ stifb_init_fb(struct sti_struct *sti, int force_bpp)
 	    case 1:
 		fix->type = FB_TYPE_PLANES;	/* well, sort of */
 		fix->visual = FB_VISUAL_MONO10;
+		var->red.length = var->green.length = var->blue.length = 1;
 		break;
 	    case 8:
 		fix->type = FB_TYPE_PACKED_PIXELS;
@@ -1281,8 +1334,8 @@ stifb_init_fb(struct sti_struct *sti, int force_bpp)
 	strcpy(fix->id, "stifb");
 	info->fbops = &stifb_ops;
 	info->screen_base = (void*) REGION_BASE(fb,1);
-	info->flags = FBINFO_FLAG_DEFAULT;
-	info->currcon = -1;
+	info->flags = FBINFO_DEFAULT;
+	info->pseudo_palette = &fb->pseudo_palette;
 
 	/* This has to been done !!! */
 	fb_alloc_cmap(&info->cmap, 256, 0);
@@ -1306,12 +1359,13 @@ stifb_init_fb(struct sti_struct *sti, int force_bpp)
 	sti->info = info; /* save for unregister_framebuffer() */
 
 	printk(KERN_INFO 
-	    "fb%d: %s %dx%d-%d frame buffer device, id: %04x, mmio: 0x%04lx\n",
+	    "fb%d: %s %dx%d-%d frame buffer device, %s, id: %04x, mmio: 0x%04lx\n",
 		fb->info.node, 
 		fix->id,
 		var->xres, 
 		var->yres,
 		var->bits_per_pixel,
+		sti->outptr.dev_name,
 		fb->id, 
 		fix->mmio_start);
 
@@ -1324,19 +1378,48 @@ out_err2:
 	release_mem_region(fix->smem_start, fix->smem_len);
 out_err1:
 	fb_dealloc_cmap(&info->cmap);
+out_err0:
 	kfree(fb);
 	return -ENXIO;
 }
+
+static int stifb_disabled __initdata;
+
+int __init
+stifb_setup(char *options);
 
 int __init
 stifb_init(void)
 {
 	struct sti_struct *sti;
+	struct sti_struct *def_sti;
 	int i;
 	
+#ifndef MODULE
+	char *option = NULL;
+
+	if (fb_get_options("stifb", &option))
+		return -ENODEV;
+	stifb_setup(option);
+#endif
+	if (stifb_disabled) {
+		printk(KERN_INFO "stifb: disabled by \"stifb=off\" kernel parameter\n");
+		return -ENXIO;
+	}
+	
+	def_sti = sti_get_rom(0);
+	if (def_sti) {
+		for (i = 1; i < MAX_STI_ROMS; i++) {
+			sti = sti_get_rom(i);
+			if (sti == def_sti && bpp > 0)
+				stifb_force_bpp[i] = bpp;
+		}
+		stifb_init_fb(def_sti, stifb_force_bpp[i]);
+	}
+
 	for (i = 1; i < MAX_STI_ROMS; i++) {
 		sti = sti_get_rom(i);
-		if (!sti)
+		if (!sti || sti==def_sti)
 			break;
 		if (bpp > 0)
 			stifb_force_bpp[i] = bpp;
@@ -1379,6 +1462,11 @@ stifb_setup(char *options)
 	if (!options || !*options)
 		return 0;
 	
+	if (strncmp(options, "off", 3) == 0) {
+		stifb_disabled = 1;
+		options += 3;
+	}
+
 	if (strncmp(options, "bpp", 3) == 0) {
 		options += 3;
 		for (i = 0; i < MAX_STI_ROMS; i++) {
@@ -1394,9 +1482,7 @@ stifb_setup(char *options)
 
 __setup("stifb=", stifb_setup);
 
-#ifdef MODULE
 module_init(stifb_init);
-#endif
 module_exit(stifb_cleanup);
 
 MODULE_AUTHOR("Helge Deller <deller@gmx.de>, Thomas Bogendoerfer <tsbogend@alpha.franken.de>");

@@ -24,6 +24,7 @@
 
 #include <linux/string.h>
 #include <linux/socket.h>
+#include <linux/module.h>
 
 #include <net/irda/irda.h>
 #include <net/irda/irias_object.h>
@@ -33,7 +34,7 @@ hashbin_t *irias_objects;
 /*
  *  Used when a missing value needs to be returned
  */
-struct ias_value missing = { IAS_MISSING, 0, 0, 0, {0}};
+struct ias_value irias_missing = { IAS_MISSING, 0, 0, 0, {0}};
 
 /*
  * Function strndup (str, max)
@@ -107,6 +108,7 @@ struct ias_object *irias_new_object( char *name, int id)
 
 	return obj;
 }
+EXPORT_SYMBOL(irias_new_object);
 
 /*
  * Function irias_delete_attrib (attrib)
@@ -114,7 +116,7 @@ struct ias_object *irias_new_object( char *name, int id)
  *    Delete given attribute and deallocate all its memory
  *
  */
-void __irias_delete_attrib(struct ias_attrib *attrib)
+static void __irias_delete_attrib(struct ias_attrib *attrib)
 {
 	ASSERT(attrib != NULL, return;);
 	ASSERT(attrib->magic == IAS_ATTRIB_MAGIC, return;);
@@ -157,14 +159,18 @@ int irias_delete_object(struct ias_object *obj)
 	ASSERT(obj != NULL, return -1;);
 	ASSERT(obj->magic == IAS_OBJECT_MAGIC, return -1;);
 
+	/* Remove from list */
 	node = hashbin_remove_this(irias_objects, (irda_queue_t *) obj);
 	if (!node)
-		return 0; /* Already removed */
+		IRDA_DEBUG( 0, "%s(), object already removed!\n",
+			    __FUNCTION__);
 
-	__irias_delete_object(node);
+	/* Destroy */
+	__irias_delete_object(obj);
 
 	return 0;
 }
+EXPORT_SYMBOL(irias_delete_object);
 
 /*
  * Function irias_delete_attrib (obj)
@@ -173,7 +179,8 @@ int irias_delete_object(struct ias_object *obj)
  *    the object, remove the object as well.
  *
  */
-int irias_delete_attrib(struct ias_object *obj, struct ias_attrib *attrib)
+int irias_delete_attrib(struct ias_object *obj, struct ias_attrib *attrib,
+			int cleanobject)
 {
 	struct ias_attrib *node;
 
@@ -189,9 +196,13 @@ int irias_delete_attrib(struct ias_object *obj, struct ias_attrib *attrib)
 	/* Deallocate attribute */
 	__irias_delete_attrib(node);
 
-	/* Check if object has still some attributes */
+	/* Check if object has still some attributes, destroy it if none.
+	 * At first glance, this look dangerous, as the kernel reference
+	 * various IAS objects. However, we only use this function on
+	 * user attributes, not kernel attributes, so there is no risk
+	 * of deleting a kernel object this way. Jean II */
 	node = (struct ias_attrib *) hashbin_get_first(obj->attribs);
-	if (!node)
+	if (cleanobject && !node)
 		irias_delete_object(obj);
 
 	return 0;
@@ -210,6 +221,7 @@ void irias_insert_object(struct ias_object *obj)
 
 	hashbin_insert(irias_objects, (irda_queue_t *) obj, 0, obj->name);
 }
+EXPORT_SYMBOL(irias_insert_object);
 
 /*
  * Function irias_find_object (name)
@@ -224,6 +236,7 @@ struct ias_object *irias_find_object(char *name)
 	/* Unsafe (locking), object might change */
 	return hashbin_lock_find(irias_objects, 0, name);
 }
+EXPORT_SYMBOL(irias_find_object);
 
 /*
  * Function irias_find_attrib (obj, name)
@@ -246,6 +259,7 @@ struct ias_attrib *irias_find_attrib(struct ias_object *obj, char *name)
 	/* Unsafe (locking), attrib might change */
 	return attrib;
 }
+EXPORT_SYMBOL(irias_find_attrib);
 
 /*
  * Function irias_add_attribute (obj, attrib)
@@ -253,8 +267,8 @@ struct ias_attrib *irias_find_attrib(struct ias_object *obj, char *name)
  *    Add attribute to object
  *
  */
-void irias_add_attrib( struct ias_object *obj, struct ias_attrib *attrib,
-		       int owner)
+static void irias_add_attrib(struct ias_object *obj, struct ias_attrib *attrib,
+			     int owner)
 {
 	ASSERT(obj != NULL, return;);
 	ASSERT(obj->magic == IAS_OBJECT_MAGIC, return;);
@@ -318,6 +332,7 @@ int irias_object_change_attribute(char *obj_name, char *attrib_name,
 	spin_unlock_irqrestore(&obj->attribs->hb_spinlock, flags);
 	return 0;
 }
+EXPORT_SYMBOL(irias_object_change_attribute);
 
 /*
  * Function irias_object_add_integer_attrib (obj, name, value)
@@ -350,6 +365,7 @@ void irias_add_integer_attrib(struct ias_object *obj, char *name, int value,
 
 	irias_add_attrib(obj, attrib, owner);
 }
+EXPORT_SYMBOL(irias_add_integer_attrib);
 
  /*
  * Function irias_add_octseq_attrib (obj, name, octet_seq, len)
@@ -384,6 +400,7 @@ void irias_add_octseq_attrib(struct ias_object *obj, char *name, __u8 *octets,
 
 	irias_add_attrib(obj, attrib, owner);
 }
+EXPORT_SYMBOL(irias_add_octseq_attrib);
 
 /*
  * Function irias_object_add_string_attrib (obj, string)
@@ -417,6 +434,7 @@ void irias_add_string_attrib(struct ias_object *obj, char *name, char *value,
 
 	irias_add_attrib(obj, attrib, owner);
 }
+EXPORT_SYMBOL(irias_add_string_attrib);
 
 /*
  * Function irias_new_integer_value (integer)
@@ -441,6 +459,7 @@ struct ias_value *irias_new_integer_value(int integer)
 
 	return value;
 }
+EXPORT_SYMBOL(irias_new_integer_value);
 
 /*
  * Function irias_new_string_value (string)
@@ -467,7 +486,7 @@ struct ias_value *irias_new_string_value(char *string)
 
 	return value;
 }
-
+EXPORT_SYMBOL(irias_new_string_value);
 
 /*
  * Function irias_new_octseq_value (octets, len)
@@ -502,6 +521,7 @@ struct ias_value *irias_new_octseq_value(__u8 *octseq , int len)
 	memcpy(value->t.oct_seq, octseq , len);
 	return value;
 }
+EXPORT_SYMBOL(irias_new_octseq_value);
 
 struct ias_value *irias_new_missing_value(void)
 {
@@ -553,3 +573,4 @@ void irias_delete_value(struct ias_value *value)
 	}
 	kfree(value);
 }
+EXPORT_SYMBOL(irias_delete_value);

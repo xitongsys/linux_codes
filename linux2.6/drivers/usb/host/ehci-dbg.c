@@ -19,13 +19,13 @@
 /* this file is part of ehci-hcd.c */
 
 #define ehci_dbg(ehci, fmt, args...) \
-	dev_dbg ((ehci)->hcd.controller , fmt , ## args )
+	dev_dbg (ehci_to_hcd(ehci)->self.controller , fmt , ## args )
 #define ehci_err(ehci, fmt, args...) \
-	dev_err ((ehci)->hcd.controller , fmt , ## args )
+	dev_err (ehci_to_hcd(ehci)->self.controller , fmt , ## args )
 #define ehci_info(ehci, fmt, args...) \
-	dev_info ((ehci)->hcd.controller , fmt , ## args )
+	dev_info (ehci_to_hcd(ehci)->self.controller , fmt , ## args )
 #define ehci_warn(ehci, fmt, args...) \
-	dev_warn ((ehci)->hcd.controller , fmt , ## args )
+	dev_warn (ehci_to_hcd(ehci)->self.controller , fmt , ## args )
 
 #ifdef EHCI_VERBOSE_DEBUG
 #	define vdbg dbg
@@ -63,6 +63,7 @@ static void dbg_hcs_params (struct ehci_hcd *ehci, char *label)
 
 		buf[0] = 0;
 		for (i = 0; i < HCS_N_PORTS (params); i++) {
+			// FIXME MIPS won't readb() ...
 			byte = readb (&ehci->caps->portroute[(i>>1)]);
 			sprintf(tmp, "%d ", 
 				((i & 0x1) ? ((byte)&0xf) : ((byte>>4)&0xf)));
@@ -115,23 +116,23 @@ static inline void dbg_hcc_params (struct ehci_hcd *ehci, char *label) {}
 #ifdef	DEBUG
 
 static void __attribute__((__unused__))
-dbg_qtd (char *label, struct ehci_hcd *ehci, struct ehci_qtd *qtd)
+dbg_qtd (const char *label, struct ehci_hcd *ehci, struct ehci_qtd *qtd)
 {
 	ehci_dbg (ehci, "%s td %p n%08x %08x t%08x p0=%08x\n", label, qtd,
-		cpu_to_le32p (&qtd->hw_next),
-		cpu_to_le32p (&qtd->hw_alt_next),
-		cpu_to_le32p (&qtd->hw_token),
-		cpu_to_le32p (&qtd->hw_buf [0]));
+		le32_to_cpup (&qtd->hw_next),
+		le32_to_cpup (&qtd->hw_alt_next),
+		le32_to_cpup (&qtd->hw_token),
+		le32_to_cpup (&qtd->hw_buf [0]));
 	if (qtd->hw_buf [1])
 		ehci_dbg (ehci, "  p1=%08x p2=%08x p3=%08x p4=%08x\n",
-			cpu_to_le32p (&qtd->hw_buf [1]),
-			cpu_to_le32p (&qtd->hw_buf [2]),
-			cpu_to_le32p (&qtd->hw_buf [3]),
-			cpu_to_le32p (&qtd->hw_buf [4]));
+			le32_to_cpup (&qtd->hw_buf [1]),
+			le32_to_cpup (&qtd->hw_buf [2]),
+			le32_to_cpup (&qtd->hw_buf [3]),
+			le32_to_cpup (&qtd->hw_buf [4]));
 }
 
 static void __attribute__((__unused__))
-dbg_qh (char *label, struct ehci_hcd *ehci, struct ehci_qh *qh)
+dbg_qh (const char *label, struct ehci_hcd *ehci, struct ehci_qh *qh)
 {
 	ehci_dbg (ehci, "%s qh %p n%08x info %x %x qtd %x\n", label,
 		qh, qh->hw_next, qh->hw_info1, qh->hw_info2,
@@ -139,10 +140,54 @@ dbg_qh (char *label, struct ehci_hcd *ehci, struct ehci_qh *qh)
 	dbg_qtd ("overlay", ehci, (struct ehci_qtd *) &qh->hw_qtd_next);
 }
 
-static int __attribute__((__unused__))
-dbg_status_buf (char *buf, unsigned len, char *label, u32 status)
+static void __attribute__((__unused__))
+dbg_itd (const char *label, struct ehci_hcd *ehci, struct ehci_itd *itd) 
 {
-	return snprintf (buf, len,
+	ehci_dbg (ehci, "%s [%d] itd %p, next %08x, urb %p\n",
+		label, itd->frame, itd, le32_to_cpu(itd->hw_next), itd->urb);
+	ehci_dbg (ehci,
+		"  trans: %08x %08x %08x %08x %08x %08x %08x %08x\n", 
+		le32_to_cpu(itd->hw_transaction[0]),
+		le32_to_cpu(itd->hw_transaction[1]),
+		le32_to_cpu(itd->hw_transaction[2]),
+		le32_to_cpu(itd->hw_transaction[3]),
+		le32_to_cpu(itd->hw_transaction[4]),
+		le32_to_cpu(itd->hw_transaction[5]),
+		le32_to_cpu(itd->hw_transaction[6]),
+		le32_to_cpu(itd->hw_transaction[7]));
+	ehci_dbg (ehci,
+		"  buf:   %08x %08x %08x %08x %08x %08x %08x\n", 
+		le32_to_cpu(itd->hw_bufp[0]),
+		le32_to_cpu(itd->hw_bufp[1]),
+		le32_to_cpu(itd->hw_bufp[2]),
+		le32_to_cpu(itd->hw_bufp[3]),
+		le32_to_cpu(itd->hw_bufp[4]),
+		le32_to_cpu(itd->hw_bufp[5]),
+		le32_to_cpu(itd->hw_bufp[6]));
+	ehci_dbg (ehci, "  index: %d %d %d %d %d %d %d %d\n",
+		itd->index[0], itd->index[1], itd->index[2],
+		itd->index[3], itd->index[4], itd->index[5],
+		itd->index[6], itd->index[7]);
+}
+
+static void __attribute__((__unused__))
+dbg_sitd (const char *label, struct ehci_hcd *ehci, struct ehci_sitd *sitd) 
+{
+	ehci_dbg (ehci, "%s [%d] sitd %p, next %08x, urb %p\n",
+		label, sitd->frame, sitd, le32_to_cpu(sitd->hw_next), sitd->urb);
+	ehci_dbg (ehci,
+		"  addr %08x sched %04x result %08x buf %08x %08x\n", 
+		le32_to_cpu(sitd->hw_fullspeed_ep),
+		le32_to_cpu(sitd->hw_uframe),
+		le32_to_cpu(sitd->hw_results),
+		le32_to_cpu(sitd->hw_buf [0]),
+		le32_to_cpu(sitd->hw_buf [1]));
+}
+
+static int __attribute__((__unused__))
+dbg_status_buf (char *buf, unsigned len, const char *label, u32 status)
+{
+	return scnprintf (buf, len,
 		"%s%sstatus %04x%s%s%s%s%s%s%s%s%s%s",
 		label, label [0] ? " " : "", status,
 		(status & STS_ASS) ? " Async" : "",
@@ -159,9 +204,9 @@ dbg_status_buf (char *buf, unsigned len, char *label, u32 status)
 }
 
 static int __attribute__((__unused__))
-dbg_intr_buf (char *buf, unsigned len, char *label, u32 enable)
+dbg_intr_buf (char *buf, unsigned len, const char *label, u32 enable)
 {
-	return snprintf (buf, len,
+	return scnprintf (buf, len,
 		"%s%sintrenable %02x%s%s%s%s%s%s",
 		label, label [0] ? " " : "", enable,
 		(enable & STS_IAA) ? " IAA" : "",
@@ -176,9 +221,10 @@ dbg_intr_buf (char *buf, unsigned len, char *label, u32 enable)
 static const char *const fls_strings [] =
     { "1024", "512", "256", "??" };
 
-static int dbg_command_buf (char *buf, unsigned len, char *label, u32 command)
+static int
+dbg_command_buf (char *buf, unsigned len, const char *label, u32 command)
 {
-	return snprintf (buf, len,
+	return scnprintf (buf, len,
 		"%s%scommand %06x %s=%d ithresh=%d%s%s%s%s period=%s%s %s",
 		label, label [0] ? " " : "", command,
 		(command & CMD_PARK) ? "park" : "(park)",
@@ -195,7 +241,7 @@ static int dbg_command_buf (char *buf, unsigned len, char *label, u32 command)
 }
 
 static int
-dbg_port_buf (char *buf, unsigned len, char *label, int port, u32 status)
+dbg_port_buf (char *buf, unsigned len, const char *label, int port, u32 status)
 {
 	char	*sig;
 
@@ -207,7 +253,7 @@ dbg_port_buf (char *buf, unsigned len, char *label, int port, u32 status)
 	default: sig = "?"; break;
 	}
 
-	return snprintf (buf, len,
+	return scnprintf (buf, len,
 		"%s%sport %d status %06x%s%s sig=%s %s%s%s%s%s%s%s%s%s",
 		label, label [0] ? " " : "", port, status,
 		(status & PORT_POWER) ? " POWER" : "",
@@ -231,19 +277,19 @@ dbg_qh (char *label, struct ehci_hcd *ehci, struct ehci_qh *qh)
 {}
 
 static inline int __attribute__((__unused__))
-dbg_status_buf (char *buf, unsigned len, char *label, u32 status)
+dbg_status_buf (char *buf, unsigned len, const char *label, u32 status)
 { return 0; }
 
 static inline int __attribute__((__unused__))
-dbg_command_buf (char *buf, unsigned len, char *label, u32 command)
+dbg_command_buf (char *buf, unsigned len, const char *label, u32 command)
 { return 0; }
 
 static inline int __attribute__((__unused__))
-dbg_intr_buf (char *buf, unsigned len, char *label, u32 enable)
+dbg_intr_buf (char *buf, unsigned len, const char *label, u32 enable)
 { return 0; }
 
 static inline int __attribute__((__unused__))
-dbg_port_buf (char *buf, unsigned len, char *label, int port, u32 status)
+dbg_port_buf (char *buf, unsigned len, const char *label, int port, u32 status)
 { return 0; }
 
 #endif	/* DEBUG */
@@ -286,14 +332,14 @@ static inline void remove_debug_files (struct ehci_hcd *bus) { }
 		default: tmp = '?'; break; \
 		}; tmp; })
 
-static inline char token_mark (u32 token)
+static inline char token_mark (__le32 token)
 {
-	token = le32_to_cpu (token);
-	if (token & QTD_STS_ACTIVE)
+	__u32 v = le32_to_cpu (token);
+	if (v & QTD_STS_ACTIVE)
 		return '*';
-	if (token & QTD_STS_HALT)
+	if (v & QTD_STS_HALT)
 		return '-';
-	if (!IS_SHORT_READ (token))
+	if (!IS_SHORT_READ (v))
 		return ' ';
 	/* tries to advance through hw_alt_next */
 	return '/';
@@ -326,25 +372,25 @@ static void qh_lines (
 			mark = '.';	/* use hw_qtd_next */
 		/* else alt_next points to some other qtd */
 	}
-	scratch = cpu_to_le32p (&qh->hw_info1);
-	hw_curr = (mark == '*') ? cpu_to_le32p (&qh->hw_current) : 0;
-	temp = snprintf (next, size,
+	scratch = le32_to_cpup (&qh->hw_info1);
+	hw_curr = (mark == '*') ? le32_to_cpup (&qh->hw_current) : 0;
+	temp = scnprintf (next, size,
 			"qh/%p dev%d %cs ep%d %08x %08x (%08x%c %s nak%d)",
 			qh, scratch & 0x007f,
 			speed_char (scratch),
 			(scratch >> 8) & 0x000f,
-			scratch, cpu_to_le32p (&qh->hw_info2),
-			cpu_to_le32p (&qh->hw_token), mark,
+			scratch, le32_to_cpup (&qh->hw_info2),
+			le32_to_cpup (&qh->hw_token), mark,
 			(__constant_cpu_to_le32 (QTD_TOGGLE) & qh->hw_token)
-				? "data0" : "data1",
-			(cpu_to_le32p (&qh->hw_alt_next) >> 1) & 0x0f);
+				? "data1" : "data0",
+			(le32_to_cpup (&qh->hw_alt_next) >> 1) & 0x0f);
 	size -= temp;
 	next += temp;
 
 	/* hc may be modifying the list as we read it ... */
 	list_for_each (entry, &qh->qtd_list) {
 		td = list_entry (entry, struct ehci_qtd, qtd_list);
-		scratch = cpu_to_le32p (&td->hw_token);
+		scratch = le32_to_cpup (&td->hw_token);
 		mark = ' ';
 		if (hw_curr == td->qtd_dma)
 			mark = '*';
@@ -418,7 +464,7 @@ show_async (struct class_device *class_dev, char *buf)
 	for (qh = ehci->async->qh_next.qh; size > 0 && qh; qh = qh->qh_next.qh)
 		qh_lines (ehci, qh, &next, &size);
 	if (ehci->reclaim && size > 0) {
-		temp = snprintf (next, size, "\nreclaim =\n");
+		temp = scnprintf (next, size, "\nreclaim =\n");
 		size -= temp;
 		next += temp;
 
@@ -443,7 +489,8 @@ show_periodic (struct class_device *class_dev, char *buf)
 	union ehci_shadow	p, *seen;
 	unsigned		temp, size, seen_count;
 	char			*next;
-	unsigned		i, tag;
+	unsigned		i;
+	__le32			tag;
 
 	if (!(seen = kmalloc (DBG_SCHED_LIMIT * sizeof *seen, SLAB_ATOMIC)))
 		return 0;
@@ -455,7 +502,7 @@ show_periodic (struct class_device *class_dev, char *buf)
 	next = buf;
 	size = PAGE_SIZE;
 
-	temp = snprintf (next, size, "size = %d\n", ehci->periodic_size);
+	temp = scnprintf (next, size, "size = %d\n", ehci->periodic_size);
 	size -= temp;
 	next += temp;
 
@@ -469,14 +516,14 @@ show_periodic (struct class_device *class_dev, char *buf)
 			continue;
 		tag = Q_NEXT_TYPE (ehci->periodic [i]);
 
-		temp = snprintf (next, size, "%4d: ", i);
+		temp = scnprintf (next, size, "%4d: ", i);
 		size -= temp;
 		next += temp;
 
 		do {
 			switch (tag) {
 			case Q_TYPE_QH:
-				temp = snprintf (next, size, " qh%d-%04x/%p",
+				temp = scnprintf (next, size, " qh%d-%04x/%p",
 						p.qh->period,
 						le32_to_cpup (&p.qh->hw_info2)
 							/* uframe masks */
@@ -489,14 +536,14 @@ show_periodic (struct class_device *class_dev, char *buf)
 					if (seen [temp].ptr != p.ptr)
 						continue;
 					if (p.qh->qh_next.ptr)
-						temp = snprintf (next, size,
+						temp = scnprintf (next, size,
 							" ...");
-					p.ptr = 0;
+					p.ptr = NULL;
 					break;
 				}
 				/* show more info the first time around */
 				if (temp == seen_count && p.ptr) {
-					u32	scratch = cpu_to_le32p (
+					u32	scratch = le32_to_cpup (
 							&p.qh->hw_info1);
 					struct ehci_qtd	*qtd;
 					char		*type = "";
@@ -514,7 +561,7 @@ show_periodic (struct class_device *class_dev, char *buf)
 						}
 					}
 
-					temp = snprintf (next, size,
+					temp = scnprintf (next, size,
 						" (%c%d ep%d%s "
 						"[%d/%d] q%d p%d)",
 						speed_char (scratch),
@@ -534,21 +581,25 @@ show_periodic (struct class_device *class_dev, char *buf)
 				}
 				break;
 			case Q_TYPE_FSTN:
-				temp = snprintf (next, size,
+				temp = scnprintf (next, size,
 					" fstn-%8x/%p", p.fstn->hw_prev,
 					p.fstn);
 				tag = Q_NEXT_TYPE (p.fstn->hw_next);
 				p = p.fstn->fstn_next;
 				break;
 			case Q_TYPE_ITD:
-				temp = snprintf (next, size,
+				temp = scnprintf (next, size,
 					" itd/%p", p.itd);
 				tag = Q_NEXT_TYPE (p.itd->hw_next);
 				p = p.itd->itd_next;
 				break;
 			case Q_TYPE_SITD:
-				temp = snprintf (next, size,
-					" sitd/%p", p.sitd);
+				temp = scnprintf (next, size,
+					" sitd%d-%04x/%p",
+					p.sitd->stream->interval,
+					le32_to_cpup (&p.sitd->hw_uframe)
+						& 0x0000ffff,
+					p.sitd);
 				tag = Q_NEXT_TYPE (p.sitd->hw_next);
 				p = p.sitd->sitd_next;
 				break;
@@ -557,7 +608,7 @@ show_periodic (struct class_device *class_dev, char *buf)
 			next += temp;
 		} while (p.ptr);
 
-		temp = snprintf (next, size, "\n");
+		temp = scnprintf (next, size, "\n");
 		size -= temp;
 		next += temp;
 	}
@@ -590,60 +641,71 @@ show_registers (struct class_device *class_dev, char *buf)
 
 	spin_lock_irqsave (&ehci->lock, flags);
 
+	if (bus->controller->power.power_state) {
+		size = scnprintf (next, size,
+			"bus %s, device %s (driver " DRIVER_VERSION ")\n"
+			"SUSPENDED (no register access)\n",
+			hcd->self.controller->bus->name,
+			hcd->self.controller->bus_id);
+		goto done;
+	}
+
 	/* Capability Registers */
-	i = readw (&ehci->caps->hci_version);
-	temp = snprintf (next, size,
-		"PCI device %s\nEHCI %x.%02x, hcd state %d (driver " DRIVER_VERSION ")\n",
-		pci_name(hcd->pdev),
-		i >> 8, i & 0x0ff, ehci->hcd.state);
+	i = HC_VERSION(readl (&ehci->caps->hc_capbase));
+	temp = scnprintf (next, size,
+		"bus %s, device %s (driver " DRIVER_VERSION ")\n"
+		"EHCI %x.%02x, hcd state %d\n",
+		hcd->self.controller->bus->name,
+		hcd->self.controller->bus_id,
+		i >> 8, i & 0x0ff, hcd->state);
 	size -= temp;
 	next += temp;
 
 	// FIXME interpret both types of params
 	i = readl (&ehci->caps->hcs_params);
-	temp = snprintf (next, size, "structural params 0x%08x\n", i);
+	temp = scnprintf (next, size, "structural params 0x%08x\n", i);
 	size -= temp;
 	next += temp;
 
 	i = readl (&ehci->caps->hcc_params);
-	temp = snprintf (next, size, "capability params 0x%08x\n", i);
+	temp = scnprintf (next, size, "capability params 0x%08x\n", i);
 	size -= temp;
 	next += temp;
 
 	/* Operational Registers */
 	temp = dbg_status_buf (scratch, sizeof scratch, label,
 			readl (&ehci->regs->status));
-	temp = snprintf (next, size, fmt, temp, scratch);
+	temp = scnprintf (next, size, fmt, temp, scratch);
 	size -= temp;
 	next += temp;
 
 	temp = dbg_command_buf (scratch, sizeof scratch, label,
 			readl (&ehci->regs->command));
-	temp = snprintf (next, size, fmt, temp, scratch);
+	temp = scnprintf (next, size, fmt, temp, scratch);
 	size -= temp;
 	next += temp;
 
 	temp = dbg_intr_buf (scratch, sizeof scratch, label,
 			readl (&ehci->regs->intr_enable));
-	temp = snprintf (next, size, fmt, temp, scratch);
+	temp = scnprintf (next, size, fmt, temp, scratch);
 	size -= temp;
 	next += temp;
 
-	temp = snprintf (next, size, "uframe %04x\n",
+	temp = scnprintf (next, size, "uframe %04x\n",
 			readl (&ehci->regs->frame_index));
 	size -= temp;
 	next += temp;
 
 	for (i = 0; i < HCS_N_PORTS (ehci->hcs_params); i++) {
-		temp = dbg_port_buf (scratch, sizeof scratch, label, i,
+		temp = dbg_port_buf (scratch, sizeof scratch, label, i + 1,
 				readl (&ehci->regs->port_status [i]));
-		temp = snprintf (next, size, fmt, temp, scratch);
+		temp = scnprintf (next, size, fmt, temp, scratch);
 		size -= temp;
 		next += temp;
 	}
 
 	if (ehci->reclaim) {
-		temp = snprintf (next, size, "reclaim qh %p%s\n",
+		temp = scnprintf (next, size, "reclaim qh %p%s\n",
 				ehci->reclaim,
 				ehci->reclaim_ready ? " ready" : "");
 		size -= temp;
@@ -651,37 +713,42 @@ show_registers (struct class_device *class_dev, char *buf)
 	}
 
 #ifdef EHCI_STATS
-	temp = snprintf (next, size,
+	temp = scnprintf (next, size,
 		"irq normal %ld err %ld reclaim %ld (lost %ld)\n",
 		ehci->stats.normal, ehci->stats.error, ehci->stats.reclaim,
 		ehci->stats.lost_iaa);
 	size -= temp;
 	next += temp;
 
-	temp = snprintf (next, size, "complete %ld unlink %ld\n",
+	temp = scnprintf (next, size, "complete %ld unlink %ld\n",
 		ehci->stats.complete, ehci->stats.unlink);
 	size -= temp;
 	next += temp;
 #endif
 
+done:
 	spin_unlock_irqrestore (&ehci->lock, flags);
 
 	return PAGE_SIZE - size;
 }
 static CLASS_DEVICE_ATTR (registers, S_IRUGO, show_registers, NULL);
 
-static inline void create_debug_files (struct ehci_hcd *bus)
+static inline void create_debug_files (struct ehci_hcd *ehci)
 {
-	class_device_create_file(&bus->hcd.self.class_dev, &class_device_attr_async);
-	class_device_create_file(&bus->hcd.self.class_dev, &class_device_attr_periodic);
-	class_device_create_file(&bus->hcd.self.class_dev, &class_device_attr_registers);
+	struct class_device *cldev = &ehci_to_hcd(ehci)->self.class_dev;
+
+	class_device_create_file(cldev, &class_device_attr_async);
+	class_device_create_file(cldev, &class_device_attr_periodic);
+	class_device_create_file(cldev, &class_device_attr_registers);
 }
 
-static inline void remove_debug_files (struct ehci_hcd *bus)
+static inline void remove_debug_files (struct ehci_hcd *ehci)
 {
-	class_device_remove_file(&bus->hcd.self.class_dev, &class_device_attr_async);
-	class_device_remove_file(&bus->hcd.self.class_dev, &class_device_attr_periodic);
-	class_device_remove_file(&bus->hcd.self.class_dev, &class_device_attr_registers);
+	struct class_device *cldev = &ehci_to_hcd(ehci)->self.class_dev;
+
+	class_device_remove_file(cldev, &class_device_attr_async);
+	class_device_remove_file(cldev, &class_device_attr_periodic);
+	class_device_remove_file(cldev, &class_device_attr_registers);
 }
 
 #endif /* STUB_DEBUG_FILES */

@@ -13,6 +13,7 @@
 #include <linux/stat.h>
 #include <linux/time.h>
 #include <linux/smp_lock.h>
+#include <linux/namei.h>
 
 /*
  * The follow_link operation is special: it must behave as a no-op
@@ -21,7 +22,8 @@
  */
 static int bad_follow_link(struct dentry *dent, struct nameidata *nd)
 {
-	return vfs_follow_link(nd, ERR_PTR(-EIO));
+	nd_set_link(nd, ERR_PTR(-EIO));
+	return 0;
 }
 
 static int return_EIO(void)
@@ -103,7 +105,8 @@ void make_bad_inode(struct inode * inode)
 	remove_inode_hash(inode);
 
 	inode->i_mode = S_IFREG;
-	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
+	inode->i_atime = inode->i_mtime = inode->i_ctime =
+		current_fs_time(inode->i_sb);
 	inode->i_op = &bad_inode_ops;	
 	inode->i_fop = &bad_file_ops;	
 }

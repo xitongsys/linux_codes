@@ -1,13 +1,11 @@
 /*
     i2c-savage4.c - Part of lm_sensors, Linux kernel modules for hardware
               monitoring
-    Copyright (c) 1998, 1999  Frodo Looijaard <frodol@dds.nl>,
-    Philip Edelbrock <phil@netroedge.com>,
-    Ralph Metzler <rjkm@thp.uni-koeln.de>, and
+    Copyright (C) 1998-2003  The LM Sensors Team
+    Alexander Wold <awold@bigfoot.com>
     Mark D. Studebaker <mdsxyz123@yahoo.com>
     
-    Based on code written by Ralph Metzler <rjkm@thp.uni-koeln.de> and
-    Simon Vogl
+    Based on i2c-voodoo3.c.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -31,6 +29,7 @@
    it easier to add later.
 */
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -74,7 +73,7 @@
 #define TIMEOUT			(HZ / 2)
 
 
-static void *ioaddr;
+static void __iomem *ioaddr;
 
 /* The sav GPIO registers don't have individual masks for each bit
    so we always have to read before writing. */
@@ -121,7 +120,7 @@ static int bit_savi2c_getsda(void *data)
 
 static int config_s4(struct pci_dev *dev)
 {
-	unsigned int cadr;
+	unsigned long cadr;
 
 	/* map memory */
 	cadr = dev->resource[0].start;
@@ -158,6 +157,8 @@ static struct pci_device_id savage4_ids[] __devinitdata = {
 	{ 0, }
 };
 
+MODULE_DEVICE_TABLE (pci, savage4_ids);
+
 static int __devinit savage4_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	int retval;
@@ -179,7 +180,7 @@ static void __devexit savage4_remove(struct pci_dev *dev)
 }
 
 static struct pci_driver savage4_driver = {
-	.name		= "savage4 smbus",
+	.name		= "savage4_smbus",
 	.id_table	= savage4_ids,
 	.probe		= savage4_probe,
 	.remove		= __devexit_p(savage4_remove),
@@ -187,7 +188,7 @@ static struct pci_driver savage4_driver = {
 
 static int __init i2c_savage4_init(void)
 {
-	return pci_module_init(&savage4_driver);
+	return pci_register_driver(&savage4_driver);
 }
 
 static void __exit i2c_savage4_exit(void)
@@ -195,9 +196,7 @@ static void __exit i2c_savage4_exit(void)
 	pci_unregister_driver(&savage4_driver);
 }
 
-MODULE_AUTHOR("Frodo Looijaard <frodol@dds.nl>, "
-		"Philip Edelbrock <phil@netroedge.com>, "
-		"Ralph Metzler <rjkm@thp.uni-koeln.de>, "
+MODULE_AUTHOR("Alexander Wold <awold@bigfoot.com> "
 		"and Mark D. Studebaker <mdsxyz123@yahoo.com>");
 MODULE_DESCRIPTION("Savage4 I2C/SMBus driver");
 MODULE_LICENSE("GPL");

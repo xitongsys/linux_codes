@@ -1,5 +1,5 @@
 /*
- *   Copyright (C) International Business Machines Corp., 2000-2003
+ *   Copyright (C) International Business Machines Corp., 2000-2004
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@
  */
 
 #include <linux/fs.h>
+#include <linux/quotaops.h>
 #include "jfs_incore.h"
 #include "jfs_superblock.h"
 #include "jfs_dmap.h"
@@ -35,7 +36,6 @@ static s64 extRoundDown(s64 nb);
 /*
  * external references
  */
-extern int dbExtend(struct inode *, s64, s64, s64);
 extern int jfs_commit_inode(struct inode *, int);
 
 
@@ -145,6 +145,13 @@ extAlloc(struct inode *ip, s64 xlen, s64 pno, xad_t * xp, boolean_t abnr)
 		return (rc);
 	}
 
+	/* Allocate blocks to quota. */
+	if (DQUOT_ALLOC_BLOCK(ip, nxlen)) {
+		dbFree(ip, nxaddr, (s64) nxlen);
+		up(&JFS_IP(ip)->commit_sem);
+		return -EDQUOT;
+	}
+
 	/* determine the value of the extent flag */
 	xflag = (abnr == TRUE) ? XAD_NOTRECORDED : 0;
 
@@ -162,12 +169,10 @@ extAlloc(struct inode *ip, s64 xlen, s64 pno, xad_t * xp, boolean_t abnr)
 	 */
 	if (rc) {
 		dbFree(ip, nxaddr, nxlen);
+		DQUOT_FREE_BLOCK(ip, nxlen);
 		up(&JFS_IP(ip)->commit_sem);
 		return (rc);
 	}
-
-	/* update the number of blocks allocated to the file */
-	ip->i_blocks += LBLK2PBLK(ip->i_sb, nxlen);
 
 	/* set the results of the extent allocation */
 	XADaddress(xp, nxaddr);
@@ -255,6 +260,13 @@ int extRealloc(struct inode *ip, s64 nxlen, xad_t * xp, boolean_t abnr)
 	if ((rc = extBrealloc(ip, xaddr, xlen, &nxlen, &nxaddr)))
 		goto exit;
 
+	/* Allocat blocks to quota. */
+	if (DQUOT_ALLOC_BLOCK(ip, nxlen)) {
+		dbFree(ip, nxaddr, (s64) nxlen);
+		up(&JFS_IP(ip)->commit_sem);
+		return -EDQUOT;
+	}
+
 	delta = nxlen - xlen;
 
 	/* check if the extend page is not abnr but the request is abnr
@@ -290,6 +302,7 @@ int extRealloc(struct inode *ip, s64 nxlen, xad_t * xp, boolean_t abnr)
 		/* extend the extent */
 		if ((rc = xtExtend(0, ip, xoff + xlen, (int) nextend, 0))) {
 			dbFree(ip, xaddr + xlen, delta);
+			DQUOT_FREE_BLOCK(ip, nxlen);
 			goto exit;
 		}
 	} else {
@@ -300,6 +313,7 @@ int extRealloc(struct inode *ip, s64 nxlen, xad_t * xp, boolean_t abnr)
 		 */
 		if ((rc = xtTailgate(0, ip, xoff, (int) ntail, nxaddr, 0))) {
 			dbFree(ip, nxaddr, nxlen);
+			DQUOT_FREE_BLOCK(ip, nxlen);
 			goto exit;
 		}
 	}
@@ -320,9 +334,6 @@ int extRealloc(struct inode *ip, s64 nxlen, xad_t * xp, boolean_t abnr)
 			xflag = 0;
 		}
 	}
-
-	/* update the inode with the number of blocks allocated */
-	ip->i_blocks += LBLK2PBLK(sb, delta);
 
 	/* set the return results */
 	XADaddress(xp, nxaddr);
@@ -534,7 +545,7 @@ extBalloc(struct inode *ip, s64 hint, s64 * nblocks, s64 * blkno)
 		nb = nblks = *nblocks;
 
 	/* try to allocate blocks */
-	while ((rc = dbAlloc(ip, hint, nb, &daddr))) {
+	while ((rc = dbAlloc(ip, hint, nb, &daddr)) != 0) {
 		/* if something other than an out of space error,
 		 * stop and return this error.
 		 */
@@ -554,6 +565,7 @@ extBalloc(struct inode *ip, s64 hint, s64 * nblocks, s64 * blkno)
 
 	if (S_ISREG(ip->i_mode) && (ji->fileset == FILESYSTEM_I)) {
 		ag = BLKTOAG(daddr, sbi);
+		spin_lock_irq(&ji->ag_lock);
 		if (ji->active_ag == -1) {
 			atomic_inc(&bmp->db_active[ag]);
 			ji->active_ag = ag;
@@ -562,6 +574,7 @@ extBalloc(struct inode *ip, s64 hint, s64 * nblocks, s64 * blkno)
 			atomic_inc(&bmp->db_active[ag]);
 			ji->active_ag = ag;
 		}
+		spin_unlock_irq(&ji->ag_lock);
 	}
 
 	return (0);

@@ -54,16 +54,15 @@
 #define HPET_T2_CMP	0x148
 #define HPET_T2_ROUTE	0x150
 
-#define HPET_ID_VENDOR	0xffff0000
 #define HPET_ID_LEGSUP	0x00008000
 #define HPET_ID_NUMBER	0x00001f00
 #define HPET_ID_REV	0x000000ff
-
-#define HPET_ID_VENDOR_SHIFT	16
-#define HPET_ID_VENDOR_8086	0x8086
+#define	HPET_ID_NUMBER_SHIFT	8
 
 #define HPET_CFG_ENABLE	0x001
 #define HPET_CFG_LEGACY	0x002
+#define	HPET_LEGACY_8254	2
+#define	HPET_LEGACY_RTC		8
 
 #define HPET_TN_ENABLE		0x004
 #define HPET_TN_PERIODIC	0x008
@@ -97,6 +96,7 @@ extern unsigned long hpet_address;	/* hpet memory map physical address */
 
 extern int hpet_rtc_timer_init(void);
 extern int hpet_enable(void);
+extern int hpet_reenable(void);
 extern int is_hpet_enabled(void);
 extern int is_hpet_capable(void);
 extern int hpet_readl(unsigned long a);

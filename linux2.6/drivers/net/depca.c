@@ -255,9 +255,9 @@
 #include <linux/ctype.h>
 #include <linux/moduleparam.h>
 #include <linux/device.h>
+#include <linux/bitops.h>
 
 #include <asm/uaccess.h>
-#include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 
@@ -463,11 +463,11 @@ struct depca_private {
         } depca_bus;	        /* type of bus */
 	struct depca_init init_block;	/* Shadow Initialization block            */
 /* CPU address space fields */
-	struct depca_rx_desc *rx_ring;	/* Pointer to start of RX descriptor ring */
-	struct depca_tx_desc *tx_ring;	/* Pointer to start of TX descriptor ring */
-	void *rx_buff[NUM_RX_DESC];	/* CPU virt address of sh'd memory buffs  */
-	void *tx_buff[NUM_TX_DESC];	/* CPU virt address of sh'd memory buffs  */
-	void *sh_mem;		/* CPU mapped virt address of device RAM  */
+	struct depca_rx_desc __iomem *rx_ring;	/* Pointer to start of RX descriptor ring */
+	struct depca_tx_desc __iomem *tx_ring;	/* Pointer to start of TX descriptor ring */
+	void __iomem *rx_buff[NUM_RX_DESC];	/* CPU virt address of sh'd memory buffs  */
+	void __iomem *tx_buff[NUM_TX_DESC];	/* CPU virt address of sh'd memory buffs  */
+	void __iomem *sh_mem;	/* CPU mapped virt address of device RAM  */
 	u_long mem_start;	/* Bus address of device RAM (before remap) */
 	u_long mem_len;		/* device memory size */
 /* Device address space fields */
@@ -666,7 +666,7 @@ static int __init depca_hw_init (struct net_device *dev, struct device *device)
 		outb(nicsr, DEPCA_NICSR);
 	}
 
-	lp->lock = SPIN_LOCK_UNLOCKED;
+	spin_lock_init(&lp->lock);
 	sprintf(lp->adapter_name, "%s (%s)",
 		depca_signature[lp->adapter], device->bus_id);
 	status = -EBUSY;
@@ -681,8 +681,7 @@ static int __init depca_hw_init (struct net_device *dev, struct device *device)
 	lp->sh_mem = ioremap(mem_start, mem_len);
 	if (lp->sh_mem == NULL) {
 		printk(KERN_ERR "depca: cannot remap ISA memory, aborting\n");
-		release_mem_region (mem_start, mem_len);
-		goto out_priv;
+		goto out1;
 	}
 
 	lp->mem_start = mem_start;
@@ -694,11 +693,11 @@ static int __init depca_hw_init (struct net_device *dev, struct device *device)
 
 	/* Tx & Rx descriptors (aligned to a quadword boundary) */
 	offset = (offset + DEPCA_ALIGN) & ~DEPCA_ALIGN;
-	lp->rx_ring = (struct depca_rx_desc *) (lp->sh_mem + offset);
+	lp->rx_ring = (struct depca_rx_desc __iomem *) (lp->sh_mem + offset);
 	lp->rx_ring_offset = offset;
 
 	offset += (sizeof(struct depca_rx_desc) * NUM_RX_DESC);
-	lp->tx_ring = (struct depca_tx_desc *) (lp->sh_mem + offset);
+	lp->tx_ring = (struct depca_tx_desc __iomem *) (lp->sh_mem + offset);
 	lp->tx_ring_offset = offset;
 
 	offset += (sizeof(struct depca_tx_desc) * NUM_TX_DESC);
@@ -771,7 +770,7 @@ static int __init depca_hw_init (struct net_device *dev, struct device *device)
 		status = -ENXIO;
 		if (!irqnum) {
 			printk(" and failed to detect IRQ line.\n");
-			goto out_priv;
+			goto out2;
 		} else {
 			for (dev->irq = 0, i = 0; (depca_irq[i]) && (!dev->irq); i++)
 				if (irqnum == depca_irq[i]) {
@@ -781,7 +780,7 @@ static int __init depca_hw_init (struct net_device *dev, struct device *device)
 
 			if (!dev->irq) {
 				printk(" but incorrect IRQ line detected.\n");
-				return -ENXIO;
+				goto out2;
 			}
 		}
 	} else {
@@ -807,11 +806,14 @@ static int __init depca_hw_init (struct net_device *dev, struct device *device)
 	device->driver_data = dev;
 	SET_NETDEV_DEV (dev, device);
 	
-	register_netdev (dev);
-	return 0;
-
- out_priv:
-	
+	status = register_netdev(dev);
+	if (status == 0)
+		return 0;
+out2:
+	iounmap(lp->sh_mem);
+out1:
+	release_mem_region (mem_start, mem_len);
+out_priv:
 	return status;
 }
 
@@ -1220,10 +1222,10 @@ static int InitRestartDepca(struct net_device *dev)
 		/* clear IDON by writing a "1", enable interrupts and start lance */
 		outw(IDON | INEA | STRT, DEPCA_DATA);
 		if (depca_debug > 2) {
-			printk("%s: DEPCA open after %d ticks, init block 0x%08lx csr0 %4.4x.\n", dev->name, i, virt_to_phys(lp->sh_mem), inw(DEPCA_DATA));
+			printk("%s: DEPCA open after %d ticks, init block 0x%08lx csr0 %4.4x.\n", dev->name, i, lp->mem_start, inw(DEPCA_DATA));
 		}
 	} else {
-		printk("%s: DEPCA unopen after %d ticks, init block 0x%08lx csr0 %4.4x.\n", dev->name, i, virt_to_phys(lp->sh_mem), inw(DEPCA_DATA));
+		printk("%s: DEPCA unopen after %d ticks, init block 0x%08lx csr0 %4.4x.\n", dev->name, i, lp->mem_start, inw(DEPCA_DATA));
 		status = -1;
 	}
 
@@ -1459,7 +1461,7 @@ static int __init depca_mca_probe(struct device *device)
  out_unclaim:
 	mca_device_set_claim(mdev, 0);
 
-	return err;;
+	return err;
 }
 #endif
 
@@ -1647,7 +1649,7 @@ static int __devexit depca_device_remove (struct device *device)
 static int __init DepcaSignature(char *name, u_long base_addr)
 {
 	u_int i, j, k;
-	void *ptr;
+	void __iomem *ptr;
 	char tmpstr[16];
 	u_long prom_addr = base_addr + 0xc000;
 	u_long mem_addr = base_addr + 0x8000; /* 32KB */
@@ -1874,17 +1876,17 @@ static void depca_dbg_open(struct net_device *dev)
 		printk("Descriptor addresses (CPU):\nRX: ");
 		for (i = 0; i < lp->rxRingMask; i++) {
 			if (i < 3) {
-				printk("0x%8.8lx ", (long) &lp->rx_ring[i].base);
+				printk("%p ", &lp->rx_ring[i].base);
 			}
 		}
-		printk("...0x%8.8lx\n", (long) &lp->rx_ring[i].base);
+		printk("...%p\n", &lp->rx_ring[i].base);
 		printk("TX: ");
 		for (i = 0; i < lp->txRingMask; i++) {
 			if (i < 3) {
-				printk("0x%8.8lx ", (long) &lp->tx_ring[i].base);
+				printk("%p ", &lp->tx_ring[i].base);
 			}
 		}
-		printk("...0x%8.8lx\n", (long) &lp->tx_ring[i].base);
+		printk("...%p\n", &lp->tx_ring[i].base);
 		printk("\nDescriptor buffers (Device):\nRX: ");
 		for (i = 0; i < lp->rxRingMask; i++) {
 			if (i < 3) {
@@ -1899,7 +1901,7 @@ static void depca_dbg_open(struct net_device *dev)
 			}
 		}
 		printk("...0x%8.8x\n", readl(&lp->tx_ring[i].base));
-		printk("Initialisation block at 0x%8.8lx(Phys)\n", virt_to_phys(lp->sh_mem));
+		printk("Initialisation block at 0x%8.8lx(Phys)\n", lp->mem_start);
 		printk("        mode: 0x%4.4x\n", p->mode);
 		printk("        physical address: ");
 		for (i = 0; i < ETH_ALEN - 1; i++) {
@@ -1913,7 +1915,7 @@ static void depca_dbg_open(struct net_device *dev)
 		printk("%2.2x\n", p->mcast_table[i]);
 		printk("        rx_ring at: 0x%8.8x\n", p->rx_ring);
 		printk("        tx_ring at: 0x%8.8x\n", p->tx_ring);
-		printk("buffers (Phys): 0x%8.8lx\n", virt_to_phys(lp->sh_mem) + lp->buffs_offset);
+		printk("buffers (Phys): 0x%8.8lx\n", lp->mem_start + lp->buffs_offset);
 		printk("Ring size:\nRX: %d  Log2(rxRingMask): 0x%8.8x\n", (int) lp->rxRingMask + 1, lp->rx_rlen);
 		printk("TX: %d  Log2(txRingMask): 0x%8.8x\n", (int) lp->txRingMask + 1, lp->tx_rlen);
 		outw(CSR2, DEPCA_ADDR);
@@ -1935,7 +1937,7 @@ static void depca_dbg_open(struct net_device *dev)
 static int depca_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
 	struct depca_private *lp = (struct depca_private *) dev->priv;
-	struct depca_ioctl *ioc = (struct depca_ioctl *) &rq->ifr_data;
+	struct depca_ioctl *ioc = (struct depca_ioctl *) &rq->ifr_ifru;
 	int i, status = 0;
 	u_long ioaddr = dev->base_addr;
 	union {
@@ -2084,7 +2086,7 @@ static int __init depca_module_init (void)
 {
         int err = 0;
 
-#if CONFIG_MCA
+#ifdef CONFIG_MCA
         err = mca_register_driver (&depca_mca_driver);
 #endif
 #ifdef CONFIG_EISA
@@ -2099,7 +2101,7 @@ static int __init depca_module_init (void)
 static void __exit depca_module_exit (void)
 {
 	int i;
-#if CONFIG_MCA
+#ifdef CONFIG_MCA
         mca_unregister_driver (&depca_mca_driver);
 #endif
 #ifdef CONFIG_EISA

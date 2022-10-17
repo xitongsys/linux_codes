@@ -28,7 +28,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/types.h>
@@ -39,10 +38,11 @@
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <linux/completion.h>
+#include <linux/time.h>
 #include <linux/interrupt.h>
 #include <asm/semaphore.h>
-#include "scsi.h"
-#include "hosts.h"
+
+#include <scsi/scsi_host.h>
 
 #include "aacraid.h"
 
@@ -79,68 +79,6 @@ static irqreturn_t aac_sa_intr(int irq, void *dev_id, struct pt_regs *regs)
 		return IRQ_HANDLED;
 	}
 	return IRQ_NONE;
-}
-
-/**
- *	aac_sa_enable_interrupt	-	enable an interrupt event
- *	@dev: Which adapter to enable.
- *	@event: Which adapter event.
- *
- *	This routine will enable the corresponding adapter event to cause an interrupt on 
- * 	the host.
- */
- 
-void aac_sa_enable_interrupt(struct aac_dev *dev, u32 event)
-{
-	switch (event) {
-
-	case HostNormCmdQue:
-		sa_writew(dev, SaDbCSR.PRICLEARIRQMASK, DOORBELL_1);
-		break;
-
-	case HostNormRespQue:
-		sa_writew(dev, SaDbCSR.PRICLEARIRQMASK, DOORBELL_2);
-		break;
-
-	case AdapNormCmdNotFull:
-		sa_writew(dev, SaDbCSR.PRICLEARIRQMASK, DOORBELL_3);
-		break;
-
-	case AdapNormRespNotFull:
-		sa_writew(dev, SaDbCSR.PRICLEARIRQMASK, DOORBELL_4);
-		break;
-	}
-}
-
-/**
- *	aac_sa_disable_interrupt	-	disable an interrupt event
- *	@dev: Which adapter to enable.
- *	@event: Which adapter event.
- *
- *	This routine will enable the corresponding adapter event to cause an interrupt on 
- * 	the host.
- */
-
-void aac_sa_disable_interrupt (struct aac_dev *dev, u32 event)
-{
-	switch (event) {
-
-	case HostNormCmdQue:
-		sa_writew(dev, SaDbCSR.PRISETIRQMASK, DOORBELL_1);
-		break;
-
-	case HostNormRespQue:
-		sa_writew(dev, SaDbCSR.PRISETIRQMASK, DOORBELL_2);
-		break;
-
-	case AdapNormCmdNotFull:
-		sa_writew(dev, SaDbCSR.PRISETIRQMASK, DOORBELL_3);
-		break;
-
-	case AdapNormRespNotFull:
-		sa_writew(dev, SaDbCSR.PRISETIRQMASK, DOORBELL_4);
-		break;
-	}
 }
 
 /**
@@ -301,23 +239,52 @@ static void aac_sa_start_adapter(struct aac_dev *dev)
 }
 
 /**
+ *	aac_sa_check_health
+ *	@dev: device to check if healthy
+ *
+ *	Will attempt to determine if the specified adapter is alive and
+ *	capable of handling requests, returning 0 if alive.
+ */
+static int aac_sa_check_health(struct aac_dev *dev)
+{
+	long status = sa_readl(dev, Mailbox7);
+
+	/*
+	 *	Check to see if the board failed any self tests.
+	 */
+	if (status & SELF_TEST_FAILED)
+		return -1;
+	/*
+	 *	Check to see if the board panic'd while booting.
+	 */
+	if (status & KERNEL_PANIC)
+		return -2;
+	/*
+	 *	Wait for the adapter to be up and running. Wait up to 3 minutes
+	 */
+	if (!(status & KERNEL_UP_AND_RUNNING))
+		return -3;
+	/*
+	 *	Everything is OK
+	 */
+	return 0;
+}
+
+/**
  *	aac_sa_init	-	initialize an ARM based AAC card
  *	@dev: device to configure
- *	@devnum: adapter number
  *
  *	Allocate and set up resources for the ARM based AAC variants. The 
  *	device_interface in the commregion will be allocated and linked 
  *	to the comm region.
  */
 
-int aac_sa_init(struct aac_dev *dev, unsigned long devnum)
+int aac_sa_init(struct aac_dev *dev)
 {
 	unsigned long start;
 	unsigned long status;
 	int instance;
 	const char *name;
-
-	dev->devnum = devnum;
 
 	dprintk(("PREINST\n"));
 	instance = dev->id;
@@ -328,24 +295,24 @@ int aac_sa_init(struct aac_dev *dev, unsigned long devnum)
 	 */
 	dprintk(("PREMAP\n"));
 
-	if((dev->regs.sa = (struct sa_registers *)ioremap((unsigned long)dev->scsi_host_ptr->base, 8192))==NULL)
+	if((dev->regs.sa = ioremap((unsigned long)dev->scsi_host_ptr->base, 8192))==NULL)
 	{	
 		printk(KERN_WARNING "aacraid: unable to map ARM.\n" );
-		return -1;
+		goto error_iounmap;
 	}
 	/*
 	 *	Check to see if the board failed any self tests.
 	 */
 	if (sa_readl(dev, Mailbox7) & SELF_TEST_FAILED) {
 		printk(KERN_WARNING "%s%d: adapter self-test failed.\n", name, instance);
-		return -1;
+		goto error_iounmap;
 	}
 	/*
 	 *	Check to see if the board panic'd while booting.
 	 */
 	if (sa_readl(dev, Mailbox7) & KERNEL_PANIC) {
 		printk(KERN_WARNING "%s%d: adapter kernel panic'd.\n", name, instance);
-		return -1;
+		goto error_iounmap;
 	}
 	start = jiffies;
 	/*
@@ -355,7 +322,7 @@ int aac_sa_init(struct aac_dev *dev, unsigned long devnum)
 		if (time_after(jiffies, start+180*HZ)) {
 			status = sa_readl(dev, Mailbox7) >> 16;
 			printk(KERN_WARNING "%s%d: adapter kernel failed to start, init status = %d.\n", name, instance, le32_to_cpu(status));
-			return -1;
+			goto error_iounmap;
 		}
 		set_current_state(TASK_UNINTERRUPTIBLE);
 		schedule_timeout(1);
@@ -364,7 +331,7 @@ int aac_sa_init(struct aac_dev *dev, unsigned long devnum)
 	dprintk(("ATIRQ\n"));
 	if (request_irq(dev->scsi_host_ptr->irq, aac_sa_intr, SA_SHIRQ|SA_INTERRUPT, "aacraid", (void *)dev ) < 0) {
 		printk(KERN_WARNING "%s%d: Interrupt unavailable.\n", name, instance);
-		return -1;
+		goto error_iounmap;
 	}
 
 	/*
@@ -372,21 +339,25 @@ int aac_sa_init(struct aac_dev *dev, unsigned long devnum)
 	 */
 
 	dev->a_ops.adapter_interrupt = aac_sa_interrupt_adapter;
-	dev->a_ops.adapter_enable_int = aac_sa_enable_interrupt;
-	dev->a_ops.adapter_disable_int = aac_sa_disable_interrupt;
 	dev->a_ops.adapter_notify = aac_sa_notify_adapter;
 	dev->a_ops.adapter_sync_cmd = sa_sync_cmd;
+	dev->a_ops.adapter_check_health = aac_sa_check_health;
 
 	dprintk(("FUNCDONE\n"));
 
 	if(aac_init_adapter(dev) == NULL)
-		return -1;
+		goto error_irq;
 
 	dprintk(("NEWADAPTDONE\n"));
 	/*
 	 *	Start any kernel threads needed
 	 */
 	dev->thread_pid = kernel_thread((int (*)(void *))aac_command_thread, dev, 0);
+	if (dev->thread_pid < 0) {
+		printk(KERN_ERR "aacraid: Unable to create command thread.\n");
+		goto error_kfree;
+	}
+
 	/*
 	 *	Tell the adapter that all is configure, and it can start 
 	 *	accepting requests
@@ -395,5 +366,17 @@ int aac_sa_init(struct aac_dev *dev, unsigned long devnum)
 	aac_sa_start_adapter(dev);
 	dprintk(("STARTED\n"));
 	return 0;
+
+
+error_kfree:
+	kfree(dev->queues);
+
+error_irq:
+	free_irq(dev->scsi_host_ptr->irq, (void *)dev);
+
+error_iounmap:
+	iounmap(dev->regs.sa);
+
+	return -1;
 }
 

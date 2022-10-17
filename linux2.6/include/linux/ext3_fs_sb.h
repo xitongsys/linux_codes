@@ -22,6 +22,7 @@
 #include <linux/blockgroup_lock.h>
 #include <linux/percpu_counter.h>
 #endif
+#include <linux/rbtree.h>
 
 /*
  * third extended-fs super-block data in memory
@@ -49,14 +50,19 @@ struct ext3_sb_info {
 	int s_desc_per_block_bits;
 	int s_inode_size;
 	int s_first_ino;
+	spinlock_t s_next_gen_lock;
 	u32 s_next_generation;
 	u32 s_hash_seed[4];
 	int s_def_hash_version;
-        u8 *s_debts;
 	struct percpu_counter s_freeblocks_counter;
 	struct percpu_counter s_freeinodes_counter;
 	struct percpu_counter s_dirs_counter;
 	struct blockgroup_lock s_blockgroup_lock;
+
+	/* root of the per fs reservation window tree */
+	spinlock_t s_rsv_window_lock;
+	struct rb_root s_rsv_window_root;
+	struct ext3_reserve_window_node s_rsv_window_head;
 
 	/* Journaling */
 	struct inode * s_journal_inode;
@@ -67,6 +73,10 @@ struct ext3_sb_info {
 #ifdef CONFIG_JBD_DEBUG
 	struct timer_list turn_ro_timer;	/* For turning read-only (crash simulation) */
 	wait_queue_head_t ro_wait_queue;	/* For people waiting for the fs to go read-only */
+#endif
+#ifdef CONFIG_QUOTA
+	char *s_qf_names[MAXQUOTAS];		/* Names of quota files with journalled quota */
+	int s_jquota_fmt;			/* Format of quota to use */
 #endif
 };
 

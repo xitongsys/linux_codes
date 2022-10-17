@@ -22,32 +22,19 @@
  *
  *-----------------------------------------------------------------------------
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
- * combined work to also be released under the terms of the GPL, the terms
- * and conditions of this License will apply in addition to those of the
- * GPL with the exception of any terms or conditions of this License that
- * conflict with, or are expressly prohibited by, the GPL.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHORS AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifdef __FreeBSD__
@@ -83,7 +70,7 @@ static void *___sym_malloc(m_pool_p mp, int size)
 	m_link_p h = mp->h;
 
 	if (size > SYM_MEM_CLUSTER_SIZE)
-		return 0;
+		return NULL;
 
 	while (size > s) {
 		s <<= 1;
@@ -95,7 +82,7 @@ static void *___sym_malloc(m_pool_p mp, int size)
 		if (s == SYM_MEM_CLUSTER_SIZE) {
 			h[j].next = (m_link_p) M_GET_MEM_CLUSTER();
 			if (h[j].next)
-				h[j].next->next = 0;
+				h[j].next->next = NULL;
 			break;
 		}
 		++j;
@@ -108,7 +95,7 @@ static void *___sym_malloc(m_pool_p mp, int size)
 			j -= 1;
 			s >>= 1;
 			h[j].next = (m_link_p) (a+s);
-			h[j].next->next = 0;
+			h[j].next->next = NULL;
 		}
 	}
 #ifdef DEBUG
@@ -183,7 +170,7 @@ static void *__sym_calloc2(m_pool_p mp, int size, char *name, int uflags)
 	}
 
 	if (p)
-		bzero(p, size);
+		memset(p, 0, size);
 	else if (uflags & SYM_MEM_WARN)
 		printf ("__sym_calloc2: failed to allocate %s[%d]\n", name, size);
 	return p;
@@ -204,18 +191,9 @@ static void __sym_mfree(m_pool_p mp, void *ptr, int size, char *name)
 /*
  *  Default memory pool we donnot need to involve in DMA.
  *
- *  If DMA abtraction is not needed, the generic allocator 
- *  calls directly some kernel allocator.
- *
  *  With DMA abstraction, we use functions (methods), to 
  *  distinguish between non DMAable memory and DMAable memory.
  */
-#ifndef	SYM_OPT_BUS_DMA_ABSTRACTION
-
-static struct sym_m_pool mp0;
-
-#else
-
 static m_addr_t ___mp0_get_mem_cluster(m_pool_p mp)
 {
 	m_addr_t m = (m_addr_t) sym_get_mem_cluster();
@@ -234,13 +212,11 @@ static void ___mp0_free_mem_cluster(m_pool_p mp, m_addr_t m)
 
 #ifdef	SYM_MEM_FREE_UNUSED
 static struct sym_m_pool mp0 =
-	{0, ___mp0_get_mem_cluster, ___mp0_free_mem_cluster};
+	{NULL, ___mp0_get_mem_cluster, ___mp0_free_mem_cluster};
 #else
 static struct sym_m_pool mp0 =
-	{0, ___mp0_get_mem_cluster};
+	{NULL, ___mp0_get_mem_cluster};
 #endif
-
-#endif	/* SYM_OPT_BUS_DMA_ABSTRACTION */
 
 /*
  * Actual memory allocation routine for non-DMAed memory.
@@ -260,7 +236,6 @@ void sym_mfree_unlocked(void *ptr, int size, char *name)
 	__sym_mfree(&mp0, ptr, size, name);
 }
 
-#ifdef	SYM_OPT_BUS_DMA_ABSTRACTION
 /*
  *  Methods that maintains DMAable pools according to user allocations.
  *  New pools are created on the fly when a new pool id is provided.
@@ -322,7 +297,7 @@ static __inline m_pool_p ___get_dma_pool(m_pool_ident_t dev_dmat)
 /* Create a new memory DMAable pool (when fetch failed) */
 static m_pool_p ___cre_dma_pool(m_pool_ident_t dev_dmat)
 {
-	m_pool_p mp = 0;
+	m_pool_p mp = NULL;
 
 	mp = __sym_calloc(&mp0, sizeof(*mp), "MPOOL");
 	if (mp) {
@@ -339,7 +314,7 @@ static m_pool_p ___cre_dma_pool(m_pool_ident_t dev_dmat)
 	}
 	if (mp)
 		__sym_mfree(&mp0, mp, sizeof(*mp), "MPOOL");
-	return 0;
+	return NULL;
 }
 
 #ifdef	SYM_MEM_FREE_UNUSED
@@ -364,7 +339,7 @@ static void ___del_dma_pool(m_pool_p p)
 void *__sym_calloc_dma_unlocked(m_pool_ident_t dev_dmat, int size, char *name)
 {
 	m_pool_p mp;
-	void *m = 0;
+	void *m = NULL;
 
 	mp = ___get_dma_pool(dev_dmat);
 	if (!mp)
@@ -404,7 +379,7 @@ u32 __vtobus_unlocked(m_pool_ident_t dev_dmat, void *m)
 {
 	m_pool_p mp;
 	int hc = VTOB_HASH_CODE(m);
-	m_vtob_p vp = 0;
+	m_vtob_p vp = NULL;
 	m_addr_t a = ((m_addr_t) m) & ~SYM_MEM_CLUSTER_MASK;
 
 	mp = ___get_dma_pool(dev_dmat);
@@ -417,5 +392,3 @@ u32 __vtobus_unlocked(m_pool_ident_t dev_dmat, void *m)
 		panic("sym: VTOBUS FAILED!\n");
 	return (u32)(vp ? vp->baddr + (((m_addr_t) m) - a) : 0);
 }
-
-#endif	/* SYM_OPT_BUS_DMA_ABSTRACTION */

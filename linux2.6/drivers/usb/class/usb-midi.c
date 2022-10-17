@@ -39,9 +39,6 @@
 #include <linux/init.h>
 #include <asm/semaphore.h>
 
-/** This declaration is missing from linux/usb.h **/
-extern int usb_get_string(struct usb_device *dev, unsigned short langid, unsigned char index, void *buf, int size);
-
 #include "usb-midi.h"
 
 /* ------------------------------------------------------------------------- */
@@ -58,39 +55,39 @@ extern int usb_get_string(struct usb_device *dev, unsigned short langid, unsigne
 /* ------------------------------------------------------------------------- */
 
 static int singlebyte = 0;
-MODULE_PARM(singlebyte,"i");
+module_param(singlebyte, int, 0);
 MODULE_PARM_DESC(singlebyte,"Enable sending MIDI messages with single message packet");
 
 static int maxdevices = 4;
-MODULE_PARM(maxdevices,"i");
+module_param(maxdevices, int, 0);
 MODULE_PARM_DESC(maxdevices,"Max number of allocatable MIDI device");
 
 static int uvendor     = -1;
-MODULE_PARM(uvendor,"i");
+module_param(uvendor, int, 0);
 MODULE_PARM_DESC(uvendor, "The USB Vendor ID of a semi-compliant interface");
 
 static int uproduct    = -1;
-MODULE_PARM(uproduct,"i");
+module_param(uproduct, int, 0);
 MODULE_PARM_DESC(uproduct, "The USB Product ID of a semi-compliant interface");
 
 static int uinterface  = -1;
-MODULE_PARM(uinterface,"i");
+module_param(uinterface, int, 0);
 MODULE_PARM_DESC(uinterface, "The Interface number of a semi-compliant interface");
 
 static int ualt        = -1;
-MODULE_PARM(ualt,"i");
+module_param(ualt, int, 0);
 MODULE_PARM_DESC(ualt, "The optional alternative setting of a semi-compliant interface");
 
 static int umin        = -1;
-MODULE_PARM(umin,"i");
+module_param(umin, int, 0);
 MODULE_PARM_DESC(umin, "The input endpoint of a semi-compliant interface");
 
 static int umout       = -1;
-MODULE_PARM(umout,"i");
+module_param(umout, int, 0);
 MODULE_PARM_DESC(umout, "The output endpoint of a semi-compliant interface");
 
 static int ucable      = -1;
-MODULE_PARM(ucable,"i");
+module_param(ucable, int, 0);
 MODULE_PARM_DESC(ucable, "The cable number used for a semi-compliant interface");
 
 /** Note -- the usb_string() returns only Latin-1 characters.
@@ -98,7 +95,7 @@ MODULE_PARM_DESC(ucable, "The cable number used for a semi-compliant interface")
  * unicode16LE-to-JIS routine is needed to wrap around usb_get_string().
  **/
 static unsigned short ulangid      = 0x0409; /** 0x0411 for Japanese **/
-MODULE_PARM(ulangid,"h");
+module_param(ulangid, ushort, 0);
 MODULE_PARM_DESC(ulangid, "The optional preferred USB Language ID for all devices");
 
 MODULE_AUTHOR("NAGANO Daisuke <breeze.nagano@nifty.ne.jp>");
@@ -649,9 +646,6 @@ static ssize_t usb_midi_read(struct file *file, char __user *buffer, size_t coun
 	ssize_t ret;
 	DECLARE_WAITQUEUE(wait, current);
 
-	if ( ppos != &file->f_pos ) {
-		return -ESPIPE;
-	}
 	if ( !access_ok(VERIFY_READ, buffer, count) ) {
 		return -EFAULT;
 	}
@@ -731,9 +725,6 @@ static ssize_t usb_midi_write(struct file *file, const char __user *buffer, size
 	ssize_t ret;
 	unsigned long int flags;
 
-	if ( ppos != &file->f_pos ) {
-		return -ESPIPE;
-	}
 	if ( !access_ok(VERIFY_READ, buffer, count) ) {
 		return -EFAULT;
 	}
@@ -814,7 +805,6 @@ static int usb_midi_open(struct inode *inode, struct file *file)
 {
 	int minor = iminor(inode);
 	DECLARE_WAITQUEUE(wait, current);
-	struct list_head      *devs, *mdevs;
 	struct usb_midi_state *s;
 	struct usb_mididev    *m;
 	unsigned long flags;
@@ -826,10 +816,8 @@ static int usb_midi_open(struct inode *inode, struct file *file)
 
 	for(;;) {
 		down(&open_sem);
-		for (devs = mididevs.next; devs != &mididevs; devs = devs->next) {
-			s = list_entry(devs, struct usb_midi_state, mididev);
-			for (mdevs = s->midiDevList.next; mdevs != &s->midiDevList; mdevs = mdevs->next) {
-				m = list_entry(mdevs, struct usb_mididev, list);
+		list_for_each_entry(s, &mididevs, mididev) {
+			list_for_each_entry(m, &s->midiDevList, list) {
 				if ( !((m->dev_midi ^ minor) & ~0xf) )
 					goto device_found;
 			}
@@ -923,7 +911,7 @@ static int usb_midi_open(struct inode *inode, struct file *file)
 	printk(KERN_INFO "usb-midi: Open Succeeded. minor= %d.\n", minor);
 #endif
 
-	return 0; /** Success. **/
+	return nonseekable_open(inode, file); /** Success. **/
 }
 
 
@@ -948,19 +936,19 @@ static int usb_midi_release(struct inode *inode, struct file *file)
 
 	if ( m->open_mode & FMODE_WRITE ) {
 		m->open_mode &= ~FMODE_WRITE;
-		usb_unlink_urb( m->mout.ep->urb );
+		usb_kill_urb( m->mout.ep->urb );
 	}
 
 	if ( m->open_mode & FMODE_READ ) {
 	        unsigned long int flagsep;
 	        spin_lock_irqsave( &m->min.ep->lock, flagsep );
-                m->min.ep->cables[m->min.cableId] = 0; // discard cable
+                m->min.ep->cables[m->min.cableId] = NULL; // discard cable
                 m->min.ep->readers -= 1;
 		m->open_mode &= ~FMODE_READ;
 		if ( m->min.ep->readers == 0 &&
                      m->min.ep->urbSubmitted ) {
 			m->min.ep->urbSubmitted = 0;
-			usb_unlink_urb(m->min.ep->urb);
+			usb_kill_urb(m->min.ep->urb);
 		}
 	        spin_unlock_irqrestore( &m->min.ep->lock, flagsep );
 	}
@@ -970,7 +958,7 @@ static int usb_midi_release(struct inode *inode, struct file *file)
 	up(&open_sem);
 	wake_up(&open_wait);
 
-	file->private_data = 0;
+	file->private_data = NULL;
 	return 0;
 }
 
@@ -1051,7 +1039,7 @@ static struct midi_in_endpoint *alloc_midi_in_endpoint( struct usb_device *d, in
 
 static int remove_midi_in_endpoint( struct midi_in_endpoint *min )
 {
-	usb_unlink_urb( min->urb );
+	usb_kill_urb( min->urb );
 	usb_free_urb( min->urb );
 	kfree( min->recvBuf );
 	kfree( min );
@@ -1111,7 +1099,7 @@ static struct midi_out_endpoint *alloc_midi_out_endpoint( struct usb_device *d, 
 
 static int remove_midi_out_endpoint( struct midi_out_endpoint *mout )
 {
-	usb_unlink_urb( mout->urb );
+	usb_kill_urb( mout->urb );
 	usb_free_urb( mout->urb );
 	kfree( mout->buf );
 	kfree( mout );
@@ -1297,7 +1285,7 @@ static struct usb_midi_device *parse_descriptor( struct usb_device *d, unsigned 
 	unsigned char jack2string[256];
 #endif
 
-	u = 0;
+	u = NULL;
 	/* find audiocontrol interface */
 	p1 = find_csinterface_descriptor( buffer, bufSize, NULL,
 					  MS_HEADER, ifnum, altSetting);
@@ -1317,9 +1305,9 @@ static struct usb_midi_device *parse_descriptor( struct usb_device *d, unsigned 
 	if ( !u ) {
 		return NULL;
 	}
-	u->deviceName = 0;
-	u->idVendor = d->descriptor.idVendor;
-	u->idProduct = d->descriptor.idProduct;
+	u->deviceName = NULL;
+	u->idVendor = le16_to_cpu(d->descriptor.idVendor);
+	u->idProduct = le16_to_cpu(d->descriptor.idProduct);
 	u->interface = ifnum;
 	u->altSetting = altSetting;
 	u->in[0].endpoint = -1;
@@ -1391,7 +1379,7 @@ static struct usb_midi_device *parse_descriptor( struct usb_device *d, unsigned 
 
 	if (quirks==0) {
 		/* MIDISTREAM */
-		p2 = 0;
+		p2 = NULL;
 		for (p1 = find_descriptor(buffer, bufSize, NULL, USB_DT_ENDPOINT,
 					  ifnum, altSetting ); p1; p1 = next ) {
 			next = find_descriptor(buffer, bufSize, p1, USB_DT_ENDPOINT,
@@ -1400,7 +1388,7 @@ static struct usb_midi_device *parse_descriptor( struct usb_device *d, unsigned 
 					     ifnum, altSetting ); 
 
 			if ( p2 && next && ( p2 > next ) )
-				p2 = 0;
+				p2 = NULL;
 
 			if ( p1[0] < 9 || !p2 || p2[0] < 4 )
 				continue;
@@ -1519,15 +1507,17 @@ static int on_bits( unsigned short v )
 static int get_alt_setting( struct usb_device *d, int ifnum )
 {
 	int alts, alt=0;
+	struct usb_interface *iface;
 	struct usb_host_interface *interface;
 	struct usb_endpoint_descriptor *ep;
 	int epin, epout;
 	int i;
 
-	alts = d->actconfig->interface[ifnum]->num_altsetting;
+	iface = usb_ifnum_to_if( d, ifnum );
+	alts = iface->num_altsetting;
 
 	for ( alt=0 ; alt<alts ; alt++ ) {
-		interface = &d->actconfig->interface[ifnum]->altsetting[alt];
+		interface = &iface->altsetting[alt];
 		epin = -1;
 		epout = -1;
 
@@ -1542,7 +1532,7 @@ static int get_alt_setting( struct usb_device *d, int ifnum )
 				epout = i;
 			}
 			if ( epin >= 0 && epout >= 0 ) {
-				return alt;
+				return interface->desc.bAlternateSetting;
 			}
 		}
 	}
@@ -1671,11 +1661,11 @@ static int alloc_usb_midi_device( struct usb_device *d, struct usb_midi_state *s
 		} 
 		/* Failsafe */
 		if ( !u->deviceName[0] ) {
-			if ( d->descriptor.idVendor == USB_VENDOR_ID_ROLAND ) {
+			if (le16_to_cpu(d->descriptor.idVendor) == USB_VENDOR_ID_ROLAND ) {
 				strcpy(u->deviceName, "Unknown Roland");
-			} else if ( d->descriptor.idVendor == USB_VENDOR_ID_STEINBERG  ) {
+			} else if (le16_to_cpu(d->descriptor.idVendor) == USB_VENDOR_ID_STEINBERG  ) {
 				strcpy(u->deviceName, "Unknown Steinberg");
-			} else if ( d->descriptor.idVendor == USB_VENDOR_ID_YAMAHA ) {
+			} else if (le16_to_cpu(d->descriptor.idVendor) == USB_VENDOR_ID_YAMAHA ) {
 				strcpy(u->deviceName, "Unknown Yamaha");
 			} else {
 				strcpy(u->deviceName, "Unknown");
@@ -1780,60 +1770,43 @@ static int alloc_usb_midi_device( struct usb_device *d, struct usb_midi_state *s
  *  Called by usb_midi_probe();
  **/
 
-static int detect_yamaha_device( struct usb_device *d, unsigned int ifnum, struct usb_midi_state *s)
+static int detect_yamaha_device( struct usb_device *d,
+		struct usb_interface *iface, unsigned int ifnum,
+		struct usb_midi_state *s)
 {
-	struct usb_host_config *c = d->actconfig;
 	struct usb_host_interface *interface;
 	struct usb_midi_device *u;
-	unsigned char buf[USB_DT_CONFIG_SIZE], *buffer;
+	unsigned char *buffer;
 	int bufSize;
 	int i;
 	int alts=-1;
 	int ret;
 
-	if (d->descriptor.idVendor != USB_VENDOR_ID_YAMAHA) {
+	if (le16_to_cpu(d->descriptor.idVendor) != USB_VENDOR_ID_YAMAHA) {
 		return -EINVAL;
 	}
 
-	for ( i=0 ; i < c->interface[ifnum]->num_altsetting; i++ ) {
-		interface = c->interface[ifnum]->altsetting + i;
+	for ( i=0 ; i < iface->num_altsetting; i++ ) {
+		interface = iface->altsetting + i;
 
 		if ( interface->desc.bInterfaceClass != 255 ||
 		     interface->desc.bInterfaceSubClass != 0 )
 			continue;
-		alts = i;
+		alts = interface->desc.bAlternateSetting;
 	}
 	if ( alts == -1 ) {
 		return -EINVAL;
 	}
 
 	printk(KERN_INFO "usb-midi: Found YAMAHA USB-MIDI device on dev %04x:%04x, iface %d\n",
-	       d->descriptor.idVendor, d->descriptor.idProduct, ifnum);
+	       le16_to_cpu(d->descriptor.idVendor),
+	       le16_to_cpu(d->descriptor.idProduct), ifnum);
 
-	ret = usb_get_descriptor( d, USB_DT_CONFIG, i, buf, USB_DT_CONFIG_SIZE );
-	if ( ret < 0 ) {
-		printk(KERN_INFO "usb-midi: Could not get config (error=%d).\n", ret);
-		return -EINVAL;
-	}
-	if ( buf[1] != USB_DT_CONFIG || buf[0] < USB_DT_CONFIG_SIZE ) {
-		printk(KERN_INFO "usb-midi: config not as expected.\n");
-		return -EINVAL;
-	}
-	bufSize = buf[2] | buf[3]<<8;
-	buffer = (unsigned char *)kmalloc(sizeof(unsigned char)*bufSize, GFP_KERNEL);
-	if ( !buffer ) {
-		printk(KERN_INFO "usb-midi: Could not allocate memory.\n");
-		return -EINVAL;
-	}
-	ret = usb_get_descriptor( d, USB_DT_CONFIG, i, buffer, bufSize );
-	if ( ret < 0 ) {
-		printk(KERN_INFO "usb-midi: Could not get full config (error=%d).\n", ret);
-		kfree(buffer);
-		return -EINVAL;
-	}
+	i = d->actconfig - d->config;
+	buffer = d->rawdescriptors[i];
+	bufSize = le16_to_cpu(d->actconfig->desc.wTotalLength);
 
 	u = parse_descriptor( d, buffer, bufSize, ifnum, alts, 1);
-	kfree(buffer);
 	if ( u == NULL ) {
 		return -EINVAL;
 	}
@@ -1861,8 +1834,8 @@ static int detect_vendor_specific_device( struct usb_device *d, unsigned int ifn
 	for ( i=0; i<VENDOR_SPECIFIC_USB_MIDI_DEVICES ; i++ ) {
 		u=&(usb_midi_devices[i]);
     
-		if ( d->descriptor.idVendor != u->idVendor ||
-		     d->descriptor.idProduct != u->idProduct ||
+		if ( le16_to_cpu(d->descriptor.idVendor) != u->idVendor ||
+		     le16_to_cpu(d->descriptor.idProduct) != u->idProduct ||
 		     ifnum != u->interface )
 			continue;
 
@@ -1878,31 +1851,33 @@ static int detect_vendor_specific_device( struct usb_device *d, unsigned int ifn
  *  Returns 0 on success, negative on failure.
  * Called by usb_midi_probe();
  **/
-static int detect_midi_subclass(struct usb_device *d, unsigned int ifnum, struct usb_midi_state *s)
+static int detect_midi_subclass(struct usb_device *d,
+		struct usb_interface *iface, unsigned int ifnum,
+		struct usb_midi_state *s)
 {
-	struct usb_host_config *c = d->actconfig;
 	struct usb_host_interface *interface;
 	struct usb_midi_device *u;
-	unsigned char buf[USB_DT_CONFIG_SIZE], *buffer;
+	unsigned char *buffer;
 	int bufSize;
 	int i;
 	int alts=-1;
 	int ret;
 
-	for ( i=0 ; i < c->interface[ifnum]->num_altsetting; i++ ) {
-		interface = c->interface[ifnum]->altsetting + i;
+	for ( i=0 ; i < iface->num_altsetting; i++ ) {
+		interface = iface->altsetting + i;
 
 		if ( interface->desc.bInterfaceClass != USB_CLASS_AUDIO ||
 		     interface->desc.bInterfaceSubClass != USB_SUBCLASS_MIDISTREAMING )
 			continue;
-		alts = i;
+		alts = interface->desc.bAlternateSetting;
 	}
 	if ( alts == -1 ) {
 		return -EINVAL;
 	}
 
 	printk(KERN_INFO "usb-midi: Found MIDISTREAMING on dev %04x:%04x, iface %d\n",
-	       d->descriptor.idVendor, d->descriptor.idProduct, ifnum);
+	       le16_to_cpu(d->descriptor.idVendor), 
+	       le16_to_cpu(d->descriptor.idProduct), ifnum);
 
 
 	/* From USB Spec v2.0, Section 9.5.
@@ -1915,30 +1890,11 @@ static int detect_midi_subclass(struct usb_device *d, unsigned int ifnum, struct
 	   descriptor they modify or extend.
 	*/
 
-	ret = usb_get_descriptor( d, USB_DT_CONFIG, i, buf, USB_DT_CONFIG_SIZE );
-	if ( ret < 0 ) {
-		printk(KERN_INFO "usb-midi: Could not get config (error=%d).\n", ret);
-		return -EINVAL;
-	}
-	if ( buf[1] != USB_DT_CONFIG || buf[0] < USB_DT_CONFIG_SIZE ) {
-		printk(KERN_INFO "usb-midi: config not as expected.\n");
-		return -EINVAL;
-	}
-	bufSize = buf[2] | buf[3]<<8;
-	buffer = (unsigned char *)kmalloc(sizeof(unsigned char)*bufSize, GFP_KERNEL);
-	if ( !buffer ) {
-		printk(KERN_INFO "usb-midi: Could not allocate memory.\n");
-		return -EINVAL;
-	}
-	ret = usb_get_descriptor( d, USB_DT_CONFIG, i, buffer, bufSize );
-	if ( ret < 0 ) {
-		printk(KERN_INFO "usb-midi: Could not get full config (error=%d).\n", ret);
-		kfree(buffer);
-		return -EINVAL;
-	}
+	i = d->actconfig - d->config;
+	buffer = d->rawdescriptors[i];
+	bufSize = le16_to_cpu(d->actconfig->desc.wTotalLength);
 
 	u = parse_descriptor( d, buffer, bufSize, ifnum, alts, 0);
-	kfree(buffer);
 	if ( u == NULL ) {
 		return -EINVAL;
 	}
@@ -1961,8 +1917,8 @@ static int detect_by_hand(struct usb_device *d, unsigned int ifnum, struct usb_m
 {
 	struct usb_midi_device u;
 
-	if ( d->descriptor.idVendor != uvendor ||
-	     d->descriptor.idProduct != uproduct ||
+	if ( le16_to_cpu(d->descriptor.idVendor) != uvendor ||
+	     le16_to_cpu(d->descriptor.idProduct) != uproduct ||
 	     ifnum != uinterface ) {
 		return -EINVAL;
 	}
@@ -1977,8 +1933,8 @@ static int detect_by_hand(struct usb_device *d, unsigned int ifnum, struct usb_m
 	if ( ucable < 0 || ucable > 15 )
 		ucable = 0;
 
-	u.deviceName = 0; /* A flag for alloc_usb_midi_device to get device name
-			     from device. */
+	u.deviceName = NULL; /* A flag for alloc_usb_midi_device to get device
+				name from device. */
 	u.idVendor   = uvendor;
 	u.idProduct  = uproduct;
 	u.interface  = uinterface;
@@ -2002,7 +1958,7 @@ static int usb_midi_probe(struct usb_interface *intf,
 {
 	struct usb_midi_state *s;
 	struct usb_device *dev = interface_to_usbdev(intf);
-	int ifnum = intf->altsetting->desc.bInterfaceNumber;
+	int ifnum = intf->cur_altsetting->desc.bInterfaceNumber;
 
 	s = (struct usb_midi_state *)kmalloc(sizeof(struct usb_midi_state), GFP_KERNEL);
 	if ( !s )
@@ -2018,9 +1974,9 @@ static int usb_midi_probe(struct usb_interface *intf,
 
 	if (
 		detect_by_hand( dev, ifnum, s ) &&
-		detect_midi_subclass( dev, ifnum, s ) &&
+		detect_midi_subclass( dev, intf, ifnum, s ) &&
 		detect_vendor_specific_device( dev, ifnum, s ) &&
-		detect_yamaha_device( dev, ifnum, s) ) {
+		detect_yamaha_device( dev, intf, ifnum, s) ) {
 		kfree(s);
 		return -EIO;
 	}
@@ -2037,7 +1993,6 @@ static int usb_midi_probe(struct usb_interface *intf,
 static void usb_midi_disconnect(struct usb_interface *intf)
 {
 	struct usb_midi_state *s = usb_get_intfdata (intf);
-	struct list_head      *list;
 	struct usb_mididev    *m;
 
 	if ( !s )
@@ -2055,8 +2010,7 @@ static void usb_midi_disconnect(struct usb_interface *intf)
 	s->usbdev = NULL;
 	usb_set_intfdata (intf, NULL);
 
-	for ( list = s->midiDevList.next; list != &s->midiDevList; list = list->next ) {
-		m = list_entry(list, struct usb_mididev, list);
+	list_for_each_entry(m, &s->midiDevList, list) {
 		wake_up(&(m->min.ep->wait));
 		wake_up(&(m->mout.ep->wait));
 		if ( m->dev_midi >= 0 ) {

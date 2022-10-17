@@ -20,9 +20,9 @@
 #define to_class_dev(obj) container_of(obj,struct class_device,kobj)
 #define to_net_dev(class) container_of(class, struct net_device, class_dev)
 
-static const char *fmt_hex = "%#x\n";
-static const char *fmt_dec = "%d\n";
-static const char *fmt_ulong = "%lu\n";
+static const char fmt_hex[] = "%#x\n";
+static const char fmt_dec[] = "%d\n";
+static const char fmt_ulong[] = "%lu\n";
 
 static inline int dev_isalive(const struct net_device *dev) 
 {
@@ -126,8 +126,18 @@ static ssize_t show_broadcast(struct class_device *dev, char *buf)
 	return -EINVAL;
 }
 
+static ssize_t show_carrier(struct class_device *dev, char *buf)
+{
+	struct net_device *netdev = to_net_dev(dev);
+	if (netif_running(netdev)) {
+		return sprintf(buf, fmt_dec, !!netif_carrier_ok(netdev));
+	}
+	return -EINVAL;
+}
+
 static CLASS_DEVICE_ATTR(address, S_IRUGO, show_address, NULL);
 static CLASS_DEVICE_ATTR(broadcast, S_IRUGO, show_broadcast, NULL);
+static CLASS_DEVICE_ATTR(carrier, S_IRUGO, show_carrier, NULL);
 
 /* read-write attributes */
 NETDEVICE_SHOW(mtu, fmt_dec);
@@ -186,6 +196,7 @@ static struct class_device_attribute *net_class_attributes[] = {
 	&class_device_attr_type,
 	&class_device_attr_address,
 	&class_device_attr_broadcast,
+	&class_device_attr_carrier,
 	NULL
 };
 
@@ -356,7 +367,7 @@ static int netdev_hotplug(struct class_device *cd, char **envp,
 	if ((size <= 0) || (i >= num_envp))
 		return -ENOMEM;
 
-	envp[i] = 0;
+	envp[i] = NULL;
 	return 0;
 }
 #endif
@@ -372,7 +383,7 @@ static void netdev_release(struct class_device *cd)
 
 	BUG_ON(dev->reg_state != NETREG_RELEASED);
 
-	kfree(dev);
+	kfree((char *)dev - dev->padded);
 }
 
 static struct class net_class = {
@@ -408,13 +419,12 @@ int netdev_register_sysfs(struct net_device *net)
 
 	class_dev->class = &net_class;
 	class_dev->class_data = net;
-	net->last_stats = net->get_stats;
 
 	strlcpy(class_dev->class_id, net->name, BUS_ID_SIZE);
 	if ((ret = class_device_register(class_dev)))
 		goto out;
 
-	for (i = 0; (attr = net_class_attributes[i]); i++) {
+	for (i = 0; (attr = net_class_attributes[i]) != NULL; i++) {
 		if ((ret = class_device_create_file(class_dev, attr)))
 		    goto out_unreg;
 	}

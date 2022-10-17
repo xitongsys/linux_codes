@@ -22,32 +22,19 @@
  *
  *-----------------------------------------------------------------------------
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
- * combined work to also be released under the terms of the GPL, the terms
- * and conditions of this License will apply in addition to those of the
- * GPL with the exception of any terms or conditions of this License that
- * conflict with, or are expressly prohibited by, the GPL.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHORS AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifdef __FreeBSD__
@@ -89,9 +76,6 @@ static struct sym_fwb_ofs sym_fw1b_ofs = {
 };
 static struct sym_fwz_ofs sym_fw1z_ofs = {
 	SYM_GEN_FW_Z(struct SYM_FWZ_SCR)
-#ifdef SYM_OPT_NO_BUS_MEMORY_MAPPING
-	SYM_GEN_Z(struct SYM_FWZ_SCR, start_ram)
-#endif
 };
 #undef	SYM_FWA_SCR
 #undef	SYM_FWB_SCR
@@ -122,10 +106,6 @@ static struct sym_fwb_ofs sym_fw2b_ofs = {
 };
 static struct sym_fwz_ofs sym_fw2z_ofs = {
 	SYM_GEN_FW_Z(struct SYM_FWZ_SCR)
-#ifdef SYM_OPT_NO_BUS_MEMORY_MAPPING
-	SYM_GEN_Z(struct SYM_FWZ_SCR, start_ram)
-	SYM_GEN_Z(struct SYM_FWZ_SCR, start_ram64)
-#endif
 };
 #undef	SYM_FWA_SCR
 #undef	SYM_FWB_SCR
@@ -142,25 +122,13 @@ static struct sym_fwz_ofs sym_fw2z_ofs = {
  *  Patch routine for firmware #1.
  */
 static void
-sym_fw1_patch(hcb_p np)
+sym_fw1_patch(struct sym_hcb *np)
 {
 	struct sym_fw1a_scr *scripta0;
 	struct sym_fw1b_scr *scriptb0;
-#ifdef SYM_OPT_NO_BUS_MEMORY_MAPPING
-	struct sym_fw1z_scr *scriptz0 = 
-		(struct sym_fw1z_scr *) np->scriptz0;
-#endif
 
 	scripta0 = (struct sym_fw1a_scr *) np->scripta0;
 	scriptb0 = (struct sym_fw1b_scr *) np->scriptb0;
-
-#ifdef SYM_OPT_NO_BUS_MEMORY_MAPPING
-	/*
-	 *  Set up BUS physical address of SCRIPTS that is to 
-	 *  be copied to on-chip RAM by the SCRIPTS processor.
-	 */
-	scriptz0->scripta0_ba[0]	= cpu_to_scr(vtobus(scripta0));
-#endif
 
 	/*
 	 *  Remove LED support if not needed.
@@ -195,28 +163,13 @@ sym_fw1_patch(hcb_p np)
  *  Patch routine for firmware #2.
  */
 static void
-sym_fw2_patch(hcb_p np)
+sym_fw2_patch(struct sym_hcb *np)
 {
 	struct sym_fw2a_scr *scripta0;
 	struct sym_fw2b_scr *scriptb0;
-#ifdef SYM_OPT_NO_BUS_MEMORY_MAPPING
-	struct sym_fw2z_scr *scriptz0 = 
-		(struct sym_fw2z_scr *) np->scriptz0;
-#endif
 
 	scripta0 = (struct sym_fw2a_scr *) np->scripta0;
 	scriptb0 = (struct sym_fw2b_scr *) np->scriptb0;
-
-#ifdef SYM_OPT_NO_BUS_MEMORY_MAPPING
-	/*
-	 *  Set up BUS physical address of SCRIPTS that is to 
-	 *  be copied to on-chip RAM by the SCRIPTS processor.
-	 */
-	scriptz0->scripta0_ba64[0]	= /* Nothing is missing here */
-	scriptz0->scripta0_ba[0]	= cpu_to_scr(vtobus(scripta0));
-	scriptz0->scriptb0_ba64[0]	= cpu_to_scr(vtobus(scriptb0));
-	scriptz0->ram_seg64[0]		= np->scr_ram_seg;
-#endif
 
 	/*
 	 *  Remove LED support if not needed.
@@ -270,13 +223,13 @@ sym_fw2_patch(hcb_p np)
 	 *  Remove a couple of work-arounds specific to C1010 if 
 	 *  they are not desirable. See `sym_fw2.h' for more details.
 	 */
-	if (!(np->device_id == PCI_ID_LSI53C1010_66 &&
+	if (!(np->device_id == PCI_DEVICE_ID_LSI_53C1010_66 &&
 	      np->revision_id < 0x1 &&
 	      np->pciclk_khz < 60000)) {
 		scripta0->datao_phase[0] = cpu_to_scr(SCR_NO_OP);
 		scripta0->datao_phase[1] = cpu_to_scr(0);
 	}
-	if (!(np->device_id == PCI_ID_LSI53C1010_33 &&
+	if (!(np->device_id == PCI_DEVICE_ID_LSI_53C1010_33 &&
 	      /* np->revision_id < 0xff */ 1)) {
 		scripta0->sel_done[0] = cpu_to_scr(SCR_NO_OP);
 		scripta0->sel_done[1] = cpu_to_scr(0);
@@ -316,7 +269,7 @@ sym_fw_fill_data (u32 *in, u32 *out)
  *  To be done for all firmwares.
  */
 static void 
-sym_fw_setup_bus_addresses(hcb_p np, struct sym_fw *fw)
+sym_fw_setup_bus_addresses(struct sym_hcb *np, struct sym_fw *fw)
 {
 	u32 *pa;
 	u_short *po;
@@ -353,7 +306,7 @@ sym_fw_setup_bus_addresses(hcb_p np, struct sym_fw *fw)
  *  Setup routine for firmware #1.
  */
 static void 
-sym_fw1_setup(hcb_p np, struct sym_fw *fw)
+sym_fw1_setup(struct sym_hcb *np, struct sym_fw *fw)
 {
 	struct sym_fw1a_scr *scripta0;
 	struct sym_fw1b_scr *scriptb0;
@@ -377,7 +330,7 @@ sym_fw1_setup(hcb_p np, struct sym_fw *fw)
  *  Setup routine for firmware #2.
  */
 static void 
-sym_fw2_setup(hcb_p np, struct sym_fw *fw)
+sym_fw2_setup(struct sym_hcb *np, struct sym_fw *fw)
 {
 	struct sym_fw2a_scr *scripta0;
 	struct sym_fw2b_scr *scriptb0;
@@ -417,13 +370,13 @@ sym_find_firmware(struct sym_pci_chip *chip)
 		return &sym_fw1;
 #endif
 	else
-		return 0;
+		return NULL;
 }
 
 /*
  *  Bind a script to physical addresses.
  */
-void sym_fw_bind_script (hcb_p np, u32 *start, int len)
+void sym_fw_bind_script(struct sym_hcb *np, u32 *start, int len)
 {
 	u32 opcode, new, old, tmp1, tmp2;
 	u32 *end, *cur;
@@ -445,7 +398,6 @@ void sym_fw_bind_script (hcb_p np, u32 *start, int len)
 		if (opcode == 0) {
 			printf ("%s: ERROR0 IN SCRIPT at %d.\n",
 				sym_name(np), (int) (cur-start));
-			MDELAY (10000);
 			++cur;
 			continue;
 		};
@@ -489,7 +441,6 @@ void sym_fw_bind_script (hcb_p np, u32 *start, int len)
 			if ((tmp1 ^ tmp2) & 3) {
 				printf ("%s: ERROR1 IN SCRIPT at %d.\n",
 					sym_name(np), (int) (cur-start));
-				MDELAY (10000);
 			}
 			/*
 			 *  If PREFETCH feature not enabled, remove 

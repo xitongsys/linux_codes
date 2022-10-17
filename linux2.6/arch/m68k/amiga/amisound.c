@@ -17,7 +17,7 @@
 #include <asm/system.h>
 #include <asm/amigahw.h>
 
-static unsigned short *snd_data = NULL;
+static unsigned short *snd_data;
 static const signed char sine_data[] = {
 	0,  39,  75,  103,  121,  127,  121,  103,  75,  39,
 	0, -39, -75, -103, -121, -127, -121, -103, -75, -39
@@ -44,7 +44,7 @@ static unsigned long clock_constant;
 
 void __init amiga_init_sound(void)
 {
-	static struct resource beep_res = { "Beep" };
+	static struct resource beep_res = { .name = "Beep" };
 
 	snd_data = amiga_chip_alloc_res(sizeof(sine_data), &beep_res);
 	if (!snd_data) {
@@ -88,7 +88,7 @@ void amiga_mksound( unsigned int hz, unsigned int ticks )
 		custom.aud[2].audlen = sizeof(sine_data)/2;
 		custom.aud[2].audper = (unsigned short)period;
 		custom.aud[2].audvol = 32; /* 50% of maxvol */
-	
+
 		if (ticks) {
 			sound_timer.expires = jiffies + ticks;
 			add_timer( &sound_timer );

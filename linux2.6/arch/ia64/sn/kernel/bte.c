@@ -1,45 +1,21 @@
 /*
- *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
  *
  * Copyright (c) 2000-2003 Silicon Graphics, Inc.  All Rights Reserved.
- * 
- * This program is free software; you can redistribute it and/or modify it 
- * under the terms of version 2 of the GNU General Public License 
- * as published by the Free Software Foundation.
- * 
- * This program is distributed in the hope that it would be useful, but 
- * WITHOUT ANY WARRANTY; without even the implied warranty of 
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. 
- * 
- * Further, this software is distributed without any warranty that it is 
- * free of the rightful claim of any third person regarding infringement 
- * or the like.  Any license provided herein, whether implied or 
- * otherwise, applies only to this software file.  Patent licenses, if 
- * any, provided herein do not apply to combinations of this program with 
- * other software, or any other product whatsoever.
- * 
- * You should have received a copy of the GNU General Public 
- * License along with this program; if not, write the Free Software 
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
- * 
- * Contact information:  Silicon Graphics, Inc., 1600 Amphitheatre Pkwy, 
- * Mountain View, CA  94043, or:
- * 
- * http://www.sgi.com 
- * 
- * For further information regarding this notice, see: 
- * 
- * http://oss.sgi.com/projects/GenInfo/NoticeExplan
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <asm/sn/nodepda.h>
 #include <asm/sn/addrs.h>
 #include <asm/sn/arch.h>
 #include <asm/sn/sn_cpuid.h>
 #include <asm/sn/pda.h>
-#include <asm/sn/sn2/shubio.h>
+#include <asm/sn/shubio.h>
 #include <asm/nodedata.h>
+#include <asm/delay.h>
 
 #include <linux/bootmem.h>
 #include <linux/string.h>
@@ -51,17 +27,22 @@
 #define L1_CACHE_MASK (L1_CACHE_BYTES - 1)
 #endif
 
-/*
- * The base address of for each set of bte registers.
- */
-static int bte_offsets[] = { IIO_IBLS0, IIO_IBLS1 };
+/* two interfaces on two btes */
+#define MAX_INTERFACES_TO_TRY		4
 
+static struct bteinfo_s *bte_if_on_node(nasid_t nasid, int interface)
+{
+	nodepda_t *tmp_nodepda;
+
+	tmp_nodepda = NODEPDA(nasid_to_cnodeid(nasid));
+	return &tmp_nodepda->bte_if[interface];
+
+}
 
 /************************************************************************
  * Block Transfer Engine copy related functions.
  *
  ***********************************************************************/
-
 
 /*
  * bte_copy(src, dest, len, mode, notification)
@@ -82,15 +63,17 @@ static int bte_offsets[] = { IIO_IBLS0, IIO_IBLS1 };
  * NOTE:  This function requires src, dest, and len to
  * be cacheline aligned.
  */
-bte_result_t
-bte_copy(u64 src, u64 dest, u64 len, u64 mode, void *notification)
+bte_result_t bte_copy(u64 src, u64 dest, u64 len, u64 mode, void *notification)
 {
-	int bte_to_use;
 	u64 transfer_size;
+	u64 transfer_stat;
 	struct bteinfo_s *bte;
 	bte_result_t bte_status;
 	unsigned long irq_flags;
-
+	unsigned long itc_end = 0;
+	struct bteinfo_s *btes_to_try[MAX_INTERFACES_TO_TRY];
+	int bte_if_index;
+	int bte_pri, bte_sec;
 
 	BTE_PRINTK(("bte_copy(0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%p)\n",
 		    src, dest, len, mode, notification));
@@ -99,21 +82,71 @@ bte_copy(u64 src, u64 dest, u64 len, u64 mode, void *notification)
 		return BTE_SUCCESS;
 	}
 
-	ASSERT(!((len & L1_CACHE_MASK) ||
-		 (src & L1_CACHE_MASK) || (dest & L1_CACHE_MASK)));
-	ASSERT(len < ((BTE_LEN_MASK + 1) << L1_CACHE_SHIFT));
+	BUG_ON((len & L1_CACHE_MASK) ||
+		 (src & L1_CACHE_MASK) || (dest & L1_CACHE_MASK));
+	BUG_ON(!(len < ((BTE_LEN_MASK + 1) << L1_CACHE_SHIFT)));
 
+	/* CPU 0 (per node) tries bte0 first, CPU 1 try bte1 first */
+	if (cpuid_to_subnode(smp_processor_id()) == 0) {
+		bte_pri = 0;
+		bte_sec = 1;
+	} else {
+		bte_pri = 1;
+		bte_sec = 0;
+	}
+
+	if (mode & BTE_USE_DEST) {
+		/* try remote then local */
+		btes_to_try[0] = bte_if_on_node(NASID_GET(dest), bte_pri);
+		btes_to_try[1] = bte_if_on_node(NASID_GET(dest), bte_sec);
+		if (mode & BTE_USE_ANY) {
+			btes_to_try[2] = bte_if_on_node(get_nasid(), bte_pri);
+			btes_to_try[3] = bte_if_on_node(get_nasid(), bte_sec);
+		} else {
+			btes_to_try[2] = NULL;
+			btes_to_try[3] = NULL;
+		}
+	} else {
+		/* try local then remote */
+		btes_to_try[0] = bte_if_on_node(get_nasid(), bte_pri);
+		btes_to_try[1] = bte_if_on_node(get_nasid(), bte_sec);
+		if (mode & BTE_USE_ANY) {
+			btes_to_try[2] = bte_if_on_node(NASID_GET(dest), bte_pri);
+			btes_to_try[3] = bte_if_on_node(NASID_GET(dest), bte_sec);
+		} else {
+			btes_to_try[2] = NULL;
+			btes_to_try[3] = NULL;
+		}
+	}
+
+retry_bteop:
 	do {
 		local_irq_save(irq_flags);
 
-		bte_to_use = 0;
+		bte_if_index = 0;
+
 		/* Attempt to lock one of the BTE interfaces. */
-		while ((bte_to_use < BTES_PER_NODE) &&
-		       BTE_LOCK_IF_AVAIL(bte_to_use)) {
-			bte_to_use++;
+		while (bte_if_index < MAX_INTERFACES_TO_TRY) {
+			bte = btes_to_try[bte_if_index++];
+
+			if (bte == NULL) {
+				continue;
+			}
+
+			if (spin_trylock(&bte->spinlock)) {
+				if (!(*bte->most_rcnt_na & BTE_WORD_AVAILABLE) ||
+				    (BTE_LNSTAT_LOAD(bte) & BTE_ACTIVE)) {
+					/* Got the lock but BTE still busy */
+					spin_unlock(&bte->spinlock);
+				} else {
+					/* we got the lock and it's not busy */
+					break;
+				}
+			}
+			bte = NULL;
 		}
 
-		if (bte_to_use < BTES_PER_NODE) {
+		if (bte != NULL) {
 			break;
 		}
 
@@ -122,14 +155,7 @@ bte_copy(u64 src, u64 dest, u64 len, u64 mode, void *notification)
 		if (!(mode & BTE_WACQUIRE)) {
 			return BTEFAIL_NOTAVAIL;
 		}
-
-		/* Wait until a bte is available. */
-		udelay(10);
 	} while (1);
-
-	bte = pda->cpu_bte_if[bte_to_use];
-	BTE_PRINTKV(("Got a lock on bte %d\n", bte_to_use));
-
 
 	if (notification == NULL) {
 		/* User does not want to be notified. */
@@ -142,58 +168,66 @@ bte_copy(u64 src, u64 dest, u64 len, u64 mode, void *notification)
 	transfer_size = ((len >> L1_CACHE_SHIFT) & BTE_LEN_MASK);
 
 	/* Initialize the notification to a known value. */
-	*bte->most_rcnt_na = -1L;
+	*bte->most_rcnt_na = BTE_WORD_BUSY;
 
 	/* Set the status reg busy bit and transfer length */
-	BTE_PRINTKV(("IBLS - HUB_S(0x%p, 0x%lx)\n",
-		     BTEREG_LNSTAT_ADDR, IBLS_BUSY | transfer_size));
-	HUB_S(BTEREG_LNSTAT_ADDR, (IBLS_BUSY | transfer_size));
+	BTE_PRINTKV(("IBLS = 0x%lx\n", IBLS_BUSY | transfer_size));
+	BTE_LNSTAT_STORE(bte, IBLS_BUSY | transfer_size);
 
 	/* Set the source and destination registers */
-	BTE_PRINTKV(("IBSA - HUB_S(0x%p, 0x%lx)\n", BTEREG_SRC_ADDR,
-		     (TO_PHYS(src))));
-	HUB_S(BTEREG_SRC_ADDR, (TO_PHYS(src)));
-	BTE_PRINTKV(("IBDA - HUB_S(0x%p, 0x%lx)\n", BTEREG_DEST_ADDR,
-		     (TO_PHYS(dest))));
-	HUB_S(BTEREG_DEST_ADDR, (TO_PHYS(dest)));
+	BTE_PRINTKV(("IBSA = 0x%lx)\n", (TO_PHYS(src))));
+	BTE_SRC_STORE(bte, TO_PHYS(src));
+	BTE_PRINTKV(("IBDA = 0x%lx)\n", (TO_PHYS(dest))));
+	BTE_DEST_STORE(bte, TO_PHYS(dest));
 
 	/* Set the notification register */
-	BTE_PRINTKV(("IBNA - HUB_S(0x%p, 0x%lx)\n", BTEREG_NOTIF_ADDR,
-		     (TO_PHYS(ia64_tpa((unsigned long)bte->most_rcnt_na)))));
-	HUB_S(BTEREG_NOTIF_ADDR, (TO_PHYS(ia64_tpa((unsigned long)bte->most_rcnt_na))));
-
+	BTE_PRINTKV(("IBNA = 0x%lx)\n",
+		     TO_PHYS(ia64_tpa((unsigned long)bte->most_rcnt_na))));
+	BTE_NOTIF_STORE(bte,
+			TO_PHYS(ia64_tpa((unsigned long)bte->most_rcnt_na)));
 
 	/* Initiate the transfer */
-	BTE_PRINTK(("IBCT - HUB_S(0x%p, 0x%lx)\n", BTEREG_CTRL_ADDR,
-		     BTE_VALID_MODE(mode)));
-	HUB_S(BTEREG_CTRL_ADDR, BTE_VALID_MODE(mode));
+	BTE_PRINTK(("IBCT = 0x%lx)\n", BTE_VALID_MODE(mode)));
+	BTE_CTRL_STORE(bte, BTE_VALID_MODE(mode));
+
+	itc_end = ia64_get_itc() + (40000000 * local_cpu_data->cyc_per_usec);
 
 	spin_unlock_irqrestore(&bte->spinlock, irq_flags);
-
 
 	if (notification != NULL) {
 		return BTE_SUCCESS;
 	}
 
-	while (*bte->most_rcnt_na == -1UL) {
+	while ((transfer_stat = *bte->most_rcnt_na) == BTE_WORD_BUSY) {
+		if (ia64_get_itc() > itc_end) {
+			BTE_PRINTK(("BTE timeout nasid 0x%x bte%d IBLS = 0x%lx na 0x%lx\n",
+				NASID_GET(bte->bte_base_addr), bte->bte_num,
+				BTE_LNSTAT_LOAD(bte), *bte->most_rcnt_na) );
+			bte->bte_error_count++;
+			bte->bh_error = IBLS_ERROR;
+			bte_error_handler((unsigned long)NODEPDA(bte->bte_cnode));
+			*bte->most_rcnt_na = BTE_WORD_AVAILABLE;
+			goto retry_bteop;
+		}
 	}
 
-
 	BTE_PRINTKV((" Delay Done.  IBLS = 0x%lx, most_rcnt_na = 0x%lx\n",
-				HUB_L(BTEREG_LNSTAT_ADDR), *bte->most_rcnt_na));
+		     BTE_LNSTAT_LOAD(bte), *bte->most_rcnt_na));
 
-	if (*bte->most_rcnt_na & IBLS_ERROR) {
-		bte_status = *bte->most_rcnt_na & ~IBLS_ERROR;
-		*bte->most_rcnt_na = 0L;
+	if (transfer_stat & IBLS_ERROR) {
+		bte_status = transfer_stat & ~IBLS_ERROR;
 	} else {
 		bte_status = BTE_SUCCESS;
 	}
+	*bte->most_rcnt_na = BTE_WORD_AVAILABLE;
+
 	BTE_PRINTK(("Returning status is 0x%lx and most_rcnt_na is 0x%lx\n",
-				HUB_L(BTEREG_LNSTAT_ADDR), *bte->most_rcnt_na));
+		    BTE_LNSTAT_LOAD(bte), *bte->most_rcnt_na));
 
 	return bte_status;
 }
 
+EXPORT_SYMBOL(bte_copy);
 
 /*
  * bte_unaligned_copy(src, dest, len, mode)
@@ -211,8 +245,7 @@ bte_copy(u64 src, u64 dest, u64 len, u64 mode, void *notification)
  * NOTE: If the source, dest, and len are all cache line aligned,
  * then it would be _FAR_ preferrable to use bte_copy instead.
  */
-bte_result_t
-bte_unaligned_copy(u64 src, u64 dest, u64 len, u64 mode)
+bte_result_t bte_unaligned_copy(u64 src, u64 dest, u64 len, u64 mode)
 {
 	int destFirstCacheOffset;
 	u64 headBteSource;
@@ -225,14 +258,19 @@ bte_unaligned_copy(u64 src, u64 dest, u64 len, u64 mode)
 	u64 footBcopyDest;
 	u64 footBcopyLen;
 	bte_result_t rv;
-	char *bteBlock;
+	char *bteBlock, *bteBlock_unaligned;
 
 	if (len == 0) {
 		return BTE_SUCCESS;
 	}
 
 	/* temporary buffer used during unaligned transfers */
-	bteBlock = pda->cpu_bte_if[0]->scratch_buf;
+	bteBlock_unaligned = kmalloc(len + 3 * L1_CACHE_BYTES,
+				     GFP_KERNEL | GFP_DMA);
+	if (bteBlock_unaligned == NULL) {
+		return BTEFAIL_NOTAVAIL;
+	}
+	bteBlock = (char *)L1_CACHE_ALIGN((u64) bteBlock_unaligned);
 
 	headBcopySrcOffset = src & L1_CACHE_MASK;
 	destFirstCacheOffset = dest & L1_CACHE_MASK;
@@ -280,15 +318,13 @@ bte_unaligned_copy(u64 src, u64 dest, u64 len, u64 mode)
 		}
 
 		if (len > headBcopyLen) {
-			footBcopyLen =
-			    (len - headBcopyLen) & L1_CACHE_MASK;
+			footBcopyLen = (len - headBcopyLen) & L1_CACHE_MASK;
 			footBteLen = L1_CACHE_BYTES;
 
 			footBteSource = src + len - footBcopyLen;
 			footBcopyDest = dest + len - footBcopyLen;
 
-			if (footBcopyDest ==
-			    (headBcopyDest + headBcopyLen)) {
+			if (footBcopyDest == (headBcopyDest + headBcopyLen)) {
 				/*
 				 * We have two contigous bcopy
 				 * blocks.  Merge them.
@@ -300,12 +336,12 @@ bte_unaligned_copy(u64 src, u64 dest, u64 len, u64 mode)
 					      ia64_tpa((unsigned long)bteBlock),
 					      footBteLen, mode, NULL);
 				if (rv != BTE_SUCCESS) {
+					kfree(bteBlock_unaligned);
 					return rv;
 				}
 
-
 				memcpy(__va(footBcopyDest),
-				       (char *) bteBlock, footBcopyLen);
+				       (char *)bteBlock, footBcopyLen);
 			}
 		} else {
 			footBcopyLen = 0;
@@ -320,12 +356,12 @@ bte_unaligned_copy(u64 src, u64 dest, u64 len, u64 mode)
 				      (len - headBcopyLen -
 				       footBcopyLen), mode, NULL);
 			if (rv != BTE_SUCCESS) {
+				kfree(bteBlock_unaligned);
 				return rv;
 			}
 
 		}
 	} else {
-
 
 		/*
 		 * The transfer is not symetric, we will
@@ -337,8 +373,7 @@ bte_unaligned_copy(u64 src, u64 dest, u64 len, u64 mode)
 		/* Add the leader from source */
 		headBteLen = len + (src & L1_CACHE_MASK);
 		/* Add the trailing bytes from footer. */
-		headBteLen +=
-		    L1_CACHE_BYTES - (headBteLen & L1_CACHE_MASK);
+		headBteLen += L1_CACHE_BYTES - (headBteLen & L1_CACHE_MASK);
 		headBteSource = src & ~L1_CACHE_MASK;
 		headBcopySrcOffset = src & L1_CACHE_MASK;
 		headBcopyDest = dest;
@@ -347,24 +382,26 @@ bte_unaligned_copy(u64 src, u64 dest, u64 len, u64 mode)
 
 	if (headBcopyLen > 0) {
 		rv = bte_copy(headBteSource,
-			      ia64_tpa((unsigned long)bteBlock), headBteLen, mode, NULL);
+			      ia64_tpa((unsigned long)bteBlock), headBteLen,
+			      mode, NULL);
 		if (rv != BTE_SUCCESS) {
+			kfree(bteBlock_unaligned);
 			return rv;
 		}
 
-		memcpy(__va(headBcopyDest), ((char *) bteBlock +
-					     headBcopySrcOffset),
-		       headBcopyLen);
+		memcpy(__va(headBcopyDest), ((char *)bteBlock +
+					     headBcopySrcOffset), headBcopyLen);
 	}
+	kfree(bteBlock_unaligned);
 	return BTE_SUCCESS;
 }
 
+EXPORT_SYMBOL(bte_unaligned_copy);
 
 /************************************************************************
  * Block Transfer Engine initialization functions.
  *
  ***********************************************************************/
-
 
 /*
  * bte_init_node(nodepda, cnode)
@@ -372,11 +409,9 @@ bte_unaligned_copy(u64 src, u64 dest, u64 len, u64 mode)
  * Initialize the nodepda structure with BTE base addresses and
  * spinlocks.
  */
-void
-bte_init_node(nodepda_t * mynodepda, cnodeid_t cnode)
+void bte_init_node(nodepda_t * mynodepda, cnodeid_t cnode)
 {
 	int i;
-
 
 	/*
 	 * Indicate that all the block transfer engines on this node
@@ -391,12 +426,13 @@ bte_init_node(nodepda_t * mynodepda, cnodeid_t cnode)
 	spin_lock_init(&mynodepda->bte_recovery_lock);
 	init_timer(&mynodepda->bte_recovery_timer);
 	mynodepda->bte_recovery_timer.function = bte_error_handler;
-	mynodepda->bte_recovery_timer.data = (unsigned long) mynodepda;
+	mynodepda->bte_recovery_timer.data = (unsigned long)mynodepda;
 
 	for (i = 0; i < BTES_PER_NODE; i++) {
-		/* >>> Don't know why the 0x1800000L is here.  Robin */
-		mynodepda->bte_if[i].bte_base_addr =
-		    (char *) LOCAL_MMR_ADDR(bte_offsets[i] | 0x1800000L);
+		/* Which link status register should we use? */
+		unsigned long link_status = (i == 0 ? IIO_IBLS0 : IIO_IBLS1);
+		mynodepda->bte_if[i].bte_base_addr = (u64 *)
+		    REMOTE_HUB_ADDR(cnodeid_to_nasid(cnode), link_status);
 
 		/*
 		 * Initialize the notification and spinlock
@@ -404,11 +440,9 @@ bte_init_node(nodepda_t * mynodepda, cnodeid_t cnode)
 		 */
 		mynodepda->bte_if[i].most_rcnt_na =
 		    &(mynodepda->bte_if[i].notify);
-		mynodepda->bte_if[i].notify = 0L;
+		mynodepda->bte_if[i].notify = BTE_WORD_AVAILABLE;
 		spin_lock_init(&mynodepda->bte_if[i].spinlock);
 
-		mynodepda->bte_if[i].scratch_buf =
-		    alloc_bootmem_node(NODE_DATA(cnode), BTE_MAX_XFER);
 		mynodepda->bte_if[i].bte_cnode = cnode;
 		mynodepda->bte_if[i].bte_error_count = 0;
 		mynodepda->bte_if[i].bte_num = i;
@@ -416,24 +450,4 @@ bte_init_node(nodepda_t * mynodepda, cnodeid_t cnode)
 		mynodepda->bte_if[i].bh_error = 0;
 	}
 
-}
-
-/*
- * bte_init_cpu()
- *
- * Initialize the cpupda structure with pointers to the
- * nodepda bte blocks.
- *
- */
-void
-bte_init_cpu(void)
-{
-	/* Called by setup.c as each cpu is being added to the nodepda */
-	if (local_node_data->active_cpu_count & 0x1) {
-		pda->cpu_bte_if[0] = &(nodepda->bte_if[0]);
-		pda->cpu_bte_if[1] = &(nodepda->bte_if[1]);
-	} else {
-		pda->cpu_bte_if[0] = &(nodepda->bte_if[1]);
-		pda->cpu_bte_if[1] = &(nodepda->bte_if[0]);
-	}
 }

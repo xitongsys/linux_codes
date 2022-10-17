@@ -11,12 +11,12 @@
  */
 #ifndef _CRYPTO_INTERNAL_H
 #define _CRYPTO_INTERNAL_H
+#include <linux/crypto.h>
 #include <linux/mm.h>
 #include <linux/highmem.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/kmod.h>
-#include <asm/hardirq.h>
 #include <asm/kmap_types.h>
 
 extern enum km_type crypto_km_types[];

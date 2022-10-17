@@ -53,16 +53,18 @@
 
 #define ARCH_NOCONVERT 1
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-#define ARCH_CONVERT   0
+# define ARCH_CONVERT	0
 #else
-#define ARCH_CONVERT   ARCH_NOCONVERT
+# define ARCH_CONVERT	ARCH_NOCONVERT
 #endif
 
 /* generic swapping macros */
 
+#ifndef HAVE_SWABMACROS
 #define INT_SWAP16(type,var) ((typeof(type))(__swab16((__u16)(var))))
 #define INT_SWAP32(type,var) ((typeof(type))(__swab32((__u32)(var))))
 #define INT_SWAP64(type,var) ((typeof(type))(__swab64((__u64)(var))))
+#endif
 
 #define INT_SWAP(type, var) \
     ((sizeof(type) == 8) ? INT_SWAP64(type,var) : \
@@ -155,11 +157,11 @@
 
 /* does not return a value */
 #define INT_MOD_EXPR(reference,arch,code) \
-    (void)(((arch) == ARCH_NOCONVERT) \
+    (((arch) == ARCH_NOCONVERT) \
 	? \
-	    ((reference) code) \
+	    (void)((reference) code) \
 	: \
-	    ( \
+	    (void)( \
 		(reference) = INT_GET((reference),arch) , \
 		((reference) code), \
 		INT_SET(reference, arch, reference) \
@@ -185,10 +187,10 @@
 
 /* does not return a value */
 #define INT_COPY(dst,src,arch) \
-    (void)( \
+    ( \
 	((sizeof(dst) == sizeof(src)) || ((arch) == ARCH_NOCONVERT)) \
 	    ? \
-		((dst) = (src)) \
+		(void)((dst) = (src)) \
 	    : \
 		INT_SET(dst, arch, INT_GET(src, arch)) \
     )

@@ -19,7 +19,7 @@
 
 static struct rpc_clnt *	nsm_create(void);
 
-extern struct rpc_program	nsm_program;
+static struct rpc_program	nsm_program;
 
 /*
  * Local NSM state
@@ -36,10 +36,11 @@ nsm_mon_unmon(struct nlm_host *host, u32 proc, struct nsm_res *res)
 	int		status;
 	struct nsm_args	args;
 
-	status = -EACCES;
 	clnt = nsm_create();
-	if (!clnt)
+	if (IS_ERR(clnt)) {
+		status = PTR_ERR(clnt);
 		goto out;
+	}
 
 	args.addr = host->h_addr.sin_addr.s_addr;
 	args.proto= (host->h_proto<<1) | host->h_server;
@@ -104,7 +105,7 @@ static struct rpc_clnt *
 nsm_create(void)
 {
 	struct rpc_xprt		*xprt;
-	struct rpc_clnt		*clnt = NULL;
+	struct rpc_clnt		*clnt;
 	struct sockaddr_in	sin;
 
 	sin.sin_family = AF_INET;
@@ -112,24 +113,23 @@ nsm_create(void)
 	sin.sin_port = 0;
 
 	xprt = xprt_create_proto(IPPROTO_UDP, &sin, NULL);
-	if (!xprt)
-		goto out;
+	if (IS_ERR(xprt))
+		return (struct rpc_clnt *)xprt;
 
 	clnt = rpc_create_client(xprt, "localhost",
 				&nsm_program, SM_VERSION,
 				RPC_AUTH_NULL);
-	if (!clnt)
+	if (IS_ERR(clnt))
 		goto out_destroy;
 	clnt->cl_softrtry = 1;
 	clnt->cl_chatty   = 1;
 	clnt->cl_oneshot  = 1;
 	xprt->resvport = 1;	/* NSM requires a reserved port */
-out:
 	return clnt;
 
 out_destroy:
 	xprt_destroy(xprt);
-	goto out;
+	return clnt;
 }
 
 /*
@@ -140,7 +140,6 @@ static u32 *
 xdr_encode_common(struct rpc_rqst *rqstp, u32 *p, struct nsm_args *argp)
 {
 	char	buffer[20];
-	u32	addr = ntohl(argp->addr);
 
 	/*
 	 * Use the dotted-quad IP address of the remote host as
@@ -148,8 +147,7 @@ xdr_encode_common(struct rpc_rqst *rqstp, u32 *p, struct nsm_args *argp)
 	 * hostname first for whatever remote hostname it receives,
 	 * so this works alright.
 	 */
-	sprintf(buffer, "%d.%d.%d.%d", (addr>>24) & 0xff, (addr>>16) & 0xff,
-				 	(addr>>8) & 0xff,  (addr) & 0xff);
+	sprintf(buffer, "%u.%u.%u.%u", NIPQUAD(argp->addr));
 	if (!(p = xdr_encode_string(p, buffer))
 	 || !(p = xdr_encode_string(p, system_utsname.nodename)))
 		return ERR_PTR(-EIO);
@@ -239,7 +237,7 @@ static struct rpc_version *	nsm_version[] = {
 
 static struct rpc_stat		nsm_stats;
 
-struct rpc_program		nsm_program = {
+static struct rpc_program	nsm_program = {
 		.name		= "statd",
 		.number		= SM_PROGRAM,
 		.nrvers		= sizeof(nsm_version)/sizeof(nsm_version[0]),

@@ -20,6 +20,7 @@
  */
 #include <linux/config.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/errno.h>
@@ -38,19 +39,7 @@
 #include <asm/irq.h>
 #include <asm/dma.h>
 #include <asm/hardware.h>
-#include <asm/mach-types.h>
-
-#include <asm/arch/assabet.h>
-#include <asm/arch/h3600.h>
-#include <asm/arch/yopy.h>
-
-#ifndef GPIO_IRDA_FIR
-#define GPIO_IRDA_FIR		(0)
-#endif
-
-#ifndef GPIO_IRDA_POWER
-#define GPIO_IRDA_POWER		(0)
-#endif
+#include <asm/mach/irda.h>
 
 static int power_level = 3;
 static int tx_lpm;
@@ -74,6 +63,7 @@ struct sa1100_irda {
 
 	struct net_device_stats	stats;
 	struct device		*dev;
+	struct irda_platform_data *pdata;
 	struct irlap_cb		*irlap;
 	struct qos_info		qos;
 
@@ -169,12 +159,8 @@ static int sa1100_irda_set_speed(struct sa1100_irda *si, int speed)
 		Ser2UTSR0 = UTSR0_REB | UTSR0_RBB | UTSR0_RID;
 		Ser2UTCR3 = UTCR3_RIE | UTCR3_RXE | UTCR3_TXE;
 
-		if (machine_is_assabet())
-			ASSABET_BCR_clear(ASSABET_BCR_IRDA_FSEL);
-		if (machine_is_h3xxx())
-			clr_h3600_egpio(IPAQ_EGPIO_IR_FSEL);
-		if (machine_is_yopy())
-			PPSR &= ~GPIO_IRDA_FIR;
+		if (si->pdata->set_speed)
+			si->pdata->set_speed(si->dev, speed);
 
 		si->speed = speed;
 
@@ -193,12 +179,8 @@ static int sa1100_irda_set_speed(struct sa1100_irda *si, int speed)
 
 		si->speed = speed;
 
-		if (machine_is_assabet())
-			ASSABET_BCR_set(ASSABET_BCR_IRDA_FSEL);
-		if (machine_is_h3xxx())
-			set_h3600_egpio(IPAQ_EGPIO_IR_FSEL);
-		if (machine_is_yopy())
-			PPSR |= GPIO_IRDA_FIR;
+		if (si->pdata->set_speed)
+			si->pdata->set_speed(si->dev, speed);
 
 		sa1100_irda_rx_alloc(si);
 		sa1100_irda_rx_dma_start(si);
@@ -215,51 +197,6 @@ static int sa1100_irda_set_speed(struct sa1100_irda *si, int speed)
 }
 
 /*
- * This sets the IRDA power level on the Assabet.
- */
-static inline int
-sa1100_irda_set_power_assabet(struct sa1100_irda *si, unsigned int state)
-{
-	static unsigned int bcr_state[4] = {
-		ASSABET_BCR_IRDA_MD0,
-		ASSABET_BCR_IRDA_MD1|ASSABET_BCR_IRDA_MD0,
-		ASSABET_BCR_IRDA_MD1,
-		0
-	};
-
-	if (state < 4) {
-		state = bcr_state[state];
-		ASSABET_BCR_clear(state ^ (ASSABET_BCR_IRDA_MD1|
-					   ASSABET_BCR_IRDA_MD0));
-		ASSABET_BCR_set(state);
-	}
-	return 0;
-}
-
-/*
- * This turns the IRDA power on or off on the Compaq H3600
- */
-static inline int
-sa1100_irda_set_power_h3600(struct sa1100_irda *si, unsigned int state)
-{
-	assign_h3600_egpio( IPAQ_EGPIO_IR_ON, state );
-	return 0;
-}
-
-/*
- * This turns the IRDA power on or off on the Yopy
- */
-static inline int
-sa1100_irda_set_power_yopy(struct sa1100_irda *si, unsigned int state)
-{
-	if (state)
-		PPSR &= ~GPIO_IRDA_POWER;
-	else
-		PPSR |= GPIO_IRDA_POWER;
-	return 0;
-}
-
-/*
  * Control the power state of the IrDA transmitter.
  * State:
  *  0 - off
@@ -273,14 +210,8 @@ static int
 __sa1100_irda_set_power(struct sa1100_irda *si, unsigned int state)
 {
 	int ret = 0;
-
-	if (machine_is_assabet())
-		ret = sa1100_irda_set_power_assabet(si, state);
-	if (machine_is_h3xxx())
-		ret = sa1100_irda_set_power_h3600(si, state);
-	if (machine_is_yopy())
-		ret = sa1100_irda_set_power_yopy(si, state);
-
+	if (si->pdata->set_power)
+		ret = si->pdata->set_power(si->dev, state);
 	return ret;
 }
 
@@ -303,11 +234,8 @@ static int sa1100_irda_startup(struct sa1100_irda *si)
 	/*
 	 * Ensure that the ports for this device are setup correctly.
 	 */
-	if (machine_is_yopy()) {
-		PPDR |= GPIO_IRDA_POWER | GPIO_IRDA_FIR;
-		PPSR |= GPIO_IRDA_POWER | GPIO_IRDA_FIR;
-		PSDR |= GPIO_IRDA_POWER | GPIO_IRDA_FIR;
-	}
+	if (si->pdata->startup)
+		si->pdata->startup(si->dev);
 
 	/*
 	 * Configure PPC for IRDA - we want to drive TXD2 low.
@@ -332,10 +260,15 @@ static int sa1100_irda_startup(struct sa1100_irda *si)
 	Ser2UTSR0 = UTSR0_REB | UTSR0_RBB | UTSR0_RID;
 
 	ret = sa1100_irda_set_speed(si, si->speed = 9600);
-	if (ret)
-		return ret;
+	if (ret) {
+		Ser2UTCR3 = 0;
+		Ser2HSCR0 = 0;
 
-	return 0;
+		if (si->pdata->shutdown)
+			si->pdata->shutdown(si->dev);
+	}
+
+	return ret;
 }
 
 static void sa1100_irda_shutdown(struct sa1100_irda *si)
@@ -349,6 +282,9 @@ static void sa1100_irda_shutdown(struct sa1100_irda *si)
 	/* Disable the port. */
 	Ser2UTCR3 = 0;
 	Ser2HSCR0 = 0;
+
+	if (si->pdata->shutdown)
+		si->pdata->shutdown(si->dev);
 }
 
 #ifdef CONFIG_PM
@@ -358,9 +294,13 @@ static void sa1100_irda_shutdown(struct sa1100_irda *si)
 static int sa1100_irda_suspend(struct device *_dev, u32 state, u32 level)
 {
 	struct net_device *dev = dev_get_drvdata(_dev);
-	struct sa1100_irda *si = dev->priv;
+	struct sa1100_irda *si;
 
-	if (si && si->open && level == SUSPEND_DISABLE) {
+	if (!dev || level != SUSPEND_DISABLE)
+		return 0;
+
+	si = dev->priv;
+	if (si->open) {
 		/*
 		 * Stop the transmit queue
 		 */
@@ -379,9 +319,13 @@ static int sa1100_irda_suspend(struct device *_dev, u32 state, u32 level)
 static int sa1100_irda_resume(struct device *_dev, u32 level)
 {
 	struct net_device *dev = dev_get_drvdata(_dev);
-	struct sa1100_irda *si = dev->priv;
+	struct sa1100_irda *si;
 
-	if (si && si->open && level == RESUME_ENABLE) {
+	if (!dev || level != RESUME_ENABLE)
+		return 0;
+
+	si = dev->priv;
+	if (si->open) {
 		/*
 		 * If we missed a speed change, initialise at the new speed
 		 * directly.  It is debatable whether this is actually
@@ -833,8 +777,6 @@ static int sa1100_irda_start(struct net_device *dev)
 	struct sa1100_irda *si = dev->priv;
 	int err;
 
-	MOD_INC_USE_COUNT;
-
 	si->speed = 9600;
 
 	err = request_irq(dev->irq, sa1100_irda_irq, 0, dev->name, dev);
@@ -890,7 +832,6 @@ err_tx_dma:
 err_rx_dma:
 	free_irq(dev->irq, dev);
 err_irq:
-	MOD_DEC_USE_COUNT;
 	return err;
 }
 
@@ -930,8 +871,6 @@ static int sa1100_irda_stop(struct net_device *dev)
 
 	sa1100_set_power(si, 0);
 
-	MOD_DEC_USE_COUNT;
-
 	return 0;
 }
 
@@ -947,56 +886,52 @@ static int sa1100_irda_init_iobuf(iobuff_t *io, int size)
 	return io->head ? 0 : -ENOMEM;
 }
 
-static struct device_driver sa1100ir_driver = {
-	.name		= "sa1100ir",
-	.bus		= &system_bus_type,
-	.suspend	= sa1100_irda_suspend,
-	.resume		= sa1100_irda_resume,
-};
-
-static struct sys_device sa1100ir_device = {
-	.name		= "sa1100ir",
-	.id		= 0,
-	.root		= NULL,
-	.dev		= {
-		.name	= "Intel Corporation SA11x0 [IrDA]",
-		.bus_id	= "0",
-		.driver	= &sa1100ir_driver,
-	},
-};
-
-static int sa1100_irda_net_init(struct net_device *dev)
+static int sa1100_irda_probe(struct device *_dev)
 {
-	struct sa1100_irda *si = dev->priv;
+	struct platform_device *pdev = to_platform_device(_dev);
+	struct net_device *dev;
+	struct sa1100_irda *si;
 	unsigned int baudrate_mask;
-	int err = -ENOMEM;
+	int err;
 
-	si = kmalloc(sizeof(struct sa1100_irda), GFP_KERNEL);
-	if (!si)
-		goto out;
+	if (!pdev->dev.platform_data)
+		return -EINVAL;
 
-	memset(si, 0, sizeof(*si));
+	err = request_mem_region(__PREG(Ser2UTCR0), 0x24, "IrDA") ? 0 : -EBUSY;
+	if (err)
+		goto err_mem_1;
+	err = request_mem_region(__PREG(Ser2HSCR0), 0x1c, "IrDA") ? 0 : -EBUSY;
+	if (err)
+		goto err_mem_2;
+	err = request_mem_region(__PREG(Ser2HSCR2), 0x04, "IrDA") ? 0 : -EBUSY;
+	if (err)
+		goto err_mem_3;
 
-	si->dev = &sa1100ir_device.dev;
+	dev = alloc_irdadev(sizeof(struct sa1100_irda));
+	if (!dev)
+		goto err_mem_4;
+
+	si = dev->priv;
+	si->dev = &pdev->dev;
+	si->pdata = pdev->dev.platform_data;
 
 	/*
 	 * Initialise the HP-SIR buffers
 	 */
 	err = sa1100_irda_init_iobuf(&si->rx_buff, 14384);
 	if (err)
-		goto out;
+		goto err_mem_5;
 	err = sa1100_irda_init_iobuf(&si->tx_buff, 4000);
 	if (err)
-		goto out_free_rx;
+		goto err_mem_5;
 
-	dev->priv = si;
 	dev->hard_start_xmit	= sa1100_irda_hard_xmit;
 	dev->open		= sa1100_irda_start;
 	dev->stop		= sa1100_irda_stop;
 	dev->do_ioctl		= sa1100_irda_ioctl;
 	dev->get_stats		= sa1100_irda_stats;
+	dev->irq		= IRQ_Ser2ICP;
 
-	irda_device_setup(dev);
 	irda_init_max_qos_capabilies(&si->qos);
 
 	/*
@@ -1030,43 +965,56 @@ static int sa1100_irda_net_init(struct net_device *dev)
 	Ser2UTCR4 = si->utcr4;
 	Ser2HSCR0 = HSCR0_UART;
 
-	return 0;
+	err = register_netdev(dev);
+	if (err == 0)
+		dev_set_drvdata(&pdev->dev, dev);
 
-	kfree(si->tx_buff.head);
-out_free_rx:
-	kfree(si->rx_buff.head);
-out:
-	kfree(si);
-
+	if (err) {
+ err_mem_5:
+		kfree(si->tx_buff.head);
+		kfree(si->rx_buff.head);
+		free_netdev(dev);
+ err_mem_4:
+		release_mem_region(__PREG(Ser2HSCR2), 0x04);
+ err_mem_3:
+		release_mem_region(__PREG(Ser2HSCR0), 0x1c);
+ err_mem_2:
+		release_mem_region(__PREG(Ser2UTCR0), 0x24);
+	}
+ err_mem_1:
 	return err;
 }
 
-/*
- * Remove all traces of this driver module from the kernel, so we can't be
- * called.  Note that the device has already been stopped, so we don't have
- * to worry about interrupts or dma.
- */
-static void sa1100_irda_net_uninit(struct net_device *dev)
+static int sa1100_irda_remove(struct device *_dev)
 {
-	struct sa1100_irda *si = dev->priv;
+	struct net_device *dev = dev_get_drvdata(_dev);
 
-	dev->hard_start_xmit	= NULL;
-	dev->open		= NULL;
-	dev->stop		= NULL;
-	dev->do_ioctl		= NULL;
-	dev->get_stats		= NULL;
-	dev->priv		= NULL;
+	if (dev) {
+		struct sa1100_irda *si = dev->priv;
+		unregister_netdev(dev);
+		kfree(si->tx_buff.head);
+		kfree(si->rx_buff.head);
+		free_netdev(dev);
+	}
 
-	kfree(si->tx_buff.head);
-	kfree(si->rx_buff.head);
-	kfree(si);
+	release_mem_region(__PREG(Ser2HSCR2), 0x04);
+	release_mem_region(__PREG(Ser2HSCR0), 0x1c);
+	release_mem_region(__PREG(Ser2UTCR0), 0x24);
+
+	return 0;
 }
+
+static struct device_driver sa1100ir_driver = {
+	.name		= "sa11x0-ir",
+	.bus		= &platform_bus_type,
+	.probe		= sa1100_irda_probe,
+	.remove		= sa1100_irda_remove,
+	.suspend	= sa1100_irda_suspend,
+	.resume		= sa1100_irda_resume,
+};
 
 static int __init sa1100_irda_init(void)
 {
-	struct net_device *dev;
-	int err;
-
 	/*
 	 * Limit power level a sensible range.
 	 */
@@ -1075,103 +1023,23 @@ static int __init sa1100_irda_init(void)
 	if (power_level > 3)
 		power_level = 3;
 
-	err = request_mem_region(__PREG(Ser2UTCR0), 0x24, "IrDA") ? 0 : -EBUSY;
-	if (err)
-		goto err_mem_1;
-	err = request_mem_region(__PREG(Ser2HSCR0), 0x1c, "IrDA") ? 0 : -EBUSY;
-	if (err)
-		goto err_mem_2;
-	err = request_mem_region(__PREG(Ser2HSCR2), 0x04, "IrDA") ? 0 : -EBUSY;
-	if (err)
-		goto err_mem_3;
-
-	driver_register(&sa1100ir_driver);
-	sys_device_register(&sa1100ir_device);
-
-	rtnl_lock();
-	dev = dev_alloc("irda%d", &err);
-	if (dev) {
-		dev->irq    = IRQ_Ser2ICP;
-		dev->init   = sa1100_irda_net_init;
-		dev->uninit = sa1100_irda_net_uninit;
-
-		err = register_netdevice(dev);
-
-		if (err)
-			kfree(dev);
-		else
-			dev_set_drvdata(&sa1100ir_device.dev, dev);
-	}
-	rtnl_unlock();
-
-	if (err) {
-		sys_device_unregister(&sa1100ir_device);
-		driver_unregister(&sa1100ir_driver);
-
-		release_mem_region(__PREG(Ser2HSCR2), 0x04);
-err_mem_3:
-		release_mem_region(__PREG(Ser2HSCR0), 0x1c);
-err_mem_2:
-		release_mem_region(__PREG(Ser2UTCR0), 0x24);
-	}
-err_mem_1:
-	return err;
+	return driver_register(&sa1100ir_driver);
 }
 
 static void __exit sa1100_irda_exit(void)
 {
-	struct net_device *dev = dev_get_drvdata(&sa1100ir_device.dev);
-
-	if (dev)
-		unregister_netdev(dev);
-
-	sys_device_unregister(&sa1100ir_device);
 	driver_unregister(&sa1100ir_driver);
-
-	release_mem_region(__PREG(Ser2HSCR2), 0x04);
-	release_mem_region(__PREG(Ser2HSCR0), 0x1c);
-	release_mem_region(__PREG(Ser2UTCR0), 0x24);
-
-	if(dev)
-		free_netdev(dev);
 }
-
-static int __init sa1100ir_setup(char *line)
-{
-	char *opt;
-
-	if (!line)
-		return 0;
-
-	while ((opt = strsep(&line, ",")) != NULL) {
-		if (!strncmp(opt, "max_rate:", 9)) {
-			max_rate = simple_strtoul(opt + 9, NULL, 0);
-			continue;
-		}
-		if (!strncmp(opt, "power_level:", 12)) {
-			power_level = simple_strtoul(opt + 12, NULL, 0);
-			continue;
-		}
-		if (!strncmp(opt, "tx_lpm:", 7)) {
-			tx_lpm = simple_strtoul(opt + 7, NULL, 0);
-			continue;
-		}
-	}
-
-	return 1;
-}
-
-__setup("sa1100ir=", sa1100ir_setup);
 
 module_init(sa1100_irda_init);
 module_exit(sa1100_irda_exit);
+module_param(power_level, int, 0);
+module_param(tx_lpm, int, 0);
+module_param(max_rate, int, 0);
 
 MODULE_AUTHOR("Russell King <rmk@arm.linux.org.uk>");
 MODULE_DESCRIPTION("StrongARM SA1100 IrDA driver");
 MODULE_LICENSE("GPL");
-MODULE_PARM(power_level, "i");
 MODULE_PARM_DESC(power_level, "IrDA power level, 1 (low) to 3 (high)");
-MODULE_PARM(tx_lpm, "i");
 MODULE_PARM_DESC(tx_lpm, "Enable transmitter low power (1.6us) mode");
-MODULE_PARM(max_rate, "i");
 MODULE_PARM_DESC(max_rate, "Maximum baud rate (4000000, 115200, 57600, 38400, 19200, 9600)");

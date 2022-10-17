@@ -43,6 +43,9 @@
 #include <net/irda/irlap_frame.h>
 #include <net/irda/qos.h>
 
+static void irlap_send_i_frame(struct irlap_cb *self, struct sk_buff *skb,
+			       int command);
+
 /*
  * Function irlap_insert_info (self, skb)
  *
@@ -629,34 +632,6 @@ static inline void irlap_recv_rr_frame(struct irlap_cb *self,
 		irlap_do_event(self, RECV_RR_RSP, skb, info);
 }
 
-void irlap_send_frmr_frame( struct irlap_cb *self, int command)
-{
-	struct sk_buff *tx_skb = NULL;
-	__u8 *frame;
-
-	ASSERT( self != NULL, return;);
-	ASSERT( self->magic == LAP_MAGIC, return;);
-
-	tx_skb = dev_alloc_skb( 32);
-	if (!tx_skb)
-		return;
-
-	frame = skb_put(tx_skb, 2);
-
-	frame[0] = self->caddr;
-	frame[0] |= (command) ? CMD_FRAME : 0;
-
-	frame[1]  = (self->vs << 1);
-	frame[1] |= PF_BIT;
-	frame[1] |= (self->vr << 5);
-
-	frame[2] = 0;
-
-	IRDA_DEBUG(4, "%s(), vr=%d, %ld\n", __FUNCTION__, self->vr, jiffies);
-
-	irlap_queue_xmit(self, tx_skb);
-}
-
 /*
  * Function irlap_recv_rnr_frame (self, skb, info)
  *
@@ -779,6 +754,7 @@ void irlap_send_data_primary(struct irlap_cb *self, struct sk_buff *skb)
 void irlap_send_data_primary_poll(struct irlap_cb *self, struct sk_buff *skb)
 {
 	struct sk_buff *tx_skb;
+	int transmission_time;
 
 	/* Stop P timer */
 	del_timer(&self->poll_timer);
@@ -829,13 +805,49 @@ void irlap_send_data_primary_poll(struct irlap_cb *self, struct sk_buff *skb)
 		}
 	}
 
+	/* How much time we took for transmission of all frames.
+	 * We don't know, so let assume we used the full window. Jean II */
+	transmission_time = self->final_timeout;
+
+	/* Reset parameter so that we can fill next window */
 	self->window = self->window_size;
+
 #ifdef CONFIG_IRDA_DYNAMIC_WINDOW
+	/* Remove what we have not used. Just do a prorata of the
+	 * bytes left in window to window capacity.
+	 * See max_line_capacities[][] in qos.c for details. Jean II */
+	transmission_time -= (self->final_timeout * self->bytes_left
+			      / self->line_capacity);
+	IRDA_DEBUG(4, "%s() adjusting transmission_time : ft=%d, bl=%d, lc=%d -> tt=%d\n", __FUNCTION__, self->final_timeout, self->bytes_left, self->line_capacity, transmission_time);
+
 	/* We are allowed to transmit a maximum number of bytes again. */
 	self->bytes_left = self->line_capacity;
 #endif /* CONFIG_IRDA_DYNAMIC_WINDOW */
 
-	irlap_start_final_timer(self, self->final_timeout);
+	/*
+	 * The network layer has a intermediate buffer between IrLAP
+	 * and the IrDA driver which can contain 8 frames. So, even
+	 * though IrLAP is currently sending the *last* frame of the
+	 * tx-window, the driver most likely has only just started
+	 * sending the *first* frame of the same tx-window.
+	 * I.e. we are always at the very begining of or Tx window.
+	 * Now, we are supposed to set the final timer from the end
+	 * of our tx-window to let the other peer reply. So, we need
+	 * to add extra time to compensate for the fact that we
+	 * are really at the start of tx-window, otherwise the final timer
+	 * might expire before he can answer...
+	 * Jean II
+	 */
+	irlap_start_final_timer(self, self->final_timeout + transmission_time);
+
+	/*
+	 * The clever amongst you might ask why we do this adjustement
+	 * only here, and not in all the other cases in irlap_event.c.
+	 * In all those other case, we only send a very short management
+	 * frame (few bytes), so the adjustement would be lost in the
+	 * noise...
+	 * The exception of course is irlap_resend_rejected_frame().
+	 * Jean II */
 }
 
 /*
@@ -1003,7 +1015,7 @@ void irlap_resend_rejected_frames(struct irlap_cb *self, int command)
 	}
 #if 0 /* Not yet */
 	/*
-	 *  We can now fill the window with additinal data frames
+	 *  We can now fill the window with additional data frames
 	 */
 	while (skb_queue_len( &self->txq) > 0) {
 
@@ -1092,8 +1104,8 @@ void irlap_send_ui_frame(struct irlap_cb *self, struct sk_buff *skb,
  *
  *    Contruct and transmit Information (I) frame
  */
-void irlap_send_i_frame(struct irlap_cb *self, struct sk_buff *skb,
-			int command)
+static void irlap_send_i_frame(struct irlap_cb *self, struct sk_buff *skb,
+			       int command)
 {
 	/* Insert connection address */
 	skb->data[0] = self->caddr;

@@ -39,7 +39,7 @@ int snd_emux_new(snd_emux_t **remu)
 	snd_emux_t *emu;
 
 	*remu = NULL;
-	emu = snd_magic_kcalloc(snd_emux_t, 0, GFP_KERNEL);
+	emu = kcalloc(1, sizeof(*emu), GFP_KERNEL);
 	if (emu == NULL)
 		return -ENOMEM;
 
@@ -67,6 +67,7 @@ int snd_emux_new(snd_emux_t **remu)
  */
 int snd_emux_register(snd_emux_t *emu, snd_card_t *card, int index, char *name)
 {
+	int err;
 	snd_sf_callback_t sf_cb;
 
 	snd_assert(emu->hw != NULL, return -EINVAL);
@@ -76,7 +77,7 @@ int snd_emux_register(snd_emux_t *emu, snd_card_t *card, int index, char *name)
 
 	emu->card = card;
 	emu->name = snd_kmalloc_strdup(name, GFP_KERNEL);
-	emu->voices = snd_kcalloc(sizeof(snd_emux_voice_t) * emu->max_voices, GFP_KERNEL);
+	emu->voices = kcalloc(emu->max_voices, sizeof(snd_emux_voice_t), GFP_KERNEL);
 	if (emu->voices == NULL)
 		return -ENOMEM;
 
@@ -89,6 +90,9 @@ int snd_emux_register(snd_emux_t *emu, snd_card_t *card, int index, char *name)
 	emu->sflist = snd_sf_new(&sf_cb, emu->memhdr);
 	if (emu->sflist == NULL)
 		return -ENOMEM;
+
+	if ((err = snd_emux_init_hwdep(emu)) < 0)
+		return err;
 
 	snd_emux_init_voices(emu);
 
@@ -128,16 +132,14 @@ int snd_emux_free(snd_emux_t *emu)
 #endif
 	snd_emux_detach_seq(emu);
 
+	snd_emux_delete_hwdep(emu);
+
 	if (emu->sflist)
 		snd_sf_free(emu->sflist);
 
-	if (emu->voices)
-		kfree(emu->voices);
-
-	if (emu->name)
-		kfree(emu->name);
-
-	snd_magic_kfree(emu);
+	kfree(emu->voices);
+	kfree(emu->name);
+	kfree(emu);
 	return 0;
 }
 

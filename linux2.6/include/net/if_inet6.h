@@ -25,6 +25,10 @@
 #define IF_RA_RCVD	0x20
 #define IF_RS_SENT	0x10
 
+/* prefix flags */
+#define IF_PREFIX_ONLINK	0x01
+#define IF_PREFIX_AUTOCONF	0x02
+
 #ifdef __KERNEL__
 
 struct inet6_ifaddr 
@@ -47,6 +51,7 @@ struct inet6_ifaddr
 	struct timer_list	timer;
 
 	struct inet6_dev	*idev;
+	struct rt6_info		*rt;
 
 	struct inet6_ifaddr	*lst_next;      /* next addr in addr_lst */
 	struct inet6_ifaddr	*if_next;       /* next addr in inet6_dev */
@@ -129,6 +134,7 @@ struct ifacaddr6
 {
 	struct in6_addr		aca_addr;
 	struct inet6_dev	*aca_idev;
+	struct rt6_info		*aca_rt;
 	struct ifacaddr6	*aca_next;
 	int			aca_users;
 	atomic_t		aca_refcnt;
@@ -183,6 +189,7 @@ struct inet6_dev
 	struct inet6_dev	*next;
 	struct ipv6_devconf	cnf;
 	struct ipv6_devstat	stats;
+	unsigned long		tstamp; /* ipv6InterfaceTable update timestamp */
 };
 
 extern struct ipv6_devconf ipv6_devconf;
@@ -258,6 +265,21 @@ static inline void ipv6_tr_mc_map(struct in6_addr *addr, char *buf)
 static inline void ipv6_arcnet_mc_map(const struct in6_addr *addr, char *buf)
 {
 	buf[0] = 0x00;
+}
+
+static inline void ipv6_ib_mc_map(struct in6_addr *addr, char *buf)
+{
+	buf[0]  = 0;		/* Reserved */
+	buf[1]  = 0xff;		/* Multicast QPN */
+	buf[2]  = 0xff;
+	buf[3]  = 0xff;
+	buf[4]  = 0xff;
+	buf[5]  = 0x12;		/* link local scope */
+	buf[6]  = 0x60;		/* IPv6 signature */
+	buf[7]  = 0x1b;
+	buf[8]  = 0;		/* P_Key */
+	buf[9]  = 0;
+	memcpy(buf + 10, addr->s6_addr + 6, 10);
 }
 #endif
 #endif

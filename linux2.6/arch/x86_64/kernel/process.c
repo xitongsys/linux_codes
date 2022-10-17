@@ -16,7 +16,6 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
-#define __KERNEL_SYSCALLS__
 #include <stdarg.h>
 
 #include <linux/errno.h>
@@ -25,7 +24,6 @@
 #include <linux/mm.h>
 #include <linux/elfcore.h>
 #include <linux/smp.h>
-#include <linux/unistd.h>
 #include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/module.h>
@@ -34,6 +32,7 @@
 #include <linux/delay.h>
 #include <linux/irq.h>
 #include <linux/ptrace.h>
+#include <linux/utsname.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -53,23 +52,27 @@ asmlinkage extern void ret_from_fork(void);
 
 unsigned long kernel_thread_flags = CLONE_VM | CLONE_UNTRACED;
 
-int hlt_counter;
+atomic_t hlt_counter = ATOMIC_INIT(0);
+
+unsigned long boot_option_idle_override = 0;
+EXPORT_SYMBOL(boot_option_idle_override);
 
 /*
  * Powermanagement idle function, if any..
  */
 void (*pm_idle)(void);
+static cpumask_t cpu_idle_map;
 
 void disable_hlt(void)
 {
-	hlt_counter++;
+	atomic_inc(&hlt_counter);
 }
 
 EXPORT_SYMBOL(disable_hlt);
 
 void enable_hlt(void)
 {
-	hlt_counter--;
+	atomic_dec(&hlt_counter);
 }
 
 EXPORT_SYMBOL(enable_hlt);
@@ -80,7 +83,7 @@ EXPORT_SYMBOL(enable_hlt);
  */
 void default_idle(void)
 {
-	if (!hlt_counter) {
+	if (!atomic_read(&hlt_counter)) {
 		local_irq_disable();
 		if (!need_resched())
 			safe_halt();
@@ -121,6 +124,23 @@ static void poll_idle (void)
 	}
 }
 
+
+void cpu_idle_wait(void)
+{
+        int cpu;
+        cpumask_t map;
+
+        for_each_online_cpu(cpu)
+                cpu_set(cpu, cpu_idle_map);
+
+        wmb();
+        do {
+                ssleep(1);
+                cpus_and(map, cpu_idle_map, cpu_online_map);
+        } while (!cpus_empty(map));
+}
+EXPORT_SYMBOL_GPL(cpu_idle_wait);
+
 /*
  * The idle thread. There's no useful work to be
  * done, so just try to conserve power and have a
@@ -129,14 +149,63 @@ static void poll_idle (void)
  */
 void cpu_idle (void)
 {
+	int cpu = smp_processor_id();
+
 	/* endless idle loop with no priority at all */
 	while (1) {
-		void (*idle)(void) = pm_idle;
-		if (!idle)
-			idle = default_idle;
-		while (!need_resched())
+		while (!need_resched()) {
+			void (*idle)(void);
+
+			if (cpu_isset(cpu, cpu_idle_map))
+				cpu_clear(cpu, cpu_idle_map);
+			rmb();
+			idle = pm_idle;
+			if (!idle)
+				idle = default_idle;
 			idle();
+		}
 		schedule();
+	}
+}
+
+/*
+ * This uses new MONITOR/MWAIT instructions on P4 processors with PNI,
+ * which can obviate IPI to trigger checking of need_resched.
+ * We execute MONITOR against need_resched and enter optimized wait state
+ * through MWAIT. Whenever someone changes need_resched, we would be woken
+ * up from MWAIT (without an IPI).
+ */
+static void mwait_idle(void)
+{
+	local_irq_enable();
+
+	if (!need_resched()) {
+		set_thread_flag(TIF_POLLING_NRFLAG);
+		do {
+			__monitor((void *)&current_thread_info()->flags, 0, 0);
+			if (need_resched())
+				break;
+			__mwait(0, 0);
+		} while (!need_resched());
+		clear_thread_flag(TIF_POLLING_NRFLAG);
+	}
+}
+
+void __init select_idle_routine(const struct cpuinfo_x86 *c)
+{
+	static int printed;
+	if (cpu_has(c, X86_FEATURE_MWAIT)) {
+		/*
+		 * Skip, if setup has overridden idle.
+		 * One CPU supports mwait => All CPUs supports mwait
+		 */
+		if (!pm_idle) {
+			if (!printed) {
+				printk("using mwait in idle threads.\n");
+				printed = 1;
+			}
+			pm_idle = mwait_idle;
+		}
 	}
 }
 
@@ -147,11 +216,11 @@ static int __init idle_setup (char *str)
 		pm_idle = poll_idle;
 	}
 
+	boot_option_idle_override = 1;
 	return 1;
 }
 
 __setup("idle=", idle_setup);
-
 
 /* Prints also some state that isn't saved in the pt_regs */ 
 void __show_regs(struct pt_regs * regs)
@@ -162,7 +231,8 @@ void __show_regs(struct pt_regs * regs)
 
 	printk("\n");
 	print_modules();
-	printk("Pid: %d, comm: %.20s %s\n", current->pid, current->comm, print_tainted());
+	printk("Pid: %d, comm: %.20s %s %s\n", 
+	       current->pid, current->comm, print_tainted(), system_utsname.release);
 	printk("RIP: %04lx:[<%016lx>] ", regs->cs & 0xffff, regs->rip);
 	printk_address(regs->rip); 
 	printk("\nRSP: %04lx:%016lx  EFLAGS: %08lx\n", regs->ss, regs->rsp, regs->eflags);
@@ -210,17 +280,28 @@ void show_regs(struct pt_regs *regs)
 void exit_thread(void)
 {
 	struct task_struct *me = current;
+	struct thread_struct *t = &me->thread;
 	if (me->thread.io_bitmap_ptr) { 
-		kfree(me->thread.io_bitmap_ptr); 
-		me->thread.io_bitmap_ptr = NULL;
-		(init_tss + smp_processor_id())->io_bitmap_base = 
-			INVALID_IO_BITMAP_OFFSET;
+		struct tss_struct *tss = &per_cpu(init_tss, get_cpu());
+
+		kfree(t->io_bitmap_ptr);
+		t->io_bitmap_ptr = NULL;
+		/*
+		 * Careful, clear this in the TSS too:
+		 */
+		memset(tss->io_bitmap, 0xff, t->io_bitmap_max);
+		t->io_bitmap_max = 0;
+		put_cpu();
 	}
 }
 
 void flush_thread(void)
 {
 	struct task_struct *tsk = current;
+	struct thread_info *t = current_thread_info();
+
+	if (t->flags & _TIF_ABI_PENDING)
+		t->flags ^= (_TIF_ABI_PENDING | _TIF_IA32);
 
 	tsk->thread.debugreg0 = 0;
 	tsk->thread.debugreg1 = 0;
@@ -233,7 +314,7 @@ void flush_thread(void)
 	 * Forget coprocessor state..
 	 */
 	clear_fpu(tsk);
-	tsk->used_math = 0;
+	clear_used_math();
 }
 
 void release_thread(struct task_struct *dead_task)
@@ -299,7 +380,6 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long rsp,
 	if (rsp == ~0UL) {
 		childregs->rsp = (unsigned long)childregs;
 	}
-	p->set_child_tid = p->clear_child_tid = NULL;
 
 	p->thread.rsp = (unsigned long) childregs;
 	p->thread.rsp0 = (unsigned long) (childregs+1);
@@ -317,8 +397,10 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long rsp,
 
 	if (unlikely(me->thread.io_bitmap_ptr != NULL)) { 
 		p->thread.io_bitmap_ptr = kmalloc(IO_BITMAP_BYTES, GFP_KERNEL);
-		if (!p->thread.io_bitmap_ptr) 
+		if (!p->thread.io_bitmap_ptr) {
+			p->thread.io_bitmap_max = 0;
 			return -ENOMEM;
+		}
 		memcpy(p->thread.io_bitmap_ptr, me->thread.io_bitmap_ptr, IO_BITMAP_BYTES);
 	} 
 
@@ -337,8 +419,10 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long rsp,
 	}
 	err = 0;
 out:
-	if (err && p->thread.io_bitmap_ptr)
+	if (err && p->thread.io_bitmap_ptr) {
 		kfree(p->thread.io_bitmap_ptr);
+		p->thread.io_bitmap_max = 0;
+	}
 	return err;
 }
 
@@ -359,7 +443,7 @@ struct task_struct *__switch_to(struct task_struct *prev_p, struct task_struct *
 	struct thread_struct *prev = &prev_p->thread,
 				 *next = &next_p->thread;
 	int cpu = smp_processor_id();  
-	struct tss_struct *tss = init_tss + cpu;
+	struct tss_struct *tss = &per_cpu(init_tss, cpu);
 
 	unlazy_fpu(prev_p);
 
@@ -427,7 +511,6 @@ struct task_struct *__switch_to(struct task_struct *prev_p, struct task_struct *
 	write_pda(pcurrent, next_p); 
 	write_pda(kernelstack, (unsigned long)next_p->thread_info + THREAD_SIZE - PDA_STACKOFFSET);
 
-
 	/*
 	 * Now maybe reload the debug registers
 	 */
@@ -446,22 +529,18 @@ struct task_struct *__switch_to(struct task_struct *prev_p, struct task_struct *
 	 * Handle the IO bitmap 
 	 */ 
 	if (unlikely(prev->io_bitmap_ptr || next->io_bitmap_ptr)) {
-		if (next->io_bitmap_ptr) {
+		if (next->io_bitmap_ptr)
 			/*
-			 * 2 cachelines copy ... not good, but not that
-			 * bad either. Anyone got something better?
-			 * This only affects processes which use ioperm().
-			 */
-			memcpy(tss->io_bitmap, next->io_bitmap_ptr, IO_BITMAP_BYTES);
-			tss->io_bitmap_base = IO_BITMAP_OFFSET;
-		} else {
+			 * Copy the relevant range of the IO bitmap.
+			 * Normally this is 128 bytes or less:
+ 			 */
+			memcpy(tss->io_bitmap, next->io_bitmap_ptr,
+				max(prev->io_bitmap_max, next->io_bitmap_max));
+		else {
 			/*
-			 * a bitmap offset pointing outside of the TSS limit
-			 * causes a nicely controllable SIGSEGV if a process
-			 * tries to use a port IO instruction. The first
-			 * sys_ioperm() call sets up the bitmap properly.
+			 * Clear any possible leftover bits:
 			 */
-			tss->io_bitmap_base = INVALID_IO_BITMAP_OFFSET;
+			memset(tss->io_bitmap, 0xff, prev->io_bitmap_max);
 		}
 	}
 
@@ -472,7 +551,8 @@ struct task_struct *__switch_to(struct task_struct *prev_p, struct task_struct *
  * sys_execve() executes a new program.
  */
 asmlinkage 
-long sys_execve(char *name, char **argv,char **envp, struct pt_regs regs)
+long sys_execve(char __user *name, char __user * __user *argv,
+		char __user * __user *envp, struct pt_regs regs)
 {
 	long error;
 	char * filename;
@@ -482,8 +562,11 @@ long sys_execve(char *name, char **argv,char **envp, struct pt_regs regs)
 	if (IS_ERR(filename)) 
 		return error;
 	error = do_execve(filename, argv, envp, &regs); 
-	if (error == 0)
+	if (error == 0) {
+		task_lock(current);
 		current->ptrace &= ~PT_DTRACE;
+		task_unlock(current);
+	}
 	putname(filename);
 	return error;
 }
@@ -494,19 +577,24 @@ void set_personality_64bit(void)
 
 	/* Make sure to be in 64bit mode */
 	clear_thread_flag(TIF_IA32); 
+
+	/* TBD: overwrites user setup. Should have two bits.
+	   But 64bit processes have always behaved this way,
+	   so it's not too bad. The main problem is just that
+   	   32bit childs are affected again. */
+	current->personality &= ~READ_IMPLIES_EXEC;
 }
 
-asmlinkage long sys_fork(struct pt_regs regs)
+asmlinkage long sys_fork(struct pt_regs *regs)
 {
-	return do_fork(SIGCHLD, regs.rsp, &regs, 0, NULL, NULL);
+	return do_fork(SIGCHLD, regs->rsp, regs, 0, NULL, NULL);
 }
 
-asmlinkage long sys_clone(unsigned long clone_flags, unsigned long newsp, void *parent_tid, void *child_tid, struct pt_regs regs)
+asmlinkage long sys_clone(unsigned long clone_flags, unsigned long newsp, void __user *parent_tid, void __user *child_tid, struct pt_regs *regs)
 {
 	if (!newsp)
-		newsp = regs.rsp;
-	return do_fork(clone_flags & ~CLONE_IDLETASK, newsp, &regs, 0, 
-		    parent_tid, child_tid);
+		newsp = regs->rsp;
+	return do_fork(clone_flags, newsp, regs, 0, parent_tid, child_tid);
 }
 
 /*
@@ -519,42 +607,34 @@ asmlinkage long sys_clone(unsigned long clone_flags, unsigned long newsp, void *
  * do not have enough call-clobbered registers to hold all
  * the information you need.
  */
-asmlinkage long sys_vfork(struct pt_regs regs)
+asmlinkage long sys_vfork(struct pt_regs *regs)
 {
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs.rsp, &regs, 0, 
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs->rsp, regs, 0,
 		    NULL, NULL);
 }
 
-/*
- * These bracket the sleeping functions..
- */
-extern void scheduling_functions_start_here(void);
-extern void scheduling_functions_end_here(void);
-#define first_sched	((unsigned long) scheduling_functions_start_here)
-#define last_sched	((unsigned long) scheduling_functions_end_here)
-
 unsigned long get_wchan(struct task_struct *p)
 {
+	unsigned long stack;
 	u64 fp,rip;
 	int count = 0;
 
 	if (!p || p == current || p->state==TASK_RUNNING)
 		return 0; 
-	if (p->thread.rsp < (u64)p || p->thread.rsp > (u64)p + THREAD_SIZE)
+	stack = (unsigned long)p->thread_info; 
+	if (p->thread.rsp < stack || p->thread.rsp > stack+THREAD_SIZE)
 		return 0;
 	fp = *(u64 *)(p->thread.rsp);
 	do { 
-		if (fp < (unsigned long)p || fp > (unsigned long)p+THREAD_SIZE)
+		if (fp < (unsigned long)stack || fp > (unsigned long)stack+THREAD_SIZE)
 			return 0; 
 		rip = *(u64 *)(fp+8); 
-		if (rip < first_sched || rip >= last_sched)
+		if (!in_sched_functions(rip))
 			return rip; 
 		fp = *(u64 *)fp; 
 	} while (count++ < 16); 
 	return 0;
 }
-#undef last_sched
-#undef first_sched
 
 long do_arch_prctl(struct task_struct *task, int code, unsigned long addr)
 { 
@@ -623,7 +703,7 @@ long do_arch_prctl(struct task_struct *task, int code, unsigned long addr)
 			rdmsrl(MSR_FS_BASE, base);
 		} else
 			base = task->thread.fs;
-		ret = put_user(base, (unsigned long *)addr); 
+		ret = put_user(base, (unsigned long __user *)addr); 
 		break; 
 	}
 	case ARCH_GET_GS: { 
@@ -634,7 +714,7 @@ long do_arch_prctl(struct task_struct *task, int code, unsigned long addr)
 			rdmsrl(MSR_KERNEL_GS_BASE, base);
 		} else
 			base = task->thread.gs;
-		ret = put_user(base, (unsigned long *)addr); 
+		ret = put_user(base, (unsigned long __user *)addr); 
 		break;
 	}
 

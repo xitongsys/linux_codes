@@ -56,7 +56,7 @@ int nfsd_acceptable(void *expv, struct dentry *dentry)
 		/* make sure parents give x permission to user */
 		int err;
 		parent = dget_parent(tdentry);
-		err = permission(parent->d_inode, S_IXOTH, NULL);
+		err = permission(parent->d_inode, MAY_EXEC, NULL);
 		if (err < 0) {
 			dput(parent);
 			break;
@@ -71,6 +71,35 @@ int nfsd_acceptable(void *expv, struct dentry *dentry)
 	return rv;
 }
 
+/* Type check. The correct error return for type mismatches does not seem to be
+ * generally agreed upon. SunOS seems to use EISDIR if file isn't S_IFREG; a
+ * comment in the NFSv3 spec says this is incorrect (implementation notes for
+ * the write call).
+ */
+static inline int
+nfsd_mode_check(struct svc_rqst *rqstp, umode_t mode, int type)
+{
+	/* Type can be negative when creating hardlinks - not to a dir */
+	if (type > 0 && (mode & S_IFMT) != type) {
+		if (rqstp->rq_vers == 4 && (mode & S_IFMT) == S_IFLNK)
+			return nfserr_symlink;
+		else if (type == S_IFDIR)
+			return nfserr_notdir;
+		else if ((mode & S_IFMT) == S_IFDIR)
+			return nfserr_isdir;
+		else
+			return nfserr_inval;
+	}
+	if (type < 0 && (mode & S_IFMT) == -type) {
+		if (rqstp->rq_vers == 4 && (mode & S_IFMT) == S_IFLNK)
+			return nfserr_symlink;
+		else if (type == -S_IFDIR)
+			return nfserr_isdir;
+		else
+			return nfserr_notdir;
+	}
+	return 0;
+}
 
 /*
  * Perform sanity checks on the dentry in a client's file handle.
@@ -87,7 +116,6 @@ fh_verify(struct svc_rqst *rqstp, struct svc_fh *fhp, int type, int access)
 	struct knfsd_fh	*fh = &fhp->fh_handle;
 	struct svc_export *exp = NULL;
 	struct dentry	*dentry;
-	struct inode	*inode;
 	u32		error = 0;
 
 	dprintk("nfsd: fh_verify(%s)\n", SVCFH_fmt(fhp));
@@ -117,19 +145,14 @@ fh_verify(struct svc_rqst *rqstp, struct svc_fh *fhp, int type, int access)
 			case 0: break;
 			default: goto out;
 			}
-
-			switch (fh->fh_fsid_type) {
-			case 0:
-				len = 2;
-				break;
-			case 1:
-				len = 1;
-				break;
-			case 2:
+			len = key_len(fh->fh_fsid_type) / 4;
+			if (len == 0) goto out;
+			if  (fh->fh_fsid_type == 2) {
+				/* deprecated, convert to type 3 */
 				len = 3;
-				break;
-			default:
-				goto out;
+				fh->fh_fsid_type = 3;
+				fh->fh_fsid[0] = new_encode_dev(MKDEV(ntohl(fh->fh_fsid[0]), ntohl(fh->fh_fsid[1])));
+				fh->fh_fsid[1] = fh->fh_fsid[2];
 			}
 			if ((data_left -= len)<0) goto out;
 			exp = exp_find(rqstp->rq_client, fh->fh_fsid_type, datap, &rqstp->rq_chandle);
@@ -158,9 +181,16 @@ fh_verify(struct svc_rqst *rqstp, struct svc_fh *fhp, int type, int access)
 		error = nfserr_perm;
 		if (!rqstp->rq_secure && EX_SECURE(exp)) {
 			printk(KERN_WARNING
-			       "nfsd: request from insecure port (%08x:%d)!\n",
-			       ntohl(rqstp->rq_addr.sin_addr.s_addr),
+			       "nfsd: request from insecure port (%u.%u.%u.%u:%d)!\n",
+			       NIPQUAD(rqstp->rq_addr.sin_addr.s_addr),
 			       ntohs(rqstp->rq_addr.sin_port));
+			goto out;
+		}
+
+		/* Set user creds for this exportpoint */
+		error = nfsd_setuser(rqstp, exp);
+		if (error) {
+			error = nfserrno(error);
 			goto out;
 		}
 
@@ -188,10 +218,10 @@ fh_verify(struct svc_rqst *rqstp, struct svc_fh *fhp, int type, int access)
 			dentry = dget(exp->ex_dentry);
 		else {
 			struct export_operations *nop = exp->ex_mnt->mnt_sb->s_export_op;
-				dentry = CALL(nop,decode_fh)(exp->ex_mnt->mnt_sb,
-							     datap, data_left,
-							     fileid_type,
-							     nfsd_acceptable, exp);
+			dentry = CALL(nop,decode_fh)(exp->ex_mnt->mnt_sb,
+						     datap, data_left,
+						     fileid_type,
+						     nfsd_acceptable, exp);
 		}
 		if (dentry == NULL)
 			goto out;
@@ -221,40 +251,9 @@ fh_verify(struct svc_rqst *rqstp, struct svc_fh *fhp, int type, int access)
 	}
 	cache_get(&exp->h);
 
-	inode = dentry->d_inode;
-
-
-	/* Set user creds for this exportpoint */
-	nfsd_setuser(rqstp, exp);
-
-	/* Type check. The correct error return for type mismatches
-	 * does not seem to be generally agreed upon. SunOS seems to
-	 * use EISDIR if file isn't S_IFREG; a comment in the NFSv3
-	 * spec says this is incorrect (implementation notes for the
-	 * write call).
-	 */
-
-	/* Type can be negative when creating hardlinks - not to a dir */
-	if (type > 0 && (inode->i_mode & S_IFMT) != type) {
-		if (rqstp->rq_vers == 4 && (inode->i_mode & S_IFMT) == S_IFLNK)
-			error = nfserr_symlink;
-		else if (type == S_IFDIR)
-			error = nfserr_notdir;
-		else if ((inode->i_mode & S_IFMT) == S_IFDIR)
-			error = nfserr_isdir;
-		else
-			error = nfserr_inval;
+	error = nfsd_mode_check(rqstp, dentry->d_inode->i_mode, type);
+	if (error)
 		goto out;
-	}
-	if (type < 0 && (inode->i_mode & S_IFMT) == -type) {
-		if (rqstp->rq_vers == 4 && (inode->i_mode & S_IFMT) == S_IFLNK)
-			error = nfserr_symlink;
-		else if (type == -S_IFDIR)
-			error = nfserr_isdir;
-		else
-			error = nfserr_notdir;
-		goto out;
-	}
 
 	/* Finally, check access permissions. */
 	error = nfsd_permission(exp, dentry, access);
@@ -332,19 +331,34 @@ fh_compose(struct svc_fh *fhp, struct svc_export *exp, struct dentry *dentry, st
 		parent->d_name.name, dentry->d_name.name,
 		(inode ? inode->i_ino : 0));
 
-	/* for large devnums rules are simple */
-	if (!old_valid_dev(ex_dev)) {
-		ref_fh_version = 1;
-		if (exp->ex_flags & NFSEXP_FSID)
-			ref_fh_fsid_type = 1;
-		else
-			ref_fh_fsid_type = 2;
-	} else if (ref_fh) {
+	if (ref_fh) {
 		ref_fh_version = ref_fh->fh_handle.fh_version;
-		ref_fh_fsid_type = ref_fh->fh_handle.fh_fsid_type;
-		if (!(exp->ex_flags & NFSEXP_FSID) || ref_fh_fsid_type == 2)
+		if (ref_fh_version == 0xca)
 			ref_fh_fsid_type = 0;
+		else
+			ref_fh_fsid_type = ref_fh->fh_handle.fh_fsid_type;
+		if (ref_fh_fsid_type > 3)
+			ref_fh_fsid_type = 0;
+
+		/* make sure ref_fh type works for given export */
+		if (ref_fh_fsid_type == 1 &&
+		    !(exp->ex_flags & NFSEXP_FSID)) {
+			/* if we don't have an fsid, we cannot provide one... */
+			ref_fh_fsid_type = 0;
+		}
+	} else if (exp->ex_flags & NFSEXP_FSID)
+		ref_fh_fsid_type = 1;
+
+	if (!old_valid_dev(ex_dev) && ref_fh_fsid_type == 0) {
+		/* for newer device numbers, we must use a newer fsid format */
+		ref_fh_version = 1;
+		ref_fh_fsid_type = 3;
 	}
+	if (old_valid_dev(ex_dev) &&
+	    (ref_fh_fsid_type == 2 || ref_fh_fsid_type == 3))
+		/* must use type1 for smaller device numbers */
+		ref_fh_fsid_type = 0;
+
 	if (ref_fh == fhp)
 		fh_put(ref_fh);
 
@@ -356,7 +370,7 @@ fh_compose(struct svc_fh *fhp, struct svc_export *exp, struct dentry *dentry, st
 		printk(KERN_ERR "fh_compose: called with maxsize %d! %s/%s\n",
 		       fhp->fh_maxsize, parent->d_name.name, dentry->d_name.name);
 
-	fhp->fh_dentry = dentry; /* our internal copy */
+	fhp->fh_dentry = dget(dentry); /* our internal copy */
 	fhp->fh_export = exp;
 	cache_get(&exp->h);
 
@@ -372,16 +386,23 @@ fh_compose(struct svc_fh *fhp, struct svc_export *exp, struct dentry *dentry, st
 		if (inode)
 			_fh_update_old(dentry, exp, &fhp->fh_handle);
 	} else {
+		int len;
 		fhp->fh_handle.fh_version = 1;
 		fhp->fh_handle.fh_auth_type = 0;
 		datap = fhp->fh_handle.fh_auth+0;
 		fhp->fh_handle.fh_fsid_type = ref_fh_fsid_type;
 		switch (ref_fh_fsid_type) {
+			case 0:
+				/*
+				 * fsid_type 0:
+				 * 2byte major, 2byte minor, 4byte inode
+				 */
+				mk_fsid_v0(datap, ex_dev,
+					exp->ex_dentry->d_inode->i_ino);
+				break;
 			case 1:
 				/* fsid_type 1 == 4 bytes filesystem id */
 				mk_fsid_v1(datap, exp->ex_fsid);
-				datap += 1;
-				fhp->fh_handle.fh_size = 2*4;
 				break;
 			case 2:
 				/*
@@ -390,21 +411,22 @@ fh_compose(struct svc_fh *fhp, struct svc_export *exp, struct dentry *dentry, st
 				 */
 				mk_fsid_v2(datap, ex_dev,
 					exp->ex_dentry->d_inode->i_ino);
-				datap += 3;
-				fhp->fh_handle.fh_size = 4*4;
 				break;
-			default:
+			case 3:
 				/*
-				 * fsid_type 0:
-				 * 2byte major, 2byte minor, 4byte inode
+				 * fsid_type 3:
+				 * 4byte devicenumber, 4byte inode
 				 */
-				mk_fsid_v0(datap, ex_dev,
+				mk_fsid_v3(datap, ex_dev,
 					exp->ex_dentry->d_inode->i_ino);
-				datap += 2;
-				fhp->fh_handle.fh_size = 3*4;
+				break;
 		}
+		len = key_len(ref_fh_fsid_type);
+		datap += len/4;
+		fhp->fh_handle.fh_size = 4 + len;
+
 		if (inode) {
-			int size = fhp->fh_maxsize/4 - 3;
+			int size = (fhp->fh_maxsize-len-4)/4;
 			fhp->fh_handle.fh_fileid_type =
 				_fh_update(dentry, exp, datap, &size);
 			fhp->fh_handle.fh_size += size*4;
@@ -489,3 +511,21 @@ fh_put(struct svc_fh *fhp)
 	return;
 }
 
+/*
+ * Shorthand for dprintk()'s
+ */
+char * SVCFH_fmt(struct svc_fh *fhp)
+{
+	struct knfsd_fh *fh = &fhp->fh_handle;
+
+	static char buf[80];
+	sprintf(buf, "%d: %08x %08x %08x %08x %08x %08x",
+		fh->fh_size,
+		fh->fh_base.fh_pad[0],
+		fh->fh_base.fh_pad[1],
+		fh->fh_base.fh_pad[2],
+		fh->fh_base.fh_pad[3],
+		fh->fh_base.fh_pad[4],
+		fh->fh_base.fh_pad[5]);
+	return buf;
+}

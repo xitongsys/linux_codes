@@ -7,6 +7,8 @@
  * Author: MontaVista Software, Inc.
  *         	ppopov@mvista.com or source@mvista.com
  *
+ * Copyright (C) 2004 by Ralf Baechle (ralf@linux-mips.org)
+ *
  *  This program is free software; you can redistribute  it and/or modify it
  *  under  the terms of  the GNU General  Public License as published by the
  *  Free Software Foundation;  either version 2 of the  License, or (at your
@@ -32,7 +34,6 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 
-#include <asm/pci_channel.h>
 #include <asm/it8172/it8172.h>
 #include <asm/it8172/it8172_pci.h>
 
@@ -77,10 +78,10 @@ static struct resource pci_mem_resource_1 = {
 
 extern struct pci_ops it8172_pci_ops;
 
-struct pci_channel mips_pci_channels[] = {
-	{&it8172_pci_ops, &pci_io_resource, &pci_mem_resource_0, 0x10,
-	 0xff},
-	{NULL, NULL, NULL, NULL, NULL}
+struct pci_controller it8172_controller = {
+	.pci_ops	= &it8172_pci_ops,
+	.io_resource	= &pci_io_resource,
+	.mem_resource	= &pci_mem_resource_0,
 };
 
 static int it8172_pcibios_config_access(unsigned char access_type,
@@ -212,8 +213,3 @@ struct pci_ops it8172_pci_ops = {
 	.read = read_config,
 	.write = write_config,
 };
-
-unsigned __init int pcibios_assign_all_busses(void)
-{
-	return 1;
-}

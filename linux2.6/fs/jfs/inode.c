@@ -1,6 +1,6 @@
 /*
- *   Copyright (c) International Business Machines Corp., 2000-2002
- *   Portions Copyright (c) Christoph Hellwig, 2001-2002
+ *   Copyright (C) International Business Machines Corp., 2000-2004
+ *   Portions Copyright (C) Christoph Hellwig, 2001-2002
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -21,6 +21,7 @@
 #include <linux/mpage.h>
 #include <linux/buffer_head.h>
 #include <linux/pagemap.h>
+#include <linux/quotaops.h>
 #include "jfs_incore.h"
 #include "jfs_filsys.h"
 #include "jfs_imap.h"
@@ -80,8 +81,7 @@ int jfs_commit_inode(struct inode *inode, int wait)
 	 * Don't commit if inode has been committed since last being
 	 * marked dirty, or if it has been deleted.
 	 */
-	if (test_cflag(COMMIT_Nolink, inode) ||
-	    !test_cflag(COMMIT_Dirty, inode))
+	if (inode->i_nlink == 0 || !test_cflag(COMMIT_Dirty, inode))
 		return 0;
 
 	if (isReadOnly(inode)) {
@@ -99,16 +99,22 @@ int jfs_commit_inode(struct inode *inode, int wait)
 
 	tid = txBegin(inode->i_sb, COMMIT_INODE);
 	down(&JFS_IP(inode)->commit_sem);
-	rc = txCommit(tid, 1, &inode, wait ? COMMIT_SYNC : 0);
+
+	/*
+	 * Retest inode state after taking commit_sem
+	 */
+	if (inode->i_nlink && test_cflag(COMMIT_Dirty, inode))
+		rc = txCommit(tid, 1, &inode, wait ? COMMIT_SYNC : 0);
+
 	txEnd(tid);
 	up(&JFS_IP(inode)->commit_sem);
 	return rc;
 }
 
-void jfs_write_inode(struct inode *inode, int wait)
+int jfs_write_inode(struct inode *inode, int wait)
 {
 	if (test_cflag(COMMIT_Nolink, inode))
-		return;
+		return 0;
 	/*
 	 * If COMMIT_DIRTY is not set, the inode isn't really dirty.
 	 * It has been committed since the last change, but was still
@@ -117,12 +123,14 @@ void jfs_write_inode(struct inode *inode, int wait)
 	 if (!test_cflag(COMMIT_Dirty, inode)) {
 		/* Make sure committed changes hit the disk */
 		jfs_flush_journal(JFS_SBI(inode->i_sb)->log, wait);
-		return;
+		return 0;
 	 }
 
 	if (jfs_commit_inode(inode, wait)) {
 		jfs_err("jfs_write_inode: jfs_commit_inode failed!");
-	}
+		return -EIO;
+	} else
+		return 0;
 }
 
 void jfs_delete_inode(struct inode *inode)
@@ -133,6 +141,13 @@ void jfs_delete_inode(struct inode *inode)
 		freeZeroLink(inode);
 
 	diFree(inode);
+
+	/*
+	 * Free the inode from the quota allocation.
+	 */
+	DQUOT_INIT(inode);
+	DQUOT_FREE_INODE(inode);
+	DQUOT_DROP(inode);
 
 	clear_inode(inode);
 }
@@ -302,11 +317,11 @@ static sector_t jfs_bmap(struct address_space *mapping, sector_t block)
 	return generic_block_bmap(mapping, block, jfs_get_block);
 }
 
-static int jfs_direct_IO(int rw, struct kiocb *iocb, const struct iovec *iov,
-			loff_t offset, unsigned long nr_segs)
+static ssize_t jfs_direct_IO(int rw, struct kiocb *iocb,
+	const struct iovec *iov, loff_t offset, unsigned long nr_segs)
 {
 	struct file *file = iocb->ki_filp;
-	struct inode *inode = file->f_dentry->d_inode->i_mapping->host;
+	struct inode *inode = file->f_mapping->host;
 
 	return blockdev_direct_IO(rw, iocb, inode, inode->i_sb->s_bdev, iov,
 				offset, nr_segs, jfs_get_blocks, NULL);

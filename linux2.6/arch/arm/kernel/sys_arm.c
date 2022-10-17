@@ -12,6 +12,7 @@
  *  have a non-standard calling sequence on the Linux/arm
  *  platform.
  */
+#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -20,6 +21,7 @@
 #include <linux/msg.h>
 #include <linux/shm.h>
 #include <linux/stat.h>
+#include <linux/syscalls.h>
 #include <linux/mman.h>
 #include <linux/fs.h>
 #include <linux/file.h>
@@ -36,7 +38,7 @@ extern unsigned long do_mremap(unsigned long addr, unsigned long old_len,
  * sys_pipe() is the normal C calling standard for creating
  * a pipe. It's not the way unix traditionally does this, though.
  */
-asmlinkage int sys_pipe(unsigned long * fildes)
+asmlinkage int sys_pipe(unsigned long __user *fildes)
 {
 	int fd[2];
 	int error;
@@ -49,6 +51,13 @@ asmlinkage int sys_pipe(unsigned long * fildes)
 	return error;
 }
 
+/*
+ * This is the lowest virtual address we can permit any user space
+ * mapping to be mapped at.  This is particularly important for
+ * non-high vector CPUs.
+ */
+#define MIN_MAP_ADDR	(PAGE_SIZE)
+
 /* common code for old and new mmaps */
 inline long do_mmap2(
 	unsigned long addr, unsigned long len,
@@ -60,11 +69,7 @@ inline long do_mmap2(
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 
-	/*
-	 * If we are doing a fixed mapping, and address < PAGE_SIZE,
-	 * then deny it.
-	 */
-	if (flags & MAP_FIXED && addr < PAGE_SIZE && vectors_base() == 0)
+	if (flags & MAP_FIXED && addr < MIN_MAP_ADDR)
 		goto out;
 
 	error = -EBADF;
@@ -93,13 +98,13 @@ struct mmap_arg_struct {
 	unsigned long offset;
 };
 
-asmlinkage int old_mmap(struct mmap_arg_struct *arg)
+asmlinkage int old_mmap(struct mmap_arg_struct __user *arg)
 {
 	int error = -EFAULT;
 	struct mmap_arg_struct a;
 
 	if (copy_from_user(&a, arg, sizeof(a)))
-		goto out;;
+		goto out;
 
 	error = -EINVAL;
 	if (a.offset & ~PAGE_MASK)
@@ -117,12 +122,7 @@ sys_arm_mremap(unsigned long addr, unsigned long old_len,
 {
 	unsigned long ret = -EINVAL;
 
-	/*
-	 * If we are doing a fixed mapping, and address < PAGE_SIZE,
-	 * then deny it.
-	 */
-	if (flags & MREMAP_FIXED && new_addr < PAGE_SIZE &&
-	    vectors_base() == 0)
+	if (flags & MREMAP_FIXED && new_addr < MIN_MAP_ADDR)
 		goto out;
 
 	down_write(&current->mm->mmap_sem);
@@ -137,15 +137,14 @@ out:
  * Perform the select(nd, in, out, ex, tv) and mmap() system
  * calls.
  */
-extern asmlinkage int sys_select(int, fd_set *, fd_set *, fd_set *, struct timeval *);
 
 struct sel_arg_struct {
 	unsigned long n;
-	fd_set *inp, *outp, *exp;
-	struct timeval *tvp;
+	fd_set __user *inp, *outp, *exp;
+	struct timeval __user *tvp;
 };
 
-asmlinkage int old_select(struct sel_arg_struct *arg)
+asmlinkage int old_select(struct sel_arg_struct __user *arg)
 {
 	struct sel_arg_struct a;
 
@@ -160,7 +159,8 @@ asmlinkage int old_select(struct sel_arg_struct *arg)
  *
  * This is really horribly ugly.
  */
-asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, long fifth)
+asmlinkage int sys_ipc(uint call, int first, int second, int third,
+		       void __user *ptr, long fifth)
 {
 	int version, ret;
 
@@ -169,28 +169,28 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 
 	switch (call) {
 	case SEMOP:
-		return sys_semop (first, (struct sembuf *)ptr, second);
+		return sys_semop(first, (struct sembuf __user *)ptr, second);
 	case SEMGET:
 		return sys_semget (first, second, third);
 	case SEMCTL: {
 		union semun fourth;
 		if (!ptr)
 			return -EINVAL;
-		if (get_user(fourth.__pad, (void **) ptr))
+		if (get_user(fourth.__pad, (void __user * __user *) ptr))
 			return -EFAULT;
 		return sys_semctl (first, second, third, fourth);
 	}
 
 	case MSGSND:
-		return sys_msgsnd (first, (struct msgbuf *) ptr, 
-				   second, third);
+		return sys_msgsnd(first, (struct msgbuf __user *) ptr, 
+				  second, third);
 	case MSGRCV:
 		switch (version) {
 		case 0: {
 			struct ipc_kludge tmp;
 			if (!ptr)
 				return -EINVAL;
-			if (copy_from_user(&tmp,(struct ipc_kludge *) ptr,
+			if (copy_from_user(&tmp,(struct ipc_kludge __user *)ptr,
 					   sizeof (tmp)))
 				return -EFAULT;
 			return sys_msgrcv (first, tmp.msgp, second,
@@ -198,36 +198,33 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 		}
 		default:
 			return sys_msgrcv (first,
-					   (struct msgbuf *) ptr,
+					   (struct msgbuf __user *) ptr,
 					   second, fifth, third);
 		}
 	case MSGGET:
 		return sys_msgget ((key_t) first, second);
 	case MSGCTL:
-		return sys_msgctl (first, second, (struct msqid_ds *) ptr);
+		return sys_msgctl(first, second, (struct msqid_ds __user *)ptr);
 
 	case SHMAT:
 		switch (version) {
 		default: {
 			ulong raddr;
-			ret = sys_shmat (first, (char *) ptr, second, &raddr);
+			ret = do_shmat(first, (char __user *)ptr, second, &raddr);
 			if (ret)
 				return ret;
-			return put_user (raddr, (ulong *) third);
+			return put_user(raddr, (ulong __user *)third);
 		}
-		case 1:	/* iBCS2 emulator entry point */
-			if (!segment_eq(get_fs(), get_ds()))
-				return -EINVAL;
-			return sys_shmat (first, (char *) ptr,
-					  second, (ulong *) third);
+		case 1: /* Of course, we don't support iBCS2! */
+			return -EINVAL;
 		}
 	case SHMDT: 
-		return sys_shmdt ((char *)ptr);
+		return sys_shmdt ((char __user *)ptr);
 	case SHMGET:
 		return sys_shmget (first, second, third);
 	case SHMCTL:
 		return sys_shmctl (first, second,
-				   (struct shmid_ds *) ptr);
+				   (struct shmid_ds __user *) ptr);
 	default:
 		return -ENOSYS;
 	}
@@ -244,18 +241,14 @@ asmlinkage int sys_fork(struct pt_regs *regs)
 /* Clone a task - this clones the calling program thread.
  * This is called indirectly via a small wrapper
  */
-asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp, struct pt_regs *regs)
+asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp,
+			 int __user *parent_tidptr, int tls_val,
+			 int __user *child_tidptr, struct pt_regs *regs)
 {
-	/*
-	 * We don't support SETTID / CLEARTID
-	 */
-	if (clone_flags & (CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID))
-		return -EINVAL;
-
 	if (!newsp)
 		newsp = regs->ARM_sp;
 
-	return do_fork(clone_flags & ~CLONE_IDLETASK, newsp, regs, 0, NULL, NULL);
+	return do_fork(clone_flags, newsp, regs, 0, parent_tidptr, child_tidptr);
 }
 
 asmlinkage int sys_vfork(struct pt_regs *regs)
@@ -266,7 +259,8 @@ asmlinkage int sys_vfork(struct pt_regs *regs)
 /* sys_execve() executes a new program.
  * This is called indirectly via a small wrapper
  */
-asmlinkage int sys_execve(char *filenamei, char **argv, char **envp, struct pt_regs *regs)
+asmlinkage int sys_execve(char __user *filenamei, char __user * __user *argv,
+			  char __user * __user *envp, struct pt_regs *regs)
 {
 	int error;
 	char * filename;
@@ -280,3 +274,43 @@ asmlinkage int sys_execve(char *filenamei, char **argv, char **envp, struct pt_r
 out:
 	return error;
 }
+
+long execve(const char *filename, char **argv, char **envp)
+{
+	struct pt_regs regs;
+	int ret;
+
+	memset(&regs, 0, sizeof(struct pt_regs));
+	ret = do_execve((char *)filename, (char __user * __user *)argv,
+			(char __user * __user *)envp, &regs);
+	if (ret < 0)
+		goto out;
+
+	/*
+	 * Save argc to the register structure for userspace.
+	 */
+	regs.ARM_r0 = ret;
+
+	/*
+	 * We were successful.  We won't be returning to our caller, but
+	 * instead to user space by manipulating the kernel stack.
+	 */
+	asm(	"add	r0, %0, %1\n\t"
+		"mov	r1, %2\n\t"
+		"mov	r2, %3\n\t"
+		"bl	memmove\n\t"	/* copy regs to top of stack */
+		"mov	r8, #0\n\t"	/* not a syscall */
+		"mov	r9, %0\n\t"	/* thread structure */
+		"mov	sp, r0\n\t"	/* reposition stack pointer */
+		"b	ret_to_user"
+		:
+		: "r" (current_thread_info()),
+		  "Ir" (THREAD_SIZE - 8 - sizeof(regs)),
+		  "r" (&regs),
+		  "Ir" (sizeof(regs))
+		: "r0", "r1", "r2", "r3", "ip", "memory");
+
+ out:
+	return ret;
+}
+EXPORT_SYMBOL(execve);

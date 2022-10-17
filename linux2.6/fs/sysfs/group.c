@@ -31,7 +31,7 @@ static int create_files(struct dentry * dir,
 	int error = 0;
 
 	for (attr = grp->attrs; *attr && !error; attr++) {
-		error = sysfs_add_file(dir,*attr);
+		error = sysfs_add_file(dir, *attr, SYSFS_KOBJ_ATTR);
 	}
 	if (error)
 		remove_files(dir,grp);
@@ -45,6 +45,8 @@ int sysfs_create_group(struct kobject * kobj,
 	struct dentry * dir;
 	int error;
 
+	BUG_ON(!kobj || !kobj->dentry);
+
 	if (grp->name) {
 		error = sysfs_create_subdir(kobj,grp->name,&dir);
 		if (error)
@@ -55,8 +57,8 @@ int sysfs_create_group(struct kobject * kobj,
 	if ((error = create_files(dir,grp))) {
 		if (grp->name)
 			sysfs_remove_subdir(dir);
-		dput(dir);
 	}
+	dput(dir);
 	return error;
 }
 
@@ -68,14 +70,15 @@ void sysfs_remove_group(struct kobject * kobj,
 	if (grp->name)
 		dir = sysfs_get_dentry(kobj->dentry,grp->name);
 	else
-		dir = kobj->dentry;
+		dir = dget(kobj->dentry);
 
 	remove_files(dir,grp);
-	dput(dir);
 	if (grp->name)
 		sysfs_remove_subdir(dir);
+	/* release the ref. taken in this routine */
+	dput(dir);
 }
 
 
-EXPORT_SYMBOL(sysfs_create_group);
-EXPORT_SYMBOL(sysfs_remove_group);
+EXPORT_SYMBOL_GPL(sysfs_create_group);
+EXPORT_SYMBOL_GPL(sysfs_remove_group);

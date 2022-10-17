@@ -35,6 +35,12 @@
 #define NO_DOOR_LOCKING 0
 #endif
 
+/*
+ * typical timeout for packet command
+ */
+#define ATAPI_WAIT_PC		(60 * HZ)
+#define ATAPI_WAIT_WRITE_BUSY	(10 * HZ)
+
 /************************************************************************/
 
 #define SECTOR_BITS 		9
@@ -47,8 +53,6 @@
 #define SECTORS_MAX		(131072 >> SECTOR_BITS)
 
 #define BLOCKS_PER_FRAME	(CD_FRAMESIZE / BLOCK_SIZE)
-
-#define MIN(a,b) ((a) < (b) ? (a) : (b))
 
 /* special command codes for strategy routine. */
 #define PACKET_COMMAND        4315
@@ -75,6 +79,7 @@ struct ide_cd_config_flags {
 	__u8 dvd		: 1; /* Drive is a DVD-ROM */
 	__u8 dvd_r		: 1; /* Drive can write DVD-R */
 	__u8 dvd_ram		: 1; /* Drive can write DVD-RAM */
+	__u8 ram		: 1; /* generic WRITE (dvd-ram/mrw) */
 	__u8 test_write		: 1; /* Drive can fake writes */
 	__u8 supp_disc_present	: 1; /* Changer can report exact contents
 					of slots. */
@@ -482,6 +487,8 @@ struct cdrom_info {
 
         /* Per-device info needed by cdrom.c generic driver. */
         struct cdrom_device_info devinfo;
+
+	unsigned long write_timeout;
 };
 
 /****************************************************************************
@@ -512,7 +519,7 @@ struct cdrom_info {
 
  /* The generic packet command opcodes for CD/DVD Logical Units,
  * From Table 57 of the SFF8090 Ver. 3 (Mt. Fuji) draft standard. */ 
-const struct {
+static const struct {
 	unsigned short packet_command;
 	const char * const text;
 } packet_command_texts[] = {
@@ -570,7 +577,7 @@ const struct {
 
 
 /* From Table 303 of the SFF8090 Ver. 3 (Mt. Fuji) draft standard. */
-const char * const sense_key_texts[16] = {
+static const char * const sense_key_texts[16] = {
 	"No sense data",
 	"Recovered error",
 	"Not ready",
@@ -590,7 +597,7 @@ const char * const sense_key_texts[16] = {
 };
 
 /* From Table 304 of the SFF8090 Ver. 3 (Mt. Fuji) draft standard. */
-const struct {
+static const struct {
 	unsigned long asc_ascq;
 	const char * const text;
 } sense_data_texts[] = {

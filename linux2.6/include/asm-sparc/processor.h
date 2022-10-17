@@ -22,13 +22,6 @@
 #include <asm/segment.h>
 #include <asm/btfixup.h>
 #include <asm/page.h>
-#include <asm/atomic.h>
-
-/*
- * Bus types
- */
-#define MCA_bus 0
-#define MCA_bus__is_a_macro /* for versions in ksyms.c */
 
 /*
  * The sparc has no problems with write protection
@@ -44,10 +37,12 @@
 
 struct task_struct;
 
+#ifdef __KERNEL__
 struct fpq {
 	unsigned long *insn_addr;
 	unsigned long insn;
 };
+#endif
 
 typedef struct {
 	int seg;
@@ -56,18 +51,11 @@ typedef struct {
 /* The Sparc processor specific thread struct. */
 struct thread_struct {
 	struct pt_regs *kregs;
+	unsigned int _pad1;
 
 	/* Special child fork kpsr/kwim values. */
 	unsigned long fork_kpsr __attribute__ ((aligned (8)));
 	unsigned long fork_kwim;
-
-	/* A place to store user windows and stack pointers
-	 * when the stack needs inspection.
-	 */
-#define NSWINS 8
-	struct reg_window reg_window[NSWINS] __attribute__ ((aligned (8)));
-	unsigned long rwbuf_stkptrs[NSWINS] __attribute__ ((aligned (8)));
-	unsigned long w_saved;
 
 	/* Floating point regs */
 	unsigned long   float_regs[32] __attribute__ ((aligned (8)));
@@ -78,33 +66,14 @@ struct thread_struct {
 	mm_segment_t current_ds;
 	struct exec core_exec;     /* just what it says. */
 	int new_signal;
-	atomic_t refcount;	/* used for sun4c only */
 };
 
 #define SPARC_FLAG_KTHREAD      0x1    /* task is a kernel thread */
 #define SPARC_FLAG_UNALIGNED    0x2    /* is allowed to do unaligned accesses */
 
 #define INIT_THREAD  { \
-/* kregs, */ \
-   0,  \
-/* fork_kpsr, fork_kwim */ \
-   0,         0, \
-/* reg_window */  \
-{ { { 0, }, { 0, } }, }, \
-/* rwbuf_stkptrs */  \
-{ 0, 0, 0, 0, 0, 0, 0, 0, }, \
-/* w_saved */ \
-   0, \
-/* FPU regs */   { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, \
-                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, }, \
-/* FPU status, FPU qdepth, FPU queue */ \
-   0,          0,  { { 0, 0, }, }, \
-/* flags,              current_ds, */ \
-   SPARC_FLAG_KTHREAD, KERNEL_DS, \
-/* core_exec */ \
-{ 0, }, \
-/* new_signal */ \
-  0, \
+	.flags = SPARC_FLAG_KTHREAD, \
+	.current_ds = KERNEL_DS, \
 }
 
 /* Return saved PC of a blocked thread. */

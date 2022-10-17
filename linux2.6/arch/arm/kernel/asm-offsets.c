@@ -12,6 +12,9 @@
  */
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <asm/mach/arch.h>
+#include <asm/thread_info.h>
+#include <asm/memory.h>
 
 /*
  * Make sure that the compiler and target are compatible.
@@ -45,16 +48,36 @@
 
 int main(void)
 {
-  DEFINE(TSK_USED_MATH,		offsetof(struct task_struct, used_math));
   DEFINE(TSK_ACTIVE_MM,		offsetof(struct task_struct, active_mm));
   BLANK();
+  DEFINE(TI_FLAGS,		offsetof(struct thread_info, flags));
+  DEFINE(TI_PREEMPT,		offsetof(struct thread_info, preempt_count));
+  DEFINE(TI_ADDR_LIMIT,		offsetof(struct thread_info, addr_limit));
+  DEFINE(TI_TASK,		offsetof(struct thread_info, task));
+  DEFINE(TI_EXEC_DOMAIN,	offsetof(struct thread_info, exec_domain));
+  DEFINE(TI_CPU,		offsetof(struct thread_info, cpu));
+  DEFINE(TI_CPU_DOMAIN,		offsetof(struct thread_info, cpu_domain));
+  DEFINE(TI_CPU_SAVE,		offsetof(struct thread_info, cpu_context));
+  DEFINE(TI_USED_CP,		offsetof(struct thread_info, used_cp));
+  DEFINE(TI_TP_VALUE,		offsetof(struct thread_info, tp_value));
+  DEFINE(TI_FPSTATE,		offsetof(struct thread_info, fpstate));
+  DEFINE(TI_VFPSTATE,		offsetof(struct thread_info, vfpstate));
+  DEFINE(TI_IWMMXT_STATE,	(offsetof(struct thread_info, fpstate)+4)&~7);
+  BLANK();
+#if __LINUX_ARM_ARCH__ >= 6
+  DEFINE(MM_CONTEXT_ID,		offsetof(struct mm_struct, context.id));
+  BLANK();
+#endif
   DEFINE(VMA_VM_MM,		offsetof(struct vm_area_struct, vm_mm));
   DEFINE(VMA_VM_FLAGS,		offsetof(struct vm_area_struct, vm_flags));
   BLANK();
   DEFINE(VM_EXEC,	       	VM_EXEC);
   BLANK();
   DEFINE(PAGE_SZ,	       	PAGE_SIZE);
+  DEFINE(VIRT_OFFSET,		PAGE_OFFSET);
   BLANK();
   DEFINE(SYS_ERROR0,		0x9f0000);
+  BLANK();
+  DEFINE(SIZEOF_MACHINE_DESC,	sizeof(struct machine_desc));
   return 0; 
 }

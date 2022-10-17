@@ -56,16 +56,15 @@ extern void kunmap_high(struct page *page);
 static inline void *kmap(struct page *page)
 {
 	might_sleep();
-	if (page < highmem_start_page)
+	if (!PageHighMem(page))
 		return page_address(page);
 	return kmap_high(page);
 }
 
 static inline void kunmap(struct page *page)
 {
-	if (in_interrupt())
-		BUG();
-	if (page < highmem_start_page)
+	BUG_ON(in_interrupt());
+	if (!PageHighMem(page))
 		return;
 	kunmap_high(page);
 }
@@ -81,44 +80,45 @@ static inline void *kmap_atomic(struct page *page, enum km_type type)
 	unsigned int idx;
 	unsigned long vaddr;
 
+	/* even !CONFIG_PREEMPT needs this, for in_atomic in do_page_fault */
 	inc_preempt_count();
-	if (page < highmem_start_page)
+	if (!PageHighMem(page))
 		return page_address(page);
 
 	idx = type + KM_TYPE_NR*smp_processor_id();
 	vaddr = KMAP_FIX_BEGIN + idx * PAGE_SIZE;
-#if HIGHMEM_DEBUG
-	if (!pte_none(*(kmap_pte+idx)))
-		BUG();
+#ifdef HIGHMEM_DEBUG
+	BUG_ON(!pte_none(*(kmap_pte+idx)));
 #endif
 	set_pte(kmap_pte+idx, mk_pte(page, kmap_prot));
-	flush_tlb_page(0, vaddr);
+	flush_tlb_page(NULL, vaddr);
 
 	return (void*) vaddr;
 }
 
 static inline void kunmap_atomic(void *kvaddr, enum km_type type)
 {
-#if HIGHMEM_DEBUG
+#ifdef HIGHMEM_DEBUG
 	unsigned long vaddr = (unsigned long) kvaddr & PAGE_MASK;
 	unsigned int idx = type + KM_TYPE_NR*smp_processor_id();
 
 	if (vaddr < KMAP_FIX_BEGIN) { // FIXME
 		dec_preempt_count();
+		preempt_check_resched();
 		return;
 	}
 
-	if (vaddr != KMAP_FIX_BEGIN + idx * PAGE_SIZE)
-		BUG();
+	BUG_ON(vaddr != KMAP_FIX_BEGIN + idx * PAGE_SIZE);
 
 	/*
 	 * force other mappings to Oops if they'll try to access
 	 * this pte without first remap it
 	 */
 	pte_clear(kmap_pte+idx);
-	flush_tlb_page(0, vaddr);
+	flush_tlb_page(NULL, vaddr);
 #endif
 	dec_preempt_count();
+	preempt_check_resched();
 }
 
 static inline struct page *kmap_atomic_to_page(void *ptr)

@@ -7,6 +7,9 @@
 #include <asm/siginfo.h>
 
 #ifdef __KERNEL__
+
+#define MAX_SIGPENDING	1024
+
 /*
  * Real Time signals may be queued.
  */
@@ -16,6 +19,7 @@ struct sigqueue {
 	spinlock_t *lock;
 	int flags;
 	siginfo_t info;
+	struct user_struct *user;
 };
 
 /* flags values. */
@@ -207,12 +211,13 @@ static inline void init_sigpending(struct sigpending *sig)
 	INIT_LIST_HEAD(&sig->list);
 }
 
+extern int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p);
 extern long do_sigpending(void __user *, unsigned long);
 extern int sigprocmask(int, sigset_t *, sigset_t *);
 
 #ifndef HAVE_ARCH_GET_SIGNAL_TO_DELIVER
 struct pt_regs;
-extern int get_signal_to_deliver(siginfo_t *info, struct pt_regs *regs, void *cookie);
+extern int get_signal_to_deliver(siginfo_t *info, struct k_sigaction *return_ka, struct pt_regs *regs, void *cookie);
 #endif
 
 #endif /* __KERNEL__ */

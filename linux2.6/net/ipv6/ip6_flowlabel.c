@@ -54,11 +54,11 @@ static struct timer_list ip6_fl_gc_timer = TIMER_INITIALIZER(ip6_fl_gc, 0, 0);
 
 /* FL hash table lock: it protects only of GC */
 
-static rwlock_t ip6_fl_lock = RW_LOCK_UNLOCKED;
+static DEFINE_RWLOCK(ip6_fl_lock);
 
 /* Big socket sock */
 
-static rwlock_t ip6_sk_fl_lock = RW_LOCK_UNLOCKED;
+static DEFINE_RWLOCK(ip6_sk_fl_lock);
 
 
 static __inline__ struct ip6_flowlabel * __fl_lookup(u32 label)
@@ -277,7 +277,7 @@ static int fl6_renew(struct ip6_flowlabel *fl, unsigned long linger, unsigned lo
 }
 
 static struct ip6_flowlabel *
-fl_create(struct in6_flowlabel_req *freq, char *optval, int optlen, int *err_p)
+fl_create(struct in6_flowlabel_req *freq, char __user *optval, int optlen, int *err_p)
 {
 	struct ip6_flowlabel *fl;
 	int olen;
@@ -407,7 +407,7 @@ static int ipv6_opt_cmp(struct ipv6_txoptions *o1, struct ipv6_txoptions *o2)
 	return 0;
 }
 
-int ipv6_flowlabel_opt(struct sock *sk, char *optval, int optlen)
+int ipv6_flowlabel_opt(struct sock *sk, char __user *optval, int optlen)
 {
 	int err;
 	struct ipv6_pinfo *np = inet6_sk(sk);
@@ -500,7 +500,7 @@ int ipv6_flowlabel_opt(struct sock *sk, char *optval, int optlen)
 					goto release;
 
 				err = -EINVAL;
-				if (ipv6_addr_cmp(&fl1->dst, &fl->dst) ||
+				if (!ipv6_addr_equal(&fl1->dst, &fl->dst) ||
 				    ipv6_opt_cmp(fl1->opt, fl->opt))
 					goto release;
 
@@ -538,7 +538,8 @@ release:
 
 		/* Do not check for fault */
 		if (!freq.flr_label)
-			copy_to_user(optval + ((u8*)&freq.flr_label - (u8*)&freq), &fl->label, sizeof(fl->label));
+			copy_to_user(&((struct in6_flowlabel_req __user *) optval)->flr_label,
+				     &fl->label, sizeof(fl->label));
 
 		sfl1->fl = fl;
 		sfl1->next = np->ipv6_fl_list;
@@ -645,8 +646,8 @@ static void ip6fl_fl_seq_show(struct seq_file *seq, struct ip6_flowlabel *fl)
 static int ip6fl_seq_show(struct seq_file *seq, void *v)
 {
 	if (v == SEQ_START_TOKEN)
-		seq_printf(seq, "Label S Owner  Users  Linger Expires  "
-				"Dst                              Opt\n");
+		seq_puts(seq, "Label S Owner  Users  Linger Expires  "
+			      "Dst                              Opt\n");
 	else
 		ip6fl_fl_seq_show(seq, v);
 	return 0;
@@ -692,14 +693,14 @@ static struct file_operations ip6fl_seq_fops = {
 #endif
 
 
-void ip6_flowlabel_init()
+void ip6_flowlabel_init(void)
 {
 #ifdef CONFIG_PROC_FS
 	proc_net_fops_create("ip6_flowlabel", S_IRUGO, &ip6fl_seq_fops);
 #endif
 }
 
-void ip6_flowlabel_cleanup()
+void ip6_flowlabel_cleanup(void)
 {
 	del_timer(&ip6_fl_gc_timer);
 #ifdef CONFIG_PROC_FS

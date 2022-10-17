@@ -31,7 +31,7 @@ void disable_8259A_irq(unsigned int irq);
  * moves to arch independent land
  */
 
-static spinlock_t i8259A_lock = SPIN_LOCK_UNLOCKED;
+spinlock_t i8259A_lock = SPIN_LOCK_UNLOCKED;
 
 static void end_8259A_irq (unsigned int irq)
 {
@@ -209,7 +209,7 @@ spurious_8259A_irq:
 		 * lets ACK and report it. [once per IRQ]
 		 */
 		if (!(spurious_irq_mask & irqmask)) {
-			printk("spurious 8259A interrupt: IRQ%d.\n", irq);
+			printk(KERN_DEBUG "spurious 8259A interrupt: IRQ%d.\n", irq);
 			spurious_irq_mask |= irqmask;
 		}
 		atomic_inc(&irq_err_count);
@@ -242,7 +242,7 @@ static int __init i8259A_init_sysfs(void)
 {
 	int error = sysdev_class_register(&i8259_sysdev_class);
 	if (!error)
-		error = sys_device_register(&device_i8259A);
+		error = sysdev_register(&device_i8259A);
 	return error;
 }
 
@@ -291,16 +291,11 @@ void __init init_8259A(int auto_eoi)
 	spin_unlock_irqrestore(&i8259A_lock, flags);
 }
 
-asmlinkage void i8259_do_irq(int irq, struct pt_regs regs)
-{
-	panic("i8259_do_irq: I want to be implemented");
-}
-
 /*
  * IRQ2 is cascade interrupt to second interrupt controller
  */
 static struct irqaction irq2 = {
-	no_action, 0, 0, "cascade", NULL, NULL
+	no_action, 0, CPU_MASK_NONE, "cascade", NULL, NULL
 };
 
 static struct resource pic1_io_resource = {

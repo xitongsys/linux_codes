@@ -24,7 +24,7 @@
  * ------------------------------------------------------------------------
  */
 
-#define ZR050_VERSION "v0.7"
+#define ZR050_VERSION "v0.7.1"
 
 #include <linux/version.h>
 #include <linux/module.h>
@@ -58,7 +58,7 @@ static int zr36050_codecs = 0;
 /* debugging is available via module parameter */
 
 static int debug = 0;
-MODULE_PARM(debug, "i");
+module_param(debug, int, 0);
 MODULE_PARM_DESC(debug, "Debug level (0-4)");
 
 #define dprintk(num, format, args...) \
@@ -325,32 +325,6 @@ static const char zr36050_dht[0x1a4] = {
 	0xF9, 0xFA
 };
 
-static const char zr36050_app[0x40] = {
-	0xff, 0xe0,		//Marker: APP0
-	0x00, 0x3e,		//Length: 60+2
-	' ', 'A', 'V', 'I', '1', 0, 0, 0,	// 'AVI' field
-	0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0
-};
-
-static const char zr36050_com[0x40] = {
-	0xff, 0xfe,		//Marker: COM
-	0x00, 0x3e,		//Length: 60+2
-	' ', 'C', 'O', 'M', 0, 0, 0, 0,	// 'COM' field
-	0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0
-};
-
 /* jpeg baseline setup, this is just fixed in this driver (YUV pictures) */
 #define NO_OF_COMPONENTS          0x3	//Y,U,V
 #define BASELINE_PRECISION        0x8	//MCU size (?)
@@ -479,7 +453,7 @@ zr36050_init (struct zr36050 *ptr)
 		zr36050_write(ptr, ZR050_INT_REQ_1, 3);	// low 2 bits always 1
 
 		/* volume control settings */
-		zr36050_write(ptr, ZR050_MBCV, ptr->max_block_vol >> 1);
+		/*zr36050_write(ptr, ZR050_MBCV, ptr->max_block_vol);*/
 		zr36050_write(ptr, ZR050_SF_HI, ptr->scalefact >> 8);
 		zr36050_write(ptr, ZR050_SF_LO, ptr->scalefact & 0xff);
 
@@ -499,10 +473,18 @@ zr36050_init (struct zr36050 *ptr)
 				      sizeof(zr36050_dqt), zr36050_dqt);
 		sum += zr36050_pushit(ptr, ZR050_DHT_IDX,
 				      sizeof(zr36050_dht), zr36050_dht);
-		sum += zr36050_pushit(ptr, ZR050_APP_IDX,
-				      sizeof(zr36050_app), zr36050_app);
-		sum += zr36050_pushit(ptr, ZR050_COM_IDX,
-				      sizeof(zr36050_com), zr36050_com);
+		zr36050_write(ptr, ZR050_APP_IDX, 0xff);
+		zr36050_write(ptr, ZR050_APP_IDX + 1, 0xe0 + ptr->app.appn);
+		zr36050_write(ptr, ZR050_APP_IDX + 2, 0x00);
+		zr36050_write(ptr, ZR050_APP_IDX + 3, ptr->app.len + 2);
+		sum += zr36050_pushit(ptr, ZR050_APP_IDX + 4, 60,
+				      ptr->app.data) + 4;
+		zr36050_write(ptr, ZR050_COM_IDX, 0xff);
+		zr36050_write(ptr, ZR050_COM_IDX + 1, 0xfe);
+		zr36050_write(ptr, ZR050_COM_IDX + 2, 0x00);
+		zr36050_write(ptr, ZR050_COM_IDX + 3, ptr->com.len + 2);
+		sum += zr36050_pushit(ptr, ZR050_COM_IDX + 4, 60,
+				      ptr->com.data) + 4;
 
 		/* do the internal huffman table preload */
 		zr36050_write(ptr, ZR050_MARKERS_EN, ZR050_ME_DHTI);
@@ -521,13 +503,13 @@ zr36050_init (struct zr36050 *ptr)
 		/* setup misc. data for compression (target code sizes) */
 
 		/* size of compressed code to reach without header data */
-		sum = ptr->total_code_vol - sum;
+		sum = ptr->real_code_vol - sum;
 		bitcnt = sum << 3;	/* need the size in bits */
 
 		tmp = bitcnt >> 16;
 		dprintk(3,
 			"%s: code: csize=%d, tot=%d, bit=%ld, highbits=%ld\n",
-			ptr->name, sum, ptr->total_code_vol, bitcnt, tmp);
+			ptr->name, sum, ptr->real_code_vol, bitcnt, tmp);
 		zr36050_write(ptr, ZR050_TCV_NET_HI, tmp >> 8);
 		zr36050_write(ptr, ZR050_TCV_NET_MH, tmp & 0xff);
 		tmp = bitcnt & 0xffff;
@@ -553,8 +535,9 @@ zr36050_init (struct zr36050 *ptr)
 
 		/* this headers seem to deliver "valid AVI" jpeg frames */
 		zr36050_write(ptr, ZR050_MARKERS_EN,
-			      ZR050_ME_APP | ZR050_ME_DQT | ZR050_ME_DHT |
-			      ZR050_ME_COM);
+			      ZR050_ME_DQT | ZR050_ME_DHT |
+			      ((ptr->app.len > 0) ? ZR050_ME_APP : 0) |
+			      ((ptr->com.len > 0) ? ZR050_ME_COM : 0));
 	} else {
 		dprintk(2, "%s: EXPANSION SETUP\n", ptr->name);
 
@@ -629,16 +612,36 @@ zr36050_set_video (struct videocodec   *codec,
 		   struct vfe_polarity *pol)
 {
 	struct zr36050 *ptr = (struct zr36050 *) codec->data;
+	int size;
 
-	dprintk(2, "%s: set_video %d.%d, %d/%d-%dx%d (0x%x) call\n",
+	dprintk(2, "%s: set_video %d.%d, %d/%d-%dx%d (0x%x) q%d call\n",
 		ptr->name, norm->HStart, norm->VStart,
 		cap->x, cap->y, cap->width, cap->height,
-		cap->decimation);
+		cap->decimation, cap->quality);
 	/* if () return -EINVAL;
 	 * trust the master driver that it knows what it does - so
 	 * we allow invalid startx/y and norm for now ... */
 	ptr->width = cap->width / (cap->decimation & 0xff);
 	ptr->height = cap->height / ((cap->decimation >> 8) & 0xff);
+
+	/* (KM) JPEG quality */
+	size = ptr->width * ptr->height;
+	size *= 16; /* size in bits */
+	/* apply quality setting */
+	size = size * cap->quality / 200;
+
+	/* Minimum: 1kb */
+	if (size < 8192)
+		size = 8192;
+	/* Maximum: 7/8 of code buffer */
+	if (size > ptr->total_code_vol * 7)
+		size = ptr->total_code_vol * 7;
+
+	ptr->real_code_vol = size >> 3; /* in bytes */
+
+	/* Set max_block_vol here (previously in zr36050_init, moved
+	 * here for consistency with zr36060 code */
+	zr36050_write(ptr, ZR050_MBCV, ptr->max_block_vol);
 
 	return 0;
 }
@@ -697,6 +700,9 @@ zr36050_control (struct videocodec *codec,
 		if (size != sizeof(int))
 			return -EFAULT;
 		ptr->total_code_vol = *ival;
+		/* (Kieran Morrissey)
+		 * code copied from zr36060.c to ensure proper bitrate */
+		ptr->real_code_vol = (ptr->total_code_vol * 6) >> 3;
 		break;
 
 	case CODEC_G_JPEG_SCALE:	/* get scaling factor */
@@ -710,6 +716,47 @@ zr36050_control (struct videocodec *codec,
 			return -EFAULT;
 		ptr->scalefact = *ival;
 		break;
+
+	case CODEC_G_JPEG_APP_DATA: {	/* get appn marker data */
+		struct jpeg_app_marker *app = data;
+
+		if (size != sizeof(struct jpeg_app_marker))
+			return -EFAULT;
+
+		*app = ptr->app;
+		break;
+	}
+
+	case CODEC_S_JPEG_APP_DATA: {	 /* set appn marker data */
+		struct jpeg_app_marker *app = data;
+
+		if (size != sizeof(struct jpeg_app_marker))
+			return -EFAULT;
+
+		ptr->app = *app;
+		break;
+	}
+
+	case CODEC_G_JPEG_COM_DATA: {	/* get comment marker data */
+		struct jpeg_com_marker *com = data;
+
+		if (size != sizeof(struct jpeg_com_marker))
+			return -EFAULT;
+
+		*com = ptr->com;
+		break;
+	}
+
+	case CODEC_S_JPEG_COM_DATA: {	/* set comment marker data */
+		struct jpeg_com_marker *com = data;
+
+		if (size != sizeof(struct jpeg_com_marker))
+			return -EFAULT;
+
+		ptr->com = *com;
+		break;
+	}
+
 	default:
 		return -EINVAL;
 	}
@@ -737,12 +784,6 @@ zr36050_unset (struct videocodec *codec)
 		codec->data = NULL;
 
 		zr36050_codecs--;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0)
-		MOD_DEC_USE_COUNT;
-#else
-		module_put(THIS_MODULE);
-#endif
-
 		return 0;
 	}
 
@@ -785,19 +826,6 @@ zr36050_setup (struct videocodec *codec)
 	ptr->num = zr36050_codecs++;
 	ptr->codec = codec;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0)
-	MOD_INC_USE_COUNT;
-#else
-	if (!try_module_get(THIS_MODULE)) {
-		dprintk(1,
-			KERN_ERR
-			"zr36050: failed to increase module use count\n");
-		kfree(ptr);
-		zr36050_codecs--;
-		return -ENODEV;
-	}
-#endif
-
 	//testing
 	res = zr36050_basic_test(ptr);
 	if (res < 0) {
@@ -817,6 +845,12 @@ zr36050_setup (struct videocodec *codec)
 	ptr->max_block_vol = 240;
 	ptr->scalefact = 0x100;
 	ptr->dri = 1;
+
+	/* no app/com marker by default */
+	ptr->app.appn = 0;
+	ptr->app.len = 0;
+	ptr->com.len = 0;
+
 	zr36050_init(ptr);
 
 	dprintk(1, KERN_INFO "%s: codec attached and running\n",
@@ -826,6 +860,7 @@ zr36050_setup (struct videocodec *codec)
 }
 
 static const struct videocodec zr36050_codec = {
+	.owner = THIS_MODULE,
 	.name = "zr36050",
 	.magic = 0L,		// magic not used
 	.flags =

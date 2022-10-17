@@ -39,6 +39,7 @@
 #include <linux/pci.h>
 #include <linux/acpi.h>
 #include <linux/kallsyms.h>
+#include <linux/edd.h>
 #include <asm/mtrr.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -52,8 +53,10 @@
 #include <asm/mpspec.h>
 #include <asm/mmu_context.h>
 #include <asm/bootsetup.h>
-#include <asm/smp.h>
 #include <asm/proto.h>
+#include <asm/setup.h>
+#include <asm/mach_apic.h>
+#include <asm/numa.h>
 
 /*
  * Machine setup..
@@ -64,13 +67,28 @@ struct cpuinfo_x86 boot_cpu_data;
 unsigned long mmu_cr4_features;
 EXPORT_SYMBOL_GPL(mmu_cr4_features);
 
-int acpi_disabled = 0;
-int acpi_ht = 0;
+int acpi_disabled;
+EXPORT_SYMBOL(acpi_disabled);
+#ifdef	CONFIG_ACPI_BOOT
+extern int __initdata acpi_ht;
+extern acpi_interrupt_flags	acpi_sci_flags;
+int __initdata acpi_force = 0;
+#endif
+
+int acpi_numa __initdata;
 
 /* For PCI or other memory-mapped resources */
 unsigned long pci_mem_start = 0x10000000;
 
+/* Boot loader ID as an integer, for the benefit of proc_dointvec */
+int bootloader_type;
+
 unsigned long saved_video_mode;
+
+#ifdef CONFIG_SWIOTLB
+int swiotlb;
+EXPORT_SYMBOL(swiotlb);
+#endif
 
 /*
  * Setup options
@@ -91,94 +109,167 @@ extern int root_mountflags;
 extern char _text, _etext, _edata, _end;
 
 char command_line[COMMAND_LINE_SIZE];
-char saved_command_line[COMMAND_LINE_SIZE];
 
 struct resource standard_io_resources[] = {
-	{ "dma1", 0x00, 0x1f, IORESOURCE_BUSY },
-	{ "pic1", 0x20, 0x21, IORESOURCE_BUSY },
-	{ "timer", 0x40, 0x5f, IORESOURCE_BUSY },
-	{ "keyboard", 0x60, 0x6f, IORESOURCE_BUSY },
-	{ "dma page reg", 0x80, 0x8f, IORESOURCE_BUSY },
-	{ "pic2", 0xa0, 0xa1, IORESOURCE_BUSY },
-	{ "dma2", 0xc0, 0xdf, IORESOURCE_BUSY },
-	{ "fpu", 0xf0, 0xff, IORESOURCE_BUSY }
+	{ .name = "dma1", .start = 0x00, .end = 0x1f,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "pic1", .start = 0x20, .end = 0x21,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "timer0", .start = 0x40, .end = 0x43,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "timer1", .start = 0x50, .end = 0x53,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "keyboard", .start = 0x60, .end = 0x6f,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "dma page reg", .start = 0x80, .end = 0x8f,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "pic2", .start = 0xa0, .end = 0xa1,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "dma2", .start = 0xc0, .end = 0xdf,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "fpu", .start = 0xf0, .end = 0xff,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO }
 };
 
-#define STANDARD_IO_RESOURCES (sizeof(standard_io_resources)/sizeof(struct resource))
+#define STANDARD_IO_RESOURCES \
+	(sizeof standard_io_resources / sizeof standard_io_resources[0])
 
-struct resource code_resource = { "Kernel code", 0x100000, 0 };
-struct resource data_resource = { "Kernel data", 0, 0 };
-struct resource vram_resource = { "Video RAM area", 0xa0000, 0xbffff, IORESOURCE_BUSY };
+#define IORESOURCE_RAM (IORESOURCE_BUSY | IORESOURCE_MEM)
 
-/* System ROM resources */
-#define MAXROMS 6
-static struct resource rom_resources[MAXROMS] = {
-	{ "System ROM", 0xF0000, 0xFFFFF, IORESOURCE_BUSY },
-	{ "Video ROM", 0xc0000, 0xc7fff, IORESOURCE_BUSY }
+struct resource data_resource = {
+	.name = "Kernel data",
+	.start = 0,
+	.end = 0,
+	.flags = IORESOURCE_RAM,
+};
+struct resource code_resource = {
+	.name = "Kernel code",
+	.start = 0,
+	.end = 0,
+	.flags = IORESOURCE_RAM,
+};
+
+#define IORESOURCE_ROM (IORESOURCE_BUSY | IORESOURCE_READONLY | IORESOURCE_MEM)
+
+static struct resource system_rom_resource = {
+	.name = "System ROM",
+	.start = 0xf0000,
+	.end = 0xfffff,
+	.flags = IORESOURCE_ROM,
+};
+
+static struct resource extension_rom_resource = {
+	.name = "Extension ROM",
+	.start = 0xe0000,
+	.end = 0xeffff,
+	.flags = IORESOURCE_ROM,
+};
+
+static struct resource adapter_rom_resources[] = {
+	{ .name = "Adapter ROM", .start = 0xc8000, .end = 0,
+		.flags = IORESOURCE_ROM },
+	{ .name = "Adapter ROM", .start = 0, .end = 0,
+		.flags = IORESOURCE_ROM },
+	{ .name = "Adapter ROM", .start = 0, .end = 0,
+		.flags = IORESOURCE_ROM },
+	{ .name = "Adapter ROM", .start = 0, .end = 0,
+		.flags = IORESOURCE_ROM },
+	{ .name = "Adapter ROM", .start = 0, .end = 0,
+		.flags = IORESOURCE_ROM },
+	{ .name = "Adapter ROM", .start = 0, .end = 0,
+		.flags = IORESOURCE_ROM }
+};
+
+#define ADAPTER_ROM_RESOURCES \
+	(sizeof adapter_rom_resources / sizeof adapter_rom_resources[0])
+
+static struct resource video_rom_resource = {
+	.name = "Video ROM",
+	.start = 0xc0000,
+	.end = 0xc7fff,
+	.flags = IORESOURCE_ROM,
+};
+
+static struct resource video_ram_resource = {
+	.name = "Video RAM area",
+	.start = 0xa0000,
+	.end = 0xbffff,
+	.flags = IORESOURCE_RAM,
 };
 
 #define romsignature(x) (*(unsigned short *)(x) == 0xaa55)
 
+static int __init romchecksum(unsigned char *rom, unsigned long length)
+{
+	unsigned char *p, sum = 0;
+
+	for (p = rom; p < rom + length; p++)
+		sum += *p;
+	return sum == 0;
+}
+
 static void __init probe_roms(void)
 {
-	int roms = 1;
-	unsigned long base;
-	unsigned char *romstart;
+	unsigned long start, length, upper;
+	unsigned char *rom;
+	int	      i;
 
-	request_resource(&iomem_resource, rom_resources+0);
-
-	/* Video ROM is standard at C000:0000 - C7FF:0000, check signature */
-	for (base = 0xC0000; base < 0xE0000; base += 2048) {
-		romstart = isa_bus_to_virt(base);
-		if (!romsignature(romstart))
+	/* video rom */
+	upper = adapter_rom_resources[0].start;
+	for (start = video_rom_resource.start; start < upper; start += 2048) {
+		rom = isa_bus_to_virt(start);
+		if (!romsignature(rom))
 			continue;
-		request_resource(&iomem_resource, rom_resources + roms);
-		roms++;
+
+		video_rom_resource.start = start;
+
+		/* 0 < length <= 0x7f * 512, historically */
+		length = rom[2] * 512;
+
+		/* if checksum okay, trust length byte */
+		if (length && romchecksum(rom, length))
+			video_rom_resource.end = start + length - 1;
+
+		request_resource(&iomem_resource, &video_rom_resource);
 		break;
-	}
-
-	/* Extension roms at C800:0000 - DFFF:0000 */
-	for (base = 0xC8000; base < 0xE0000; base += 2048) {
-		unsigned long length;
-
-		romstart = isa_bus_to_virt(base);
-		if (!romsignature(romstart))
-			continue;
-		length = romstart[2] * 512;
-		if (length) {
-			unsigned int i;
-			unsigned char chksum;
-
-			chksum = 0;
-			for (i = 0; i < length; i++)
-				chksum += romstart[i];
-
-			/* Good checksum? */
-			if (!chksum) {
-				rom_resources[roms].start = base;
-				rom_resources[roms].end = base + length - 1;
-				rom_resources[roms].name = "Extension ROM";
-				rom_resources[roms].flags = IORESOURCE_BUSY;
-
-				request_resource(&iomem_resource, rom_resources + roms);
-				roms++;
-				if (roms >= MAXROMS)
-					return;
 			}
+
+	start = (video_rom_resource.end + 1 + 2047) & ~2047UL;
+	if (start < upper)
+		start = upper;
+
+	/* system rom */
+	request_resource(&iomem_resource, &system_rom_resource);
+	upper = system_rom_resource.start;
+
+	/* check for extension rom (ignore length byte!) */
+	rom = isa_bus_to_virt(extension_rom_resource.start);
+	if (romsignature(rom)) {
+		length = extension_rom_resource.end - extension_rom_resource.start + 1;
+		if (romchecksum(rom, length)) {
+			request_resource(&iomem_resource, &extension_rom_resource);
+			upper = extension_rom_resource.start;
 		}
 	}
 
-	/* Final check for motherboard extension rom at E000:0000 */
-	base = 0xE0000;
-	romstart = isa_bus_to_virt(base);
+	/* check for adapter roms on 2k boundaries */
+	for (i = 0; i < ADAPTER_ROM_RESOURCES && start < upper; start += 2048) {
+		rom = isa_bus_to_virt(start);
+		if (!romsignature(rom))
+			continue;
 
-	if (romsignature(romstart)) {
-		rom_resources[roms].start = base;
-		rom_resources[roms].end = base + 65535;
-		rom_resources[roms].name = "Extension ROM";
-		rom_resources[roms].flags = IORESOURCE_BUSY;
+		/* 0 < length <= 0x7f * 512, historically */
+		length = rom[2] * 512;
 
-		request_resource(&iomem_resource, rom_resources + roms);
+		/* but accept any length that fits if checksum okay */
+		if (!length || start + length > upper || !romchecksum(rom, length))
+			continue;
+
+		adapter_rom_resources[i].start = start;
+		adapter_rom_resources[i].end = start + length - 1;
+		request_resource(&iomem_resource, &adapter_rom_resources[i]);
+
+		start = adapter_rom_resources[i++].end & ~2047UL;
 	}
 }
 
@@ -194,22 +285,55 @@ static __init void parse_cmdline_early (char ** cmdline_p)
 	for (;;) {
 		if (c != ' ') 
 			goto next_char; 
- 
+
+#ifdef  CONFIG_SMP
+		/*
+		 * If the BIOS enumerates physical processors before logical,
+		 * maxcpus=N at enumeration-time can be used to disable HT.
+		 */
+		else if (!memcmp(from, "maxcpus=", 8)) {
+			extern unsigned int maxcpus;
+
+			maxcpus = simple_strtoul(from + 8, NULL, 0);
+		}
+#endif
+#ifdef CONFIG_ACPI_BOOT
 		/* "acpi=off" disables both ACPI table parsing and interpreter init */
 		if (!memcmp(from, "acpi=off", 8))
-			acpi_disabled = 1;
+			disable_acpi();
 
 		if (!memcmp(from, "acpi=force", 10)) { 
 			/* add later when we do DMI horrors: */
-			/* acpi_force = 1; */	
+			acpi_force = 1;
 			acpi_disabled = 0;
 		}
 
 		/* acpi=ht just means: do ACPI MADT parsing 
 		   at bootup, but don't enable the full ACPI interpreter */
 		if (!memcmp(from, "acpi=ht", 7)) { 
+			if (!acpi_force)
+				disable_acpi();
 			acpi_ht = 1; 
 		}
+                else if (!memcmp(from, "pci=noacpi", 10)) 
+			acpi_disable_pci();
+		else if (!memcmp(from, "acpi=noirq", 10))
+			acpi_noirq_set();
+
+		else if (!memcmp(from, "acpi_sci=edge", 13))
+			acpi_sci_flags.trigger =  1;
+		else if (!memcmp(from, "acpi_sci=level", 14))
+			acpi_sci_flags.trigger = 3;
+		else if (!memcmp(from, "acpi_sci=high", 13))
+			acpi_sci_flags.polarity = 1;
+		else if (!memcmp(from, "acpi_sci=low", 12))
+			acpi_sci_flags.polarity = 3;
+
+		/* acpi=strict disables out-of-spec workarounds */
+		else if (!memcmp(from, "acpi=strict", 11)) {
+			acpi_strict = 1;
+		}
+#endif
 
 		if (!memcmp(from, "nolapic", 7) ||
 		    !memcmp(from, "disableapic", 11))
@@ -218,7 +342,7 @@ static __init void parse_cmdline_early (char ** cmdline_p)
 		if (!memcmp(from, "noapic", 6)) 
 			skip_ioapic_setup = 1;
 
-		if (!memcmp(from, "apic", 6)) { 
+		if (!memcmp(from, "apic", 4)) { 
 			skip_ioapic_setup = 0;
 			ioapic_force = 1;
 		}
@@ -236,6 +360,12 @@ static __init void parse_cmdline_early (char ** cmdline_p)
 			iommu_setup(from+6); 
 		}
 #endif
+
+		if (!memcmp(from,"oops=panic", 10))
+			panic_on_oops = 1;
+
+		if (!memcmp(from, "noexec=", 7))
+			nonx_setup(from + 7);
 
 	next_char:
 		c = *(from++);
@@ -329,9 +459,47 @@ static int __init noreplacement_setup(char *s)
 
 __setup("noreplacement", noreplacement_setup); 
 
+#if defined(CONFIG_EDD) || defined(CONFIG_EDD_MODULE)
+struct edd edd;
+#ifdef CONFIG_EDD_MODULE
+EXPORT_SYMBOL(edd);
+#endif
+/**
+ * copy_edd() - Copy the BIOS EDD information
+ *              from boot_params into a safe place.
+ *
+ */
+static inline void copy_edd(void)
+{
+     memcpy(edd.mbr_signature, EDD_MBR_SIGNATURE, sizeof(edd.mbr_signature));
+     memcpy(edd.edd_info, EDD_BUF, sizeof(edd.edd_info));
+     edd.mbr_signature_nr = EDD_MBR_SIG_NR;
+     edd.edd_info_nr = EDD_NR;
+}
+#else
+static inline void copy_edd(void)
+{
+}
+#endif
+
+#define EBDA_ADDR_POINTER 0x40E
+static void __init reserve_ebda_region(void)
+{
+	unsigned int addr;
+	/** 
+	 * there is a real-mode segmented pointer pointing to the 
+	 * 4K EBDA area at 0x40E
+	 */
+	addr = *(unsigned short *)phys_to_virt(EBDA_ADDR_POINTER);
+	addr <<= 4;
+	if (addr)
+		reserve_bootmem_generic(addr, PAGE_SIZE);
+}
+
 void __init setup_arch(char **cmdline_p)
 {
 	unsigned long low_mem_size;
+	unsigned long kernel_end;
 
  	ROOT_DEV = old_decode_dev(ORIG_ROOT_DEV);
  	drive_info = DRIVE_INFO;
@@ -339,6 +507,7 @@ void __init setup_arch(char **cmdline_p)
 	edid_info = EDID_INFO;
 	aux_device_present = AUX_DEVICE_INFO;
 	saved_video_mode = SAVED_VIDEO_MODE;
+	bootloader_type = LOADER_TYPE;
 
 #ifdef CONFIG_BLK_DEV_RAM
 	rd_image_start = RAMDISK_FLAGS & RAMDISK_IMAGE_START_MASK;
@@ -346,6 +515,7 @@ void __init setup_arch(char **cmdline_p)
 	rd_doload = ((RAMDISK_FLAGS & RAMDISK_LOAD_FLAG) != 0);
 #endif
 	setup_memory_region();
+	copy_edd();
 
 	if (!MOUNT_ROOT_RDONLY)
 		root_mountflags &= ~MS_RDONLY;
@@ -361,13 +531,32 @@ void __init setup_arch(char **cmdline_p)
 
 	parse_cmdline_early(cmdline_p);
 
+	early_identify_cpu(&boot_cpu_data);
+
 	/*
 	 * partially used pages are not usable - thus
 	 * we are rounding upwards:
 	 */
 	end_pfn = e820_end_of_ram();
 
-	init_memory_mapping(); 
+	check_efer();
+
+	init_memory_mapping(0, (end_pfn_map << PAGE_SHIFT));
+
+#ifdef CONFIG_ACPI_BOOT
+	/*
+	 * Initialize the ACPI boot-time table parser (gets the RSDP and SDT).
+	 * Call this early for SRAT node setup.
+	 */
+	acpi_boot_table_init();
+#endif
+
+#ifdef CONFIG_ACPI_NUMA
+	/*
+	 * Parse SRAT to discover nodes.
+	 */
+	acpi_numa_init();
+#endif
 
 #ifdef CONFIG_DISCONTIGMEM
 	numa_initmem_init(0, end_pfn); 
@@ -380,7 +569,6 @@ void __init setup_arch(char **cmdline_p)
 				(table_end - table_start) << PAGE_SHIFT);
 
 	/* reserve kernel */
-	unsigned long kernel_end;
 	kernel_end = round_up(__pa_symbol(&_end),PAGE_SIZE);
 	reserve_bootmem_generic(HIGH_MEMORY, kernel_end - HIGH_MEMORY);
 
@@ -389,6 +577,9 @@ void __init setup_arch(char **cmdline_p)
 	 * enabling clean reboots, SMP operation, laptop functions.
 	 */
 	reserve_bootmem_generic(0, PAGE_SIZE);
+
+	/* reserve ebda region */
+	reserve_ebda_region();
 
 #ifdef CONFIG_SMP
 	/*
@@ -431,25 +622,17 @@ void __init setup_arch(char **cmdline_p)
 		}
 	}
 #endif
-
 	paging_init();
 
-#ifndef CONFIG_SMP
-	/* Temporary hack: disable the IO-APIC for UP Nvidia and 
-	   This is until we sort out the ACPI problems. */
-	if (!acpi_disabled) 
-		check_ioapic();
-#endif
+	check_ioapic();
+
 #ifdef CONFIG_ACPI_BOOT
-       /*
-        * Initialize the ACPI boot-time table parser (gets the RSDP and SDT).
-        * Must do this after paging_init (due to reliance on fixmap, and thus
-        * the bootmem allocator) but before get_smp_config (to allow parsing
-        * of MADT).
-        */
-	if (!acpi_disabled)
-		acpi_boot_init();
+	/*
+	 * Read APIC and some other early information from ACPI tables.
+	 */
+	acpi_boot_init();
 #endif
+
 #ifdef CONFIG_X86_LOCAL_APIC
 	/*
 	 * get boot-time SMP configuration:
@@ -466,13 +649,13 @@ void __init setup_arch(char **cmdline_p)
 	probe_roms();
 	e820_reserve_resources(); 
 
-	request_resource(&iomem_resource, &vram_resource);
+	request_resource(&iomem_resource, &video_ram_resource);
 
 	{
 	unsigned i;
 	/* request I/O space for devices used on all i[345]86 PCs */
 	for (i = 0; i < STANDARD_IO_RESOURCES; i++)
-		request_resource(&ioport_resource, standard_io_resources+i);
+		request_resource(&ioport_resource, &standard_io_resources[i]);
 	}
 
 	/* Will likely break when you have unassigned resources with more
@@ -500,7 +683,7 @@ static int __init get_model_name(struct cpuinfo_x86 *c)
 {
 	unsigned int *v;
 
-	if (cpuid_eax(0x80000000) < 0x80000004)
+	if (c->x86_cpuid_level < 0x80000004)
 		return 0;
 
 	v = (unsigned int *) c->x86_model_id;
@@ -516,24 +699,24 @@ static void __init display_cacheinfo(struct cpuinfo_x86 *c)
 {
 	unsigned int n, dummy, eax, ebx, ecx, edx;
 
-	n = cpuid_eax(0x80000000);
+	n = c->x86_cpuid_level;
 
 	if (n >= 0x80000005) {
 		cpuid(0x80000005, &dummy, &ebx, &ecx, &edx);
 		printk(KERN_INFO "CPU: L1 I Cache: %dK (%d bytes/line), D cache %dK (%d bytes/line)\n",
 			edx>>24, edx&0xFF, ecx>>24, ecx&0xFF);
-		c->x86_cache_size=(ecx>>24)+(edx>>24);	
-		/* DTLB and ITLB together, but only 4K */
-		c->x86_tlbsize = ((ebx>>16)&0xff) + (ebx&0xff);
+		c->x86_cache_size=(ecx>>24)+(edx>>24);
+		/* On K8 L1 TLB is inclusive, so don't count it */
+		c->x86_tlbsize = 0;
 	}
 
 	if (n >= 0x80000006) {
 		cpuid(0x80000006, &dummy, &ebx, &ecx, &edx);
-	ecx = cpuid_ecx(0x80000006);
-	c->x86_cache_size = ecx >> 16;
+		ecx = cpuid_ecx(0x80000006);
+		c->x86_cache_size = ecx >> 16;
 		c->x86_tlbsize += ((ebx >> 16) & 0xfff) + (ebx & 0xfff);
 
-	printk(KERN_INFO "CPU: L2 Cache: %dK (%d bytes/line)\n",
+		printk(KERN_INFO "CPU: L2 Cache: %dK (%d bytes/line)\n",
 		c->x86_cache_size, ecx & 0xFF);
 	}
 
@@ -551,6 +734,9 @@ static int __init init_amd(struct cpuinfo_x86 *c)
 {
 	int r;
 	int level;
+#ifdef CONFIG_NUMA
+	int cpu;
+#endif
 
 	/* Bit 31 in normal CPUID used for nonstandard 3DNow ID;
 	   3DNow is IDd by bit 31 in extended CPUID (1*32+31) anyway */
@@ -572,9 +758,108 @@ static int __init init_amd(struct cpuinfo_x86 *c)
 		} 
 	} 
 	display_cacheinfo(c);
+
+	if (c->x86_cpuid_level >= 0x80000008) {
+		c->x86_num_cores = (cpuid_ecx(0x80000008) & 0xff) + 1;
+		if (c->x86_num_cores & (c->x86_num_cores - 1))
+			c->x86_num_cores = 1;
+
+#ifdef CONFIG_NUMA
+		/* On a dual core setup the lower bits of apic id
+		   distingush the cores. Fix up the CPU<->node mappings
+		   here based on that.
+		   Assumes number of cores is a power of two.
+		   When using SRAT use mapping from SRAT. */
+		cpu = c->x86_apicid;
+		if (acpi_numa <= 0 && c->x86_num_cores > 1) {
+			cpu_to_node[cpu] = cpu >> hweight32(c->x86_num_cores - 1);
+			if (!node_online(cpu_to_node[cpu]))
+				cpu_to_node[cpu] = first_node(node_online_map);
+		}
+		printk(KERN_INFO "CPU %d(%d) -> Node %d\n",
+				cpu, c->x86_num_cores, cpu_to_node[cpu]);
+#endif
+	}
+
 	return r;
 }
 
+static void __init detect_ht(struct cpuinfo_x86 *c)
+{
+#ifdef CONFIG_SMP
+	u32 	eax, ebx, ecx, edx;
+	int 	index_lsb, index_msb, tmp;
+	int 	cpu = smp_processor_id();
+	
+	if (!cpu_has(c, X86_FEATURE_HT))
+		return;
+
+	cpuid(1, &eax, &ebx, &ecx, &edx);
+	smp_num_siblings = (ebx & 0xff0000) >> 16;
+	
+	if (smp_num_siblings == 1) {
+		printk(KERN_INFO  "CPU: Hyper-Threading is disabled\n");
+	} else if (smp_num_siblings > 1) {
+		index_lsb = 0;
+		index_msb = 31;
+		/*
+		 * At this point we only support two siblings per
+		 * processor package.
+		 */
+		if (smp_num_siblings > NR_CPUS) {
+			printk(KERN_WARNING "CPU: Unsupported number of the siblings %d", smp_num_siblings);
+			smp_num_siblings = 1;
+			return;
+		}
+		tmp = smp_num_siblings;
+		while ((tmp & 1) == 0) {
+			tmp >>=1 ;
+			index_lsb++;
+		}
+		tmp = smp_num_siblings;
+		while ((tmp & 0x80000000 ) == 0) {
+			tmp <<=1 ;
+			index_msb--;
+		}
+		if (index_lsb != index_msb )
+			index_msb++;
+		phys_proc_id[cpu] = phys_pkg_id(index_msb);
+		
+		printk(KERN_INFO  "CPU: Physical Processor ID: %d\n",
+		       phys_proc_id[cpu]);
+	}
+#endif
+}
+
+static void __init sched_cmp_hack(struct cpuinfo_x86 *c)
+{
+#ifdef CONFIG_SMP
+	/* AMD dual core looks like HT but isn't really. Hide it from the
+	   scheduler. This works around problems with the domain scheduler.
+	   Also probably gives slightly better scheduling and disables
+	   SMT nice which is harmful on dual core.
+	   TBD tune the domain scheduler for dual core. */
+	if (c->x86_vendor == X86_VENDOR_AMD && cpu_has(c, X86_FEATURE_CMP_LEGACY))
+		smp_num_siblings = 1;
+#endif
+}
+	
+static void __init init_intel(struct cpuinfo_x86 *c)
+{
+	/* Cache sizes */
+	unsigned n;
+
+	init_intel_cacheinfo(c);
+	n = c->x86_cpuid_level;
+	if (n >= 0x80000008) {
+		unsigned eax = cpuid_eax(0x80000008);
+		c->x86_virt_bits = (eax >> 8) & 0xff;
+		c->x86_phys_bits = eax & 0xff;
+	}
+
+	if (c->x86 == 15)
+		c->x86_cache_alignment = c->x86_clflush_size * 2;
+}
 
 void __init get_cpu_vendor(struct cpuinfo_x86 *c)
 {
@@ -582,6 +867,8 @@ void __init get_cpu_vendor(struct cpuinfo_x86 *c)
 
 	if (!strcmp(v, "AuthenticAMD"))
 		c->x86_vendor = X86_VENDOR_AMD;
+	else if (!strcmp(v, "GenuineIntel"))
+		c->x86_vendor = X86_VENDOR_INTEL;
 	else
 		c->x86_vendor = X86_VENDOR_UNKNOWN;
 }
@@ -592,13 +879,12 @@ struct cpu_model_info {
 	char *model_names[16];
 };
 
-/*
- * This does the hard work of actually picking apart the CPU stuff...
- */
-void __init identify_cpu(struct cpuinfo_x86 *c)
+/* Do some early cpuid on the boot CPU to get some parameter that are
+   needed before check_bugs. Everything advanced is in identify_cpu
+   below. */
+void __init early_identify_cpu(struct cpuinfo_x86 *c)
 {
-	int junk, i;
-	u32 xlvl, tfms;
+	u32 tfms;
 
 	c->loops_per_jiffy = loops_per_jiffy;
 	c->x86_cache_size = -1;
@@ -606,22 +892,28 @@ void __init identify_cpu(struct cpuinfo_x86 *c)
 	c->x86_model = c->x86_mask = 0;	/* So far unknown... */
 	c->x86_vendor_id[0] = '\0'; /* Unset */
 	c->x86_model_id[0] = '\0';  /* Unset */
+	c->x86_clflush_size = 64;
+	c->x86_cache_alignment = c->x86_clflush_size;
+	c->x86_num_cores = 1;
+	c->x86_apicid = c == &boot_cpu_data ? 0 : c - cpu_data;
+	c->x86_cpuid_level = 0;
 	memset(&c->x86_capability, 0, sizeof c->x86_capability);
 
 	/* Get vendor name */
-	cpuid(0x00000000, &c->cpuid_level,
-	      (int *)&c->x86_vendor_id[0],
-	      (int *)&c->x86_vendor_id[8],
-	      (int *)&c->x86_vendor_id[4]);
+	cpuid(0x00000000, (unsigned int *)&c->cpuid_level,
+	      (unsigned int *)&c->x86_vendor_id[0],
+	      (unsigned int *)&c->x86_vendor_id[8],
+	      (unsigned int *)&c->x86_vendor_id[4]);
 		
 	get_cpu_vendor(c);
+
 	/* Initialize the standard set of capabilities */
 	/* Note that the vendor-specific code below might override */
 
 	/* Intel-defined flags: level 0x00000001 */
 	if (c->cpuid_level >= 0x00000001) {
 		__u32 misc;
-		cpuid(0x00000001, &tfms, &misc, &junk,
+		cpuid(0x00000001, &tfms, &misc, &c->x86_capability[4],
 		      &c->x86_capability[0]);
 		c->x86 = (tfms >> 8) & 0xf;
 		c->x86_model = (tfms >> 4) & 0xf;
@@ -631,28 +923,43 @@ void __init identify_cpu(struct cpuinfo_x86 *c)
 			c->x86_model += ((tfms >> 16) & 0xF) << 4;
 		} 
 		if (c->x86_capability[0] & (1<<19)) 
-       		c->x86_clflush_size = ((misc >> 8) & 0xff) * 8;
+			c->x86_clflush_size = ((misc >> 8) & 0xff) * 8;
+		c->x86_apicid = misc >> 24;
 	} else {
 		/* Have CPUID level 0 only - unheard of */
 		c->x86 = 4;
 	}
+}
+
+/*
+ * This does the hard work of actually picking apart the CPU stuff...
+ */
+void __init identify_cpu(struct cpuinfo_x86 *c)
+{
+	int i;
+	u32 xlvl;
+
+	early_identify_cpu(c);
 
 	/* AMD-defined flags: level 0x80000001 */
 	xlvl = cpuid_eax(0x80000000);
-	if ( (xlvl & 0xffff0000) == 0x80000000 ) {
-		if ( xlvl >= 0x80000001 )
+	c->x86_cpuid_level = xlvl;
+	if ((xlvl & 0xffff0000) == 0x80000000) {
+		if (xlvl >= 0x80000001) {
 			c->x86_capability[1] = cpuid_edx(0x80000001);
-		if ( xlvl >= 0x80000004 )
+			c->x86_capability[5] = cpuid_ecx(0x80000001);
+		}
+		if (xlvl >= 0x80000004)
 			get_model_name(c); /* Default name */
 	}
 
 	/* Transmeta-defined flags: level 0x80860001 */
 	xlvl = cpuid_eax(0x80860000);
-	if ( (xlvl & 0xffff0000) == 0x80860000 ) {
-		if (  xlvl >= 0x80860001 )
+	if ((xlvl & 0xffff0000) == 0x80860000) {
+		/* Don't set x86_cpuid_level here for now to not confuse. */
+		if (xlvl >= 0x80860001)
 			c->x86_capability[2] = cpuid_edx(0x80860001);
 	}
-
 
 	/*
 	 * Vendor-specific initialization.  In this section we
@@ -664,30 +971,44 @@ void __init identify_cpu(struct cpuinfo_x86 *c)
 	 * At the end of this section, c->x86_capability better
 	 * indicate the features this CPU genuinely supports!
 	 */
-	switch ( c->x86_vendor ) {
+	switch (c->x86_vendor) {
+	case X86_VENDOR_AMD:
+		init_amd(c);
+		break;
 
-		case X86_VENDOR_AMD:
-			init_amd(c);
-			break;
+	case X86_VENDOR_INTEL:
+		init_intel(c);
+		break;
 
-		case X86_VENDOR_UNKNOWN:
-		default:
-			/* Not much we can do here... */
-			break;
+	case X86_VENDOR_UNKNOWN:
+	default:
+		display_cacheinfo(c);
+		break;
 	}
-	
+
+	select_idle_routine(c);
+	detect_ht(c); 
+	sched_cmp_hack(c);
+
 	/*
 	 * On SMP, boot_cpu_data holds the common feature set between
 	 * all CPUs; so make sure that we indicate which features are
 	 * common between the CPUs.  The first time this routine gets
 	 * executed, c == &boot_cpu_data.
 	 */
-	if ( c != &boot_cpu_data ) {
+	if (c != &boot_cpu_data) {
 		/* AND the already accumulated flags with these */
-		for ( i = 0 ; i < NCAPINTS ; i++ )
+		for (i = 0 ; i < NCAPINTS ; i++)
 			boot_cpu_data.x86_capability[i] &= c->x86_capability[i];
 	}
 
+#ifdef CONFIG_X86_MCE
+	mcheck_init(c);
+#endif
+#ifdef CONFIG_NUMA
+	if (c != &boot_cpu_data)
+		numa_add_cpu(c - cpu_data);
+#endif
 }
  
 
@@ -723,13 +1044,13 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	        "fpu", "vme", "de", "pse", "tsc", "msr", "pae", "mce",
 	        "cx8", "apic", NULL, "sep", "mtrr", "pge", "mca", "cmov",
 	        "pat", "pse36", "pn", "clflush", NULL, "dts", "acpi", "mmx",
-	        "fxsr", "sse", "sse2", "ss", NULL, "tm", "ia64", NULL,
+	        "fxsr", "sse", "sse2", "ss", "ht", "tm", "ia64", NULL,
 
 		/* AMD-defined */
-		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		"pni", NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 		NULL, NULL, NULL, "syscall", NULL, NULL, NULL, NULL,
 		NULL, NULL, NULL, NULL, "nx", NULL, "mmxext", NULL,
-		NULL, NULL, NULL, NULL, NULL, "lm", "3dnowext", "3dnow",
+		NULL, "fxsr_opt", NULL, NULL, NULL, "lm", "3dnowext", "3dnow",
 
 		/* Transmeta-defined */
 		"recovery", "longrun", NULL, "lrti", NULL, NULL, NULL, NULL,
@@ -742,6 +1063,18 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+
+		/* Intel-defined (#2) */
+		"pni", NULL, NULL, "monitor", "ds_cpl", NULL, NULL, "est",
+		"tm2", NULL, "cid", NULL, NULL, "cx16", "xtpr", NULL,
+		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+
+		/* AMD-defined (#2) */
+		"lahf_lm", "cmp_legacy", NULL, NULL, NULL, NULL, NULL, NULL,
+		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
 	};
 	static char *x86_power_flags[] = { 
 		"ts",	/* temperature sensor */
@@ -781,6 +1114,11 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	if (c->x86_cache_size >= 0) 
 		seq_printf(m, "cache size\t: %d KB\n", c->x86_cache_size);
 	
+#ifdef CONFIG_SMP
+	seq_printf(m, "physical id\t: %d\n", phys_proc_id[c - cpu_data]);
+	seq_printf(m, "siblings\t: %d\n", c->x86_num_cores * smp_num_siblings);
+#endif	
+
 	seq_printf(m,
 	        "fpu\t\t: yes\n"
 	        "fpu_exception\t: yes\n"
@@ -804,6 +1142,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	if (c->x86_tlbsize > 0) 
 		seq_printf(m, "TLB size\t: %d 4K pages\n", c->x86_tlbsize);
 	seq_printf(m, "clflush size\t: %d\n", c->x86_clflush_size);
+	seq_printf(m, "cache_alignment\t: %d\n", c->x86_cache_alignment);
 
 	seq_printf(m, "address sizes\t: %u bits physical, %u bits virtual\n", 
 		   c->x86_phys_bits, c->x86_virt_bits);
@@ -819,6 +1158,10 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 					seq_printf(m, " [%d]", i);
 			}
 	}
+	seq_printf(m, "\n");
+
+	if (c->x86_num_cores > 1)
+		seq_printf(m, "cpu cores\t: %d\n", c->x86_num_cores);
 
 	seq_printf(m, "\n\n"); 
 

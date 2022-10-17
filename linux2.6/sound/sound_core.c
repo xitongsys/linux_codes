@@ -45,6 +45,7 @@
 #include <linux/major.h>
 #include <linux/kmod.h>
 #include <linux/devfs_fs_kernel.h>
+#include <linux/device.h>
 
 #define SOUND_STEP 16
 
@@ -63,6 +64,9 @@ extern int msnd_classic_init(void);
 #ifdef CONFIG_SOUND_MSNDPIN
 extern int msnd_pinnacle_init(void);
 #endif
+
+struct class_simple *sound_class;
+EXPORT_SYMBOL(sound_class);
 
 /*
  *	Low level list operator. Scan the ordered list, find a hole and
@@ -142,7 +146,7 @@ static struct sound_unit *__sound_remove_unit(struct sound_unit **list, int unit
  *	This lock guards the sound loader list.
  */
 
-static spinlock_t sound_loader_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(sound_loader_lock);
 
 /*
  *	Allocate the controlling structure and add it to the sound driver
@@ -170,6 +174,8 @@ static int sound_insert_unit(struct sound_unit **list, struct file_operations *f
 
 	devfs_mk_cdev(MKDEV(SOUND_MAJOR, s->unit_minor),
 			S_IFCHR | mode, s->name);
+	class_simple_device_add(sound_class, MKDEV(SOUND_MAJOR, s->unit_minor),
+				NULL, s->name+6);
 	return r;
 
  fail:
@@ -192,6 +198,7 @@ static void sound_remove_unit(struct sound_unit **list, int unit)
 	spin_unlock(&sound_loader_lock);
 	if (p) {
 		devfs_remove(p->name);
+		class_simple_device_remove(MKDEV(SOUND_MAJOR, p->unit_minor));
 		kfree(p);
 	}
 }
@@ -547,6 +554,7 @@ EXPORT_SYMBOL(mod_firmware_load);
 MODULE_DESCRIPTION("Core sound module");
 MODULE_AUTHOR("Alan Cox");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_CHARDEV_MAJOR(SOUND_MAJOR);
 
 static void __exit cleanup_soundcore(void)
 {
@@ -554,6 +562,7 @@ static void __exit cleanup_soundcore(void)
 	   empty */
 	unregister_chrdev(SOUND_MAJOR, "sound");
 	devfs_remove("sound");
+	class_simple_destroy(sound_class);
 }
 
 static int __init init_soundcore(void)
@@ -563,6 +572,9 @@ static int __init init_soundcore(void)
 		return -EBUSY;
 	}
 	devfs_mk_dir ("sound");
+	sound_class = class_simple_create(THIS_MODULE, "sound");
+	if (IS_ERR(sound_class))
+		return PTR_ERR(sound_class);
 
 	return 0;
 }

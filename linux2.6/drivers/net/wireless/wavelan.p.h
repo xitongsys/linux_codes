@@ -377,8 +377,8 @@
 #include	<linux/in.h>
 #include	<linux/string.h>
 #include	<linux/delay.h>
+#include	<linux/bitops.h>
 #include	<asm/system.h>
-#include	<asm/bitops.h>
 #include	<asm/io.h>
 #include	<asm/dma.h>
 #include	<asm/uaccess.h>
@@ -469,7 +469,6 @@ static const char	*version	= "wavelan.c : v24 (SMP + wireless extensions) 11/12/
 /****************************** TYPES ******************************/
 
 /* Shortcuts */
-typedef struct net_device		device;
 typedef struct net_device_stats	en_stats;
 typedef struct iw_statistics	iw_stats;
 typedef struct iw_quality	iw_qual;
@@ -492,7 +491,7 @@ typedef u_char		mac_addr[WAVELAN_ADDR_SIZE];	/* Hardware address */
 struct net_local
 {
   net_local *	next;		/* linked list of the devices */
-  device *	dev;		/* reverse link */
+  struct net_device *	dev;		/* reverse link */
   spinlock_t	spinlock;	/* Serialize access to the hardware (SMP) */
   en_stats	stats;		/* Ethernet interface statistics */
   int		nresets;	/* number of hardware resets */
@@ -511,6 +510,7 @@ struct net_local
   iw_stats	wstats;		/* Wireless-specific statistics */
 
   struct iw_spy_data	spy_data;
+  struct iw_public_data	wireless_data;
 #endif
 
 #ifdef HISTOGRAM
@@ -542,8 +542,8 @@ static inline void
 		  u_short),	/* hacr   */
 	wv_16_on(u_long,	/* ioaddr */
 		 u_short),	/* hacr   */
-	wv_ints_off(device *),
-	wv_ints_on(device *);
+	wv_ints_off(struct net_device *),
+	wv_ints_on(struct net_device *);
 /* ----------------- MODEM MANAGEMENT SUBROUTINES ----------------- */
 static void
 	psa_read(u_long,	/* Read the Parameter Storage Area. */
@@ -592,57 +592,59 @@ static inline void
 		    u_char *,	/* b */
 		    int);	/* n */
 static void
-	wv_ack(device *);
+	wv_ack(struct net_device *);
 static inline int
-	wv_synchronous_cmd(device *,
+	wv_synchronous_cmd(struct net_device *,
 			   const char *),
-	wv_config_complete(device *,
+	wv_config_complete(struct net_device *,
 			   u_long,
 			   net_local *);
 static int
-	wv_complete(device *,
+	wv_complete(struct net_device *,
 		    u_long,
 		    net_local *);
 static inline void
-	wv_82586_reconfig(device *);
+	wv_82586_reconfig(struct net_device *);
 /* ------------------- DEBUG & INFO SUBROUTINES ------------------- */
 #ifdef DEBUG_I82586_SHOW
 static void
 	wv_scb_show(unsigned short);
 #endif
 static inline void
-	wv_init_info(device *);	/* display startup info */
+	wv_init_info(struct net_device *);	/* display startup info */
 /* ------------------- IOCTL, STATS & RECONFIG ------------------- */
 static en_stats	*
-	wavelan_get_stats(device *);	/* Give stats /proc/net/dev */
+	wavelan_get_stats(struct net_device *);	/* Give stats /proc/net/dev */
+static iw_stats *
+	wavelan_get_wireless_stats(struct net_device *);
 static void
-	wavelan_set_multicast_list(device *);
+	wavelan_set_multicast_list(struct net_device *);
 /* ----------------------- PACKET RECEPTION ----------------------- */
 static inline void
-	wv_packet_read(device *,	/* Read a packet from a frame. */
+	wv_packet_read(struct net_device *,	/* Read a packet from a frame. */
 		       u_short,
 		       int),
-	wv_receive(device *);	/* Read all packets waiting. */
+	wv_receive(struct net_device *);	/* Read all packets waiting. */
 /* --------------------- PACKET TRANSMISSION --------------------- */
 static inline int
-	wv_packet_write(device *,	/* Write a packet to the Tx buffer. */
+	wv_packet_write(struct net_device *,	/* Write a packet to the Tx buffer. */
 			void *,
 			short);
 static int
 	wavelan_packet_xmit(struct sk_buff *,	/* Send a packet. */
-			    device *);
+			    struct net_device *);
 /* -------------------- HARDWARE CONFIGURATION -------------------- */
 static inline int
-	wv_mmc_init(device *),		/* Initialize the modem. */
-	wv_ru_start(device *),		/* Start the i82586 receiver unit. */
-	wv_cu_start(device *),		/* Start the i82586 command unit. */
-	wv_82586_start(device *);	/* Start the i82586. */
+	wv_mmc_init(struct net_device *),	/* Initialize the modem. */
+	wv_ru_start(struct net_device *),	/* Start the i82586 receiver unit. */
+	wv_cu_start(struct net_device *),	/* Start the i82586 command unit. */
+	wv_82586_start(struct net_device *);	/* Start the i82586. */
 static void
-	wv_82586_config(device *);	/* Configure the i82586. */
+	wv_82586_config(struct net_device *);	/* Configure the i82586. */
 static inline void
-	wv_82586_stop(device *);
+	wv_82586_stop(struct net_device *);
 static int
-	wv_hw_reset(device *),		/* Reset the WaveLAN hardware. */
+	wv_hw_reset(struct net_device *),	/* Reset the WaveLAN hardware. */
 	wv_check_ioaddr(u_long,		/* ioaddr */
 			u_char *);	/* mac address (read) */
 /* ---------------------- INTERRUPT HANDLING ---------------------- */
@@ -651,14 +653,13 @@ static irqreturn_t
 			  void *,
 			  struct pt_regs *);
 static void
-	wavelan_watchdog(device *);	/* transmission watchdog */
+	wavelan_watchdog(struct net_device *);	/* transmission watchdog */
 /* ------------------- CONFIGURATION CALLBACKS ------------------- */
 static int
-	wavelan_open(device *),		/* Open the device. */
-	wavelan_close(device *),	/* Close the device. */
-	wavelan_config(device *);	/* Configure one device. */
-extern int
-	wavelan_probe(device *);	/* See Space.c. */
+	wavelan_open(struct net_device *),	/* Open the device. */
+	wavelan_close(struct net_device *),	/* Close the device. */
+	wavelan_config(struct net_device *, unsigned short);/* Configure one device. */
+extern struct net_device *wavelan_probe(int unit);	/* See Space.c. */
 
 /**************************** VARIABLES ****************************/
 
@@ -702,10 +703,11 @@ static unsigned short	iobase[]	=
 /* Parameters set by insmod */
 static int	io[4];
 static int	irq[4];
-static char	name[4][IFNAMSIZ];
-MODULE_PARM(io, "1-4i");
-MODULE_PARM(irq, "1-4i");
-MODULE_PARM(name, "1-4c" __MODULE_STRING(IFNAMSIZ));
+static char	*name[4];
+module_param_array(io, int, NULL, 0);
+module_param_array(irq, int, NULL, 0);
+module_param_array(name, charp, NULL, 0);
+
 MODULE_PARM_DESC(io, "WaveLAN I/O base address(es),required");
 MODULE_PARM_DESC(irq, "WaveLAN IRQ number(s)");
 MODULE_PARM_DESC(name, "WaveLAN interface neme(s)");

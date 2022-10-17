@@ -56,13 +56,18 @@
 
 /* address in low memory of the wakeup routine. */
 unsigned long acpi_wakeup_address = 0;
+unsigned long acpi_video_flags;
 extern char wakeup_start, wakeup_end;
 
 extern unsigned long FASTCALL(acpi_copy_wakeup_routine(unsigned long));
 
+static pgd_t low_ptr;
+
 static void init_low_mapping(void)
 {
-	cpu_pda[0].level4_pgt[0] = cpu_pda[0].level4_pgt[pml4_index(PAGE_OFFSET)];
+	pgd_t *slot0 = pgd_offset(current->mm, 0UL);
+	low_ptr = *slot0;
+	set_pgd(slot0, *pgd_offset(current->mm, PAGE_OFFSET));
 	flush_tlb_all();
 }
 
@@ -96,7 +101,7 @@ int acpi_save_state_disk (void)
  */
 void acpi_restore_state_mem (void)
 {
-	cpu_pda[0].level4_pgt[0] = 0;
+	set_pgd(pgd_offset(current->mm, 0UL), low_ptr);
 	flush_tlb_all();
 }
 
@@ -113,8 +118,23 @@ void __init acpi_reserve_bootmem(void)
 	acpi_wakeup_address = (unsigned long)alloc_bootmem_low(PAGE_SIZE);
 	if ((&wakeup_end - &wakeup_start) > PAGE_SIZE)
 		printk(KERN_CRIT "ACPI: Wakeup code way too big, will crash on attempt to suspend\n");
-	printk(KERN_DEBUG "ACPI: have wakeup address 0x%8.8lx\n", acpi_wakeup_address);
 }
+
+static int __init acpi_sleep_setup(char *str)
+{
+	while ((str != NULL) && (*str != '\0')) {
+		if (strncmp(str, "s3_bios", 7) == 0)
+			acpi_video_flags = 1;
+		if (strncmp(str, "s3_mode", 7) == 0)
+			acpi_video_flags |= 2;
+		str = strchr(str, ',');
+		if (str != NULL)
+			str += strspn(str, ", \t");
+	}
+	return 1;
+}
+
+__setup("acpi_sleep=", acpi_sleep_setup);
 
 #endif /*CONFIG_ACPI_SLEEP*/
 

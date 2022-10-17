@@ -51,6 +51,8 @@
 #include <asm/uaccess.h>
 
 #include <net/bluetooth/bluetooth.h>
+#include <net/bluetooth/hci_core.h>
+#include <net/bluetooth/l2cap.h>
 #include <net/bluetooth/rfcomm.h>
 
 #ifndef CONFIG_BT_RFCOMM_DEBUG
@@ -97,17 +99,31 @@ static void rfcomm_sk_state_change(struct rfcomm_dlc *d, int err)
 
 	if (err)
 		sk->sk_err = err;
+
 	sk->sk_state = d->state;
 
 	parent = bt_sk(sk)->parent;
-	if (!parent) {
+	if (parent) {
+		if (d->state == BT_CLOSED) {
+			sk->sk_zapped = 1;
+			bt_accept_unlink(sk);
+		}
+		parent->sk_data_ready(parent, 0);
+	} else {
 		if (d->state == BT_CONNECTED)
 			rfcomm_session_getaddr(d->session, &bt_sk(sk)->src, NULL);
 		sk->sk_state_change(sk);
-	} else
-		parent->sk_data_ready(parent, 0);
+	}
 
 	bh_unlock_sock(sk);
+
+	if (parent && sk->sk_zapped) {
+		/* We have to drop DLC lock here, otherwise
+		 * rfcomm_sock_destruct() will dead lock. */
+		rfcomm_dlc_unlock(d);
+		rfcomm_sock_kill(sk);
+		rfcomm_dlc_lock(d);
+	}
 }
 
 /* ---- Socket functions ---- */
@@ -173,7 +189,7 @@ static void rfcomm_sock_destruct(struct sock *sk)
 
 	rfcomm_dlc_lock(d);
 	rfcomm_pi(sk)->dlc = NULL;
-	
+
 	/* Detach DLC if it's owned by this socket */
 	if (d->owner == sk)
 		d->owner = NULL;
@@ -252,10 +268,18 @@ static void rfcomm_sock_close(struct sock *sk)
 
 static void rfcomm_sock_init(struct sock *sk, struct sock *parent)
 {
+	struct rfcomm_pinfo *pi = rfcomm_pi(sk);
+
 	BT_DBG("sk %p", sk);
 
-	if (parent) 
+	if (parent) {
 		sk->sk_type = parent->sk_type;
+		pi->link_mode = rfcomm_pi(parent)->link_mode;
+	} else {
+		pi->link_mode = 0;
+	}
+
+	pi->dlc->link_mode = pi->link_mode;
 }
 
 static struct sock *rfcomm_sock_alloc(struct socket *sock, int proto, int prio)
@@ -384,7 +408,7 @@ static int rfcomm_sock_connect(struct socket *sock, struct sockaddr *addr, int a
 	return err;
 }
 
-int rfcomm_sock_listen(struct socket *sock, int backlog)
+static int rfcomm_sock_listen(struct socket *sock, int backlog)
 {
 	struct sock *sk = sock->sk;
 	int err = 0;
@@ -398,6 +422,27 @@ int rfcomm_sock_listen(struct socket *sock, int backlog)
 		goto done;
 	}
 
+	if (!rfcomm_pi(sk)->channel) {
+		bdaddr_t *src = &bt_sk(sk)->src;
+		u8 channel;
+
+		err = -EINVAL;
+
+		write_lock_bh(&rfcomm_sk_list.lock);
+
+		for (channel = 1; channel < 31; channel++)
+			if (!__rfcomm_get_sock_by_addr(channel, src)) {
+				rfcomm_pi(sk)->channel = channel;
+				err = 0;
+				break;
+			}
+
+		write_unlock_bh(&rfcomm_sk_list.lock);
+
+		if (err < 0)
+			goto done;
+	}
+
 	sk->sk_max_ack_backlog = backlog;
 	sk->sk_ack_backlog = 0;
 	sk->sk_state = BT_LISTEN;
@@ -407,7 +452,7 @@ done:
 	return err;
 }
 
-int rfcomm_sock_accept(struct socket *sock, struct socket *newsock, int flags)
+static int rfcomm_sock_accept(struct socket *sock, struct socket *newsock, int flags)
 {
 	DECLARE_WAITQUEUE(wait, current);
 	struct sock *sk = sock->sk, *nsk;
@@ -482,12 +527,12 @@ static int rfcomm_sock_getname(struct socket *sock, struct sockaddr *addr, int *
 }
 
 static int rfcomm_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
-			       struct msghdr *msg, int len)
+			       struct msghdr *msg, size_t len)
 {
 	struct sock *sk = sock->sk;
 	struct rfcomm_dlc *d = rfcomm_pi(sk)->dlc;
 	struct sk_buff *skb;
-	int err, size;
+	int err;
 	int sent = 0;
 
 	if (msg->msg_flags & MSG_OOB)
@@ -501,7 +546,7 @@ static int rfcomm_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
 	lock_sock(sk);
 
 	while (len) {
-		size = min_t(uint, len, d->mtu);
+		size_t size = min_t(size_t, len, d->mtu);
 		
 		skb = sock_alloc_send_skb(sk, size + RFCOMM_SKB_RESERVE,
 				msg->msg_flags & MSG_DONTWAIT, &err);
@@ -556,10 +601,11 @@ static long rfcomm_sock_data_wait(struct sock *sk, long timeo)
 }
 
 static int rfcomm_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
-			       struct msghdr *msg, int size, int flags)
+			       struct msghdr *msg, size_t size, int flags)
 {
 	struct sock *sk = sock->sk;
-	int target, err = 0, copied = 0;
+	int err = 0;
+	size_t target, copied = 0;
 	long timeo;
 
 	if (flags & MSG_OOB)
@@ -636,16 +682,26 @@ out:
 	return copied ? : err;
 }
 
-static int rfcomm_sock_setsockopt(struct socket *sock, int level, int optname, char *optval, int optlen)
+static int rfcomm_sock_setsockopt(struct socket *sock, int level, int optname, char __user *optval, int optlen)
 {
 	struct sock *sk = sock->sk;
 	int err = 0;
+	u32 opt;
 
 	BT_DBG("sk %p", sk);
 
 	lock_sock(sk);
 
 	switch (optname) {
+	case RFCOMM_LM:
+		if (get_user(opt, (u32 __user *) optval)) {
+			err = -EFAULT;
+			break;
+		}
+
+		rfcomm_pi(sk)->link_mode = opt;
+		break;
+
 	default:
 		err = -ENOPROTOOPT;
 		break;
@@ -655,10 +711,12 @@ static int rfcomm_sock_setsockopt(struct socket *sock, int level, int optname, c
 	return err;
 }
 
-static int rfcomm_sock_getsockopt(struct socket *sock, int level, int optname, char *optval, int *optlen)
+static int rfcomm_sock_getsockopt(struct socket *sock, int level, int optname, char __user *optval, int __user *optlen)
 {
 	struct sock *sk = sock->sk;
-	int len, err = 0; 
+	struct sock *l2cap_sk;
+	struct rfcomm_conninfo cinfo;
+	int len, err = 0;
 
 	BT_DBG("sk %p", sk);
 
@@ -668,10 +726,32 @@ static int rfcomm_sock_getsockopt(struct socket *sock, int level, int optname, c
 	lock_sock(sk);
 
 	switch (optname) {
+	case RFCOMM_LM:
+		if (put_user(rfcomm_pi(sk)->link_mode, (u32 __user *) optval))
+			err = -EFAULT;
+		break;
+
+	case RFCOMM_CONNINFO:
+		if (sk->sk_state != BT_CONNECTED) {
+			err = -ENOTCONN;
+			break;
+		}
+
+		l2cap_sk = rfcomm_pi(sk)->dlc->session->sock->sk;
+
+		cinfo.hci_handle = l2cap_pi(l2cap_sk)->conn->hcon->handle;
+		memcpy(cinfo.dev_class, l2cap_pi(l2cap_sk)->conn->hcon->dev_class, 3);
+
+		len = min_t(unsigned int, len, sizeof(cinfo));
+		if (copy_to_user(optval, (char *) &cinfo, len))
+			err = -EFAULT;
+
+		break;
+
 	default:
 		err = -ENOPROTOOPT;
 		break;
-	};
+	}
 
 	release_sock(sk);
 	return err;
@@ -685,7 +765,7 @@ static int rfcomm_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned lon
 	lock_sock(sk);
 
 #ifdef CONFIG_BT_RFCOMM_TTY
-	err = rfcomm_dev_ioctl(sk, cmd, arg);
+	err = rfcomm_dev_ioctl(sk, cmd, (void __user *)arg);
 #else
 	err = -EOPNOTSUPP;
 #endif

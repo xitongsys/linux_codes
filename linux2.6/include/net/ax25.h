@@ -227,12 +227,10 @@ extern void ax25_cb_add(ax25_cb *);
 struct sock *ax25_find_listener(ax25_address *, int, struct net_device *, int);
 struct sock *ax25_get_socket(ax25_address *, ax25_address *, int);
 extern ax25_cb *ax25_find_cb(ax25_address *, ax25_address *, ax25_digi *, struct net_device *);
-extern struct sock *ax25_addr_match(ax25_address *);
-extern void ax25_send_to_raw(struct sock *, struct sk_buff *, int);
+extern void ax25_send_to_raw(ax25_address *, struct sk_buff *, int);
 extern void ax25_destroy_socket(ax25_cb *);
 extern ax25_cb *ax25_create_cb(void);
 extern void ax25_fillin_cb(ax25_cb *, ax25_dev *);
-extern int  ax25_create(struct socket *, int);
 extern struct sock *ax25_make_new(struct sock *, struct ax25_dev *);
 
 /* ax25_addr.c */
@@ -269,7 +267,6 @@ extern int  ax25_ds_frame_in(ax25_cb *, struct sk_buff *, int);
 extern void ax25_ds_nr_error_recovery(ax25_cb *);
 extern void ax25_ds_enquiry_response(ax25_cb *);
 extern void ax25_ds_establish_data_link(ax25_cb *);
-extern void ax25_dev_dama_on(ax25_dev *);
 extern void ax25_dev_dama_off(ax25_dev *);
 extern void ax25_dama_on(ax25_cb *);
 extern void ax25_dama_off(ax25_cb *);
@@ -313,7 +310,7 @@ extern int  ax25_check_iframes_acked(ax25_cb *, unsigned short);
 
 /* ax25_route.c */
 extern void ax25_rt_device_down(struct net_device *);
-extern int  ax25_rt_ioctl(unsigned int, void *);
+extern int  ax25_rt_ioctl(unsigned int, void __user *);
 extern struct file_operations ax25_route_fops;
 extern int  ax25_rt_autobind(ax25_cb *, ax25_address *);
 extern ax25_route *ax25_rt_find_route(ax25_route *, ax25_address *,

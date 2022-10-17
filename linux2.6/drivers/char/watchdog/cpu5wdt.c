@@ -20,6 +20,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
@@ -36,7 +37,7 @@
 
 static int verbose = 0;
 static int port = 0x91;
-static volatile int ticks = 10000;
+static int ticks = 10000;
 
 #define PFX			"cpu5wdt: "
 
@@ -60,7 +61,6 @@ static struct {
 	struct timer_list timer;
 	volatile int queue;
 	int default_ticks;
-	int min_ticks;
 	unsigned long inuse;
 } cpu5wdt_device;
 
@@ -91,9 +91,6 @@ static void cpu5wdt_trigger(unsigned long unused)
 
 static void cpu5wdt_reset(void)
 {
-	if ( ticks < cpu5wdt_device.min_ticks )
-		cpu5wdt_device.min_ticks = ticks;
-
 	ticks = cpu5wdt_device.default_ticks;
 
 	if ( verbose )
@@ -105,8 +102,8 @@ static void cpu5wdt_start(void)
 {
 	if ( !cpu5wdt_device.queue ) {
 		cpu5wdt_device.queue = 1;
-		outb(0, port + CPU5WDT_TIME_A_REG);  
-		outb(0, port + CPU5WDT_TIME_B_REG);  
+		outb(0, port + CPU5WDT_TIME_A_REG);
+		outb(0, port + CPU5WDT_TIME_B_REG);
 		outb(1, port + CPU5WDT_MODE_REG);
 		outb(0, port + CPU5WDT_RESET_REG);
 		outb(0, port + CPU5WDT_ENABLE_REG);
@@ -134,51 +131,44 @@ static int cpu5wdt_stop(void)
 
 static int cpu5wdt_open(struct inode *inode, struct file *file)
 {
-	switch(iminor(inode)) {
-		case WATCHDOG_MINOR:
-			if ( test_and_set_bit(0, &cpu5wdt_device.inuse) )
-				return -EBUSY;
-			break;
-		default:
-			return -ENODEV;
-	}
-	return 0;
+	if ( test_and_set_bit(0, &cpu5wdt_device.inuse) )
+		return -EBUSY;
 
+	return nonseekable_open(inode, file);
 }
 
 static int cpu5wdt_release(struct inode *inode, struct file *file)
 {
-	if(iminor(inode)==WATCHDOG_MINOR) {
-		clear_bit(0, &cpu5wdt_device.inuse);
-	}
+	clear_bit(0, &cpu5wdt_device.inuse);
 	return 0;
 }
 
 static int cpu5wdt_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
 {
+	void __user *argp = (void __user *)arg;
 	unsigned int value;
 	static struct watchdog_info ident =
 	{
 		.options = WDIOF_CARDRESET,
-		.identity = "CPU5 WDT"
+		.identity = "CPU5 WDT",
 	};
-  
+
 	switch(cmd) {
 		case WDIOC_KEEPALIVE:
 			cpu5wdt_reset();
 			break;
-		case WDIOC_GETSTATUS:    
-			value = inb(port + CPU5WDT_STATUS_REG); 
+		case WDIOC_GETSTATUS:
+			value = inb(port + CPU5WDT_STATUS_REG);
 			value = (value >> 2) & 1;
-			if ( copy_to_user((int *)arg, (int *)&value, sizeof(int)) )
+			if ( copy_to_user(argp, &value, sizeof(int)) )
 				return -EFAULT;
 			break;
 		case WDIOC_GETSUPPORT:
-			if ( copy_to_user((struct watchdog_info *)arg, &ident, sizeof(ident)) )
+			if ( copy_to_user(argp, &ident, sizeof(ident)) )
 				return -EFAULT;
 			break;
 		case WDIOC_SETOPTIONS:
-			if ( copy_from_user(&value, (int *)arg, sizeof(int)) )
+			if ( copy_from_user(&value, argp, sizeof(int)) )
 				return -EFAULT;
 			switch(value) {
 				case WDIOS_ENABLECARD:
@@ -191,23 +181,24 @@ static int cpu5wdt_ioctl(struct inode *inode, struct file *file, unsigned int cm
 			}
 			break;
 		default:
-    			return -EINVAL;
+    			return -ENOIOCTLCMD;
 	}
 	return 0;
 }
 
-static ssize_t cpu5wdt_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
+static ssize_t cpu5wdt_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
 	if ( !count )
 		return -EIO;
-	
-	cpu5wdt_reset();
-	return count;
 
+	cpu5wdt_reset();
+
+	return count;
 }
 
 static struct file_operations cpu5wdt_fops = {
 	.owner		= THIS_MODULE,
+	.llseek		= no_llseek,
 	.ioctl		= cpu5wdt_ioctl,
 	.open		= cpu5wdt_open,
 	.write		= cpu5wdt_write,
@@ -217,7 +208,7 @@ static struct file_operations cpu5wdt_fops = {
 static struct miscdevice cpu5wdt_misc = {
 	.minor	= WATCHDOG_MINOR,
 	.name	= "watchdog",
-	.fops	= &cpu5wdt_fops
+	.fops	= &cpu5wdt_fops,
 };
 
 /* init/exit function */
@@ -242,14 +233,13 @@ static int __devinit cpu5wdt_init(void)
 	}
 
 	/* watchdog reboot? */
-	val = inb(port + CPU5WDT_STATUS_REG); 
+	val = inb(port + CPU5WDT_STATUS_REG);
 	val = (val >> 2) & 1;
 	if ( !val )
 		printk(KERN_INFO PFX "sorry, was my fault\n");
 
 	init_MUTEX_LOCKED(&cpu5wdt_device.stop);
 	cpu5wdt_device.queue = 0;
-	cpu5wdt_device.min_ticks = ticks;
 
 	clear_bit(0, &cpu5wdt_device.inuse);
 
@@ -301,12 +291,13 @@ MODULE_AUTHOR("Heiko Ronsdorf <hero@ihg.uni-duisburg.de>");
 MODULE_DESCRIPTION("sma cpu5 watchdog driver");
 MODULE_SUPPORTED_DEVICE("sma cpu5 watchdog");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
 
-MODULE_PARM(port, "i");
+module_param(port, int, 0);
 MODULE_PARM_DESC(port, "base address of watchdog card, default is 0x91");
 
-MODULE_PARM(verbose, "i");
+module_param(verbose, int, 0);
 MODULE_PARM_DESC(verbose, "be verbose, default is 0 (no)");
 
-MODULE_PARM(ticks, "i");
+module_param(ticks, int, 0);
 MODULE_PARM_DESC(ticks, "count down ticks, default is 10000");

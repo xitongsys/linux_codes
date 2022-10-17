@@ -49,6 +49,7 @@ struct sbus_dev;
 
 typedef enum {
 	SNDRV_DEV_TOPLEVEL =		(0*SNDRV_DEV_TYPE_RANGE_SIZE),
+	SNDRV_DEV_CONTROL,
 	SNDRV_DEV_LOWLEVEL_PRE,
 	SNDRV_DEV_LOWLEVEL_NORMAL =	(1*SNDRV_DEV_TYPE_RANGE_SIZE),
 	SNDRV_DEV_PCM,
@@ -57,6 +58,8 @@ typedef enum {
 	SNDRV_DEV_SEQUENCER,
 	SNDRV_DEV_HWDEP,
 	SNDRV_DEV_INFO,
+	SNDRV_DEV_BUS,
+	SNDRV_DEV_CODEC,
 	SNDRV_DEV_LOWLEVEL =		(2*SNDRV_DEV_TYPE_RANGE_SIZE)
 } snd_device_type_t;
 
@@ -147,6 +150,7 @@ struct _snd_card {
 	struct rw_semaphore controls_rwsem;	/* controls list lock */
 	rwlock_t ctl_files_rwlock;	/* ctl_files list lock */
 	int controls_count;		/* count of all controls */
+	int user_ctl_count;		/* count of all user controls */
 	struct list_head controls;	/* all controls for this card */
 	struct list_head ctl_files;	/* active control files */
 
@@ -160,10 +164,13 @@ struct _snd_card {
 	int shutdown;			/* this card is going down */
 	wait_queue_head_t shutdown_sleep;
 	struct work_struct free_workq;	/* for free in workqueue */
+	struct device *dev;
 
 #ifdef CONFIG_PM
-	int (*set_power_state) (snd_card_t *card, unsigned int state);
-	void *power_state_private_data;
+	int (*pm_suspend)(snd_card_t *card, unsigned int state);
+	int (*pm_resume)(snd_card_t *card, unsigned int state);
+	struct pm_dev *pm_dev;		/* for ISA */
+	void *pm_private_data;
 	unsigned int power_state;	/* power state */
 	struct semaphore power_lock;	/* power lock */
 	wait_queue_head_t power_sleep;
@@ -198,12 +205,36 @@ static inline void snd_power_change_state(snd_card_t *card, unsigned int state)
 	card->power_state = state;
 	wake_up(&card->power_sleep);
 }
+int snd_card_set_pm_callback(snd_card_t *card,
+			     int (*suspend)(snd_card_t *, unsigned int),
+			     int (*resume)(snd_card_t *, unsigned int),
+			     void *private_data);
+int snd_card_set_dev_pm_callback(snd_card_t *card, int type,
+				 int (*suspend)(snd_card_t *, unsigned int),
+				 int (*resume)(snd_card_t *, unsigned int),
+				 void *private_data);
+#define snd_card_set_isa_pm_callback(card,suspend,resume,data) \
+	snd_card_set_dev_pm_callback(card, PM_ISA_DEV, suspend, resume, data)
+#ifdef CONFIG_PCI
+#ifndef SND_PCI_PM_CALLBACKS
+int snd_card_pci_suspend(struct pci_dev *dev, u32 state);
+int snd_card_pci_resume(struct pci_dev *dev);
+#define SND_PCI_PM_CALLBACKS \
+	.suspend = snd_card_pci_suspend,  .resume = snd_card_pci_resume
+#endif
+#endif
 #else
 #define snd_power_lock(card)		do { (void)(card); } while (0)
 #define snd_power_unlock(card)		do { (void)(card); } while (0)
 static inline int snd_power_wait(snd_card_t *card, unsigned int state, struct file *file) { return 0; }
 #define snd_power_get_state(card)	SNDRV_CTL_POWER_D0
 #define snd_power_change_state(card, state)	do { (void)(card); } while (0)
+#define snd_card_set_pm_callback(card,suspend,resume,data)
+#define snd_card_set_dev_pm_callback(card,suspend,resume,data)
+#define snd_card_set_isa_pm_callback(card,suspend,resume,data)
+#ifdef CONFIG_PCI
+#define SND_PCI_PM_CALLBACKS
+#endif
 #endif
 
 /* device.c */
@@ -245,7 +276,7 @@ int snd_oss_init_module(void);
 #else
 #define snd_minor_info_oss_init() /*NOP*/
 #define snd_minor_info_oss_done() /*NOP*/
-#define snd_oss_init_module() /*NOP*/
+#define snd_oss_init_module() 0
 #endif
 
 /* memory.c */
@@ -256,10 +287,12 @@ void snd_memory_done(void);
 int snd_memory_info_init(void);
 int snd_memory_info_done(void);
 void *snd_hidden_kmalloc(size_t size, int flags);
+void *snd_hidden_kcalloc(size_t n, size_t size, int flags);
 void snd_hidden_kfree(const void *obj);
 void *snd_hidden_vmalloc(unsigned long size);
 void snd_hidden_vfree(void *obj);
 #define kmalloc(size, flags) snd_hidden_kmalloc(size, flags)
+#define kcalloc(n, size, flags) snd_hidden_kcalloc(n, size, flags)
 #define kfree(obj) snd_hidden_kfree(obj)
 #define vmalloc(size) snd_hidden_vmalloc(size)
 #define vfree(obj) snd_hidden_vfree(obj)
@@ -277,14 +310,12 @@ void snd_hidden_vfree(void *obj);
 #define kfree_nocheck(obj) kfree(obj)
 #define vfree_nocheck(obj) vfree(obj)
 #endif
-void *snd_kcalloc(size_t size, int flags);
 char *snd_kmalloc_strdup(const char *string, int flags);
-int copy_to_user_fromio(void *dst, unsigned long src, size_t count);
-int copy_from_user_toio(unsigned long dst, const void *src, size_t count);
+int copy_to_user_fromio(void __user *dst, const volatile void __iomem *src, size_t count);
+int copy_from_user_toio(volatile void __iomem *dst, const void __user *src, size_t count);
 
 /* init.c */
 
-extern int snd_cards_count;
 extern unsigned int snd_cards_lock;
 extern snd_card_t *snd_cards[SNDRV_CARDS];
 extern rwlock_t snd_card_rwlock;
@@ -306,6 +337,10 @@ int snd_card_info_done(void);
 int snd_component_add(snd_card_t *card, const char *component);
 int snd_card_file_add(snd_card_t *card, struct file *file);
 int snd_card_file_remove(snd_card_t *card, struct file *file);
+
+#ifndef snd_card_set_dev
+#define snd_card_set_dev(card,devptr) ((card)->dev = (devptr))
+#endif
 
 /* device.c */
 
@@ -330,10 +365,12 @@ unsigned int snd_dma_pointer(unsigned long dma, unsigned int size);
 
 int snd_task_name(struct task_struct *task, char *name, size_t size);
 #ifdef CONFIG_SND_VERBOSE_PRINTK
-void snd_verbose_printk(const char *file, int line, const char *format, ...);
+void snd_verbose_printk(const char *file, int line, const char *format, ...)
+     __attribute__ ((format (printf, 3, 4)));
 #endif
 #if defined(CONFIG_SND_DEBUG) && defined(CONFIG_SND_VERBOSE_PRINTK)
-void snd_verbose_printd(const char *file, int line, const char *format, ...);
+void snd_verbose_printd(const char *file, int line, const char *format, ...)
+     __attribute__ ((format (printf, 3, 4)));
 #endif
 
 /* --- */
@@ -382,8 +419,8 @@ void snd_verbose_printd(const char *file, int line, const char *format, ...);
  * not checked.
  */
 #define snd_assert(expr, args...) do {\
-	if (!(expr)) {\
-		snd_printk("BUG? (%s) (called from %p)\n", __ASTRING__(expr), __builtin_return_address(0));\
+	if (unlikely(!(expr))) {				\
+		snd_printk(KERN_ERR "BUG? (%s) (called from %p)\n", __ASTRING__(expr), __builtin_return_address(0));\
 		args;\
 	}\
 } while (0)
@@ -398,8 +435,8 @@ void snd_verbose_printd(const char *file, int line, const char *format, ...);
  * CONFIG_SND_DEBUG is not set but without any error messages.
  */
 #define snd_runtime_check(expr, args...) do {\
-	if (!(expr)) {\
-		snd_printk("ERROR (%s) (called from %p)\n", __ASTRING__(expr), __builtin_return_address(0));\
+	if (unlikely(!(expr))) {				\
+		snd_printk(KERN_ERR "ERROR (%s) (called from %p)\n", __ASTRING__(expr), __builtin_return_address(0));\
 		args;\
 	}\
 } while (0)

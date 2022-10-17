@@ -56,24 +56,24 @@
 #define SCHIZO_STRBUF_CTRL_ENAB    0x0000000000000001UL /* Streaming Buffer Enable */
 
 /* IOMMU control register. */
-#define SCHIZO_IOMMU_CTRL_RESV     0xfffffffff9000000 /* Reserved                      */
-#define SCHIZO_IOMMU_CTRL_XLTESTAT 0x0000000006000000 /* Translation Error Status      */
-#define SCHIZO_IOMMU_CTRL_XLTEERR  0x0000000001000000 /* Translation Error encountered */
-#define SCHIZO_IOMMU_CTRL_LCKEN    0x0000000000800000 /* Enable translation locking    */
-#define SCHIZO_IOMMU_CTRL_LCKPTR   0x0000000000780000 /* Translation lock pointer      */
-#define SCHIZO_IOMMU_CTRL_TSBSZ    0x0000000000070000 /* TSB Size                      */
-#define SCHIZO_IOMMU_TSBSZ_1K      0x0000000000000000 /* TSB Table 1024 8-byte entries */
-#define SCHIZO_IOMMU_TSBSZ_2K      0x0000000000010000 /* TSB Table 2048 8-byte entries */
-#define SCHIZO_IOMMU_TSBSZ_4K      0x0000000000020000 /* TSB Table 4096 8-byte entries */
-#define SCHIZO_IOMMU_TSBSZ_8K      0x0000000000030000 /* TSB Table 8192 8-byte entries */
-#define SCHIZO_IOMMU_TSBSZ_16K     0x0000000000040000 /* TSB Table 16k 8-byte entries  */
-#define SCHIZO_IOMMU_TSBSZ_32K     0x0000000000050000 /* TSB Table 32k 8-byte entries  */
-#define SCHIZO_IOMMU_TSBSZ_64K     0x0000000000060000 /* TSB Table 64k 8-byte entries  */
-#define SCHIZO_IOMMU_TSBSZ_128K    0x0000000000070000 /* TSB Table 128k 8-byte entries */
-#define SCHIZO_IOMMU_CTRL_RESV2    0x000000000000fff8 /* Reserved                      */
-#define SCHIZO_IOMMU_CTRL_TBWSZ    0x0000000000000004 /* Assumed page size, 0=8k 1=64k */
-#define SCHIZO_IOMMU_CTRL_DENAB    0x0000000000000002 /* Diagnostic mode enable        */
-#define SCHIZO_IOMMU_CTRL_ENAB     0x0000000000000001 /* IOMMU Enable                  */
+#define SCHIZO_IOMMU_CTRL_RESV     0xfffffffff9000000UL /* Reserved                      */
+#define SCHIZO_IOMMU_CTRL_XLTESTAT 0x0000000006000000UL /* Translation Error Status      */
+#define SCHIZO_IOMMU_CTRL_XLTEERR  0x0000000001000000UL /* Translation Error encountered */
+#define SCHIZO_IOMMU_CTRL_LCKEN    0x0000000000800000UL /* Enable translation locking    */
+#define SCHIZO_IOMMU_CTRL_LCKPTR   0x0000000000780000UL /* Translation lock pointer      */
+#define SCHIZO_IOMMU_CTRL_TSBSZ    0x0000000000070000UL /* TSB Size                      */
+#define SCHIZO_IOMMU_TSBSZ_1K      0x0000000000000000UL /* TSB Table 1024 8-byte entries */
+#define SCHIZO_IOMMU_TSBSZ_2K      0x0000000000010000UL /* TSB Table 2048 8-byte entries */
+#define SCHIZO_IOMMU_TSBSZ_4K      0x0000000000020000UL /* TSB Table 4096 8-byte entries */
+#define SCHIZO_IOMMU_TSBSZ_8K      0x0000000000030000UL /* TSB Table 8192 8-byte entries */
+#define SCHIZO_IOMMU_TSBSZ_16K     0x0000000000040000UL /* TSB Table 16k 8-byte entries  */
+#define SCHIZO_IOMMU_TSBSZ_32K     0x0000000000050000UL /* TSB Table 32k 8-byte entries  */
+#define SCHIZO_IOMMU_TSBSZ_64K     0x0000000000060000UL /* TSB Table 64k 8-byte entries  */
+#define SCHIZO_IOMMU_TSBSZ_128K    0x0000000000070000UL /* TSB Table 128k 8-byte entries */
+#define SCHIZO_IOMMU_CTRL_RESV2    0x000000000000fff8UL /* Reserved                      */
+#define SCHIZO_IOMMU_CTRL_TBWSZ    0x0000000000000004UL /* Assumed page size, 0=8k 1=64k */
+#define SCHIZO_IOMMU_CTRL_DENAB    0x0000000000000002UL /* Diagnostic mode enable        */
+#define SCHIZO_IOMMU_CTRL_ENAB     0x0000000000000001UL /* IOMMU Enable                  */
 
 /* Schizo config space address format is nearly identical to
  * that of PSYCHO:
@@ -377,7 +377,7 @@ enum schizo_error_type {
 	UE_ERR, CE_ERR, PCI_ERR, SAFARI_ERR
 };
 
-static spinlock_t stc_buf_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(stc_buf_lock);
 static unsigned long stc_error_buf[128];
 static unsigned long stc_tag_buf[16];
 static unsigned long stc_line_buf[16];
@@ -1111,9 +1111,9 @@ static irqreturn_t schizo_safarierr_intr(int irq, void *dev_id, struct pt_regs *
 
 /* Nearly identical to PSYCHO equivalents... */
 #define SCHIZO_ECC_CTRL		0x10020UL
-#define  SCHIZO_ECCCTRL_EE	 0x8000000000000000 /* Enable ECC Checking */
-#define  SCHIZO_ECCCTRL_UE	 0x4000000000000000 /* Enable UE Interrupts */
-#define  SCHIZO_ECCCTRL_CE	 0x2000000000000000 /* Enable CE INterrupts */
+#define  SCHIZO_ECCCTRL_EE	 0x8000000000000000UL /* Enable ECC Checking */
+#define  SCHIZO_ECCCTRL_UE	 0x4000000000000000UL /* Enable UE Interrupts */
+#define  SCHIZO_ECCCTRL_CE	 0x2000000000000000UL /* Enable CE INterrupts */
 
 #define SCHIZO_SAFARI_ERRCTRL	0x10008UL
 #define  SCHIZO_SAFERRCTRL_EN	 0x8000000000000000UL
@@ -1171,7 +1171,7 @@ static void __init tomatillo_register_error_handlers(struct pci_controller_info 
 		prom_halt();
 	}
 	bucket = __bucket(irq);
-	tmp = readl(bucket->imap);
+	tmp = upa_readl(bucket->imap);
 	upa_writel(tmp, (pbm->pbm_regs +
 			 schizo_imap_offset(SCHIZO_UE_INO) + 4));
 
@@ -1309,7 +1309,7 @@ static void __init schizo_register_error_handlers(struct pci_controller_info *p)
 		prom_halt();
 	}
 	bucket = __bucket(irq);
-	tmp = readl(bucket->imap);
+	tmp = upa_readl(bucket->imap);
 	upa_writel(tmp, (pbm->pbm_regs + schizo_imap_offset(SCHIZO_UE_INO) + 4));
 
 	pbm = pbm_for_ino(p, SCHIZO_CE_INO);
@@ -1372,10 +1372,10 @@ static void __init schizo_register_error_handlers(struct pci_controller_info *p)
 		    SCHIZO_PCICTRL_RTRY_ERR |
 		    SCHIZO_PCICTRL_SBH_ERR |
 		    SCHIZO_PCICTRL_SERR |
-		    SCHIZO_PCICTRL_SBH_INT |
 		    SCHIZO_PCICTRL_EEN);
 
-	err_no_mask = SCHIZO_PCICTRL_DTO_ERR;
+	err_no_mask = (SCHIZO_PCICTRL_DTO_ERR |
+		       SCHIZO_PCICTRL_SBH_INT);
 
 	/* Enable PCI Error interrupts and clear error
 	 * bits for each PBM.
@@ -1766,6 +1766,14 @@ static void schizo_pbm_iommu_init(struct pci_pbm_info *pbm)
 	 * in pci_iommu.c
 	 */
 
+	iommu->dummy_page = __get_free_pages(GFP_KERNEL, 0);
+	if (!iommu->dummy_page) {
+		prom_printf("PSYCHO_IOMMU: Error, gfp(dummy_page) failed.\n");
+		prom_halt();
+	}
+	memset((void *)iommu->dummy_page, 0, PAGE_SIZE);
+	iommu->dummy_page_pa = (unsigned long) __pa(iommu->dummy_page);
+
 	/* Using assumed page size 8K with 128K entries we need 1MB iommu page
 	 * table (128K ioptes * 8 bytes per iopte).  This is
 	 * page order 7 on UltraSparc.
@@ -1780,7 +1788,7 @@ static void schizo_pbm_iommu_init(struct pci_pbm_info *pbm)
 	iommu->page_table = (iopte_t *)tsbbase;
 	iommu->page_table_map_base = vdma[0];
 	iommu->dma_addr_mask = dma_mask;
-	memset((char *)tsbbase, 0, PAGE_SIZE << order);
+	pci_iommu_table_init(iommu, PAGE_SIZE << order);
 
 	switch (tsbsize) {
 	case 64:
@@ -2073,13 +2081,11 @@ static void __init __schizo_init(int node, char *model_name, int chip_type)
 {
 	struct pci_controller_info *p;
 	struct pci_iommu *iommu;
-	unsigned long flags;
 	int is_pbm_a;
 	u32 portid;
 
 	portid = prom_getintdefault(node, "portid", 0xff);
 
-	spin_lock_irqsave(&pci_controller_lock, flags);
 	for(p = pci_controller_root; p; p = p->next) {
 		struct pci_pbm_info *pbm;
 
@@ -2091,13 +2097,11 @@ static void __init __schizo_init(int node, char *model_name, int chip_type)
 		       &p->pbm_B);
 
 		if (portid_compare(pbm->portid, portid, chip_type)) {
-			spin_unlock_irqrestore(&pci_controller_lock, flags);
 			is_pbm_a = (p->pbm_A.prom_node == 0);
 			schizo_pbm_init(p, node, portid, chip_type);
 			return;
 		}
 	}
-	spin_unlock_irqrestore(&pci_controller_lock, flags);
 
 	p = kmalloc(sizeof(struct pci_controller_info), GFP_ATOMIC);
 	if (!p) {
@@ -2122,10 +2126,8 @@ static void __init __schizo_init(int node, char *model_name, int chip_type)
 	memset(iommu, 0, sizeof(*iommu));
 	p->pbm_B.iommu = iommu;
 
-	spin_lock_irqsave(&pci_controller_lock, flags);
 	p->next = pci_controller_root;
 	pci_controller_root = p;
-	spin_unlock_irqrestore(&pci_controller_lock, flags);
 
 	p->index = pci_num_controllers++;
 	p->pbms_same_domain = 0;

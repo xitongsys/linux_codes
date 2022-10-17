@@ -40,15 +40,6 @@
  *     - Arno Griffioen <arno@usn.nl>
  *     - David Carter <carter@cs.bris.ac.uk>
  * 
- *   Note that the abstract console driver allows all consoles to be of
- *   potentially different sizes, so the following variables depend on the
- *   current console (currcons):
- *
- *     - video_num_columns
- *     - video_num_lines
- *     - video_size_row
- *     - can_do_color
- *
  *   The abstract console driver provides a generic interface for a text
  *   console. It supports VGA text mode, frame buffer based graphical consoles
  *   and special graphics processors that are only accessible through some
@@ -100,11 +91,12 @@
 #include <linux/workqueue.h>
 #include <linux/bootmem.h>
 #include <linux/pm.h>
+#include <linux/font.h>
+#include <linux/bitops.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
-#include <asm/bitops.h>
 
 #include "console_macros.h"
 
@@ -135,9 +127,6 @@ extern void prom_con_init(void);
 #ifdef CONFIG_MDA_CONSOLE
 extern int mda_console_init(void);
 #endif
-#ifdef CONFIG_FRAMEBUFFER_CONSOLE
-extern int fb_console_init(void);
-#endif
 
 struct vc vc_cons [MAX_NR_CONSOLES];
 
@@ -148,16 +137,15 @@ static const struct consw *con_driver_map[MAX_NR_CONSOLES];
 static int con_open(struct tty_struct *, struct file *);
 static void vc_init(unsigned int console, unsigned int rows,
 		    unsigned int cols, int do_clear);
-static void blank_screen(unsigned long dummy);
-static void gotoxy(int currcons, int new_x, int new_y);
+static void gotoxy(struct vc_data *vc, int new_x, int new_y);
 static void save_cur(int currcons);
 static void reset_terminal(int currcons, int do_clear);
 static void con_flush_chars(struct tty_struct *tty);
-static void set_vesa_blanking(unsigned long arg);
-static void set_cursor(int currcons);
-static void hide_cursor(int currcons);
-static void unblank_screen_t(unsigned long dummy);
+static void set_vesa_blanking(char __user *p);
+static void set_cursor(struct vc_data *vc);
+static void hide_cursor(struct vc_data *vc);
 static void console_callback(void *ignored);
+static void blank_screen_t(unsigned long dummy);
 
 static int printable;		/* Is console ready for printing? */
 
@@ -214,33 +202,44 @@ static int scrollback_delta;
 int (*console_blank_hook)(int);
 
 static struct timer_list console_timer;
+static int blank_state;
+static int blank_timer_expired;
+enum {
+	blank_off = 0,
+	blank_normal_wait,
+	blank_vesa_wait,
+};
 
 /*
  *	Low-Level Functions
  */
 
-#define IS_FG (currcons == fg_console)
+#define IS_FG			(currcons == fg_console)
+#define IS_FG_VC(vc)		(vc == vc_cons[fg_console].d)
+
 #define IS_VISIBLE CON_IS_VISIBLE(vc_cons[currcons].d)
 
 #ifdef VT_BUF_VRAM_ONLY
-#define DO_UPDATE 0
+#define DO_UPDATE		0
+#define DO_UPDATE_VC(vc)	0
 #else
-#define DO_UPDATE IS_VISIBLE
+#define DO_UPDATE 		IS_VISIBLE
+#define DO_UPDATE_VC(vc)	CON_IS_VISIBLE(vc)
 #endif
 
 static int pm_con_request(struct pm_dev *dev, pm_request_t rqst, void *data);
 static struct pm_dev *pm_con;
 
-static inline unsigned short *screenpos(int currcons, int offset, int viewed)
+static inline unsigned short *screenpos(struct vc_data *vc, int offset, int viewed)
 {
 	unsigned short *p;
 	
 	if (!viewed)
-		p = (unsigned short *)(origin + offset);
-	else if (!sw->con_screen_pos)
-		p = (unsigned short *)(visible_origin + offset);
+		p = (unsigned short *)(vc->vc_origin + offset);
+	else if (!vc->vc_sw->con_screen_pos)
+		p = (unsigned short *)(vc->vc_visible_origin + offset);
 	else
-		p = sw->con_screen_pos(vc_cons[currcons].d, offset);
+		p = vc->vc_sw->con_screen_pos(vc, offset);
 	return p;
 }
 
@@ -261,14 +260,15 @@ static void scrup(int currcons, unsigned int t, unsigned int b, int nr)
 
 	if (t+nr >= b)
 		nr = b - t - 1;
-	if (b > video_num_lines || t >= b || nr < 1)
+	if (b > vc_cons[currcons].d->vc_rows || t >= b || nr < 1)
 		return;
 	if (IS_VISIBLE && sw->con_scroll(vc_cons[currcons].d, t, b, SM_UP, nr))
 		return;
-	d = (unsigned short *) (origin+video_size_row*t);
-	s = (unsigned short *) (origin+video_size_row*(t+nr));
-	scr_memmovew(d, s, (b-t-nr) * video_size_row);
-	scr_memsetw(d + (b-t-nr) * video_num_columns, video_erase_char, video_size_row*nr);
+	d = (unsigned short *) (origin+vc_cons[currcons].d->vc_size_row*t);
+	s = (unsigned short *) (origin+vc_cons[currcons].d->vc_size_row*(t+nr));
+	scr_memmovew(d, s, (b-t-nr) * vc_cons[currcons].d->vc_size_row);
+	scr_memsetw(d + (b-t-nr) * vc_cons[currcons].d->vc_cols, video_erase_char,
+			vc_cons[currcons].d->vc_size_row * nr);
 }
 
 static void
@@ -279,40 +279,40 @@ scrdown(int currcons, unsigned int t, unsigned int b, int nr)
 
 	if (t+nr >= b)
 		nr = b - t - 1;
-	if (b > video_num_lines || t >= b || nr < 1)
+	if (b > vc_cons[currcons].d->vc_rows || t >= b || nr < 1)
 		return;
 	if (IS_VISIBLE && sw->con_scroll(vc_cons[currcons].d, t, b, SM_DOWN, nr))
 		return;
-	s = (unsigned short *) (origin+video_size_row*t);
-	step = video_num_columns * nr;
-	scr_memmovew(s + step, s, (b-t-nr)*video_size_row);
+	s = (unsigned short *) (origin+vc_cons[currcons].d->vc_size_row*t);
+	step = vc_cons[currcons].d->vc_cols * nr;
+	scr_memmovew(s + step, s, (b-t-nr)*vc_cons[currcons].d->vc_size_row);
 	scr_memsetw(s, video_erase_char, 2*step);
 }
 
-static void do_update_region(int currcons, unsigned long start, int count)
+static void do_update_region(struct vc_data *vc, unsigned long start, int count)
 {
 #ifndef VT_BUF_VRAM_ONLY
 	unsigned int xx, yy, offset;
 	u16 *p;
 
 	p = (u16 *) start;
-	if (!sw->con_getxy) {
-		offset = (start - origin) / 2;
-		xx = offset % video_num_columns;
-		yy = offset / video_num_columns;
+	if (!vc->vc_sw->con_getxy) {
+		offset = (start - vc->vc_origin) / 2;
+		xx = offset % vc->vc_cols;
+		yy = offset / vc->vc_cols;
 	} else {
 		int nxx, nyy;
-		start = sw->con_getxy(vc_cons[currcons].d, start, &nxx, &nyy);
+		start = vc->vc_sw->con_getxy(vc, start, &nxx, &nyy);
 		xx = nxx; yy = nyy;
 	}
 	for(;;) {
 		u16 attrib = scr_readw(p) & 0xff00;
 		int startx = xx;
 		u16 *q = p;
-		while (xx < video_num_columns && count) {
+		while (xx < vc->vc_cols && count) {
 			if (attrib != (scr_readw(p) & 0xff00)) {
 				if (p > q)
-					sw->con_putcs(vc_cons[currcons].d, q, p-q, yy, startx);
+					vc->vc_sw->con_putcs(vc, q, p-q, yy, startx);
 				startx = xx;
 				q = p;
 				attrib = scr_readw(p) & 0xff00;
@@ -322,14 +322,14 @@ static void do_update_region(int currcons, unsigned long start, int count)
 			count--;
 		}
 		if (p > q)
-			sw->con_putcs(vc_cons[currcons].d, q, p-q, yy, startx);
+			vc->vc_sw->con_putcs(vc, q, p-q, yy, startx);
 		if (!count)
 			break;
 		xx = 0;
 		yy++;
-		if (sw->con_getxy) {
+		if (vc->vc_sw->con_getxy) {
 			p = (u16 *)start;
-			start = sw->con_getxy(vc_cons[currcons].d, start, NULL, NULL);
+			start = vc->vc_sw->con_getxy(vc, start, NULL, NULL);
 		}
 	}
 #endif
@@ -337,10 +337,12 @@ static void do_update_region(int currcons, unsigned long start, int count)
 
 void update_region(int currcons, unsigned long start, int count)
 {
+	WARN_CONSOLE_UNLOCKED();
+
 	if (DO_UPDATE) {
-		hide_cursor(currcons);
-		do_update_region(currcons, start, count);
-		set_cursor(currcons);
+		hide_cursor(vc_cons[currcons].d);
+		do_update_region(vc_cons[currcons].d, start, count);
+		set_cursor(vc_cons[currcons].d);
 	}
 }
 
@@ -364,7 +366,7 @@ static u8 build_attr(int currcons, u8 _color, u8 _intensity, u8 _blink, u8 _unde
  */
 	{
 	u8 a = color;
-	if (!can_do_color)
+	if (!vc_cons[currcons].d->vc_can_do_color)
 		return _intensity |
 		       (_underline ? 4 : 0) |
 		       (_reverse ? 8 : 0) |
@@ -395,29 +397,30 @@ static void update_attr(int currcons)
 }
 
 /* Note: inverting the screen twice should revert to the original state */
-
-void invert_screen(int currcons, int offset, int count, int viewed)
+void invert_screen(struct vc_data *vc, int offset, int count, int viewed)
 {
 	unsigned short *p;
 
+	WARN_CONSOLE_UNLOCKED();
+
 	count /= 2;
-	p = screenpos(currcons, offset, viewed);
-	if (sw->con_invert_region)
-		sw->con_invert_region(vc_cons[currcons].d, p, count);
+	p = screenpos(vc, offset, viewed);
+	if (vc->vc_sw->con_invert_region)
+		vc->vc_sw->con_invert_region(vc, p, count);
 #ifndef VT_BUF_VRAM_ONLY
 	else {
 		u16 *q = p;
 		int cnt = count;
 		u16 a;
 
-		if (!can_do_color) {
+		if (!vc->vc_can_do_color) {
 			while (cnt--) {
 			    a = scr_readw(q);
 			    a ^= 0x0800;
 			    scr_writew(a, q);
 			    q++;
 			}
-		} else if (hi_font_mask == 0x100) {
+		} else if (vc->vc_hi_font_mask == 0x100) {
 			while (cnt--) {
 				a = scr_readw(q);
 				a = ((a) & 0x11ff) | (((a) & 0xe000) >> 4) | (((a) & 0x0e00) << 4);
@@ -434,34 +437,36 @@ void invert_screen(int currcons, int offset, int count, int viewed)
 		}
 	}
 #endif
-	if (DO_UPDATE)
-		do_update_region(currcons, (unsigned long) p, count);
+	if (DO_UPDATE_VC(vc))
+		do_update_region(vc, (unsigned long) p, count);
 }
 
 /* used by selection: complement pointer position */
-void complement_pos(int currcons, int offset)
+void complement_pos(struct vc_data *vc, int offset)
 {
 	static unsigned short *p;
 	static unsigned short old;
 	static unsigned short oldx, oldy;
 
+	WARN_CONSOLE_UNLOCKED();
+
 	if (p) {
 		scr_writew(old, p);
-		if (DO_UPDATE)
-			sw->con_putc(vc_cons[currcons].d, old, oldy, oldx);
+		if (DO_UPDATE_VC(vc))
+			vc->vc_sw->con_putc(vc, old, oldy, oldx);
 	}
 	if (offset == -1)
 		p = NULL;
 	else {
 		unsigned short new;
-		p = screenpos(currcons, offset, 1);
+		p = screenpos(vc, offset, 1);
 		old = scr_readw(p);
-		new = old ^ complement_mask;
+		new = old ^ vc->vc_complement_mask;
 		scr_writew(new, p);
-		if (DO_UPDATE) {
-			oldx = (offset >> 1) % video_num_columns;
-			oldy = (offset >> 1) / video_num_columns;
-			sw->con_putc(vc_cons[currcons].d, new, oldy, oldx);
+		if (DO_UPDATE_VC(vc)) {
+			oldx = (offset >> 1) % vc->vc_cols;
+			oldy = (offset >> 1) / vc->vc_cols;
+			vc->vc_sw->con_putc(vc, new, oldy, oldx);
 		}
 	}
 }
@@ -470,7 +475,7 @@ static void insert_char(int currcons, unsigned int nr)
 {
 	unsigned short *p, *q = (unsigned short *) pos;
 
-	p = q + video_num_columns - nr - x;
+	p = q + vc_cons[currcons].d->vc_cols - nr - x;
 	while (--p >= q)
 		scr_writew(scr_readw(p), p + nr);
 	scr_memsetw(q, video_erase_char, nr*2);
@@ -478,7 +483,7 @@ static void insert_char(int currcons, unsigned int nr)
 	if (DO_UPDATE) {
 		unsigned short oldattr = attr;
 		sw->con_bmove(vc_cons[currcons].d,y,x,y,x+nr,1,
-			      video_num_columns-x-nr);
+			      vc_cons[currcons].d->vc_cols-x-nr);
 		attr = video_erase_char >> 8;
 		while (nr--)
 			sw->con_putc(vc_cons[currcons].d,
@@ -492,7 +497,7 @@ static void delete_char(int currcons, unsigned int nr)
 	unsigned int i = x;
 	unsigned short *p = (unsigned short *) pos;
 
-	while (++i <= video_num_columns - nr) {
+	while (++i <= vc_cons[currcons].d->vc_cols - nr) {
 		scr_writew(scr_readw(p+nr), p);
 		p++;
 	}
@@ -501,22 +506,22 @@ static void delete_char(int currcons, unsigned int nr)
 	if (DO_UPDATE) {
 		unsigned short oldattr = attr;
 		sw->con_bmove(vc_cons[currcons].d, y, x+nr, y, x, 1,
-			      video_num_columns-x-nr);
+			      vc_cons[currcons].d->vc_cols-x-nr);
 		attr = video_erase_char >> 8;
 		while (nr--)
 			sw->con_putc(vc_cons[currcons].d,
 				     video_erase_char, y,
-				     video_num_columns-1-nr);
+				     vc_cons[currcons].d->vc_cols-1-nr);
 		attr = oldattr;
 	}
 }
 
 static int softcursor_original;
 
-static void add_softcursor(int currcons)
+static void add_softcursor(struct vc_data *vc)
 {
-	int i = scr_readw((u16 *) pos);
-	u32 type = cursor_type;
+	int i = scr_readw((u16 *) vc->vc_pos);
+	u32 type = vc->vc_cursor_type;
 
 	if (! (type & 0x10)) return;
 	if (softcursor_original != -1) return;
@@ -525,51 +530,62 @@ static void add_softcursor(int currcons)
 	i ^= ((type) & 0xff00 );
 	if ((type & 0x20) && ((softcursor_original & 0x7000) == (i & 0x7000))) i ^= 0x7000;
 	if ((type & 0x40) && ((i & 0x700) == ((i & 0x7000) >> 4))) i ^= 0x0700;
-	scr_writew(i, (u16 *) pos);
-	if (DO_UPDATE)
-		sw->con_putc(vc_cons[currcons].d, i, y, x);
+	scr_writew(i, (u16 *) vc->vc_pos);
+	if (DO_UPDATE_VC(vc))
+		vc->vc_sw->con_putc(vc, i, vc->vc_y, vc->vc_x);
 }
 
-static void hide_cursor(int currcons)
+static void hide_softcursor(struct vc_data *vc)
 {
-	if (currcons == sel_cons)
-		clear_selection();
 	if (softcursor_original != -1) {
-		scr_writew(softcursor_original,(u16 *) pos);
-		if (DO_UPDATE)
-			sw->con_putc(vc_cons[currcons].d, softcursor_original, y, x);
+		scr_writew(softcursor_original, (u16 *)vc->vc_pos);
+		if (DO_UPDATE_VC(vc))
+			vc->vc_sw->con_putc(vc, softcursor_original,
+					vc->vc_y, vc->vc_x);
 		softcursor_original = -1;
 	}
-	sw->con_cursor(vc_cons[currcons].d,CM_ERASE);
 }
 
-static void set_cursor(int currcons)
+static void hide_cursor(struct vc_data *vc)
 {
-    if (!IS_FG || console_blanked || vcmode == KD_GRAPHICS)
-	return;
-    if (deccm) {
-	if (currcons == sel_cons)
+	if (vc == sel_cons)
 		clear_selection();
-	add_softcursor(currcons);
-	if ((cursor_type & 0x0f) != 1)
-	    sw->con_cursor(vc_cons[currcons].d,CM_DRAW);
-    } else
-	hide_cursor(currcons);
+	vc->vc_sw->con_cursor(vc, CM_ERASE);
+	hide_softcursor(vc);
+}
+
+static void set_cursor(struct vc_data *vc)
+{
+	if (!IS_FG_VC(vc) || console_blanked ||
+	    vc->vc_vt->vc_mode == KD_GRAPHICS)
+		return;
+	if (vc->vc_deccm) {
+		if (vc == sel_cons)
+			clear_selection();
+		add_softcursor(vc);
+		if ((vc->vc_cursor_type & 0x0f) != 1)
+			vc->vc_sw->con_cursor(vc, CM_DRAW);
+	} else
+		hide_cursor(vc);
 }
 
 static void set_origin(int currcons)
 {
+	WARN_CONSOLE_UNLOCKED();
+
 	if (!IS_VISIBLE ||
 	    !sw->con_set_origin ||
 	    !sw->con_set_origin(vc_cons[currcons].d))
 		origin = (unsigned long) screenbuf;
 	visible_origin = origin;
 	scr_end = origin + screenbuf_size;
-	pos = origin + video_size_row*y + 2*x;
+	pos = origin + vc_cons[currcons].d->vc_size_row*y + 2*x;
 }
 
 static inline void save_screen(int currcons)
 {
+	WARN_CONSOLE_UNLOCKED();
+
 	if (sw->con_save_screen)
 		sw->con_save_screen(vc_cons[currcons].d);
 }
@@ -578,10 +594,23 @@ static inline void save_screen(int currcons)
  *	Redrawing of screen
  */
 
+static void clear_buffer_attributes(int currcons)
+{
+	unsigned short *p = (unsigned short *) origin;
+	int count = screenbuf_size/2;
+	int mask = hi_font_mask | 0xff;
+
+	for (; count > 0; count--, p++) {
+		scr_writew((scr_readw(p)&mask) | (video_erase_char&~mask), p);
+	}
+}
+
 void redraw_screen(int new_console, int is_switch)
 {
 	int redraw = 1;
 	int currcons, old_console;
+
+	WARN_CONSOLE_UNLOCKED();
 
 	if (!vc_cons_allocated(new_console)) {
 		/* strange ... */
@@ -591,7 +620,7 @@ void redraw_screen(int new_console, int is_switch)
 
 	if (is_switch) {
 		currcons = fg_console;
-		hide_cursor(currcons);
+		hide_cursor(vc_cons[currcons].d);
 		if (fg_console != new_console) {
 			struct vc_data **display = vc_cons[new_console].d->vc_display_fg;
 			old_console = (*display) ? (*display)->vc_num : fg_console;
@@ -608,18 +637,30 @@ void redraw_screen(int new_console, int is_switch)
 		}
 	} else {
 		currcons = new_console;
-		hide_cursor(currcons);
+		hide_cursor(vc_cons[currcons].d);
 	}
 
 	if (redraw) {
 		int update;
+		int old_was_color = vc_cons[currcons].d->vc_can_do_color;
+
 		set_origin(currcons);
 		update = sw->con_switch(vc_cons[currcons].d);
 		set_palette(currcons);
+		/*
+		 * If console changed from mono<->color, the best we can do
+		 * is to clear the buffer attributes. As it currently stands,
+		 * rebuilding new attributes from the old buffer is not doable
+		 * without overly complex code.
+		 */
+		if (old_was_color != vc_cons[currcons].d->vc_can_do_color) {
+			update_attr(currcons);
+			clear_buffer_attributes(currcons);
+		}
 		if (update && vcmode != KD_GRAPHICS)
-			do_update_region(currcons, origin, screenbuf_size/2);
+			do_update_region(vc_cons[currcons].d, origin, screenbuf_size/2);
 	}
-	set_cursor(currcons);
+	set_cursor(vc_cons[currcons].d);
 	if (is_switch) {
 		set_leds();
 		compute_shiftstate();
@@ -638,28 +679,34 @@ int vc_cons_allocated(unsigned int i)
 static void visual_init(int currcons, int init)
 {
     /* ++Geert: sw->con_init determines console size */
+    if (sw)
+	module_put(sw->owner);
     sw = conswitchp;
 #ifndef VT_SINGLE_DRIVER
     if (con_driver_map[currcons])
 	sw = con_driver_map[currcons];
 #endif
+    __module_get(sw->owner);
     cons_num = currcons;
     display_fg = &master_display_fg;
     vc_cons[currcons].d->vc_uni_pagedir_loc = &vc_cons[currcons].d->vc_uni_pagedir;
     vc_cons[currcons].d->vc_uni_pagedir = 0;
     hi_font_mask = 0;
     complement_mask = 0;
-    can_do_color = 0;
+    vc_cons[currcons].d->vc_can_do_color = 0;
     sw->con_init(vc_cons[currcons].d, init);
     if (!complement_mask)
-        complement_mask = can_do_color ? 0x7700 : 0x0800;
+        complement_mask =
+		vc_cons[currcons].d->vc_can_do_color ? 0x7700 : 0x0800;
     s_complement_mask = complement_mask;
-    video_size_row = video_num_columns<<1;
-    screenbuf_size = video_num_lines*video_size_row;
+    vc_cons[currcons].d->vc_size_row = vc_cons[currcons].d->vc_cols<<1;
+    screenbuf_size = vc_cons[currcons].d->vc_rows * vc_cons[currcons].d->vc_size_row;
 }
 
 int vc_allocate(unsigned int currcons)	/* return 0 on success */
 {
+	WARN_CONSOLE_UNLOCKED();
+
 	if (currcons >= MAX_NR_CONSOLES)
 		return -ENXIO;
 	if (!vc_cons[currcons].d) {
@@ -681,6 +728,7 @@ int vc_allocate(unsigned int currcons)	/* return 0 on success */
 	    memset((void *)p, 0, structsize);
 	    vc_cons[currcons].d = (struct vc_data *)p;
 	    vt_cons[currcons] = (struct vt_struct *)(p+sizeof(struct vc_data));
+	    vc_cons[currcons].d->vc_vt = vt_cons[currcons];
 	    visual_init(currcons, 1);
 	    if (!*vc_cons[currcons].d->vc_uni_pagedir_loc)
 		con_set_default_unimap(currcons);
@@ -693,7 +741,7 @@ int vc_allocate(unsigned int currcons)	/* return 0 on success */
 	    }
 	    screenbuf = (unsigned short *) q;
 	    kmalloced = 1;
-	    vc_init(currcons, video_num_lines, video_num_columns, 1);
+	    vc_init(currcons, vc_cons[currcons].d->vc_rows, vc_cons[currcons].d->vc_cols, 1);
 
 	    if (!pm_con) {
 		    pm_con = pm_register(PM_SYS_DEV,
@@ -719,6 +767,8 @@ inline int resize_screen(int currcons, int width, int height)
  * [this is to be used together with some user program
  * like resize that changes the hardware videomode]
  */
+#define VC_RESIZE_MAXCOL (32767)
+#define VC_RESIZE_MAXROW (32767)
 int vc_resize(int currcons, unsigned int cols, unsigned int lines)
 {
 	unsigned long old_origin, new_origin, new_scr_end, rlth, rrem, err = 0;
@@ -726,36 +776,41 @@ int vc_resize(int currcons, unsigned int cols, unsigned int lines)
 	unsigned int new_cols, new_rows, new_row_size, new_screen_size;
 	unsigned short *newscreen;
 
+	WARN_CONSOLE_UNLOCKED();
+
 	if (!vc_cons_allocated(currcons))
 		return -ENXIO;
 
-	new_cols = (cols ? cols : video_num_columns);
-	new_rows = (lines ? lines : video_num_lines);
+	if (cols > VC_RESIZE_MAXCOL || lines > VC_RESIZE_MAXROW)
+		return -EINVAL;
+
+	new_cols = (cols ? cols : vc_cons[currcons].d->vc_cols);
+	new_rows = (lines ? lines : vc_cons[currcons].d->vc_rows);
 	new_row_size = new_cols << 1;
 	new_screen_size = new_row_size * new_rows;
 
-	if (new_cols == video_num_columns && new_rows == video_num_lines)
+	if (new_cols == vc_cons[currcons].d->vc_cols && new_rows == vc_cons[currcons].d->vc_rows)
 		return 0;
 
 	newscreen = (unsigned short *) kmalloc(new_screen_size, GFP_USER);
 	if (!newscreen)
 		return -ENOMEM;
 
-	old_rows = video_num_lines;
-	old_cols = video_num_columns;
-	old_row_size = video_size_row;
+	old_rows = vc_cons[currcons].d->vc_rows;
+	old_cols = vc_cons[currcons].d->vc_cols;
+	old_row_size = vc_cons[currcons].d->vc_size_row;
 	old_screen_size = screenbuf_size;
-
-	video_num_lines = new_rows;
-	video_num_columns = new_cols;
-	video_size_row = new_row_size;
-	screenbuf_size = new_screen_size;
 
 	err = resize_screen(currcons, new_cols, new_rows);
 	if (err) {
 		kfree(newscreen);
 		return err;
 	}
+
+	vc_cons[currcons].d->vc_rows = new_rows;
+	vc_cons[currcons].d->vc_cols = new_cols;
+	vc_cons[currcons].d->vc_size_row = new_row_size;
+	screenbuf_size = new_screen_size;
 
 	rlth = min(old_row_size, new_row_size);
 	rrem = new_row_size - rlth;
@@ -781,22 +836,20 @@ int vc_resize(int currcons, unsigned int cols, unsigned int lines)
 	screenbuf = newscreen;
 	kmalloced = 1;
 	screenbuf_size = new_screen_size;
-	if (IS_VISIBLE)
-		err = resize_screen(currcons, new_cols, new_rows);
 	set_origin(currcons);
 
 	/* do part of a reset_terminal() */
 	top = 0;
-	bottom = video_num_lines;
-	gotoxy(currcons, x, y);
+	bottom = vc_cons[currcons].d->vc_rows;
+	gotoxy(vc_cons[currcons].d, x, y);
 	save_cur(currcons);
 
 	if (vc_cons[currcons].d->vc_tty) {
 		struct winsize ws, *cws = &vc_cons[currcons].d->vc_tty->winsize;
 
 		memset(&ws, 0, sizeof(ws));
-		ws.ws_row = video_num_lines;
-		ws.ws_col = video_num_columns;
+		ws.ws_row = vc_cons[currcons].d->vc_rows;
+		ws.ws_col = vc_cons[currcons].d->vc_cols;
 		ws.ws_ypixel = video_scan_lines;
 		if ((ws.ws_row != cws->ws_row || ws.ws_col != cws->ws_col) &&
 		    vc_cons[currcons].d->vc_tty->pgrp > 0)
@@ -812,7 +865,8 @@ int vc_resize(int currcons, unsigned int cols, unsigned int lines)
 
 void vc_disallocate(unsigned int currcons)
 {
-	acquire_console_sem();
+	WARN_CONSOLE_UNLOCKED();
+
 	if (vc_cons_allocated(currcons)) {
 	    sw->con_deinit(vc_cons[currcons].d);
 	    if (kmalloced)
@@ -821,7 +875,6 @@ void vc_disallocate(unsigned int currcons)
 		kfree(vc_cons[currcons].d);
 	    vc_cons[currcons].d = NULL;
 	}
-	release_console_sem();
 }
 
 /*
@@ -859,38 +912,40 @@ int default_blu[] = {0x00,0x00,0x00,0x00,0xaa,0xaa,0xaa,0xaa,
  * might also be negative. If the given position is out of
  * bounds, the cursor is placed at the nearest margin.
  */
-static void gotoxy(int currcons, int new_x, int new_y)
+static void gotoxy(struct vc_data *vc, int new_x, int new_y)
 {
 	int min_y, max_y;
 
 	if (new_x < 0)
-		x = 0;
-	else
-		if (new_x >= video_num_columns)
-			x = video_num_columns - 1;
+		vc->vc_x = 0;
+	else {
+		if (new_x >= vc->vc_cols)
+			vc->vc_x = vc->vc_cols - 1;
 		else
-			x = new_x;
- 	if (decom) {
-		min_y = top;
-		max_y = bottom;
+			vc->vc_x = new_x;
+	}
+
+ 	if (vc->vc_decom) {
+		min_y = vc->vc_top;
+		max_y = vc->vc_bottom;
 	} else {
 		min_y = 0;
-		max_y = video_num_lines;
+		max_y = vc->vc_rows;
 	}
 	if (new_y < min_y)
-		y = min_y;
+		vc->vc_y = min_y;
 	else if (new_y >= max_y)
-		y = max_y - 1;
+		vc->vc_y = max_y - 1;
 	else
-		y = new_y;
-	pos = origin + y*video_size_row + (x<<1);
-	need_wrap = 0;
+		vc->vc_y = new_y;
+	vc->vc_pos = vc->vc_origin + vc->vc_y * vc->vc_size_row + (vc->vc_x<<1);
+	vc->vc_need_wrap = 0;
 }
 
 /* for absolute user moves, when decom is set */
 static void gotoxay(int currcons, int new_x, int new_y)
 {
-	gotoxy(currcons, new_x, decom ? (top+new_y) : new_y);
+	gotoxy(vc_cons[currcons].d, new_x, decom ? (top+new_y) : new_y);
 }
 
 void scrollback(int lines)
@@ -898,7 +953,7 @@ void scrollback(int lines)
 	int currcons = fg_console;
 
 	if (!lines)
-		lines = video_num_lines/2;
+		lines = vc_cons[currcons].d->vc_rows/2;
 	scrolldelta(-lines);
 }
 
@@ -907,7 +962,7 @@ void scrollfront(int lines)
 	int currcons = fg_console;
 
 	if (!lines)
-		lines = video_num_lines/2;
+		lines = vc_cons[currcons].d->vc_rows/2;
 	scrolldelta(lines);
 }
 
@@ -918,9 +973,9 @@ static void lf(int currcons)
 	 */
     	if (y+1 == bottom)
 		scrup(currcons,top,bottom,1);
-	else if (y < video_num_lines-1) {
+	else if (y < vc_cons[currcons].d->vc_rows-1) {
 	    	y++;
-		pos += video_size_row;
+		pos += vc_cons[currcons].d->vc_size_row;
 	}
 	need_wrap = 0;
 }
@@ -934,7 +989,7 @@ static void ri(int currcons)
 		scrdown(currcons,top,bottom,1);
 	else if (y > 0) {
 		y--;
-		pos -= video_size_row;
+		pos -= vc_cons[currcons].d->vc_size_row;
 	}
 	need_wrap = 0;
 }
@@ -971,10 +1026,10 @@ static void csi_J(int currcons, int vpar)
 			if (DO_UPDATE) {
 				/* do in two stages */
 				sw->con_clear(vc_cons[currcons].d, y, x, 1,
-					      video_num_columns-x);
+					      vc_cons[currcons].d->vc_cols-x);
 				sw->con_clear(vc_cons[currcons].d, y+1, 0,
-					      video_num_lines-y-1,
-					      video_num_columns);
+					      vc_cons[currcons].d->vc_rows-y-1,
+					      vc_cons[currcons].d->vc_cols);
 			}
 			break;
 		case 1:	/* erase from start to cursor */
@@ -983,18 +1038,18 @@ static void csi_J(int currcons, int vpar)
 			if (DO_UPDATE) {
 				/* do in two stages */
 				sw->con_clear(vc_cons[currcons].d, 0, 0, y,
-					      video_num_columns);
+					      vc_cons[currcons].d->vc_cols);
 				sw->con_clear(vc_cons[currcons].d, y, 0, 1,
 					      x + 1);
 			}
 			break;
 		case 2: /* erase whole display */
-			count = video_num_columns * video_num_lines;
+			count = vc_cons[currcons].d->vc_cols * vc_cons[currcons].d->vc_rows;
 			start = (unsigned short *) origin;
 			if (DO_UPDATE)
 				sw->con_clear(vc_cons[currcons].d, 0, 0,
-					      video_num_lines,
-					      video_num_columns);
+					      vc_cons[currcons].d->vc_rows,
+					      vc_cons[currcons].d->vc_cols);
 			break;
 		default:
 			return;
@@ -1010,11 +1065,11 @@ static void csi_K(int currcons, int vpar)
 
 	switch (vpar) {
 		case 0:	/* erase from cursor to end of line */
-			count = video_num_columns-x;
+			count = vc_cons[currcons].d->vc_cols-x;
 			start = (unsigned short *) pos;
 			if (DO_UPDATE)
 				sw->con_clear(vc_cons[currcons].d, y, x, 1,
-					      video_num_columns-x);
+					      vc_cons[currcons].d->vc_cols-x);
 			break;
 		case 1:	/* erase from start of line to cursor */
 			start = (unsigned short *) (pos - (x<<1));
@@ -1025,10 +1080,10 @@ static void csi_K(int currcons, int vpar)
 			break;
 		case 2: /* erase whole line */
 			start = (unsigned short *) (pos - (x<<1));
-			count = video_num_columns;
+			count = vc_cons[currcons].d->vc_cols;
 			if (DO_UPDATE)
 				sw->con_clear(vc_cons[currcons].d, y, 0, 1,
-					      video_num_columns);
+					      vc_cons[currcons].d->vc_cols);
 			break;
 		default:
 			return;
@@ -1043,7 +1098,7 @@ static void csi_X(int currcons, int vpar) /* erase the following vpar positions 
 
 	if (!vpar)
 		vpar++;
-	count = (vpar > video_num_columns-x) ? (video_num_columns-x) : vpar;
+	count = (vpar > vc_cons[currcons].d->vc_cols-x) ? (vc_cons[currcons].d->vc_cols-x) : vpar;
 
 	scr_memsetw((unsigned short *) pos, video_erase_char, 2 * count);
 	if (DO_UPDATE)
@@ -1156,7 +1211,7 @@ static void csi_m(int currcons)
 	update_attr(currcons);
 }
 
-static void respond_string(const char * p, struct tty_struct * tty)
+static void respond_string(const char *p, struct tty_struct *tty)
 {
 	while (*p) {
 		tty_insert_flip_char(tty, *p, 0);
@@ -1165,7 +1220,7 @@ static void respond_string(const char * p, struct tty_struct * tty)
 	con_schedule_flip(tty);
 }
 
-static void cursor_report(int currcons, struct tty_struct * tty)
+static void cursor_report(int currcons, struct tty_struct *tty)
 {
 	char buf[40];
 
@@ -1173,7 +1228,7 @@ static void cursor_report(int currcons, struct tty_struct * tty)
 	respond_string(buf, tty);
 }
 
-static inline void status_report(struct tty_struct * tty)
+static inline void status_report(struct tty_struct *tty)
 {
 	respond_string("\033[0n", tty);	/* Terminal ok */
 }
@@ -1183,7 +1238,7 @@ static inline void respond_ID(struct tty_struct * tty)
 	respond_string(VT102ID, tty);
 }
 
-void mouse_report(struct tty_struct * tty, int butt, int mrx, int mry)
+void mouse_report(struct tty_struct *tty, int butt, int mrx, int mry)
 {
 	char buf[8];
 
@@ -1216,7 +1271,7 @@ static void set_mode(int currcons, int on_off)
 			case 3:	/* 80/132 mode switch unimplemented */
 				deccolm = on_off;
 #if 0
-				(void) vc_resize(deccolm ? 132 : 80, video_num_lines);
+				(void) vc_resize(deccolm ? 132 : 80, vc_cons[currcons].d->vc_rows);
 				/* this alone does not suffice; some user mode
 				   utility has to change the hardware regs */
 #endif
@@ -1224,7 +1279,7 @@ static void set_mode(int currcons, int on_off)
 			case 5:			/* Inverted screen on/off */
 				if (decscnm != on_off) {
 					decscnm = on_off;
-					invert_screen(currcons, 0, screenbuf_size, 0);
+					invert_screen(vc_cons[currcons].d, 0, screenbuf_size, 0);
 					update_attr(currcons);
 				}
 				break;
@@ -1271,14 +1326,16 @@ static void setterm_command(int currcons)
 {
 	switch(par[0]) {
 		case 1:	/* set color for underline mode */
-			if (can_do_color && par[1] < 16) {
+			if (vc_cons[currcons].d->vc_can_do_color &&
+					par[1] < 16) {
 				ulcolor = color_table[par[1]];
 				if (underline)
 					update_attr(currcons);
 			}
 			break;
 		case 2:	/* set color for half intensity mode */
-			if (can_do_color && par[1] < 16) {
+			if (vc_cons[currcons].d->vc_can_do_color &&
+					par[1] < 16) {
 				halfcolor = color_table[par[1]];
 				if (intensity == 0)
 					update_attr(currcons);
@@ -1327,8 +1384,8 @@ static void setterm_command(int currcons)
 /* console_sem is held */
 static void csi_at(int currcons, unsigned int nr)
 {
-	if (nr > video_num_columns - x)
-		nr = video_num_columns - x;
+	if (nr > vc_cons[currcons].d->vc_cols - x)
+		nr = vc_cons[currcons].d->vc_cols - x;
 	else if (!nr)
 		nr = 1;
 	insert_char(currcons, nr);
@@ -1337,8 +1394,8 @@ static void csi_at(int currcons, unsigned int nr)
 /* console_sem is held */
 static void csi_L(int currcons, unsigned int nr)
 {
-	if (nr > video_num_lines - y)
-		nr = video_num_lines - y;
+	if (nr > vc_cons[currcons].d->vc_rows - y)
+		nr = vc_cons[currcons].d->vc_rows - y;
 	else if (!nr)
 		nr = 1;
 	scrdown(currcons,y,bottom,nr);
@@ -1348,8 +1405,8 @@ static void csi_L(int currcons, unsigned int nr)
 /* console_sem is held */
 static void csi_P(int currcons, unsigned int nr)
 {
-	if (nr > video_num_columns - x)
-		nr = video_num_columns - x;
+	if (nr > vc_cons[currcons].d->vc_cols - x)
+		nr = vc_cons[currcons].d->vc_cols - x;
 	else if (!nr)
 		nr = 1;
 	delete_char(currcons, nr);
@@ -1358,8 +1415,8 @@ static void csi_P(int currcons, unsigned int nr)
 /* console_sem is held */
 static void csi_M(int currcons, unsigned int nr)
 {
-	if (nr > video_num_lines - y)
-		nr = video_num_lines - y;
+	if (nr > vc_cons[currcons].d->vc_rows - y)
+		nr = vc_cons[currcons].d->vc_rows - y;
 	else if (!nr)
 		nr=1;
 	scrup(currcons,y,bottom,nr);
@@ -1384,7 +1441,7 @@ static void save_cur(int currcons)
 /* console_sem is held */
 static void restore_cur(int currcons)
 {
-	gotoxy(currcons,saved_x,saved_y);
+	gotoxy(vc_cons[currcons].d,saved_x,saved_y);
 	intensity	= s_intensity;
 	underline	= s_underline;
 	blink		= s_blink;
@@ -1406,7 +1463,7 @@ enum { ESnormal, ESesc, ESsquare, ESgetpars, ESgotpars, ESfunckey,
 static void reset_terminal(int currcons, int do_clear)
 {
 	top		= 0;
-	bottom		= video_num_lines;
+	bottom		= vc_cons[currcons].d->vc_rows;
 	vc_state	= ESnormal;
 	ques		= 0;
 	translate	= set_translate(LAT1_MAP,currcons);
@@ -1453,7 +1510,7 @@ static void reset_terminal(int currcons, int do_clear)
 	bell_pitch = DEFAULT_BELL_PITCH;
 	bell_duration = DEFAULT_BELL_DURATION;
 
-	gotoxy(currcons,0,0);
+	gotoxy(vc_cons[currcons].d, 0, 0);
 	save_cur(currcons);
 	if (do_clear)
 	    csi_J(currcons,2);
@@ -1478,7 +1535,7 @@ static void do_con_trol(struct tty_struct *tty, unsigned int currcons, int c)
 		return;
 	case 9:
 		pos -= (x << 1);
-		while (x < video_num_columns - 1) {
+		while (x < vc_cons[currcons].d->vc_cols - 1) {
 			x++;
 			if (tab_stop[x >> 5] & (1 << (x & 31)))
 				break;
@@ -1665,31 +1722,31 @@ static void do_con_trol(struct tty_struct *tty, unsigned int currcons, int c)
 		switch(c) {
 		case 'G': case '`':
 			if (par[0]) par[0]--;
-			gotoxy(currcons,par[0],y);
+			gotoxy(vc_cons[currcons].d, par[0], y);
 			return;
 		case 'A':
 			if (!par[0]) par[0]++;
-			gotoxy(currcons,x,y-par[0]);
+			gotoxy(vc_cons[currcons].d, x, y-par[0]);
 			return;
 		case 'B': case 'e':
 			if (!par[0]) par[0]++;
-			gotoxy(currcons,x,y+par[0]);
+			gotoxy(vc_cons[currcons].d, x, y+par[0]);
 			return;
 		case 'C': case 'a':
 			if (!par[0]) par[0]++;
-			gotoxy(currcons,x+par[0],y);
+			gotoxy(vc_cons[currcons].d, x+par[0], y);
 			return;
 		case 'D':
 			if (!par[0]) par[0]++;
-			gotoxy(currcons,x-par[0],y);
+			gotoxy(vc_cons[currcons].d, x-par[0], y);
 			return;
 		case 'E':
 			if (!par[0]) par[0]++;
-			gotoxy(currcons,0,y+par[0]);
+			gotoxy(vc_cons[currcons].d, 0, y+par[0]);
 			return;
 		case 'F':
 			if (!par[0]) par[0]++;
-			gotoxy(currcons,0,y-par[0]);
+			gotoxy(vc_cons[currcons].d, 0, y-par[0]);
 			return;
 		case 'd':
 			if (par[0]) par[0]--;
@@ -1743,10 +1800,10 @@ static void do_con_trol(struct tty_struct *tty, unsigned int currcons, int c)
 			if (!par[0])
 				par[0]++;
 			if (!par[1])
-				par[1] = video_num_lines;
+				par[1] = vc_cons[currcons].d->vc_rows;
 			/* Minimum allowed region is 2 lines */
 			if (par[0] < par[1] &&
-			    par[1] <= video_num_lines) {
+			    par[1] <= vc_cons[currcons].d->vc_rows) {
 				top=par[0]-1;
 				bottom=par[1];
 				gotoxay(currcons,0,0);
@@ -1793,7 +1850,7 @@ static void do_con_trol(struct tty_struct *tty, unsigned int currcons, int c)
 			csi_J(currcons, 2);
 			video_erase_char =
 				(video_erase_char & 0xff00) | ' ';
-			do_update_region(currcons, origin, screenbuf_size/2);
+			do_update_region(vc_cons[currcons].d, origin, screenbuf_size/2);
 		}
 		return;
 	case ESsetG0:
@@ -1836,13 +1893,11 @@ static void do_con_trol(struct tty_struct *tty, unsigned int currcons, int c)
  * since console_init (and thus con_init) are called before any
  * kernel memory allocation is available.
  */
-char con_buf[PAGE_SIZE];
-#define CON_BUF_SIZE	PAGE_SIZE
+char con_buf[CON_BUF_SIZE];
 DECLARE_MUTEX(con_buf_sem);
 
 /* acquires console_sem */
-static int do_con_write(struct tty_struct * tty, int from_user,
-			const unsigned char *buf, int count)
+static int do_con_write(struct tty_struct *tty, const unsigned char *buf, int count)
 {
 #ifdef VT_BUF_VRAM_ONLY
 #define FLUSH do { } while(0);
@@ -1856,14 +1911,24 @@ static int do_con_write(struct tty_struct * tty, int from_user,
 	int c, tc, ok, n = 0, draw_x = -1;
 	unsigned int currcons;
 	unsigned long draw_from = 0, draw_to = 0;
-	struct vt_struct *vt = (struct vt_struct *)tty->driver_data;
+	struct vt_struct *vt;
 	u16 himask, charmask;
 	const unsigned char *orig_buf = NULL;
 	int orig_count;
 
 	if (in_interrupt())
 		return count;
-		
+
+	might_sleep();
+
+	acquire_console_sem();
+	vt = tty->driver_data;
+	if (vt == NULL) {
+		printk(KERN_ERR "vt: argh, driver_data is NULL !\n");
+		release_console_sem();
+		return 0;
+	}
+
 	currcons = vt->vc_num;
 	if (!vc_cons_allocated(currcons)) {
 	    /* could this happen? */
@@ -1872,26 +1937,13 @@ static int do_con_write(struct tty_struct * tty, int from_user,
 		error = 1;
 		printk("con_write: tty %d not allocated\n", currcons+1);
 	    }
+	    release_console_sem();
 	    return 0;
 	}
+	release_console_sem();
 
 	orig_buf = buf;
 	orig_count = count;
-
-	if (from_user) {
-		down(&con_buf_sem);
-
-again:
-		if (count > CON_BUF_SIZE)
-			count = CON_BUF_SIZE;
-		console_conditional_schedule();
-		if (copy_from_user(con_buf, buf, count)) {
-			n = 0; /* ?? are error codes legal here ?? */
-			goto out;
-		}
-
-		buf = con_buf;
-	}
 
 	/* At this point 'buf' is guaranteed to be a kernel buffer
 	 * and therefore no access to userspace (and therefore sleeping)
@@ -1902,20 +1954,31 @@ again:
 
 	acquire_console_sem();
 
+	vt = tty->driver_data;
+	if (vt == NULL) {
+		printk(KERN_ERR "vt: argh, driver_data _became_ NULL !\n");
+		release_console_sem();
+		goto out;
+	}
+
 	himask = hi_font_mask;
 	charmask = himask ? 0x1ff : 0xff;
 
 	/* undraw cursor first */
 	if (IS_FG)
-		hide_cursor(currcons);
+		hide_cursor(vc_cons[currcons].d);
 
 	while (!tty->stopped && count) {
-		c = *buf;
+		int orig = *buf;
+		c = orig;
 		buf++;
 		n++;
 		count--;
 
-		if (utf) {
+		/* Do no translation at all in control states */
+		if (vc_state != ESnormal) {
+			tc = c;
+		} else if (utf) {
 		    /* Combine UTF-8 into Unicode */
 		    /* Incomplete characters silently ignored */
 		    if(c > 0x7f) {
@@ -2005,7 +2068,7 @@ again:
 				draw_x = x;
 				draw_from = pos;
 			}
-			if (x == video_num_columns - 1) {
+			if (x == vc_cons[currcons].d->vc_cols - 1) {
 				need_wrap = decawm;
 				draw_to = pos+2;
 			} else {
@@ -2015,29 +2078,13 @@ again:
 			continue;
 		}
 		FLUSH
-		do_con_trol(tty, currcons, c);
+		do_con_trol(tty, currcons, orig);
 	}
 	FLUSH
 	console_conditional_schedule();
 	release_console_sem();
 
 out:
-	if (from_user) {
-		/* If the user requested something larger than
-		 * the CON_BUF_SIZE, and the tty is not stopped,
-		 * keep going.
-		 */
-		if ((orig_count > CON_BUF_SIZE) && !tty->stopped) {
-			orig_count -= CON_BUF_SIZE;
-			orig_buf += CON_BUF_SIZE;
-			count = orig_count;
-			buf = orig_buf;
-			goto again;
-		}
-
-		up(&con_buf_sem);
-	}
-
 	return n;
 #undef FLUSH
 }
@@ -2056,8 +2103,9 @@ static void console_callback(void *ignored)
 	acquire_console_sem();
 
 	if (want_console >= 0) {
-		if (want_console != fg_console && vc_cons_allocated(want_console)) {
-			hide_cursor(fg_console);
+		if (want_console != fg_console &&
+		    vc_cons_allocated(want_console)) {
+			hide_cursor(vc_cons[fg_console].d);
 			change_console(want_console);
 			/* we only changed when the console had already
 			   been allocated - a new console is not created
@@ -2076,6 +2124,10 @@ static void console_callback(void *ignored)
 			sw->con_scrolldelta(vc_cons[currcons].d, scrollback_delta);
 		scrollback_delta = 0;
 	}
+	if (blank_timer_expired) {
+		do_blank_screen(0);
+		blank_timer_expired = 0;
+	}
 
 	release_console_sem();
 }
@@ -2086,6 +2138,8 @@ void set_console(int nr)
 	schedule_console_callback();
 }
 
+struct tty_driver *console_driver;
+
 #ifdef CONFIG_VT_CONSOLE
 
 /*
@@ -2094,7 +2148,7 @@ void set_console(int nr)
  * The console must be locked when we get here.
  */
 
-void vt_console_print(struct console *co, const char * b, unsigned count)
+void vt_console_print(struct console *co, const char *b, unsigned count)
 {
 	int currcons = fg_console;
 	unsigned char c;
@@ -2106,8 +2160,6 @@ void vt_console_print(struct console *co, const char * b, unsigned count)
 	/* console busy or not yet initialized */
 	if (!printable || test_and_set_bit(0, &printing))
 		return;
-
-	pm_access(pm_con);
 
 	if (kmsg_redirect && vc_cons_allocated(kmsg_redirect - 1))
 		currcons = kmsg_redirect - 1;
@@ -2127,7 +2179,7 @@ void vt_console_print(struct console *co, const char * b, unsigned count)
 
 	/* undraw cursor first */
 	if (IS_FG)
-		hide_cursor(currcons);
+		hide_cursor(vc_cons[currcons].d);
 
 	start = (ushort *)pos;
 
@@ -2160,7 +2212,7 @@ void vt_console_print(struct console *co, const char * b, unsigned count)
 		}
 		scr_writew((attr << 8) + c, (unsigned short *) pos);
 		cnt++;
-		if (myx == video_num_columns - 1) {
+		if (myx == vc_cons[currcons].d->vc_cols - 1) {
 			need_wrap = 1;
 			continue;
 		}
@@ -2171,12 +2223,12 @@ void vt_console_print(struct console *co, const char * b, unsigned count)
 		if (IS_VISIBLE)
 			sw->con_putcs(vc_cons[currcons].d, start, cnt, y, x);
 		x += cnt;
-		if (x == video_num_columns) {
+		if (x == vc_cons[currcons].d->vc_cols) {
 			x--;
 			need_wrap = 1;
 		}
 	}
-	set_cursor(currcons);
+	set_cursor(vc_cons[currcons].d);
 
 	if (!oops_in_progress)
 		poke_blanked_console();
@@ -2184,8 +2236,6 @@ void vt_console_print(struct console *co, const char * b, unsigned count)
 quit:
 	clear_bit(0, &printing);
 }
-
-struct tty_driver *console_driver;
 
 static struct tty_driver *vt_console_device(struct console *c, int *index)
 {
@@ -2221,21 +2271,22 @@ struct console vt_console_driver = {
 int tioclinux(struct tty_struct *tty, unsigned long arg)
 {
 	char type, data;
+	char __user *p = (char __user *)arg;
 	int lines;
 	int ret;
 
 	if (tty->driver->type != TTY_DRIVER_TYPE_CONSOLE)
 		return -EINVAL;
-	if (current->tty != tty && !capable(CAP_SYS_ADMIN))
+	if (current->signal->tty != tty && !capable(CAP_SYS_ADMIN))
 		return -EPERM;
-	if (get_user(type, (char *)arg))
+	if (get_user(type, p))
 		return -EFAULT;
 	ret = 0;
 	switch (type)
 	{
 		case TIOCL_SETSEL:
 			acquire_console_sem();
-			ret = set_selection((struct tiocl_selection *)((char *)arg+1), tty, 1);
+			ret = set_selection((struct tiocl_selection __user *)(p+1), tty);
 			release_console_sem();
 			break;
 		case TIOCL_PASTESEL:
@@ -2245,7 +2296,7 @@ int tioclinux(struct tty_struct *tty, unsigned long arg)
 			unblank_screen();
 			break;
 		case TIOCL_SELLOADLUT:
-			ret = sel_loadlut(arg);
+			ret = sel_loadlut(p);
 			break;
 		case TIOCL_GETSHIFTSTATE:
 			
@@ -2256,20 +2307,20 @@ int tioclinux(struct tty_struct *tty, unsigned long arg)
 	 * related to the kernel should not use this.
 	 */
 	 		data = shift_state;
-			ret = __put_user(data, (char *) arg);
+			ret = __put_user(data, p);
 			break;
 		case TIOCL_GETMOUSEREPORTING:
 			data = mouse_reporting();
-			ret = __put_user(data, (char *) arg);
+			ret = __put_user(data, p);
 			break;
 		case TIOCL_SETVESABLANK:
-			set_vesa_blanking(arg);
-			break;;
+			set_vesa_blanking(p);
+			break;
 		case TIOCL_SETKMSGREDIRECT:
 			if (!capable(CAP_SYS_ADMIN)) {
 				ret = -EPERM;
 			} else {
-				if (get_user(data, (char *)arg+1))
+				if (get_user(data, p+1))
 					ret = -EFAULT;
 				else
 					kmsg_redirect = data;
@@ -2279,7 +2330,7 @@ int tioclinux(struct tty_struct *tty, unsigned long arg)
 			ret = fg_console;
 			break;
 		case TIOCL_SCROLLCONSOLE:
-			if (get_user(lines, (s32 *)((char *)arg+4))) {
+			if (get_user(lines, (s32 __user *)(p+4))) {
 				ret = -EFAULT;
 			} else {
 				scrollfront(lines);
@@ -2301,16 +2352,14 @@ int tioclinux(struct tty_struct *tty, unsigned long arg)
 }
 
 /*
- *	/dev/ttyN handling
+ * /dev/ttyN handling
  */
 
-static int con_write(struct tty_struct * tty, int from_user,
-		     const unsigned char *buf, int count)
+static int con_write(struct tty_struct *tty, const unsigned char *buf, int count)
 {
 	int	retval;
 
-	pm_access(pm_con);
-	retval = do_con_write(tty, from_user, buf, count);
+	retval = do_con_write(tty, buf, count);
 	con_flush_chars(tty);
 
 	return retval;
@@ -2319,9 +2368,8 @@ static int con_write(struct tty_struct * tty, int from_user,
 static void con_put_char(struct tty_struct *tty, unsigned char ch)
 {
 	if (in_interrupt())
-		return;		/* n_r3964 calls put_char() from interrupt context */
-	pm_access(pm_con);
-	do_con_write(tty, 0, &ch, 1);
+		return;	/* n_r3964 calls put_char() from interrupt context */
+	do_con_write(tty, &ch, 1);
 }
 
 static int con_write_room(struct tty_struct *tty)
@@ -2347,7 +2395,7 @@ static void con_throttle(struct tty_struct *tty)
 
 static void con_unthrottle(struct tty_struct *tty)
 {
-	struct vt_struct *vt = (struct vt_struct *) tty->driver_data;
+	struct vt_struct *vt = tty->driver_data;
 
 	wake_up_interruptible(&vt->paste_wait);
 }
@@ -2389,65 +2437,83 @@ static void con_flush_chars(struct tty_struct *tty)
 	if (in_interrupt())	/* from flush_to_ldisc */
 		return;
 
-	pm_access(pm_con);
-	
 	/* if we race with con_close(), vt may be null */
 	acquire_console_sem();
-	vt = (struct vt_struct *)tty->driver_data;
+	vt = tty->driver_data;
 	if (vt)
-		set_cursor(vt->vc_num);
+		set_cursor(vc_cons[vt->vc_num].d);
 	release_console_sem();
 }
 
 /*
  * Allocate the console screen memory.
  */
-static int con_open(struct tty_struct *tty, struct file * filp)
+static int con_open(struct tty_struct *tty, struct file *filp)
 {
-	unsigned int	currcons;
-	int i;
+	unsigned int currcons = tty->index;
+	int ret = 0;
 
-	currcons = tty->index;
+	acquire_console_sem();
+	if (tty->count == 1) {
+		ret = vc_allocate(currcons);
+		if (ret == 0) {
+			vt_cons[currcons]->vc_num = currcons;
+			tty->driver_data = vt_cons[currcons];
+			vc_cons[currcons].d->vc_tty = tty;
 
-	i = vc_allocate(currcons);
-	if (i)
-		return i;
-
-	vt_cons[currcons]->vc_num = currcons;
-	tty->driver_data = vt_cons[currcons];
-	vc_cons[currcons].d->vc_tty = tty;
-
-	if (!tty->winsize.ws_row && !tty->winsize.ws_col) {
-		tty->winsize.ws_row = video_num_lines;
-		tty->winsize.ws_col = video_num_columns;
+			if (!tty->winsize.ws_row && !tty->winsize.ws_col) {
+				tty->winsize.ws_row = vc_cons[currcons].d->vc_rows;
+				tty->winsize.ws_col = vc_cons[currcons].d->vc_cols;
+			}
+			release_console_sem();
+			vcs_make_devfs(tty);
+			return ret;
+		}
 	}
-	if (tty->count == 1)
-		vcs_make_devfs(tty);
-	return 0;
+	release_console_sem();
+	return ret;
 }
 
-static void con_close(struct tty_struct *tty, struct file * filp)
+/*
+ * We take tty_sem in here to prevent another thread from coming in via init_dev
+ * and taking a ref against the tty while we're in the process of forgetting
+ * about it and cleaning things up.
+ *
+ * This is because vcs_remove_devfs() can sleep and will drop the BKL.
+ */
+static void con_close(struct tty_struct *tty, struct file *filp)
 {
-	struct vt_struct *vt;
-	
-	if (!tty || tty->count != 1)
-		return;
+	down(&tty_sem);
+	acquire_console_sem();
+	if (tty && tty->count == 1) {
+		struct vt_struct *vt;
 
-	vcs_remove_devfs(tty);
-	vt = (struct vt_struct*)tty->driver_data;
-	if (vt)
-		vc_cons[vt->vc_num].d->vc_tty = NULL;
-	tty->driver_data = 0;
+		vt = tty->driver_data;
+		if (vt)
+			vc_cons[vt->vc_num].d->vc_tty = NULL;
+		tty->driver_data = NULL;
+		release_console_sem();
+		vcs_remove_devfs(tty);
+		up(&tty_sem);
+		/*
+		 * tty_sem is released, but we still hold BKL, so there is
+		 * still exclusion against init_dev()
+		 */
+		return;
+	}
+	release_console_sem();
+	up(&tty_sem);
 }
 
-static void vc_init(unsigned int currcons, unsigned int rows, unsigned int cols, int do_clear)
+static void vc_init(unsigned int currcons, unsigned int rows,
+			unsigned int cols, int do_clear)
 {
 	int j, k ;
 
-	video_num_columns = cols;
-	video_num_lines = rows;
-	video_size_row = cols<<1;
-	screenbuf_size = video_num_lines * video_size_row;
+	vc_cons[currcons].d->vc_cols = cols;
+	vc_cons[currcons].d->vc_rows = rows;
+	vc_cons[currcons].d->vc_size_row = cols<<1;
+	screenbuf_size = vc_cons[currcons].d->vc_rows * vc_cons[currcons].d->vc_size_row;
 
 	set_origin(currcons);
 	pos = origin;
@@ -2475,16 +2541,20 @@ static int __init con_init(void)
 	const char *display_desc = NULL;
 	unsigned int currcons = 0;
 
+	acquire_console_sem();
+
 	if (conswitchp)
 		display_desc = conswitchp->con_startup();
 	if (!display_desc) {
 		fg_console = 0;
+		release_console_sem();
 		return 0;
 	}
 
 	init_timer(&console_timer);
-	console_timer.function = blank_screen;
+	console_timer.function = blank_screen_t;
 	if (blankinterval) {
+		blank_state = blank_normal_wait;
 		mod_timer(&console_timer, jiffies + blankinterval);
 	}
 
@@ -2496,24 +2566,27 @@ static int __init con_init(void)
 				alloc_bootmem(sizeof(struct vc_data));
 		vt_cons[currcons] = (struct vt_struct *)
 				alloc_bootmem(sizeof(struct vt_struct));
+		vc_cons[currcons].d->vc_vt = vt_cons[currcons];
 		visual_init(currcons, 1);
 		screenbuf = (unsigned short *) alloc_bootmem(screenbuf_size);
 		kmalloced = 0;
-		vc_init(currcons, video_num_lines, video_num_columns, 
+		vc_init(currcons, vc_cons[currcons].d->vc_rows, vc_cons[currcons].d->vc_cols,
 			currcons || !sw->con_save_screen);
 	}
 	currcons = fg_console = 0;
 	master_display_fg = vc_cons[currcons].d;
 	set_origin(currcons);
 	save_screen(currcons);
-	gotoxy(currcons,x,y);
+	gotoxy(vc_cons[currcons].d, x, y);
 	csi_J(currcons, 0);
 	update_screen(fg_console);
 	printk("Console: %s %s %dx%d",
-		can_do_color ? "colour" : "mono",
-		display_desc, video_num_columns, video_num_lines);
+		vc_cons[currcons].d->vc_can_do_color ? "colour" : "mono",
+		display_desc, vc_cons[currcons].d->vc_cols, vc_cons[currcons].d->vc_rows);
 	printable = 1;
 	printk("\n");
+
+	release_console_sem();
 
 #ifdef CONFIG_VT_CONSOLE
 	register_console(&vt_console_driver);
@@ -2539,6 +2612,8 @@ static struct tty_operations con_ops = {
 
 int __init vty_init(void)
 {
+	vcs_init();
+
 	console_driver = alloc_tty_driver(MAX_NR_CONSOLES);
 	if (!console_driver)
 		panic("Couldn't allocate console driver\n");
@@ -2563,25 +2638,10 @@ int __init vty_init(void)
 #ifdef CONFIG_MDA_CONSOLE
 	mda_console_init();
 #endif
-#ifdef CONFIG_FRAMEBUFFER_CONSOLE
-	fb_console_init();
-#endif	
-	vcs_init();
 	return 0;
 }
 
 #ifndef VT_SINGLE_DRIVER
-
-static void clear_buffer_attributes(int currcons)
-{
-	unsigned short *p = (unsigned short *) origin;
-	int count = screenbuf_size/2;
-	int mask = hi_font_mask | 0xff;
-
-	for (; count > 0; count--, p++) {
-		scr_writew((scr_readw(p)&mask) | (video_erase_char&~mask), p);
-	}
-}
 
 /*
  *	If we support more console drivers, this function is used
@@ -2589,20 +2649,38 @@ static void clear_buffer_attributes(int currcons)
  *	and become default driver for newly opened ones.
  */
 
-void take_over_console(const struct consw *csw, int first, int last, int deflt)
+int take_over_console(const struct consw *csw, int first, int last, int deflt)
 {
 	int i, j = -1;
 	const char *desc;
+	struct module *owner;
+
+	owner = csw->owner;
+	if (!try_module_get(owner))
+		return -ENODEV;
+
+	acquire_console_sem();
 
 	desc = csw->con_startup();
-	if (!desc) return;
-	if (deflt)
+	if (!desc) {
+		release_console_sem();
+		module_put(owner);
+		return -ENODEV;
+	}
+	if (deflt) {
+		if (conswitchp)
+			module_put(conswitchp->owner);
+		__module_get(owner);
 		conswitchp = csw;
+	}
 
 	for (i = first; i <= last; i++) {
 		int old_was_color;
 		int currcons = i;
 
+		if (con_driver_map[i])
+			module_put(con_driver_map[i]->owner);
+		__module_get(owner);
 		con_driver_map[i] = csw;
 
 		if (!vc_cons[i].d || !vc_cons[i].d->vc_sw)
@@ -2613,6 +2691,10 @@ void take_over_console(const struct consw *csw, int first, int last, int deflt)
 			save_screen(i);
 		old_was_color = vc_cons[i].d->vc_can_do_color;
 		vc_cons[i].d->vc_sw->con_deinit(vc_cons[i].d);
+		origin = (unsigned long) screenbuf;
+		visible_origin = origin;
+		scr_end = origin + screenbuf_size;
+		pos = origin + vc_cons[currcons].d->vc_size_row*y + 2*x;
 		visual_init(i, 0);
 		update_attr(i);
 
@@ -2635,6 +2717,11 @@ void take_over_console(const struct consw *csw, int first, int last, int deflt)
 		       desc, vc_cons[j].d->vc_cols, vc_cons[j].d->vc_rows);
 	else
 		printk("to %s\n", desc);
+
+	release_console_sem();
+
+	module_put(owner);
+	return 0;
 }
 
 void give_up_console(const struct consw *csw)
@@ -2642,8 +2729,10 @@ void give_up_console(const struct consw *csw)
 	int i;
 
 	for(i = 0; i < MAX_NR_CONSOLES; i++)
-		if (con_driver_map[i] == csw)
+		if (con_driver_map[i] == csw) {
+			module_put(csw->owner);
 			con_driver_map[i] = NULL;
+		}
 }
 
 #endif
@@ -2652,11 +2741,10 @@ void give_up_console(const struct consw *csw)
  *	Screen blanking
  */
 
-static void set_vesa_blanking(unsigned long arg)
+static void set_vesa_blanking(char __user *p)
 {
-    char *argp = (char *)arg + 1;
     unsigned int mode;
-    get_user(mode, argp);
+    get_user(mode, p + 1);
     vesa_blank_mode = (mode < 4) ? mode : 0;
 }
 
@@ -2673,39 +2761,40 @@ static void vesa_powerdown(void)
      *  Called only if powerdown features are allowed.
      */
     switch (vesa_blank_mode) {
-	case VESA_NO_BLANKING:
-	    c->vc_sw->con_blank(c, VESA_VSYNC_SUSPEND+1);
+    case VESA_NO_BLANKING:
+	    c->vc_sw->con_blank(c, VESA_VSYNC_SUSPEND+1, 0);
 	    break;
-	case VESA_VSYNC_SUSPEND:
-	case VESA_HSYNC_SUSPEND:
-	    c->vc_sw->con_blank(c, VESA_POWERDOWN+1);
+    case VESA_VSYNC_SUSPEND:
+    case VESA_HSYNC_SUSPEND:
+	    c->vc_sw->con_blank(c, VESA_POWERDOWN+1, 0);
 	    break;
     }
 }
 
-/*
- * This is a timer handler
- */
-static void vesa_powerdown_screen(unsigned long dummy)
-{
-	console_timer.function = unblank_screen_t;
-
-	vesa_powerdown();
-}
-
-static void timer_do_blank_screen(int entering_gfx, int from_timer_handler)
+void do_blank_screen(int entering_gfx)
 {
 	int currcons = fg_console;
 	int i;
 
-	if (console_blanked)
+	WARN_CONSOLE_UNLOCKED();
+
+	if (console_blanked) {
+		if (blank_state == blank_vesa_wait) {
+			blank_state = blank_off;
+			vesa_powerdown();
+
+		}
 		return;
+	}
+	if (blank_state != blank_normal_wait)
+		return;
+	blank_state = blank_off;
 
 	/* entering graphics mode? */
 	if (entering_gfx) {
-		hide_cursor(currcons);
+		hide_cursor(vc_cons[currcons].d);
 		save_screen(currcons);
-		sw->con_blank(vc_cons[currcons].d, -1);
+		sw->con_blank(vc_cons[currcons].d, -1, 1);
 		console_blanked = fg_console + 1;
 		set_origin(currcons);
 		return;
@@ -2717,14 +2806,13 @@ static void timer_do_blank_screen(int entering_gfx, int from_timer_handler)
 		return;
 	}
 
-	hide_cursor(currcons);
-	if (!from_timer_handler)
-		del_timer_sync(&console_timer);
-	console_timer.function = unblank_screen_t;
+	hide_cursor(vc_cons[currcons].d);
+	del_timer_sync(&console_timer);
+	blank_timer_expired = 0;
 
 	save_screen(currcons);
 	/* In case we need to reset origin, blanking hook returns 1 */
-	i = sw->con_blank(vc_cons[currcons].d, 1);
+	i = sw->con_blank(vc_cons[currcons].d, 1, 0);
 	console_blanked = fg_console + 1;
 	if (i)
 		set_origin(currcons);
@@ -2733,33 +2821,23 @@ static void timer_do_blank_screen(int entering_gfx, int from_timer_handler)
 		return;
 
 	if (vesa_off_interval) {
-		console_timer.function = vesa_powerdown_screen;
+		blank_state = blank_vesa_wait,
 		mod_timer(&console_timer, jiffies + vesa_off_interval);
 	}
 
     	if (vesa_blank_mode)
-		sw->con_blank(vc_cons[currcons].d, vesa_blank_mode + 1);
+		sw->con_blank(vc_cons[currcons].d, vesa_blank_mode + 1, 0);
 }
-
-void do_blank_screen(int entering_gfx)
-{
-	timer_do_blank_screen(entering_gfx, 0);
-}
-
-/*
- * This is a timer handler
- */
-static void unblank_screen_t(unsigned long dummy)
-{
-	unblank_screen();
-}
+EXPORT_SYMBOL(do_blank_screen);
 
 /*
  * Called by timer as well as from vt_console_driver
  */
-void unblank_screen(void)
+void do_unblank_screen(int leaving_gfx)
 {
 	int currcons;
+
+	WARN_CONSOLE_UNLOCKED();
 
 	ignore_poke = 0;
 	if (!console_blanked)
@@ -2773,39 +2851,61 @@ void unblank_screen(void)
 	if (vcmode != KD_TEXT)
 		return; /* but leave console_blanked != 0 */
 
-	console_timer.function = blank_screen;
 	if (blankinterval) {
 		mod_timer(&console_timer, jiffies + blankinterval);
+		blank_state = blank_normal_wait;
 	}
 
 	console_blanked = 0;
-	if (sw->con_blank(vc_cons[currcons].d, 0))
+	if (sw->con_blank(vc_cons[currcons].d, 0, leaving_gfx))
 		/* Low-level driver cannot restore -> do it ourselves */
 		update_screen(fg_console);
 	if (console_blank_hook)
 		console_blank_hook(0);
 	set_palette(currcons);
-	set_cursor(fg_console);
+	set_cursor(vc_cons[fg_console].d);
+}
+EXPORT_SYMBOL(do_unblank_screen);
+
+/*
+ * This is called by the outside world to cause a forced unblank, mostly for
+ * oopses. Currently, I just call do_unblank_screen(0), but we could eventually
+ * call it with 1 as an argument and so force a mode restore... that may kill
+ * X or at least garbage the screen but would also make the Oops visible...
+ */
+void unblank_screen(void)
+{
+	do_unblank_screen(0);
 }
 
 /*
- * This is both a user-level callable and a timer handler
+ * We defer the timer blanking to work queue so it can take the console semaphore
+ * (console operations can still happen at irq time, but only from printk which
+ * has the console semaphore. Not perfect yet, but better than no locking
  */
-static void blank_screen(unsigned long dummy)
+static void blank_screen_t(unsigned long dummy)
 {
-	timer_do_blank_screen(0, 1);
+	blank_timer_expired = 1;
+	schedule_work(&console_work);
 }
 
 void poke_blanked_console(void)
 {
+	WARN_CONSOLE_UNLOCKED();
+
+	/* This isn't perfectly race free, but a race here would be mostly harmless,
+	 * at worse, we'll do a spurrious blank and it's unlikely
+	 */
 	del_timer(&console_timer);
+	blank_timer_expired = 0;
+
 	if (ignore_poke || !vt_cons[fg_console] || vt_cons[fg_console]->vc_mode == KD_GRAPHICS)
 		return;
-	if (console_blanked) {
-		console_timer.function = unblank_screen_t;
-		mod_timer(&console_timer, jiffies);	/* Now */
-	} else if (blankinterval) {
+	if (console_blanked)
+		unblank_screen();
+	else if (blankinterval) {
 		mod_timer(&console_timer, jiffies + blankinterval);
+		blank_state = blank_normal_wait;
 	}
 }
 
@@ -2815,13 +2915,17 @@ void poke_blanked_console(void)
 
 void set_palette(int currcons)
 {
+	WARN_CONSOLE_UNLOCKED();
+
 	if (vcmode != KD_GRAPHICS)
 		sw->con_set_palette(vc_cons[currcons].d, color_table);
 }
 
-static int set_get_cmap(unsigned char *arg, int set)
+static int set_get_cmap(unsigned char __user *arg, int set)
 {
     int i, j, k;
+
+    WARN_CONSOLE_UNLOCKED();
 
     for (i = 0; i < 16; i++)
 	if (set) {
@@ -2852,14 +2956,26 @@ static int set_get_cmap(unsigned char *arg, int set)
  * map, 3 bytes per colour, 16 colours, range from 0 to 255.
  */
 
-int con_set_cmap(unsigned char *arg)
+int con_set_cmap(unsigned char __user *arg)
 {
-	return set_get_cmap (arg,1);
+	int rc;
+
+	acquire_console_sem();
+	rc = set_get_cmap (arg,1);
+	release_console_sem();
+
+	return rc;
 }
 
-int con_get_cmap(unsigned char *arg)
+int con_get_cmap(unsigned char __user *arg)
 {
-	return set_get_cmap (arg,0);
+	int rc;
+
+	acquire_console_sem();
+	rc = set_get_cmap (arg,0);
+	release_console_sem();
+
+	return rc;
 }
 
 void reset_palette(int currcons)
@@ -2888,91 +3004,184 @@ void reset_palette(int currcons)
 
 #define max_font_size 65536
 
-int con_font_op(int currcons, struct console_font_op *op)
+int con_font_get(int currcons, struct console_font_op *op)
 {
+	struct console_font font;
 	int rc = -EINVAL;
-	int size = max_font_size, set;
-	u8 *temp = NULL;
-	struct console_font_op old_op;
+	int c;
 
 	if (vt_cons[currcons]->vc_mode != KD_TEXT)
-		goto quit;
-	memcpy(&old_op, op, sizeof(old_op));
-	if (op->op == KD_FONT_OP_SET) {
-		if (!op->data)
-			return -EINVAL;
-		if (op->charcount > 512)
-			goto quit;
-		if (!op->height) {		/* Need to guess font height [compat] */
-			int h, i;
-			u8 *charmap = op->data, tmp;
-			
-			/* If from KDFONTOP ioctl, don't allow things which can be done in userland,
-			   so that we can get rid of this soon */
-			if (!(op->flags & KD_FONT_FLAG_OLD))
-				goto quit;
-			rc = -EFAULT;
-			for (h = 32; h > 0; h--)
-				for (i = 0; i < op->charcount; i++) {
-					if (get_user(tmp, &charmap[32*i+h-1]))
-						goto quit;
-					if (tmp)
-						goto nonzero;
-				}
-			rc = -EINVAL;
-			goto quit;
-		nonzero:
-			rc = -EINVAL;
-			op->height = h;
-		}
-		if (op->width > 32 || op->height > 32)
-			goto quit;
-		size = (op->width+7)/8 * 32 * op->charcount;
-		if (size > max_font_size)
-			return -ENOSPC;
-		set = 1;
-	} else if (op->op == KD_FONT_OP_GET)
-		set = 0;
-	else
-		return sw->con_font_op(vc_cons[currcons].d, op);
+		return -EINVAL;
+
 	if (op->data) {
-		temp = kmalloc(size, GFP_KERNEL);
-		if (!temp)
+		font.data = kmalloc(max_font_size, GFP_KERNEL);
+		if (!font.data)
 			return -ENOMEM;
-		if (set && copy_from_user(temp, op->data, size)) {
-			rc = -EFAULT;
-			goto quit;
-		}
-		op->data = temp;
-	}
+	} else
+		font.data = NULL;
 
 	acquire_console_sem();
-	rc = sw->con_font_op(vc_cons[currcons].d, op);
+	if (sw->con_font_get)
+		rc = sw->con_font_get(vc_cons[currcons].d, &font);
+	else
+		rc = -ENOSYS;
 	release_console_sem();
 
-	op->data = old_op.data;
-	if (!rc && !set) {
-		int c = (op->width+7)/8 * 32 * op->charcount;
-		
-		if (op->data && op->charcount > old_op.charcount)
+	if (rc)
+		goto out;
+
+	c = (font.width+7)/8 * 32 * font.charcount;
+	
+	if (op->data && font.charcount > op->charcount)
+		rc = -ENOSPC;
+	if (!(op->flags & KD_FONT_FLAG_OLD)) {
+		if (font.width > op->width || font.height > op->height) 
 			rc = -ENOSPC;
-		if (!(op->flags & KD_FONT_FLAG_OLD)) {
-			if (op->width > old_op.width || 
-			    op->height > old_op.height)
-				rc = -ENOSPC;
-		} else {
-			if (op->width != 8)
-				rc = -EIO;
-			else if ((old_op.height && op->height > old_op.height) ||
-			         op->height > 32)
-				rc = -ENOSPC;
-		}
-		if (!rc && op->data && copy_to_user(op->data, temp, c))
-			rc = -EFAULT;
+	} else {
+		if (font.width != 8)
+			rc = -EIO;
+		else if ((op->height && font.height > op->height) ||
+			 font.height > 32)
+			rc = -ENOSPC;
 	}
-quit:	if (temp)
-		kfree(temp);
+	if (rc)
+		goto out;
+
+	op->height = font.height;
+	op->width = font.width;
+	op->charcount = font.charcount;
+
+	if (op->data && copy_to_user(op->data, font.data, c))
+		rc = -EFAULT;
+
+out:
+	kfree(font.data);
 	return rc;
+}
+
+int con_font_set(int currcons, struct console_font_op *op)
+{
+	struct console_font font;
+	int rc = -EINVAL;
+	int size;
+
+	if (vt_cons[currcons]->vc_mode != KD_TEXT)
+		return -EINVAL;
+	if (!op->data)
+		return -EINVAL;
+	if (op->charcount > 512)
+		return -EINVAL;
+	if (!op->height) {		/* Need to guess font height [compat] */
+		int h, i;
+		u8 __user *charmap = op->data;
+		u8 tmp;
+		
+		/* If from KDFONTOP ioctl, don't allow things which can be done in userland,
+		   so that we can get rid of this soon */
+		if (!(op->flags & KD_FONT_FLAG_OLD))
+			return -EINVAL;
+		for (h = 32; h > 0; h--)
+			for (i = 0; i < op->charcount; i++) {
+				if (get_user(tmp, &charmap[32*i+h-1]))
+					return -EFAULT;
+				if (tmp)
+					goto nonzero;
+			}
+		return -EINVAL;
+	nonzero:
+		op->height = h;
+	}
+	if (op->width <= 0 || op->width > 32 || op->height > 32)
+		return -EINVAL;
+	size = (op->width+7)/8 * 32 * op->charcount;
+	if (size > max_font_size)
+		return -ENOSPC;
+	font.charcount = op->charcount;
+	font.height = op->height;
+	font.width = op->width;
+	font.data = kmalloc(size, GFP_KERNEL);
+	if (!font.data)
+		return -ENOMEM;
+	if (copy_from_user(font.data, op->data, size)) {
+		kfree(font.data);
+		return -EFAULT;
+	}
+	acquire_console_sem();
+	if (sw->con_font_set)
+		rc = sw->con_font_set(vc_cons[currcons].d, &font, op->flags);
+	else
+		rc = -ENOSYS;
+	release_console_sem();
+	kfree(font.data);
+	return rc;
+}
+
+int con_font_default(int currcons, struct console_font_op *op)
+{
+	struct console_font font = {.width = op->width, .height = op->height};
+	char name[MAX_FONT_NAME];
+	char *s = name;
+	int rc;
+
+	if (vt_cons[currcons]->vc_mode != KD_TEXT)
+		return -EINVAL;
+
+	if (!op->data)
+		s = NULL;
+	else if (strncpy_from_user(name, op->data, MAX_FONT_NAME - 1) < 0)
+		return -EFAULT;
+	else
+		name[MAX_FONT_NAME - 1] = 0;
+
+	acquire_console_sem();
+	if (sw->con_font_default)
+		rc = sw->con_font_default(vc_cons[currcons].d, &font, s);
+	else
+		rc = -ENOSYS;
+	release_console_sem();
+	if (!rc) {
+		op->width = font.width;
+		op->height = font.height;
+	}
+	return rc;
+}
+
+int con_font_copy(int currcons, struct console_font_op *op)
+{
+	int con = op->height;
+	struct vc_data *vc;
+	int rc;
+
+	if (vt_cons[currcons]->vc_mode != KD_TEXT)
+		return -EINVAL;
+
+	acquire_console_sem();
+	vc = vc_cons[currcons].d;
+	if (!sw->con_font_copy)
+		rc = -ENOSYS;
+	else if (con < 0 || !vc_cons_allocated(con))
+		rc = -ENOTTY;
+	else if (con == vc->vc_num)	/* nothing to do */
+		rc = 0;
+	else
+		rc = sw->con_font_copy(vc, con);
+	release_console_sem();
+	return rc;
+}
+
+int con_font_op(int currcons, struct console_font_op *op)
+{
+	switch (op->op) {
+	case KD_FONT_OP_SET:
+		return con_font_set(currcons, op);
+	case KD_FONT_OP_GET:
+		return con_font_get(currcons, op);
+	case KD_FONT_OP_SET_DEFAULT:
+		return con_font_default(currcons, op);
+	case KD_FONT_OP_COPY:
+		return con_font_copy(currcons, op);
+	}
+	return -ENOSYS;
 }
 
 /*
@@ -2980,47 +3189,47 @@ quit:	if (temp)
  */
 
 /* used by selection */
-u16 screen_glyph(int currcons, int offset)
+u16 screen_glyph(struct vc_data *vc, int offset)
 {
-	u16 w = scr_readw(screenpos(currcons, offset, 1));
+	u16 w = scr_readw(screenpos(vc, offset, 1));
 	u16 c = w & 0xff;
 
-	if (w & hi_font_mask)
+	if (w & vc->vc_hi_font_mask)
 		c |= 0x100;
 	return c;
 }
 
 /* used by vcs - note the word offset */
-unsigned short *screen_pos(int currcons, int w_offset, int viewed)
+unsigned short *screen_pos(struct vc_data *vc, int w_offset, int viewed)
 {
-	return screenpos(currcons, 2 * w_offset, viewed);
+	return screenpos(vc, 2 * w_offset, viewed);
 }
 
-void getconsxy(int currcons, char *p)
+void getconsxy(struct vc_data *vc, unsigned char *p)
 {
-	p[0] = x;
-	p[1] = y;
+	p[0] = vc->vc_x;
+	p[1] = vc->vc_y;
 }
 
-void putconsxy(int currcons, char *p)
+void putconsxy(struct vc_data *vc, unsigned char *p)
 {
-	gotoxy(currcons, p[0], p[1]);
-	set_cursor(currcons);
+	gotoxy(vc, p[0], p[1]);
+	set_cursor(vc);
 }
 
-u16 vcs_scr_readw(int currcons, const u16 *org)
+u16 vcs_scr_readw(struct vc_data *vc, const u16 *org)
 {
-	if ((unsigned long)org == pos && softcursor_original != -1)
+	if ((unsigned long)org == vc->vc_pos && softcursor_original != -1)
 		return softcursor_original;
 	return scr_readw(org);
 }
 
-void vcs_scr_writew(int currcons, u16 val, u16 *org)
+void vcs_scr_writew(struct vc_data *vc, u16 val, u16 *org)
 {
 	scr_writew(val, org);
-	if ((unsigned long)org == pos) {
+	if ((unsigned long)org == vc->vc_pos) {
 		softcursor_original = -1;
-		add_softcursor(currcons);
+		add_softcursor(vc);
 	}
 }
 
@@ -3029,10 +3238,14 @@ static int pm_con_request(struct pm_dev *dev, pm_request_t rqst, void *data)
 	switch (rqst)
 	{
 	case PM_RESUME:
+		acquire_console_sem();
 		unblank_screen();
+		release_console_sem();
 		break;
 	case PM_SUSPEND:
+		acquire_console_sem();
 		do_blank_screen(0);
+		release_console_sem();
 		break;
 	}
 	return 0;
@@ -3046,7 +3259,6 @@ EXPORT_SYMBOL(color_table);
 EXPORT_SYMBOL(default_red);
 EXPORT_SYMBOL(default_grn);
 EXPORT_SYMBOL(default_blu);
-EXPORT_SYMBOL(vc_cons_allocated);
 EXPORT_SYMBOL(update_region);
 EXPORT_SYMBOL(redraw_screen);
 EXPORT_SYMBOL(vc_resize);

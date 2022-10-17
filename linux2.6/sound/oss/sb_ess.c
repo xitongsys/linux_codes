@@ -1638,8 +1638,10 @@ printk (KERN_INFO "FKS: ess_mixer_init dup = %d\n", devc->duplex);
 #endif
 		if (devc->duplex) {
 			devc->iomap				= &es1887_mix;
+			devc->iomap_sz                          = ARRAY_SIZE(es1887_mix);
 		} else {
 			devc->iomap				= &es_rec_mix;
+			devc->iomap_sz                          = ARRAY_SIZE(es_rec_mix);
 		}
 		break;
 	default:
@@ -1647,6 +1649,7 @@ printk (KERN_INFO "FKS: ess_mixer_init dup = %d\n", devc->duplex);
 			devc->supported_devices		= ES688_MIXER_DEVICES;
 			devc->supported_rec_devices	= ES688_RECORDING_DEVICES;
 			devc->iomap					= &es688_mix;
+			devc->iomap_sz                                  = ARRAY_SIZE(es688_mix);
 		} else {
 			/*
 			 * es1688 has 4 bits master vol.
@@ -1656,8 +1659,10 @@ printk (KERN_INFO "FKS: ess_mixer_init dup = %d\n", devc->duplex);
 			devc->supported_rec_devices	= ES1688_RECORDING_DEVICES;
 			if (devc->submodel < 0x10) {
 				devc->iomap				= &es1688_mix;
+				devc->iomap_sz                          = ARRAY_SIZE(es688_mix);
 			} else {
 				devc->iomap				= &es1688later_mix;
+				devc->iomap_sz                          = ARRAY_SIZE(es1688later_mix);
 			}
 		}
 	}
@@ -1691,7 +1696,7 @@ void ess_mixer_reload (sb_devc *devc, int dev)
 	sb_common_mixer_set(devc, dev, left, right);
 }
 
-int es_rec_set_recmask(sb_devc * devc, int mask)
+static int es_rec_set_recmask(sb_devc * devc, int mask)
 {
 	int i, i_mask, cur_mask, diff_mask;
 	int value, left, right;

@@ -32,12 +32,25 @@
  *    Gareth Hughes <gareth@valinux.com>
  */
 
-#include "mga.h"
 #include "drmP.h"
 #include "drm.h"
 #include "mga_drm.h"
 #include "mga_drv.h"
 
+drm_ioctl_desc_t mga_ioctls[] = {
+	[DRM_IOCTL_NR(DRM_MGA_INIT)]    = { mga_dma_init,    1, 1 },
+	[DRM_IOCTL_NR(DRM_MGA_FLUSH)]   = { mga_dma_flush,   1, 0 },
+	[DRM_IOCTL_NR(DRM_MGA_RESET)]   = { mga_dma_reset,   1, 0 },
+	[DRM_IOCTL_NR(DRM_MGA_SWAP)]    = { mga_dma_swap,    1, 0 },
+	[DRM_IOCTL_NR(DRM_MGA_CLEAR)]   = { mga_dma_clear,   1, 0 },
+	[DRM_IOCTL_NR(DRM_MGA_VERTEX)]  = { mga_dma_vertex,  1, 0 },
+	[DRM_IOCTL_NR(DRM_MGA_INDICES)] = { mga_dma_indices, 1, 0 },
+	[DRM_IOCTL_NR(DRM_MGA_ILOAD)]   = { mga_dma_iload,   1, 0 },
+	[DRM_IOCTL_NR(DRM_MGA_BLIT)]    = { mga_dma_blit,    1, 0 },
+	[DRM_IOCTL_NR(DRM_MGA_GETPARAM)]= { mga_getparam,    1, 0 },
+};
+
+int mga_max_ioctl = DRM_ARRAY_SIZE(mga_ioctls);
 
 /* ================================================================
  * DMA hardware state programming functions
@@ -889,7 +902,7 @@ int mga_dma_clear( DRM_IOCTL_ARGS )
 
 	LOCK_TEST_WITH_RETURN( dev, filp );
 
-	DRM_COPY_FROM_USER_IOCTL( clear, (drm_mga_clear_t *)data, sizeof(clear) );
+	DRM_COPY_FROM_USER_IOCTL( clear, (drm_mga_clear_t __user *)data, sizeof(clear) );
 
 	if ( sarea_priv->nbox > MGA_NR_SAREA_CLIPRECTS )
 		sarea_priv->nbox = MGA_NR_SAREA_CLIPRECTS;
@@ -939,7 +952,7 @@ int mga_dma_vertex( DRM_IOCTL_ARGS )
 	LOCK_TEST_WITH_RETURN( dev, filp );
 
 	DRM_COPY_FROM_USER_IOCTL( vertex,
-			     (drm_mga_vertex_t *)data,
+			     (drm_mga_vertex_t __user *)data,
 			     sizeof(vertex) );
 
         if(vertex.idx < 0 || vertex.idx > dma->buf_count) return DRM_ERR(EINVAL);
@@ -978,7 +991,7 @@ int mga_dma_indices( DRM_IOCTL_ARGS )
 	LOCK_TEST_WITH_RETURN( dev, filp );
 
 	DRM_COPY_FROM_USER_IOCTL( indices,
-			     (drm_mga_indices_t *)data,
+			     (drm_mga_indices_t __user *)data,
 			     sizeof(indices) );
 
         if(indices.idx < 0 || indices.idx > dma->buf_count) return DRM_ERR(EINVAL);
@@ -1017,7 +1030,7 @@ int mga_dma_iload( DRM_IOCTL_ARGS )
 
 	LOCK_TEST_WITH_RETURN( dev, filp );
 
-	DRM_COPY_FROM_USER_IOCTL( iload, (drm_mga_iload_t *)data, sizeof(iload) );
+	DRM_COPY_FROM_USER_IOCTL( iload, (drm_mga_iload_t __user *)data, sizeof(iload) );
 
 #if 0
 	if ( mga_do_wait_for_idle( dev_priv ) < 0 ) {
@@ -1057,7 +1070,7 @@ int mga_dma_blit( DRM_IOCTL_ARGS )
 
 	LOCK_TEST_WITH_RETURN( dev, filp );
 
-	DRM_COPY_FROM_USER_IOCTL( blit, (drm_mga_blit_t *)data, sizeof(blit) );
+	DRM_COPY_FROM_USER_IOCTL( blit, (drm_mga_blit_t __user *)data, sizeof(blit) );
 
 	if ( sarea_priv->nbox > MGA_NR_SAREA_CLIPRECTS )
 		sarea_priv->nbox = MGA_NR_SAREA_CLIPRECTS;
@@ -1088,7 +1101,7 @@ int mga_getparam( DRM_IOCTL_ARGS )
 		return DRM_ERR(EINVAL);
 	}
 
-	DRM_COPY_FROM_USER_IOCTL( param, (drm_mga_getparam_t *)data,
+	DRM_COPY_FROM_USER_IOCTL( param, (drm_mga_getparam_t __user *)data,
 			     sizeof(param) );
 
 	DRM_DEBUG( "pid=%d\n", DRM_CURRENTPID );

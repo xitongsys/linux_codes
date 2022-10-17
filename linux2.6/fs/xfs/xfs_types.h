@@ -58,7 +58,7 @@ typedef enum { B_FALSE,B_TRUE }	boolean_t;
 typedef __int64_t		prid_t;		/* project ID */
 typedef __uint32_t		inst_t;		/* an instruction */
 
-typedef __u64			xfs_off_t;
+typedef __s64			xfs_off_t;	/* <file offset> type */
 typedef __u64			xfs_ino_t;	/* <inode> type */
 typedef __s64			xfs_daddr_t;	/* <disk address> type */
 typedef char *			xfs_caddr_t;	/* <core address> type */
@@ -73,24 +73,6 @@ typedef __int64_t __psint_t;
 typedef __uint64_t __psunsigned_t;
 #else
 #error BITS_PER_LONG must be 32 or 64
-#endif
-
-/*
- * Some types are conditional depending on the target system.
- * XFS_BIG_BLKNOS needs block layer disk addresses to be 64 bits.
- * XFS_BIG_INUMS needs the VFS inode number to be 64 bits, as well
- * as requiring XFS_BIG_BLKNOS to be set.
- */
-#if defined(CONFIG_LBD) || (BITS_PER_LONG == 64)
-# define XFS_BIG_BLKNOS	1
-# if BITS_PER_LONG == 64
-#  define XFS_BIG_INUMS	1
-# else
-#  define XFS_BIG_INUMS	0
-# endif
-#else
-# define XFS_BIG_BLKNOS	0
-# define XFS_BIG_INUMS	0
 #endif
 
 #endif	/* __KERNEL__ */

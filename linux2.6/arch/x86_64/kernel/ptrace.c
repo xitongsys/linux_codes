@@ -16,6 +16,7 @@
 #include <linux/ptrace.h>
 #include <linux/user.h>
 #include <linux/security.h>
+#include <linux/audit.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -87,6 +88,7 @@ void ptrace_disable(struct task_struct *child)
 { 
 	long tmp;
 
+	clear_tsk_thread_flag(child, TIF_SINGLESTEP);
 	tmp = get_stack_long(child, EFL_OFFSET) & ~TRAP_FLAG;
 	put_stack_long(child, EFL_OFFSET, tmp);
 }
@@ -231,7 +233,7 @@ asmlinkage long sys_ptrace(long request, long pid, unsigned long addr, long data
 		ret = -EIO;
 		if (copied != sizeof(tmp))
 			break;
-		ret = put_user(tmp,(unsigned long *) data);
+		ret = put_user(tmp,(unsigned long __user *) data);
 		break;
 	}
 
@@ -270,7 +272,7 @@ asmlinkage long sys_ptrace(long request, long pid, unsigned long addr, long data
 			tmp = 0;
 			break;
 		}
-		ret = put_user(tmp,(unsigned long *) data);
+		ret = put_user(tmp,(unsigned long __user *) data);
 		break;
 	}
 
@@ -321,6 +323,8 @@ asmlinkage long sys_ptrace(long request, long pid, unsigned long addr, long data
 			ret = 0;
 			break;
 		case offsetof(struct user, u_debugreg[7]):
+			/* See arch/i386/kernel/ptrace.c for an explanation of
+			 * this awkward check.*/
 				  data &= ~DR_CONTROL_RESERVED;
 				  for(i=0; i<4; i++)
 					  if ((0x5454 >> ((data >> (16 + 4*i)) & 0xf)) & 1)
@@ -343,6 +347,7 @@ asmlinkage long sys_ptrace(long request, long pid, unsigned long addr, long data
 			set_tsk_thread_flag(child,TIF_SYSCALL_TRACE);
 		else
 			clear_tsk_thread_flag(child,TIF_SYSCALL_TRACE);
+		clear_tsk_thread_flag(child, TIF_SINGLESTEP);
 		child->exit_code = data;
 	/* make sure the single step bit is not set. */
 		tmp = get_stack_long(child, EFL_OFFSET);
@@ -359,19 +364,20 @@ asmlinkage long sys_ptrace(long request, long pid, unsigned long addr, long data
 		   don't use it against 64bit processes, use
 		   PTRACE_ARCH_PRCTL instead. */
 	case PTRACE_SET_THREAD_AREA: {
+		struct user_desc __user *p;
 		int old; 
-		get_user(old,  &((struct user_desc *)data)->entry_number); 
-		put_user(addr, &((struct user_desc *)data)->entry_number);
-		ret = do_set_thread_area(&child->thread, 
-					 (struct user_desc *)data);
-		put_user(old,  &((struct user_desc *)data)->entry_number); 
+		p = (struct user_desc __user *)data;
+		get_user(old,  &p->entry_number); 
+		put_user(addr, &p->entry_number);
+		ret = do_set_thread_area(&child->thread, p);
+		put_user(old,  &p->entry_number); 
 		break;
 	case PTRACE_GET_THREAD_AREA:
-		get_user(old,  &((struct user_desc *)data)->entry_number); 
-		put_user(addr, &((struct user_desc *)data)->entry_number);
-		ret = do_get_thread_area(&child->thread, 
-					 (struct user_desc *)data);
-		put_user(old,  &((struct user_desc *)data)->entry_number); 
+		p = (struct user_desc __user *)data;
+		get_user(old,  &p->entry_number); 
+		put_user(addr, &p->entry_number);
+		ret = do_get_thread_area(&child->thread, p);
+		put_user(old,  &p->entry_number); 
 		break;
 	} 
 #endif
@@ -391,8 +397,9 @@ asmlinkage long sys_ptrace(long request, long pid, unsigned long addr, long data
 		long tmp;
 
 		ret = 0;
-		if (child->state == TASK_ZOMBIE)	/* already dead */
+		if (child->exit_state == EXIT_ZOMBIE)	/* already dead */
 			break;
+		clear_tsk_thread_flag(child, TIF_SINGLESTEP);
 		child->exit_code = SIGKILL;
 		/* make sure the single step bit is not set. */
 		tmp = get_stack_long(child, EFL_OFFSET) & ~TRAP_FLAG;
@@ -414,6 +421,7 @@ asmlinkage long sys_ptrace(long request, long pid, unsigned long addr, long data
 		}
 		tmp = get_stack_long(child, EFL_OFFSET) | TRAP_FLAG;
 		put_stack_long(child, EFL_OFFSET, tmp);
+		set_tsk_thread_flag(child, TIF_SINGLESTEP);
 		child->exit_code = data;
 		/* give it a chance to run. */
 		wake_up_process(child);
@@ -427,51 +435,53 @@ asmlinkage long sys_ptrace(long request, long pid, unsigned long addr, long data
 		break;
 
 	case PTRACE_GETREGS: { /* Get all gp regs from the child. */
-	  	if (!access_ok(VERIFY_WRITE, (unsigned *)data, FRAME_SIZE)) {
+	  	if (!access_ok(VERIFY_WRITE, (unsigned __user *)data,
+			       sizeof(struct user_regs_struct))) {
 			ret = -EIO;
 			break;
 		}
+		ret = 0;
 		for (ui = 0; ui < sizeof(struct user_regs_struct); ui += sizeof(long)) {
-			__put_user(getreg(child, ui),(unsigned long *) data);
+			ret |= __put_user(getreg(child, ui),(unsigned long __user *) data);
 			data += sizeof(long);
 		}
-		ret = 0;
 		break;
 	}
 
 	case PTRACE_SETREGS: { /* Set all gp regs in the child. */
 		unsigned long tmp;
-	  	if (!access_ok(VERIFY_READ, (unsigned *)data, FRAME_SIZE)) {
+	  	if (!access_ok(VERIFY_READ, (unsigned __user *)data,
+			       sizeof(struct user_regs_struct))) {
 			ret = -EIO;
 			break;
 		}
+		ret = 0;
 		for (ui = 0; ui < sizeof(struct user_regs_struct); ui += sizeof(long)) {
-			__get_user(tmp, (unsigned long *) data);
+			ret |= __get_user(tmp, (unsigned long __user *) data);
 			putreg(child, ui, tmp);
 			data += sizeof(long);
 		}
-		ret = 0;
 		break;
 	}
 
 	case PTRACE_GETFPREGS: { /* Get the child extended FPU state. */
-		if (!access_ok(VERIFY_WRITE, (unsigned *)data,
+		if (!access_ok(VERIFY_WRITE, (unsigned __user *)data,
 			       sizeof(struct user_i387_struct))) {
 			ret = -EIO;
 			break;
 		}
-		ret = get_fpregs((struct user_i387_struct *)data, child);
+		ret = get_fpregs((struct user_i387_struct __user *)data, child);
 		break;
 	}
 
 	case PTRACE_SETFPREGS: { /* Set the child extended FPU state. */
-		if (!access_ok(VERIFY_READ, (unsigned *)data,
+		if (!access_ok(VERIFY_READ, (unsigned __user *)data,
 			       sizeof(struct user_i387_struct))) {
 			ret = -EIO;
 			break;
 		}
-		child->used_math = 1;
-		ret = set_fpregs(child, (struct user_i387_struct *)data);
+		set_stopped_child_used_math(child);
+		ret = set_fpregs(child, (struct user_i387_struct __user *)data);
 		break;
 	}
 
@@ -486,7 +496,7 @@ out:
 	return ret;
 }
 
-asmlinkage void syscall_trace(struct pt_regs *regs)
+static void syscall_trace(struct pt_regs *regs)
 {
 
 #if 0
@@ -496,11 +506,6 @@ asmlinkage void syscall_trace(struct pt_regs *regs)
 	       current_thread_info()->flags, current->ptrace); 
 #endif
 
-	if (!test_thread_flag(TIF_SYSCALL_TRACE))
-		return; 
-	if (!(current->ptrace & PT_PTRACED))
-		return;
-	
 	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
 				? 0x80 : 0));
 	/*
@@ -512,4 +517,27 @@ asmlinkage void syscall_trace(struct pt_regs *regs)
 		send_sig(current->exit_code, current, 1);
 		current->exit_code = 0;
 	}
+}
+
+asmlinkage void syscall_trace_enter(struct pt_regs *regs)
+{
+	if (unlikely(current->audit_context))
+		audit_syscall_entry(current, regs->orig_rax,
+				    regs->rdi, regs->rsi,
+				    regs->rdx, regs->r10);
+
+	if (test_thread_flag(TIF_SYSCALL_TRACE)
+	    && (current->ptrace & PT_PTRACED))
+		syscall_trace(regs);
+}
+
+asmlinkage void syscall_trace_leave(struct pt_regs *regs)
+{
+	if (unlikely(current->audit_context))
+		audit_syscall_exit(current, regs->rax);
+
+	if ((test_thread_flag(TIF_SYSCALL_TRACE)
+	     || test_thread_flag(TIF_SINGLESTEP))
+	    && (current->ptrace & PT_PTRACED))
+		syscall_trace(regs);
 }

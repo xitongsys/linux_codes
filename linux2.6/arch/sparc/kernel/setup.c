@@ -22,6 +22,7 @@
 #include <linux/config.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
+#include <linux/syscalls.h>
 #include <linux/kdev_t.h>
 #include <linux/major.h>
 #include <linux/string.h>
@@ -43,8 +44,9 @@
 #include <asm/kdebug.h>
 #include <asm/mbus.h>
 #include <asm/idprom.h>
-#include <asm/hardirq.h>
 #include <asm/machines.h>
+#include <asm/cpudata.h>
+#include <asm/setup.h>
 
 struct screen_info screen_info = {
 	0, 0,			/* orig-x, orig-y */
@@ -66,7 +68,6 @@ struct screen_info screen_info = {
 
 extern unsigned long trapbase;
 void (*prom_palette)(int);
-asmlinkage void sys_sync(void);	/* it's really int */
 
 /* Pretty sick eh? */
 void prom_sync_me(void)
@@ -74,7 +75,7 @@ void prom_sync_me(void)
 	unsigned long prom_tbr, flags;
 
 	/* XXX Badly broken. FIX! - Anton */
-	save_and_cli(flags);
+	local_irq_save(flags);
 	__asm__ __volatile__("rd %%tbr, %0\n\t" : "=r" (prom_tbr));
 	__asm__ __volatile__("wr %0, 0x0, %%tbr\n\t"
 			     "nop\n\t"
@@ -86,9 +87,9 @@ void prom_sync_me(void)
 	prom_printf("PROM SYNC COMMAND...\n");
 	show_free_areas();
 	if(current->pid != 0) {
-		sti();
+		local_irq_enable();
 		sys_sync();
-		cli();
+		local_irq_disable();
 	}
 	prom_printf("Returning to prom\n");
 
@@ -96,7 +97,7 @@ void prom_sync_me(void)
 			     "nop\n\t"
 			     "nop\n\t"
 			     "nop\n\t" : : "r" (prom_tbr));
-	restore_flags(flags);
+	local_irq_restore(flags);
 
 	return;
 }
@@ -104,8 +105,6 @@ void prom_sync_me(void)
 unsigned int boot_flags __initdata = 0;
 #define BOOTME_DEBUG  0x1
 #define BOOTME_SINGLE 0x2
-
-static int console_fb __initdata = 0;
 
 /* Exported for mm/init.c:paging_init. */
 unsigned long cmdline_memory_size __initdata = 0;
@@ -160,6 +159,31 @@ static void __init process_switch(char c)
 	}
 }
 
+static void __init process_console(char *commands)
+{
+	serial_console = 0;
+	commands += 8;
+	/* Linux-style serial */
+	if (!strncmp(commands, "ttyS", 4))
+		serial_console = simple_strtoul(commands + 4, NULL, 10) + 1;
+	else if (!strncmp(commands, "tty", 3)) {
+		char c = *(commands + 3);
+		/* Solaris-style serial */
+		if (c == 'a' || c == 'b')
+			serial_console = c - 'a' + 1;
+		/* else Linux-style fbcon, not serial */
+	}
+#if defined(CONFIG_PROM_CONSOLE)
+	if (!strncmp(commands, "prom", 4)) {
+		char *p;
+
+		for (p = commands - 8; *p && *p != ' '; p++)
+			*p = ' ';
+		conswitchp = &prom_con;
+	}
+#endif
+}
+
 static void __init boot_flags_init(char *commands)
 {
 	while (*commands) {
@@ -174,37 +198,27 @@ static void __init boot_flags_init(char *commands)
 			commands++;
 			while (*commands && *commands != ' ')
 				process_switch(*commands++);
-		} else {
-			if (!strncmp(commands, "console=", 8)) {
-				commands += 8;
-#if defined(CONFIG_PROM_CONSOLE)
-				if (!strncmp (commands, "prom", 4)) {
-					char *p;
-					
-					for (p = commands - 8; *p && *p != ' '; p++)
-						*p = ' ';
-					conswitchp = &prom_con;
-					console_fb = 1;
-				}
-#endif
-			} else if (!strncmp(commands, "mem=", 4)) {
-				/*
-				 * "mem=XXX[kKmM] overrides the PROM-reported
-				 * memory size.
-				 */
-				cmdline_memory_size = simple_strtoul(commands + 4,
-							     &commands, 0);
-				if (*commands == 'K' || *commands == 'k') {
-					cmdline_memory_size <<= 10;
-					commands++;
-				} else if (*commands=='M' || *commands=='m') {
-					cmdline_memory_size <<= 20;
-					commands++;
-				}
-			}
-			while (*commands && *commands != ' ')
-				commands++;
+			continue;
 		}
+		if (!strncmp(commands, "console=", 8)) {
+			process_console(commands);
+		} else if (!strncmp(commands, "mem=", 4)) {
+			/*
+			 * "mem=XXX[kKmM] overrides the PROM-reported
+			 * memory size.
+			 */
+			cmdline_memory_size = simple_strtoul(commands + 4,
+						     &commands, 0);
+			if (*commands == 'K' || *commands == 'k') {
+				cmdline_memory_size <<= 10;
+				commands++;
+			} else if (*commands=='M' || *commands=='m') {
+				cmdline_memory_size <<= 20;
+				commands++;
+			}
+		}
+		while (*commands && *commands != ' ')
+			commands++;
 	}
 }
 
@@ -219,8 +233,6 @@ extern void sun4c_probe_vac(void);
 extern char cputypval;
 extern unsigned long start, end;
 extern void panic_setup(char *, int *);
-extern void srmmu_end_memory(unsigned long, unsigned long *);
-extern void sun_serial_setup(void);
 
 extern unsigned short root_flags;
 extern unsigned short root_dev;
@@ -231,8 +243,7 @@ extern unsigned short ram_flags;
 
 extern int root_mountflags;
 
-char saved_command_line[256];
-char reboot_command[256];
+char reboot_command[COMMAND_LINE_SIZE];
 enum sparc_cpu sparc_cpu_model;
 
 struct tt_entry *sparc_ttable;
@@ -318,6 +329,7 @@ void __init setup_arch(char **cmdline_p)
 		if (highest_paddr < top)
 			highest_paddr = top;
 	}
+	pfn_base = phys_base >> PAGE_SHIFT;
 
 	if (!root_flags)
 		root_mountflags &= ~MS_RDONLY;
@@ -329,34 +341,6 @@ void __init setup_arch(char **cmdline_p)
 #endif
 
 	prom_setsync(prom_sync_me);
-
-#ifndef CONFIG_SERIAL_CONSOLE	/* Not CONFIG_SERIAL_SUNCORE: to be gone. */
-	serial_console = 0;
-#else
-	if (console_fb != 0) {
-		serial_console = 0;
-	} else {
-		int idev = prom_query_input_device();
-		int odev = prom_query_output_device();
-		if (idev == PROMDEV_IKBD && odev == PROMDEV_OSCREEN) {
-			serial_console = 0;
-		} else if (idev == PROMDEV_ITTYA && odev == PROMDEV_OTTYA) {
-			serial_console = 1;
-		} else if (idev == PROMDEV_ITTYB && odev == PROMDEV_OTTYB) {
-			serial_console = 2;
-		} else if (idev == PROMDEV_I_UNK && odev == PROMDEV_OTTYA) {
-			prom_printf("MrCoffee ttya\n");
-			serial_console = 1;
-		} else if (idev == PROMDEV_I_UNK && odev == PROMDEV_OSCREEN) {
-			serial_console = 0;
-			prom_printf("MrCoffee keyboard\n");
-		} else {
-			prom_printf("Confusing console (idev %d, odev %d)\n",
-			    idev, odev);
-			serial_console = 1;
-		}
-	}
-#endif
 
 	if((boot_flags&BOOTME_DEBUG) && (linux_dbvec!=0) && 
 	   ((*(short *)linux_dbvec) != -1)) {
@@ -370,18 +354,46 @@ void __init setup_arch(char **cmdline_p)
 	paging_init();
 }
 
-asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int on)
+static int __init set_preferred_console(void)
 {
-	return -EIO;
-}
+	int idev, odev;
 
-extern char *sparc_cpu_type[];
-extern char *sparc_fpu_type[];
+	/* The user has requested a console so this is already set up. */
+	if (serial_console >= 0)
+		return -EBUSY;
+
+	idev = prom_query_input_device();
+	odev = prom_query_output_device();
+	if (idev == PROMDEV_IKBD && odev == PROMDEV_OSCREEN) {
+		serial_console = 0;
+	} else if (idev == PROMDEV_ITTYA && odev == PROMDEV_OTTYA) {
+		serial_console = 1;
+	} else if (idev == PROMDEV_ITTYB && odev == PROMDEV_OTTYB) {
+		serial_console = 2;
+	} else if (idev == PROMDEV_I_UNK && odev == PROMDEV_OTTYA) {
+		prom_printf("MrCoffee ttya\n");
+		serial_console = 1;
+	} else if (idev == PROMDEV_I_UNK && odev == PROMDEV_OSCREEN) {
+		serial_console = 0;
+		prom_printf("MrCoffee keyboard\n");
+	} else {
+		prom_printf("Confusing console (idev %d, odev %d)\n",
+		    idev, odev);
+		serial_console = 1;
+	}
+
+	if (serial_console)
+		return add_preferred_console("ttyS", serial_console - 1, NULL);
+
+	return -ENODEV;
+}
+console_initcall(set_preferred_console);
+
+extern char *sparc_cpu_type;
+extern char *sparc_fpu_type;
 
 static int show_cpuinfo(struct seq_file *m, void *__unused)
 {
-	int cpuid = hard_smp_processor_id();
-
 	seq_printf(m,
 		   "cpu\t\t: %s\n"
 		   "fpu\t\t: %s\n"
@@ -391,26 +403,28 @@ static int show_cpuinfo(struct seq_file *m, void *__unused)
 		   "ncpus probed\t: %d\n"
 		   "ncpus active\t: %d\n"
 #ifndef CONFIG_SMP
-		   "BogoMips\t: %lu.%02lu\n"
+		   "CPU0Bogo\t: %lu.%02lu\n"
+		   "CPU0ClkTck\t: %ld\n"
 #endif
 		   ,
-		   sparc_cpu_type[cpuid] ? : "undetermined",
-		   sparc_fpu_type[cpuid] ? : "undetermined",
+		   sparc_cpu_type ? sparc_cpu_type : "undetermined",
+		   sparc_fpu_type ? sparc_fpu_type : "undetermined",
 		   romvec->pv_romvers,
 		   prom_rev,
 		   romvec->pv_printrev >> 16,
-		   (short) romvec->pv_printrev,
+		   romvec->pv_printrev & 0xffff,
 		   &cputypval,
-		   linux_num_cpus,
+		   num_possible_cpus(),
 		   num_online_cpus()
 #ifndef CONFIG_SMP
-		   , loops_per_jiffy/(500000/HZ),
-		   (loops_per_jiffy/(5000/HZ)) % 100
+		   , cpu_data(0).udelay_val/(500000/HZ),
+		   (cpu_data(0).udelay_val/(5000/HZ)) % 100,
+		   cpu_data(0).clock_tick
 #endif
 		);
 
 #ifdef CONFIG_SMP
-	smp_bogo_info(m);
+	smp_bogo(m);
 #endif
 	mmu_info(m);
 #ifdef CONFIG_SMP
@@ -458,5 +472,5 @@ void sun_do_break(void)
 	prom_cmdline();
 }
 
-int serial_console;
+int serial_console = -1;
 int stop_a_enabled = 1;

@@ -6,13 +6,10 @@
  * Copyright (C) 1996, Olaf Kirch <okir@monad.swb.de>
  */
 
-#define __KERNEL_SYSCALLS__
-
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/time.h>
 #include <linux/nfs_fs.h>
-#include <linux/unistd.h>
 #include <linux/sunrpc/clnt.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/lockd/lockd.h>
@@ -149,7 +146,7 @@ void nlmclnt_mark_reclaim(struct nlm_host *host)
 		inode = fl->fl_file->f_dentry->d_inode;
 		if (inode->i_sb->s_magic != NFS_SUPER_MAGIC)
 			continue;
-		if (fl->fl_u.nfs_fl.host != host)
+		if (fl->fl_u.nfs_fl.owner->host != host)
 			continue;
 		if (!(fl->fl_u.nfs_fl.flags & NFS_LCK_GRANTED))
 			continue;
@@ -218,7 +215,7 @@ restart:
 		inode = fl->fl_file->f_dentry->d_inode;
 		if (inode->i_sb->s_magic != NFS_SUPER_MAGIC)
 			continue;
-		if (fl->fl_u.nfs_fl.host != host)
+		if (fl->fl_u.nfs_fl.owner->host != host)
 			continue;
 		if (!(fl->fl_u.nfs_fl.flags & NFS_LCK_RECLAIM))
 			continue;
@@ -231,7 +228,6 @@ restart:
 	}
 
 	host->h_reclaiming = 0;
-	wake_up(&host->h_gracewait);
 
 	/* Now, wake up all processes that sleep on a blocked lock */
 	for (block = nlm_blocked; block; block = block->b_next) {

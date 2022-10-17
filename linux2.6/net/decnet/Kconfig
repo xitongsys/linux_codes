@@ -1,17 +1,6 @@
 #
 # DECnet configuration
 #
-config DECNET_SIOCGIFCONF
-	bool "DECnet: SIOCGIFCONF support"
-	depends on DECNET
-	help
-	  This option should only be turned on if you are really sure that
-	  you know what you are doing. It can break other applications which
-	  use this system call and the proper way to get the information
-	  provided by this call is to use rtnetlink.
-
-	  If unsure, say N.
-
 config DECNET_ROUTER
 	bool "DECnet: router support (EXPERIMENTAL)"
 	depends on DECNET && EXPERIMENTAL
@@ -22,8 +11,9 @@ config DECNET_ROUTER
 	  network link driver", "Routing messages" and "Network packet
 	  filtering".  The first two are required to allow configuration via
 	  rtnetlink (you will need Alexey Kuznetsov's iproute2 package
-	  from <ftp://ftp.inr.ac.ru/>). The "Network packet filtering" option
-	  will be required for the forthcoming routing daemon to work.
+	  from <ftp://ftp.tux.org/pub/net/ip-routing/>). The "Network packet
+	  filtering" option will be required for the forthcoming routing daemon
+	  to work.
 
 	  See <file:Documentation/networking/decnet.txt> for more information.
 

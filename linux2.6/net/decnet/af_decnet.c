@@ -151,19 +151,19 @@ static void dn_keepalive(struct sock *sk);
 
 static kmem_cache_t *dn_sk_cachep;
 static struct proto_ops dn_proto_ops;
-static rwlock_t dn_hash_lock = RW_LOCK_UNLOCKED;
+static DEFINE_RWLOCK(dn_hash_lock);
 static struct hlist_head dn_sk_hash[DN_SK_HASH_SIZE];
 static struct hlist_head dn_wild_sk;
 
-static int __dn_setsockopt(struct socket *sock, int level, int optname, char *optval, int optlen, int flags);
-static int __dn_getsockopt(struct socket *sock, int level, int optname, char *optval, int *optlen, int flags);
+static int __dn_setsockopt(struct socket *sock, int level, int optname, char __user *optval, int optlen, int flags);
+static int __dn_getsockopt(struct socket *sock, int level, int optname, char __user *optval, int __user *optlen, int flags);
 
 static struct hlist_head *dn_find_list(struct sock *sk)
 {
 	struct dn_scp *scp = DN_SK(sk);
 
 	if (scp->addr.sdn_flags & SDF_WILD)
-		return hlist_empty(&dn_wild_sk) ? NULL : &dn_wild_sk;
+		return hlist_empty(&dn_wild_sk) ? &dn_wild_sk : NULL;
 
 	return &dn_sk_hash[scp->addrloc & DN_SK_HASH_MASK];
 }
@@ -246,7 +246,7 @@ static void dn_unhash_sock_bh(struct sock *sk)
 	write_unlock_bh(&dn_hash_lock);
 }
 
-struct hlist_head *listen_hash(struct sockaddr_dn *addr)
+static struct hlist_head *listen_hash(struct sockaddr_dn *addr)
 {
 	int i;
 	unsigned hash = addr->sdn_objnum;
@@ -447,7 +447,7 @@ static void dn_destruct(struct sock *sk)
 	dst_release(xchg(&sk->sk_dst_cache, NULL));
 }
 
-struct sock *dn_alloc_sock(struct socket *sock, int gfp)
+static struct sock *dn_alloc_sock(struct socket *sock, int gfp)
 {
 	struct dn_scp *scp;
 	struct sock *sk = sk_alloc(PF_DECnet, gfp, sizeof(struct dn_sock),
@@ -456,7 +456,7 @@ struct sock *dn_alloc_sock(struct socket *sock, int gfp)
 	if  (!sk)
 		goto out;
 
-	DN_SK(sk) = scp = (struct dn_scp *)(sk + 1);
+	sk->sk_protinfo = scp = (struct dn_scp *)(sk + 1);
 
 	if (sock)
 		sock->ops = &dn_proto_ops;
@@ -578,7 +578,6 @@ int dn_destroy_timer(struct sock *sk)
 	if (sk->sk_socket)
 		return 0;
 
-	dn_stop_fast_timer(sk); /* unlikely, but possible that this is runninng */
 	if ((jiffies - scp->stamp) >= (HZ * decnet_time_wait)) {
 		dn_unhash_sock(sk);
 		sock_put(sk);
@@ -631,7 +630,6 @@ disc_reject:
 		default:
 			printk(KERN_DEBUG "DECnet: dn_destroy_sock passed socket in invalid state\n");
 		case DN_O:
-			dn_stop_fast_timer(sk);
 			dn_stop_slow_timer(sk);
 
 			dn_unhash_sock_bh(sk);
@@ -1075,7 +1073,7 @@ static int dn_accept(struct socket *sock, struct socket *newsock, int flags)
 		skb = dn_wait_for_connect(sk, &timeo);
 		if (IS_ERR(skb)) {
 			release_sock(sk);
-			return PTR_ERR(sk);
+			return PTR_ERR(skb);
 		}
 	}
 
@@ -1212,7 +1210,7 @@ static int dn_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	{
 	case SIOCGIFADDR:
 	case SIOCSIFADDR:
-		return dn_dev_ioctl(cmd, (void *)arg);
+		return dn_dev_ioctl(cmd, (void __user *)arg);
 
 	case SIOCATMARK:
 		lock_sock(sk);
@@ -1226,7 +1224,7 @@ static int dn_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		amount = sk->sk_sndbuf - atomic_read(&sk->sk_wmem_alloc);
 		if (amount < 0)
 			amount = 0;
-		err = put_user(amount, (int *)arg);
+		err = put_user(amount, (int __user *)arg);
 		break;
 
 	case TIOCINQ:
@@ -1244,11 +1242,11 @@ static int dn_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			}
 		}
 		release_sock(sk);
-		err = put_user(amount, (int *)arg);
+		err = put_user(amount, (int __user *)arg);
 		break;
 
 	default:
-		err = dev_ioctl(cmd, (void *)arg);
+		err = dev_ioctl(cmd, (void __user *)arg);
 		break;
 	}
 
@@ -1313,7 +1311,7 @@ out:
 	return err;
 }
 
-static int dn_setsockopt(struct socket *sock, int level, int optname, char *optval, int optlen)
+static int dn_setsockopt(struct socket *sock, int level, int optname, char __user *optval, int optlen)
 {
 	struct sock *sk = sock->sk;
 	int err;
@@ -1325,7 +1323,7 @@ static int dn_setsockopt(struct socket *sock, int level, int optname, char *optv
 	return err;
 }
 
-static int __dn_setsockopt(struct socket *sock, int level,int optname, char *optval, int optlen, int flags) 
+static int __dn_setsockopt(struct socket *sock, int level,int optname, char __user *optval, int optlen, int flags) 
 {
 	struct	sock *sk = sock->sk;
 	struct dn_scp *scp = DN_SK(sk);
@@ -1490,7 +1488,7 @@ static int __dn_setsockopt(struct socket *sock, int level,int optname, char *opt
 	return 0;
 }
 
-static int dn_getsockopt(struct socket *sock, int level, int optname, char *optval, int *optlen)
+static int dn_getsockopt(struct socket *sock, int level, int optname, char __user *optval, int __user *optlen)
 {
 	struct sock *sk = sock->sk;
 	int err;
@@ -1502,7 +1500,7 @@ static int dn_getsockopt(struct socket *sock, int level, int optname, char *optv
 	return err;
 }
 
-static int __dn_getsockopt(struct socket *sock, int level,int optname, char *optval,int *optlen, int flags)
+static int __dn_getsockopt(struct socket *sock, int level,int optname, char __user *optval,int __user *optlen, int flags)
 {
 	struct	sock *sk = sock->sk;
 	struct dn_scp *scp = DN_SK(sk);
@@ -1659,13 +1657,13 @@ static int dn_data_ready(struct sock *sk, struct sk_buff_head *q, int flags, int
 
 
 static int dn_recvmsg(struct kiocb *iocb, struct socket *sock,
-	struct msghdr *msg, int size, int flags)
+	struct msghdr *msg, size_t size, int flags)
 {
 	struct sock *sk = sock->sk;
 	struct dn_scp *scp = DN_SK(sk);
 	struct sk_buff_head *queue = &sk->sk_receive_queue;
-	int target = size > 1 ? 1 : 0;
-	int copied = 0;
+	size_t target = size > 1 ? 1 : 0;
+	size_t copied = 0;
 	int rv = 0;
 	struct sk_buff *skb, *nskb;
 	struct dn_skb_cb *cb = NULL;
@@ -1723,7 +1721,7 @@ static int dn_recvmsg(struct kiocb *iocb, struct socket *sock,
 			goto out;
 
 		if (signal_pending(current)) {
-			rv = -ERESTARTSYS;
+			rv = sock_intr_errno(timeo);
 			goto out;
 		}
 
@@ -1746,7 +1744,7 @@ static int dn_recvmsg(struct kiocb *iocb, struct socket *sock,
 	}
 
 	for(skb = queue->next; skb != (struct sk_buff *)queue; skb = nskb) {
-		int chunk = skb->len;
+		unsigned int chunk = skb->len;
 		cb = DN_SKB_CB(skb);
 
 		if ((chunk + copied) > size)
@@ -1888,24 +1886,24 @@ static int dn_error(struct sock *sk, int flags, int err)
 }
 
 static int dn_sendmsg(struct kiocb *iocb, struct socket *sock,
-	   struct msghdr *msg, int size)
+	   struct msghdr *msg, size_t size)
 {
 	struct sock *sk = sock->sk;
 	struct dn_scp *scp = DN_SK(sk);
-	int mss;
+	size_t mss;
 	struct sk_buff_head *queue = &scp->data_xmit_queue;
 	int flags = msg->msg_flags;
 	int err = 0;
-	int sent = 0;
+	size_t sent = 0;
 	int addr_len = msg->msg_namelen;
 	struct sockaddr_dn *addr = (struct sockaddr_dn *)msg->msg_name;
 	struct sk_buff *skb = NULL;
 	struct dn_skb_cb *cb;
-	int len;
+	size_t len;
 	unsigned char fctype;
 	long timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
 
-	if (flags & ~(MSG_TRYHARD|MSG_OOB|MSG_DONTWAIT|MSG_EOR|MSG_NOSIGNAL|MSG_MORE))
+	if (flags & ~(MSG_TRYHARD|MSG_OOB|MSG_DONTWAIT|MSG_EOR|MSG_NOSIGNAL|MSG_MORE|MSG_CMSG_COMPAT))
 		return -EOPNOTSUPP;
 
 	if (addr_len && (addr_len != sizeof(struct sockaddr_dn)))
@@ -1957,7 +1955,7 @@ static int dn_sendmsg(struct kiocb *iocb, struct socket *sock,
 			goto out;
 
 		if (signal_pending(current)) {
-			err = -ERESTARTSYS;
+			err = sock_intr_errno(timeo);
 			goto out;
 		}
 
@@ -1992,7 +1990,7 @@ static int dn_sendmsg(struct kiocb *iocb, struct socket *sock,
 		/*
 		 * Get a suitably sized skb.
 		 */
-		skb = dn_alloc_send_skb(sk, &len, flags & MSG_DONTWAIT, &err);
+		skb = dn_alloc_send_skb(sk, &len, flags & MSG_DONTWAIT, timeo, &err);
 
 		if (err)
 			break;
@@ -2363,30 +2361,29 @@ static int __init decnet_init(void)
 	if (!dn_sk_cachep)
 		return -ENOMEM;
 
-	sock_register(&dn_family_ops);
-	dev_add_pack(&dn_dix_packet_type);
-	register_netdevice_notifier(&dn_dev_notifier);
-
-	proc_net_fops_create("decnet", S_IRUGO, &dn_socket_seq_fops);
-
 	dn_neigh_init();
 	dn_dev_init();
 	dn_route_init();
 	dn_fib_init();
 
-	dn_register_sysctl();
+	sock_register(&dn_family_ops);
+	dev_add_pack(&dn_dix_packet_type);
+	register_netdevice_notifier(&dn_dev_notifier);
 
-	/*
-	 * Prevent DECnet module unloading until its fixed properly.
-	 * Requires an audit of the code to check for memory leaks and
-	 * initialisation problems etc.
-	 */
-	try_module_get(THIS_MODULE);
+	proc_net_fops_create("decnet", S_IRUGO, &dn_socket_seq_fops);
+	dn_register_sysctl();
 
 	return 0;
 
 }
+module_init(decnet_init);
 
+/*
+ * Prevent DECnet module unloading until its fixed properly.
+ * Requires an audit of the code to check for memory leaks and
+ * initialisation problems etc.
+ */
+#if 0
 static void __exit decnet_exit(void)
 {
 	sock_unregister(AF_DECnet);
@@ -2405,6 +2402,5 @@ static void __exit decnet_exit(void)
 
 	kmem_cache_destroy(dn_sk_cachep);
 }
-
-module_init(decnet_init);
 module_exit(decnet_exit);
+#endif

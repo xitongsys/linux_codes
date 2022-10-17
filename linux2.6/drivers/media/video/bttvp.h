@@ -1,4 +1,6 @@
 /*
+    $Id: bttvp.h,v 1.15 2004/12/14 15:33:30 kraxel Exp $
+
     bttv - Bt848 frame grabber driver
 
     bttv's *private* header file  --  nobody other than bttv itself
@@ -25,7 +27,7 @@
 #define _BTTVP_H_
 
 #include <linux/version.h>
-#define BTTV_VERSION_CODE KERNEL_VERSION(0,9,12)
+#define BTTV_VERSION_CODE KERNEL_VERSION(0,9,15)
 
 #include <linux/types.h>
 #include <linux/wait.h>
@@ -41,13 +43,12 @@
 #include <media/video-buf.h>
 #include <media/audiochip.h>
 #include <media/tuner.h>
+#include <media/tveeprom.h>
+#include <media/ir-common.h>
 
 #include "bt848.h"
 #include "bttv.h"
 #include "btcx-risc.h"
-#ifdef CONFIG_VIDEO_IR
-#include "ir-common.h"
-#endif
 
 #ifdef __KERNEL__
 
@@ -89,7 +90,6 @@ struct bttv_tvnorm {
 	int   sram;
 };
 extern const struct bttv_tvnorm bttv_tvnorms[];
-extern const unsigned int BTTV_TVNORMS;
 
 struct bttv_format {
 	char *name;
@@ -101,8 +101,6 @@ struct bttv_format {
 	int  flags;
 	int  hshift,vshift;   /* for planar modes   */
 };
-extern const struct bttv_format bttv_formats[];
-extern const unsigned int BTTV_FORMATS;
 
 /* ---------------------------------------------------------- */
 
@@ -129,9 +127,8 @@ struct bttv_buffer {
 struct bttv_buffer_set {
 	struct bttv_buffer     *top;       /* top field buffer    */
 	struct bttv_buffer     *bottom;    /* bottom field buffer */
-	struct bttv_buffer     *vbi;       /* vbi buffer */
-	unsigned int           irqflags;
-	unsigned int           topirq;
+	unsigned int           top_irq;
+	unsigned int           frame_irq;
 };
 
 struct bttv_overlay {
@@ -146,7 +143,7 @@ struct bttv_overlay {
 struct bttv_fh {
 	struct bttv              *btv;
 	int resources;
-#ifdef VIDIOC_G_PRIORITY 
+#ifdef VIDIOC_G_PRIORITY
 	enum v4l2_priority       prio;
 #endif
 	enum v4l2_buf_type       type;
@@ -174,33 +171,19 @@ int bttv_risc_packed(struct bttv *btv, struct btcx_riscmem *risc,
 		     struct scatterlist *sglist,
 		     unsigned int offset, unsigned int bpl,
 		     unsigned int pitch, unsigned int lines);
-int bttv_risc_planar(struct bttv *btv, struct btcx_riscmem *risc,
-		     struct scatterlist *sglist,
-		     unsigned int yoffset,  unsigned int ybpl,
-		     unsigned int ypadding, unsigned int ylines,
-		     unsigned int uoffset,  unsigned int voffset,
-		     unsigned int hshift,   unsigned int vshift,
-		     unsigned int cpadding);
-int bttv_risc_overlay(struct bttv *btv, struct btcx_riscmem *risc,
-		      const struct bttv_format *fmt,
-		      struct bttv_overlay *ov,
-		      int skip_top, int skip_bottom);
-
-/* calculate / apply geometry settings */
-void bttv_calc_geo(struct bttv *btv, struct bttv_geometry *geo,
-		   int width, int height, int interleaved, int norm);
-void bttv_apply_geo(struct bttv *btv, struct bttv_geometry *geo, int top);
 
 /* control dma register + risc main loop */
-void bttv_set_dma(struct bttv *btv, int override, int irqflags);
+void bttv_set_dma(struct bttv *btv, int override);
 int bttv_risc_init_main(struct bttv *btv);
 int bttv_risc_hook(struct bttv *btv, int slot, struct btcx_riscmem *risc,
 		   int irqflags);
 
 /* capture buffer handling */
 int bttv_buffer_risc(struct bttv *btv, struct bttv_buffer *buf);
-int bttv_buffer_set_activate(struct bttv *btv,
-			     struct bttv_buffer_set *set);
+int bttv_buffer_activate_video(struct bttv *btv,
+			       struct bttv_buffer_set *set);
+int bttv_buffer_activate_vbi(struct bttv *btv,
+			     struct bttv_buffer *vbi);
 void bttv_dma_free(struct bttv *btv, struct bttv_buffer *buf);
 
 /* overlay handling */
@@ -219,11 +202,15 @@ void bttv_vbi_setlines(struct bttv_fh *fh, struct bttv *btv, int lines);
 extern struct videobuf_queue_ops bttv_vbi_qops;
 
 /* ---------------------------------------------------------- */
-/* bttv-input.c                                               */
+/* bttv-gpio.c */
 
-int bttv_input_init(struct bttv *btv);
-void bttv_input_fini(struct bttv *btv);
-void bttv_input_irq(struct bttv *btv);
+
+extern struct bus_type bttv_sub_bus_type;
+int bttv_sub_add_device(struct bttv_core *core, char *name);
+int bttv_sub_del_devices(struct bttv_core *core);
+void bttv_gpio_irq(struct bttv_core *core);
+void bttv_i2c_info(struct bttv_core *core, struct i2c_client *client, int attach);
+
 
 /* ---------------------------------------------------------- */
 /* bttv-driver.c                                              */
@@ -235,11 +222,6 @@ extern unsigned int bttv_gpio;
 extern void bttv_gpio_tracking(struct bttv *btv, char *comment);
 extern int init_bttv_i2c(struct bttv *btv);
 extern int fini_bttv_i2c(struct bttv *btv);
-extern int pvr_boot(struct bttv *btv);
-
-extern int bttv_common_ioctls(struct bttv *btv, unsigned int cmd, void *arg);
-extern void bttv_reinit_bt848(struct bttv *btv);
-extern void bttv_field_count(struct bttv *btv);
 
 #define vprintk  if (bttv_verbose) printk
 #define dprintk  if (bttv_debug >= 1) printk
@@ -263,7 +245,6 @@ struct bttv_pll_info {
 	unsigned int pll_current;  /* Currently programmed ofreq */
 };
 
-#ifdef CONFIG_VIDEO_IR
 /* for gpio-connected remote control */
 struct bttv_input {
 	struct input_dev      dev;
@@ -273,36 +254,48 @@ struct bttv_input {
 	u32                   mask_keycode;
 	u32                   mask_keydown;
 };
-#endif
+
+struct bttv_suspend_state {
+	u32  gpio_enable;
+	u32  gpio_data;
+	int  disabled;
+	int  loop_irq;
+	struct bttv_buffer_set video;
+	struct bttv_buffer     *vbi;
+};
 
 struct bttv {
+	struct bttv_core c;
+
 	/* pci device config */
-	struct pci_dev *dev;
 	unsigned short id;
 	unsigned char revision;
-	unsigned char *bt848_mmio;   /* pointer to mmio */
+	unsigned char __iomem *bt848_mmio;   /* pointer to mmio */
 
 	/* card configuration info */
-        unsigned int nr;       /* dev nr (for printk("bttv%d: ...");  */
-	char name[8];          /* dev name */
 	unsigned int cardid;   /* pci subsystem id (bt878 based ones) */
-	unsigned int type;     /* card type (pointer into tvcards[])  */
         unsigned int tuner_type;  /* tuner chip type */
         unsigned int pinnacle_id;
 	unsigned int svhs;
 	struct bttv_pll_info pll;
 	int triton1;
+	int gpioirq;
+	int use_i2c_hw;
 
-	/* gpio interface */
+	/* old gpio interface */
 	wait_queue_head_t gpioq;
 	int shutdown;
 	void (*audio_hook)(struct bttv *btv, struct video_audio *v, int set);
-	
+
+	/* new gpio interface */
+	spinlock_t gpio_lock;
+
 	/* i2c layer */
-	struct i2c_adapter         i2c_adap;
 	struct i2c_algo_bit_data   i2c_algo;
 	struct i2c_client          i2c_client;
 	int                        i2c_state, i2c_rc;
+	int                        i2c_done;
+	wait_queue_head_t          i2c_queue;
 
 	/* video4linux (1) */
 	struct video_device *video_dev;
@@ -311,19 +304,17 @@ struct bttv {
 
 	/* infrared remote */
 	int has_remote;
-#ifdef CONFIG_VIDEO_IR
 	struct bttv_input *remote;
-#endif
 
 	/* locking */
 	spinlock_t s_lock;
         struct semaphore lock;
 	int resources;
         struct semaphore reslock;
-#ifdef VIDIOC_G_PRIORITY 
+#ifdef VIDIOC_G_PRIORITY
 	struct v4l2_prio_state prio;
 #endif
-	
+
 	/* video state */
 	unsigned int input;
 	unsigned int audio;
@@ -339,6 +330,8 @@ struct bttv {
 	int opt_chroma_agc;
 	int opt_adc_crush;
 	int opt_vcr_hack;
+	int opt_whitecrush_upper;
+	int opt_whitecrush_lower;
 
 	/* radio data/state */
 	int has_radio;
@@ -366,12 +359,20 @@ struct bttv {
 	struct list_head        capture;    /* video capture queue */
 	struct list_head        vcapture;   /* vbi capture queue   */
 	struct bttv_buffer_set  curr;       /* active buffers      */
+	struct bttv_buffer      *cvbi;      /* active vbi buffer   */
+	int                     loop_irq;
 	int                     new_input;
 
 	unsigned long cap_ctl;
 	unsigned long dma_on;
 	struct timer_list timeout;
+	struct bttv_suspend_state state;
+
+	/* stats */
 	unsigned int errors;
+	unsigned int framedrop;
+	unsigned int irq_total;
+	unsigned int irq_me;
 
 	unsigned int users;
 	struct bttv_fh init;
@@ -383,7 +384,7 @@ struct bttv {
 
 #endif
 
-#define btwrite(dat,adr)    writel((dat), (char *) (btv->bt848_mmio+(adr)))
+#define btwrite(dat,adr)    writel((dat), btv->bt848_mmio+(adr))
 #define btread(adr)         readl(btv->bt848_mmio+(adr))
 
 #define btand(dat,adr)      btwrite((dat) & btread(adr), adr)

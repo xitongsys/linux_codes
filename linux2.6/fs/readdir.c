@@ -14,6 +14,8 @@
 #include <linux/fs.h>
 #include <linux/dirent.h>
 #include <linux/security.h>
+#include <linux/syscalls.h>
+#include <linux/unistd.h>
 
 #include <asm/uaccess.h>
 
@@ -32,6 +34,7 @@ int vfs_readdir(struct file *file, filldir_t filler, void *buf)
 	res = -ENOENT;
 	if (!IS_DEADDIR(inode)) {
 		res = file->f_op->readdir(file, buf, filler);
+		file_accessed(file);
 	}
 	up(&inode->i_sem);
 out:
@@ -48,10 +51,10 @@ EXPORT_SYMBOL(vfs_readdir);
  * anyway. Thus the special "fillonedir()" function for that
  * case (the low-level handlers don't need to care about this).
  */
-#define NAME_OFFSET(de) ((int) ((de)->d_name - (char *) (de)))
+#define NAME_OFFSET(de) ((int) ((de)->d_name - (char __user *) (de)))
 #define ROUND_UP(x) (((x)+sizeof(long)-1) & ~(sizeof(long)-1))
 
-#ifndef __ia64__
+#ifdef __ARCH_WANT_OLD_READDIR
 
 struct old_linux_dirent {
 	unsigned long	d_ino;
@@ -75,7 +78,7 @@ static int fillonedir(void * __buf, const char * name, int namlen, loff_t offset
 		return -EINVAL;
 	buf->result++;
 	dirent = buf->dirent;
-	if (!access_ok(VERIFY_WRITE, (unsigned long)dirent,
+	if (!access_ok(VERIFY_WRITE, dirent,
 			(unsigned long)(dirent->d_name + namlen + 1) -
 				(unsigned long)dirent))
 		goto efault;
@@ -114,7 +117,7 @@ out:
 	return error;
 }
 
-#endif /* !__ia64__ */
+#endif /* __ARCH_WANT_OLD_READDIR */
 
 /*
  * New, all-improved, singing, dancing, iBCS2-compliant getdents()
@@ -139,7 +142,7 @@ static int filldir(void * __buf, const char * name, int namlen, loff_t offset,
 {
 	struct linux_dirent __user * dirent;
 	struct getdents_callback * buf = (struct getdents_callback *) __buf;
-	int reclen = ROUND_UP(NAME_OFFSET(dirent) + namlen + 1);
+	int reclen = ROUND_UP(NAME_OFFSET(dirent) + namlen + 2);
 
 	buf->error = -EINVAL;	/* only used if we fail.. */
 	if (reclen > buf->count)
@@ -158,8 +161,10 @@ static int filldir(void * __buf, const char * name, int namlen, loff_t offset,
 		goto efault;
 	if (__put_user(0, dirent->d_name + namlen))
 		goto efault;
+	if (__put_user(d_type, (char __user *) dirent + reclen - 1))
+		goto efault;
 	buf->previous = dirent;
-	((char *) dirent) += reclen;
+	dirent = (void __user *)dirent + reclen;
 	buf->current_dir = dirent;
 	buf->count -= reclen;
 	return 0;
@@ -245,7 +250,7 @@ static int filldir64(void * __buf, const char * name, int namlen, loff_t offset,
 	if (__put_user(0, dirent->d_name + namlen))
 		goto efault;
 	buf->previous = dirent;
-	((char *) dirent) += reclen;
+	dirent = (void __user *)dirent + reclen;
 	buf->current_dir = dirent;
 	buf->count -= reclen;
 	return 0;
@@ -282,7 +287,9 @@ asmlinkage long sys_getdents64(unsigned int fd, struct linux_dirent64 __user * d
 	lastdirent = buf.previous;
 	if (lastdirent) {
 		typeof(lastdirent->d_off) d_off = file->f_pos;
-		__put_user(d_off, &lastdirent->d_off);
+		error = -EFAULT;
+		if (__put_user(d_off, &lastdirent->d_off))
+			goto out_putf;
 		error = count - buf.count;
 	}
 

@@ -24,7 +24,7 @@ static DECLARE_WAIT_QUEUE_HEAD(krxtimod_sleepq);
 static int krxtimod_die;
 
 static LIST_HEAD(krxtimod_list);
-static spinlock_t krxtimod_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(krxtimod_lock);
 
 static int krxtimod(void *arg);
 
@@ -73,12 +73,6 @@ static int krxtimod(void *arg)
 	daemonize("krxtimod");
 
 	complete(&krxtimod_alive);
-
-	/* only certain signals are of interest */
-	spin_lock_irq(&current->sighand->siglock);
-	siginitsetinv(&current->blocked, 0);
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
 
 	/* loop around looking for things to attend to */
  loop:

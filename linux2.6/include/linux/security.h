@@ -27,42 +27,40 @@
 #include <linux/signal.h>
 #include <linux/resource.h>
 #include <linux/sem.h>
-#include <linux/sysctl.h>
 #include <linux/shm.h>
 #include <linux/msg.h>
 #include <linux/sched.h>
-#include <linux/skbuff.h>
-#include <linux/netlink.h>
+
+struct ctl_table;
 
 /*
  * These functions are in security/capability.c and are used
  * as the default capabilities functions
  */
 extern int cap_capable (struct task_struct *tsk, int cap);
+extern int cap_settime (struct timespec *ts, struct timezone *tz);
 extern int cap_ptrace (struct task_struct *parent, struct task_struct *child);
 extern int cap_capget (struct task_struct *target, kernel_cap_t *effective, kernel_cap_t *inheritable, kernel_cap_t *permitted);
 extern int cap_capset_check (struct task_struct *target, kernel_cap_t *effective, kernel_cap_t *inheritable, kernel_cap_t *permitted);
 extern void cap_capset_set (struct task_struct *target, kernel_cap_t *effective, kernel_cap_t *inheritable, kernel_cap_t *permitted);
 extern int cap_bprm_set_security (struct linux_binprm *bprm);
-extern void cap_bprm_compute_creds (struct linux_binprm *bprm);
+extern void cap_bprm_apply_creds (struct linux_binprm *bprm, int unsafe);
 extern int cap_bprm_secureexec(struct linux_binprm *bprm);
+extern int cap_inode_setxattr(struct dentry *dentry, char *name, void *value, size_t size, int flags);
+extern int cap_inode_removexattr(struct dentry *dentry, char *name);
 extern int cap_task_post_setuid (uid_t old_ruid, uid_t old_euid, uid_t old_suid, int flags);
 extern void cap_task_reparent_to_init (struct task_struct *p);
 extern int cap_syslog (int type);
 extern int cap_vm_enough_memory (long pages);
 
-static inline int cap_netlink_send (struct sk_buff *skb)
-{
-	NETLINK_CB (skb).eff_cap = current->cap_effective;
-	return 0;
-}
+struct msghdr;
+struct sk_buff;
+struct sock;
+struct sockaddr;
+struct socket;
 
-static inline int cap_netlink_recv (struct sk_buff *skb)
-{
-	if (!cap_raised (NETLINK_CB (skb).eff_cap, CAP_NET_ADMIN))
-		return -EPERM;
-	return 0;
-}
+extern int cap_netlink_send(struct sock *sk, struct sk_buff *skb);
+extern int cap_netlink_recv(struct sk_buff *skb);
 
 /*
  * Values used in the task_security_ops calls
@@ -84,6 +82,11 @@ struct nfsctl_arg;
 struct sched_param;
 struct swap_info_struct;
 
+/* bprm_apply_creds unsafe reasons */
+#define LSM_UNSAFE_SHARE	1
+#define LSM_UNSAFE_PTRACE	2
+#define LSM_UNSAFE_PTRACE_CAP	4
+
 #ifdef CONFIG_SECURITY
 
 /**
@@ -100,20 +103,29 @@ struct swap_info_struct;
  * @bprm_free_security:
  *	@bprm contains the linux_binprm structure to be modified.
  *	Deallocate and clear the @bprm->security field.
- * @bprm_compute_creds:
+ * @bprm_apply_creds:
  *	Compute and set the security attributes of a process being transformed
  *	by an execve operation based on the old attributes (current->security)
  *	and the information saved in @bprm->security by the set_security hook.
  *	Since this hook function (and its caller) are void, this hook can not
  *	return an error.  However, it can leave the security attributes of the
- *	process unchanged if an access failure occurs at this point. It can
- *	also perform other state changes on the process (e.g.  closing open
- *	file descriptors to which access is no longer granted if the attributes
- *	were changed). 
+ *	process unchanged if an access failure occurs at this point.
+ *	bprm_apply_creds is called under task_lock.  @unsafe indicates various
+ *	reasons why it may be unsafe to change security state.
+ *	@bprm contains the linux_binprm structure.
+ * @bprm_post_apply_creds:
+ *	Runs after bprm_apply_creds with the task_lock dropped, so that
+ *	functions which cannot be called safely under the task_lock can
+ *	be used.  This hook is a good place to perform state changes on
+ *	the process such as closing open file descriptors to which access
+ *	is no longer granted if the attributes were changed.
+ *	Note that a security module might need to save state between
+ *	bprm_apply_creds and bprm_post_apply_creds to store the decision
+ *	on whether the process may proceed.
  *	@bprm contains the linux_binprm structure.
  * @bprm_set_security:
  *	Save security information in the bprm->security field, typically based
- *	on information about the bprm->file, for later use by the compute_creds
+ *	on information about the bprm->file, for later use by the apply_creds
  *	hook.  This hook may also optionally check permissions (e.g. for
  *	transitions between security domains).
  *	This hook may be called multiple times during a single execve, e.g. for
@@ -169,6 +181,16 @@ struct swap_info_struct;
  *	@flags contains the mount flags.
  *	@data contains the filesystem-specific data.
  *	Return 0 if permission is granted.
+ * @sb_copy_data:
+ *	Allow mount option data to be copied prior to parsing by the filesystem,
+ *	so that the security module can extract security-specific mount
+ *	options cleanly (a filesystem may modify the data e.g. with strsep()).
+ *	This also allows the original mount data to be stripped of security-
+ *	specific options to avoid having to make filesystems aware of them.
+ *	@type the type of filesystem being mounted.
+ *	@orig the original mount data copied from userspace.
+ *	@copy copied data which will be passed to the security module.
+ *	Returns 0 if the copy was successful.
  * @sb_check_sb:
  *	Check permission before the device with superblock @mnt->sb is mounted
  *	on the mount point named by @nd.
@@ -376,13 +398,13 @@ struct swap_info_struct;
  * 	Return 0 if permission is granted.
  * @inode_getsecurity:
  *	Copy the extended attribute representation of the security label 
- *	associated with @name for @dentry into @buffer.  @buffer may be 
+ *	associated with @name for @inode into @buffer.  @buffer may be
  *	NULL to request the size of the buffer required.  @size indicates
  *	the size of @buffer in bytes.  Note that @name is the remainder
  *	of the attribute name after the security. prefix has been removed.
  *	Return number of bytes used/required on success.
  * @inode_setsecurity:
- *	Set the security label associated with @name for @dentry from the 
+ *	Set the security label associated with @name for @inode from the
  *	extended attribute value @value.  @size indicates the size of the
  *	@value in bytes.  @flags may be XATTR_CREATE, XATTR_REPLACE, or 0.
  *	Note that @name is the remainder of the attribute name after the 
@@ -390,8 +412,9 @@ struct swap_info_struct;
  *	Return 0 on success.
  * @inode_listsecurity:
  *	Copy the extended attribute names for the security labels
- *	associated with @dentry into @buffer.  @buffer may be NULL to 
- *	request the size of the buffer required.  
+ *	associated with @inode into @buffer.  The maximum size of @buffer
+ *	is specified by @buffer_size.  @buffer may be NULL to request
+ *	the size of the buffer required.
  *	Returns number of bytes used/required on success.
  *
  * Security hooks for file operations
@@ -466,16 +489,15 @@ struct swap_info_struct;
  *	@file contains the file structure to update.
  *	Return 0 on success.
  * @file_send_sigiotask:
- *	Check permission for the file owner @fown to send SIGIO to the process
- *	@tsk.  Note that this hook is always called from interrupt.  Note that
- *	the fown_struct, @fown, is never outside the context of a struct file,
- *	so the file structure (and associated security information) can always
- *	be obtained:
+ *	Check permission for the file owner @fown to send SIGIO or SIGURG to the
+ *	process @tsk.  Note that this hook is sometimes called from interrupt.
+ *	Note that the fown_struct, @fown, is never outside the context of a
+ *	struct file, so the file structure (and associated security information)
+ *	can always be obtained:
  *		(struct file *)((long)fown - offsetof(struct file,f_owner));
  * 	@tsk contains the structure of task receiving signal.
  *	@fown contains the file owner information.
- *	@fd contains the file descriptor.
- *	@reason contains the operational flags.
+ *	@sig is the signal that will be sent.  When 0, kernel sends SIGIO.
  *	Return 0 if permission is granted.
  * @file_receive:
  *	This hook allows security modules to control the ability of a process
@@ -552,9 +574,8 @@ struct swap_info_struct;
  *	Return 0 if permission is granted.
  * @task_setgroups:
  *	Check permission before setting the supplementary group set of the
- *	current process to @grouplist.
- *	@gidsetsize contains the number of elements in @grouplist.
- *	@grouplist contains the array of gids.
+ *	current process.
+ *	@group_info contains the new group information.
  *	Return 0 if permission is granted.
  * @task_setnice:
  *	Check permission before setting the nice value of @p to @nice.
@@ -564,7 +585,7 @@ struct swap_info_struct;
  * @task_setrlimit:
  *	Check permission before setting the resource limits of the current
  *	process for @resource to @new_rlim.  The old resource limit values can
- *	be examined by dereferencing (current->rlim + resource).
+ *	be examined by dereferencing (current->signal->rlim + resource).
  *	@resource contains the resource whose limit is being set.
  *	@new_rlim contains the new limits for @resource.
  *	Return 0 if permission is granted.
@@ -621,9 +642,12 @@ struct swap_info_struct;
  *	Save security information for a netlink message so that permission
  *	checking can be performed when the message is processed.  The security
  *	information can be saved using the eff_cap field of the
- *      netlink_skb_parms structure.
+ *      netlink_skb_parms structure.  Also may be used to provide fine
+ *	grained control over message transmission.
+ *	@sk associated sock of task sending the message.,
  *	@skb contains the sk_buff structure for the netlink message.
- *	Return 0 if the information was successfully saved.
+ *	Return 0 if the information was successfully saved and message
+ *	is allowed to be transmitted.
  * @netlink_recv:
  *	Check permission before processing the received netlink message in
  *	@skb.
@@ -662,6 +686,7 @@ struct swap_info_struct;
  *	@family contains the requested protocol family.
  *	@type contains the requested communications type.
  *	@protocol contains the requested protocol.
+ *	@kern set to 1 if a kernel socket.
  *	Return 0 if permission is granted.
  * @socket_post_create:
  *	This hook allows a module to update or allocate a per-socket security
@@ -676,6 +701,7 @@ struct swap_info_struct;
  *	@family contains the requested protocol family.
  *	@type contains the requested communications type.
  *	@protocol contains the requested protocol.
+ *	@kern set to 1 if a kernel socket.
  * @socket_bind:
  *	Check permission before socket protocol layer bind operation is
  *	performed and the socket @sock is bound to the address specified in the
@@ -757,6 +783,22 @@ struct swap_info_struct;
  *	incoming sk_buff @skb has been associated with a particular socket, @sk.
  *	@sk contains the sock (not socket) associated with the incoming sk_buff.
  *	@skb contains the incoming network data.
+ * @socket_getpeersec:
+ *	This hook allows the security module to provide peer socket security
+ *	state to userspace via getsockopt SO_GETPEERSEC.
+ *	@sock is the local socket.
+ *	@optval userspace memory where the security state is to be copied.
+ *	@optlen userspace int where the module should copy the actual length
+ *	of the security state.
+ *	@len as input is the maximum length to copy to userspace provided
+ *	by the caller.
+ *	Return 0 if all is well, otherwise, typical getsockopt return
+ *	values.
+ * @sk_alloc_security:
+ *      Allocate and attach a security structure to the sk->sk_security field,
+ *      which is used to copy security attributes between local stream sockets.
+ * @sk_free_security:
+ *	Deallocate security structure.
  *
  * Security hooks affecting all System V IPC operations.
  *
@@ -897,7 +939,7 @@ struct swap_info_struct;
  *	Check permission before allowing the @parent process to trace the
  *	@child process.
  *	Security modules may also want to perform a process tracing check
- *	during an execve in the set_security or compute_creds hooks of
+ *	during an execve in the set_security or apply_creds hooks of
  *	binprm_security_ops if the process is being traced and its security
  *	attributes would be changed by the execve.
  *	@parent contains the task_struct structure for parent process.
@@ -960,6 +1002,12 @@ struct swap_info_struct;
  *	See the syslog(2) manual page for an explanation of the @type values.  
  *	@type contains the type of action.
  *	Return 0 if permission is granted.
+ * @settime:
+ *	Check permission to change the system time.
+ *	struct timespec and timezone are defined in include/linux/time.h
+ *	@ts contains new time
+ *	@tz contains new timezone
+ *	Return 0 if permission is granted.
  * @vm_enough_memory:
  *	Check permissions for allocating a new virtual mapping.
  *      @pages contains the number of pages.
@@ -990,23 +1038,27 @@ struct security_operations {
 			    kernel_cap_t * inheritable,
 			    kernel_cap_t * permitted);
 	int (*acct) (struct file * file);
-	int (*sysctl) (ctl_table * table, int op);
+	int (*sysctl) (struct ctl_table * table, int op);
 	int (*capable) (struct task_struct * tsk, int cap);
 	int (*quotactl) (int cmds, int type, int id, struct super_block * sb);
-	int (*quota_on) (struct file * f);
+	int (*quota_on) (struct dentry * dentry);
 	int (*syslog) (int type);
+	int (*settime) (struct timespec *ts, struct timezone *tz);
 	int (*vm_enough_memory) (long pages);
 
 	int (*bprm_alloc_security) (struct linux_binprm * bprm);
 	void (*bprm_free_security) (struct linux_binprm * bprm);
-	void (*bprm_compute_creds) (struct linux_binprm * bprm);
+	void (*bprm_apply_creds) (struct linux_binprm * bprm, int unsafe);
+	void (*bprm_post_apply_creds) (struct linux_binprm * bprm);
 	int (*bprm_set_security) (struct linux_binprm * bprm);
 	int (*bprm_check_security) (struct linux_binprm * bprm);
 	int (*bprm_secureexec) (struct linux_binprm * bprm);
 
 	int (*sb_alloc_security) (struct super_block * sb);
 	void (*sb_free_security) (struct super_block * sb);
-	int (*sb_kern_mount) (struct super_block *sb);
+	int (*sb_copy_data)(struct file_system_type *type,
+			    void *orig, void *copy);
+	int (*sb_kern_mount) (struct super_block *sb, void *data);
 	int (*sb_statfs) (struct super_block * sb);
 	int (*sb_mount) (char *dev_name, struct nameidata * nd,
 			 char *type, unsigned long flags, void *data);
@@ -1067,9 +1119,9 @@ struct security_operations {
 	int (*inode_getxattr) (struct dentry *dentry, char *name);
 	int (*inode_listxattr) (struct dentry *dentry);
 	int (*inode_removexattr) (struct dentry *dentry, char *name);
-  	int (*inode_getsecurity)(struct dentry *dentry, const char *name, void *buffer, size_t size);
-  	int (*inode_setsecurity)(struct dentry *dentry, const char *name, const void *value, size_t size, int flags);
-  	int (*inode_listsecurity)(struct dentry *dentry, char *buffer);
+  	int (*inode_getsecurity)(struct inode *inode, const char *name, void *buffer, size_t size);
+  	int (*inode_setsecurity)(struct inode *inode, const char *name, const void *value, size_t size, int flags);
+  	int (*inode_listsecurity)(struct inode *inode, char *buffer, size_t buffer_size);
 
 	int (*file_permission) (struct file * file, int mask);
 	int (*file_alloc_security) (struct file * file);
@@ -1084,8 +1136,7 @@ struct security_operations {
 			   unsigned long arg);
 	int (*file_set_fowner) (struct file * file);
 	int (*file_send_sigiotask) (struct task_struct * tsk,
-				    struct fown_struct * fown,
-				    int fd, int reason);
+				    struct fown_struct * fown, int sig);
 	int (*file_receive) (struct file * file);
 
 	int (*task_create) (unsigned long clone_flags);
@@ -1098,7 +1149,7 @@ struct security_operations {
 	int (*task_setpgid) (struct task_struct * p, pid_t pgid);
 	int (*task_getpgid) (struct task_struct * p);
 	int (*task_getsid) (struct task_struct * p);
-	int (*task_setgroups) (int gidsetsize, gid_t * grouplist);
+	int (*task_setgroups) (struct group_info *group_info);
 	int (*task_setnice) (struct task_struct * p, int nice);
 	int (*task_setrlimit) (unsigned int resource, struct rlimit * new_rlim);
 	int (*task_setscheduler) (struct task_struct * p, int policy,
@@ -1134,7 +1185,7 @@ struct security_operations {
 	int (*shm_associate) (struct shmid_kernel * shp, int shmflg);
 	int (*shm_shmctl) (struct shmid_kernel * shp, int cmd);
 	int (*shm_shmat) (struct shmid_kernel * shp, 
-			  char *shmaddr, int shmflg);
+			  char __user *shmaddr, int shmflg);
 
 	int (*sem_alloc_security) (struct sem_array * sma);
 	void (*sem_free_security) (struct sem_array * sma);
@@ -1143,7 +1194,7 @@ struct security_operations {
 	int (*sem_semop) (struct sem_array * sma, 
 			  struct sembuf * sops, unsigned nsops, int alter);
 
-	int (*netlink_send) (struct sk_buff * skb);
+	int (*netlink_send) (struct sock * sk, struct sk_buff * skb);
 	int (*netlink_recv) (struct sk_buff * skb);
 
 	/* allow module stacking */
@@ -1162,9 +1213,9 @@ struct security_operations {
 				    struct socket * other, struct sock * newsk);
 	int (*unix_may_send) (struct socket * sock, struct socket * other);
 
-	int (*socket_create) (int family, int type, int protocol);
+	int (*socket_create) (int family, int type, int protocol, int kern);
 	void (*socket_post_create) (struct socket * sock, int family,
-				    int type, int protocol);
+				    int type, int protocol, int kern);
 	int (*socket_bind) (struct socket * sock,
 			    struct sockaddr * address, int addrlen);
 	int (*socket_connect) (struct socket * sock,
@@ -1183,6 +1234,9 @@ struct security_operations {
 	int (*socket_setsockopt) (struct socket * sock, int level, int optname);
 	int (*socket_shutdown) (struct socket * sock, int how);
 	int (*socket_sock_rcv_skb) (struct sock * sk, struct sk_buff * skb);
+	int (*socket_getpeersec) (struct socket *sock, char __user *optval, int __user *optlen, unsigned len);
+	int (*sk_alloc_security) (struct sock *sk, int family, int priority);
+	void (*sk_free_security) (struct sock *sk);
 #endif	/* CONFIG_SECURITY_NETWORK */
 };
 
@@ -1224,7 +1278,7 @@ static inline int security_acct (struct file *file)
 	return security_ops->acct (file);
 }
 
-static inline int security_sysctl(ctl_table * table, int op)
+static inline int security_sysctl(struct ctl_table *table, int op)
 {
 	return security_ops->sysctl(table, op);
 }
@@ -1235,15 +1289,21 @@ static inline int security_quotactl (int cmds, int type, int id,
 	return security_ops->quotactl (cmds, type, id, sb);
 }
 
-static inline int security_quota_on (struct file * file)
+static inline int security_quota_on (struct dentry * dentry)
 {
-	return security_ops->quota_on (file);
+	return security_ops->quota_on (dentry);
 }
 
 static inline int security_syslog(int type)
 {
 	return security_ops->syslog(type);
 }
+
+static inline int security_settime(struct timespec *ts, struct timezone *tz)
+{
+	return security_ops->settime(ts, tz);
+}
+
 
 static inline int security_vm_enough_memory(long pages)
 {
@@ -1258,9 +1318,13 @@ static inline void security_bprm_free (struct linux_binprm *bprm)
 {
 	security_ops->bprm_free_security (bprm);
 }
-static inline void security_bprm_compute_creds (struct linux_binprm *bprm)
+static inline void security_bprm_apply_creds (struct linux_binprm *bprm, int unsafe)
 {
-	security_ops->bprm_compute_creds (bprm);
+	security_ops->bprm_apply_creds (bprm, unsafe);
+}
+static inline void security_bprm_post_apply_creds (struct linux_binprm *bprm)
+{
+	security_ops->bprm_post_apply_creds (bprm);
 }
 static inline int security_bprm_set (struct linux_binprm *bprm)
 {
@@ -1287,9 +1351,15 @@ static inline void security_sb_free (struct super_block *sb)
 	security_ops->sb_free_security (sb);
 }
 
-static inline int security_sb_kern_mount (struct super_block *sb)
+static inline int security_sb_copy_data (struct file_system_type *type,
+					 void *orig, void *copy)
 {
-	return security_ops->sb_kern_mount (sb);
+	return security_ops->sb_copy_data (type, orig, copy);
+}
+
+static inline int security_sb_kern_mount (struct super_block *sb, void *data)
+{
+	return security_ops->sb_kern_mount (sb, data);
 }
 
 static inline int security_sb_statfs (struct super_block *sb)
@@ -1525,19 +1595,19 @@ static inline int security_inode_removexattr (struct dentry *dentry, char *name)
 	return security_ops->inode_removexattr (dentry, name);
 }
 
-static inline int security_inode_getsecurity(struct dentry *dentry, const char *name, void *buffer, size_t size)
+static inline int security_inode_getsecurity(struct inode *inode, const char *name, void *buffer, size_t size)
 {
-	return security_ops->inode_getsecurity(dentry, name, buffer, size);
+	return security_ops->inode_getsecurity(inode, name, buffer, size);
 }
 
-static inline int security_inode_setsecurity(struct dentry *dentry, const char *name, const void *value, size_t size, int flags) 
+static inline int security_inode_setsecurity(struct inode *inode, const char *name, const void *value, size_t size, int flags)
 {
-	return security_ops->inode_setsecurity(dentry, name, value, size, flags);
+	return security_ops->inode_setsecurity(inode, name, value, size, flags);
 }
 
-static inline int security_inode_listsecurity(struct dentry *dentry, char *buffer)
+static inline int security_inode_listsecurity(struct inode *inode, char *buffer, size_t buffer_size)
 {
-	return security_ops->inode_listsecurity(dentry, buffer);
+	return security_ops->inode_listsecurity(inode, buffer, buffer_size);
 }
 
 static inline int security_file_permission (struct file *file, int mask)
@@ -1591,9 +1661,9 @@ static inline int security_file_set_fowner (struct file *file)
 
 static inline int security_file_send_sigiotask (struct task_struct *tsk,
 						struct fown_struct *fown,
-						int fd, int reason)
+						int sig)
 {
-	return security_ops->file_send_sigiotask (tsk, fown, fd, reason);
+	return security_ops->file_send_sigiotask (tsk, fown, sig);
 }
 
 static inline int security_file_receive (struct file *file)
@@ -1649,9 +1719,9 @@ static inline int security_task_getsid (struct task_struct *p)
 	return security_ops->task_getsid (p);
 }
 
-static inline int security_task_setgroups (int gidsetsize, gid_t *grouplist)
+static inline int security_task_setgroups (struct group_info *group_info)
 {
-	return security_ops->task_setgroups (gidsetsize, grouplist);
+	return security_ops->task_setgroups (group_info);
 }
 
 static inline int security_task_setnice (struct task_struct *p, int nice)
@@ -1826,9 +1896,9 @@ static inline int security_setprocattr(struct task_struct *p, char *name, void *
 	return security_ops->setprocattr(p, name, value, size);
 }
 
-static inline int security_netlink_send(struct sk_buff * skb)
+static inline int security_netlink_send(struct sock *sk, struct sk_buff * skb)
 {
-	return security_ops->netlink_send(skb);
+	return security_ops->netlink_send(sk, skb);
 }
 
 static inline int security_netlink_recv(struct sk_buff * skb)
@@ -1837,7 +1907,7 @@ static inline int security_netlink_recv(struct sk_buff * skb)
 }
 
 /* prototypes */
-extern int security_scaffolding_startup	(void);
+extern int security_init	(void);
 extern int register_security	(struct security_operations *ops);
 extern int unregister_security	(struct security_operations *ops);
 extern int mod_reg_security	(const char *name, struct security_operations *ops);
@@ -1851,7 +1921,7 @@ extern int mod_unreg_security	(const char *name, struct security_operations *ops
  * are just stubbed out, but a few must call the proper capable code.
  */
 
-static inline int security_scaffolding_startup (void)
+static inline int security_init(void)
 {
 	return 0;
 }
@@ -1890,7 +1960,7 @@ static inline int security_acct (struct file *file)
 	return 0;
 }
 
-static inline int security_sysctl(ctl_table * table, int op)
+static inline int security_sysctl(struct ctl_table *table, int op)
 {
 	return 0;
 }
@@ -1901,7 +1971,7 @@ static inline int security_quotactl (int cmds, int type, int id,
 	return 0;
 }
 
-static inline int security_quota_on (struct file * file)
+static inline int security_quota_on (struct dentry * dentry)
 {
 	return 0;
 }
@@ -1909,6 +1979,11 @@ static inline int security_quota_on (struct file * file)
 static inline int security_syslog(int type)
 {
 	return cap_syslog(type);
+}
+
+static inline int security_settime(struct timespec *ts, struct timezone *tz)
+{
+	return cap_settime(ts, tz);
 }
 
 static inline int security_vm_enough_memory(long pages)
@@ -1924,9 +1999,14 @@ static inline int security_bprm_alloc (struct linux_binprm *bprm)
 static inline void security_bprm_free (struct linux_binprm *bprm)
 { }
 
-static inline void security_bprm_compute_creds (struct linux_binprm *bprm)
+static inline void security_bprm_apply_creds (struct linux_binprm *bprm, int unsafe)
 { 
-	cap_bprm_compute_creds (bprm);
+	cap_bprm_apply_creds (bprm, unsafe);
+}
+
+static inline void security_bprm_post_apply_creds (struct linux_binprm *bprm)
+{
+	return;
 }
 
 static inline int security_bprm_set (struct linux_binprm *bprm)
@@ -1952,7 +2032,13 @@ static inline int security_sb_alloc (struct super_block *sb)
 static inline void security_sb_free (struct super_block *sb)
 { }
 
-static inline int security_sb_kern_mount (struct super_block *sb)
+static inline int security_sb_copy_data (struct file_system_type *type,
+					 void *orig, void *copy)
+{
+	return 0;
+}
+
+static inline int security_sb_kern_mount (struct super_block *sb, void *data)
 {
 	return 0;
 }
@@ -2136,7 +2222,7 @@ static inline void security_inode_delete (struct inode *inode)
 static inline int security_inode_setxattr (struct dentry *dentry, char *name,
 					   void *value, size_t size, int flags)
 {
-	return 0;
+	return cap_inode_setxattr(dentry, name, value, size, flags);
 }
 
 static inline void security_inode_post_setxattr (struct dentry *dentry, char *name,
@@ -2155,20 +2241,20 @@ static inline int security_inode_listxattr (struct dentry *dentry)
 
 static inline int security_inode_removexattr (struct dentry *dentry, char *name)
 {
-	return 0;
+	return cap_inode_removexattr(dentry, name);
 }
 
-static inline int security_inode_getsecurity(struct dentry *dentry, const char *name, void *buffer, size_t size)
+static inline int security_inode_getsecurity(struct inode *inode, const char *name, void *buffer, size_t size)
 {
 	return -EOPNOTSUPP;
 }
 
-static inline int security_inode_setsecurity(struct dentry *dentry, const char *name, const void *value, size_t size, int flags) 
+static inline int security_inode_setsecurity(struct inode *inode, const char *name, const void *value, size_t size, int flags)
 {
 	return -EOPNOTSUPP;
 }
 
-static inline int security_inode_listsecurity(struct dentry *dentry, char *buffer)
+static inline int security_inode_listsecurity(struct inode *inode, char *buffer, size_t buffer_size)
 {
 	return 0;
 }
@@ -2222,7 +2308,7 @@ static inline int security_file_set_fowner (struct file *file)
 
 static inline int security_file_send_sigiotask (struct task_struct *tsk,
 						struct fown_struct *fown,
-						int fd, int reason)
+						int sig)
 {
 	return 0;
 }
@@ -2278,7 +2364,7 @@ static inline int security_task_getsid (struct task_struct *p)
 	return 0;
 }
 
-static inline int security_task_setgroups (int gidsetsize, gid_t *grouplist)
+static inline int security_task_setgroups (struct group_info *group_info)
 {
 	return 0;
 }
@@ -2443,14 +2529,9 @@ static inline int security_setprocattr(struct task_struct *p, char *name, void *
 	return -EINVAL;
 }
 
-/*
- * The netlink capability defaults need to be used inline by default
- * (rather than hooking into the capability module) to reduce overhead
- * in the networking code.
- */
-static inline int security_netlink_send (struct sk_buff *skb)
+static inline int security_netlink_send (struct sock *sk, struct sk_buff *skb)
 {
-	return cap_netlink_send (skb);
+	return cap_netlink_send (sk, skb);
 }
 
 static inline int security_netlink_recv (struct sk_buff *skb)
@@ -2475,17 +2556,19 @@ static inline int security_unix_may_send(struct socket * sock,
 	return security_ops->unix_may_send(sock, other);
 }
 
-static inline int security_socket_create (int family, int type, int protocol)
+static inline int security_socket_create (int family, int type,
+					  int protocol, int kern)
 {
-	return security_ops->socket_create(family, type, protocol);
+	return security_ops->socket_create(family, type, protocol, kern);
 }
 
 static inline void security_socket_post_create(struct socket * sock, 
 					       int family,
 					       int type, 
-					       int protocol)
+					       int protocol, int kern)
 {
-	security_ops->socket_post_create(sock, family, type, protocol);
+	security_ops->socket_post_create(sock, family, type,
+					 protocol, kern);
 }
 
 static inline int security_socket_bind(struct socket * sock, 
@@ -2564,6 +2647,22 @@ static inline int security_sock_rcv_skb (struct sock * sk,
 {
 	return security_ops->socket_sock_rcv_skb (sk, skb);
 }
+
+static inline int security_socket_getpeersec(struct socket *sock, char __user *optval,
+					     int __user *optlen, unsigned len)
+{
+	return security_ops->socket_getpeersec(sock, optval, optlen, len);
+}
+
+static inline int security_sk_alloc(struct sock *sk, int family, int priority)
+{
+	return security_ops->sk_alloc_security(sk, family, priority);
+}
+
+static inline void security_sk_free(struct sock *sk)
+{
+	return security_ops->sk_free_security(sk);
+}
 #else	/* CONFIG_SECURITY_NETWORK */
 static inline int security_unix_stream_connect(struct socket * sock,
 					       struct socket * other, 
@@ -2578,7 +2677,8 @@ static inline int security_unix_may_send(struct socket * sock,
 	return 0;
 }
 
-static inline int security_socket_create (int family, int type, int protocol)
+static inline int security_socket_create (int family, int type,
+					  int protocol, int kern)
 {
 	return 0;
 }
@@ -2586,7 +2686,7 @@ static inline int security_socket_create (int family, int type, int protocol)
 static inline void security_socket_post_create(struct socket * sock, 
 					       int family,
 					       int type, 
-					       int protocol)
+					       int protocol, int kern)
 {
 }
 
@@ -2663,6 +2763,21 @@ static inline int security_sock_rcv_skb (struct sock * sk,
 					 struct sk_buff * skb)
 {
 	return 0;
+}
+
+static inline int security_socket_getpeersec(struct socket *sock, char __user *optval,
+					     int __user *optlen, unsigned len)
+{
+	return -ENOPROTOOPT;
+}
+
+static inline int security_sk_alloc(struct sock *sk, int family, int priority)
+{
+	return 0;
+}
+
+static inline void security_sk_free(struct sock *sk)
+{
 }
 #endif	/* CONFIG_SECURITY_NETWORK */
 

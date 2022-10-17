@@ -1,6 +1,6 @@
 /*
  *   ALSA sequencer Priority Queue
- *   Copyright (c) 1998-1999 by Frank van de Pol <fvdpol@home.nl>
+ *   Copyright (c) 1998-1999 by Frank van de Pol <fvdpol@coil.demon.nl>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -59,7 +59,7 @@ prioq_t *snd_seq_prioq_new(void)
 {
 	prioq_t *f;
 
-	f = snd_kcalloc(sizeof(prioq_t), GFP_KERNEL);
+	f = kcalloc(1, sizeof(*f), GFP_KERNEL);
 	if (f == NULL) {
 		snd_printd("oops: malloc failed for snd_seq_prioq_new()\n");
 		return NULL;

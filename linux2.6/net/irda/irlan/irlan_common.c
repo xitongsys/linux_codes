@@ -32,12 +32,14 @@
 #include <linux/errno.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/random.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/rtnetlink.h>
+#include <linux/moduleparam.h>
+#include <linux/bitops.h>
 
 #include <asm/system.h>
-#include <asm/bitops.h>
 #include <asm/byteorder.h>
 
 #include <net/irda/irda.h>
@@ -75,14 +77,14 @@ static int eth;   /* Use "eth" or "irlan" name for devices */
 static int access = ACCESS_PEER; /* PEER, DIRECT or HOSTED */
 
 #ifdef CONFIG_PROC_FS
-static char *irlan_access[] = {
+static const char *irlan_access[] = {
 	"UNKNOWN",
 	"DIRECT",
 	"PEER",
 	"HOSTED"
 };
 
-static char *irlan_media[] = {
+static const char *irlan_media[] = {
 	"UNKNOWN",
 	"802.3",
 	"802.5"
@@ -103,10 +105,13 @@ static struct file_operations irlan_fops = {
 extern struct proc_dir_entry *proc_irda;
 #endif /* CONFIG_PROC_FS */
 
+static struct irlan_cb *irlan_open(__u32 saddr, __u32 daddr);
 static void __irlan_close(struct irlan_cb *self);
 static int __irlan_insert_param(struct sk_buff *skb, char *param, int type, 
 				__u8 value_byte, __u16 value_short, 
 				__u8 *value_array, __u16 value_len);
+static void irlan_open_unicast_addr(struct irlan_cb *self);
+static void irlan_get_unicast_addr(struct irlan_cb *self);
 void irlan_close_tsaps(struct irlan_cb *self);
 
 /*
@@ -115,12 +120,12 @@ void irlan_close_tsaps(struct irlan_cb *self);
  *    Initialize IrLAN layer
  *
  */
-int __init irlan_init(void)
+static int __init irlan_init(void)
 {
 	struct irlan_cb *new;
 	__u16 hints;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__ );
+	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
 
 #ifdef CONFIG_PROC_FS
 	{ struct proc_dir_entry *proc;
@@ -156,7 +161,7 @@ int __init irlan_init(void)
 	return 0;
 }
 
-void __exit irlan_cleanup(void) 
+static void __exit irlan_cleanup(void) 
 {
 	struct irlan_cb *self, *next;
 
@@ -183,7 +188,7 @@ void __exit irlan_cleanup(void)
  *    Open new instance of a client/provider, we should only register the 
  *    network device if this instance is ment for a particular client/provider
  */
-struct irlan_cb *irlan_open(__u32 saddr, __u32 daddr)
+static struct irlan_cb *irlan_open(__u32 saddr, __u32 daddr)
 {
 	struct net_device *dev;
 	struct irlan_cb *self;
@@ -191,9 +196,7 @@ struct irlan_cb *irlan_open(__u32 saddr, __u32 daddr)
 	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
 
 	/* Create network device with irlan */
-	dev = alloc_netdev(sizeof(*self), 
-			   eth ? "eth%d" : "irlan%d", 
-			   irlan_eth_setup);
+	dev = alloc_irlandev(eth ? "eth%d" : "irlan%d");
 	if (!dev)
 		return NULL;
 
@@ -209,6 +212,19 @@ struct irlan_cb *irlan_open(__u32 saddr, __u32 daddr)
 
 	/* Provider access can only be PEER, DIRECT, or HOSTED */
 	self->provider.access_type = access;
+	if (access == ACCESS_DIRECT) {
+		/*  
+		 * Since we are emulating an IrLAN sever we will have to
+		 * give ourself an ethernet address!  
+		 */
+		dev->dev_addr[0] = 0x40;
+		dev->dev_addr[1] = 0x00;
+		dev->dev_addr[2] = 0x00;
+		dev->dev_addr[3] = 0x00;
+		get_random_bytes(dev->dev_addr+4, 1);
+		get_random_bytes(dev->dev_addr+5, 1);
+	}
+
 	self->media = MEDIA_802_3;
 	self->disconnect_reason = LM_USER_REQUEST;
 	init_timer(&self->watchdog_timer);
@@ -224,7 +240,7 @@ struct irlan_cb *irlan_open(__u32 saddr, __u32 daddr)
 		IRDA_DEBUG(2, "%s(), register_netdev() failed!\n", 
 			   __FUNCTION__ );
 		self = NULL;
-		kfree(dev);
+		free_netdev(dev);
 	} else {
 		rtnl_lock();
 		list_add_rcu(&self->dev_list, &irlans);
@@ -242,16 +258,14 @@ struct irlan_cb *irlan_open(__u32 saddr, __u32 daddr)
  */
 static void __irlan_close(struct irlan_cb *self)
 {
-	struct sk_buff *skb;
-
 	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
 	
 	ASSERT_RTNL();
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == IRLAN_MAGIC, return;);
 
-	del_timer(&self->watchdog_timer);
-	del_timer(&self->client.kick_timer);
+	del_timer_sync(&self->watchdog_timer);
+	del_timer_sync(&self->client.kick_timer);
 
 	/* Close all open connections and remove TSAPs */
 	irlan_close_tsaps(self);
@@ -260,8 +274,7 @@ static void __irlan_close(struct irlan_cb *self)
 		iriap_close(self->client.iriap);
 
 	/* Remove frames queued on the control channel */
-	while ((skb = skb_dequeue(&self->client.txq)))
-		dev_kfree_skb(skb);
+	skb_queue_purge(&self->client.txq);
 
 	/* Unregister and free self via destructor */
 	unregister_netdevice(self->dev);
@@ -284,9 +297,11 @@ struct irlan_cb *irlan_get_any(void)
  *    Here we receive the connect indication for the data channel
  *
  */
-void irlan_connect_indication(void *instance, void *sap, struct qos_info *qos,
-			      __u32 max_sdu_size, __u8 max_header_size, 
-			      struct sk_buff *skb)
+static void irlan_connect_indication(void *instance, void *sap,
+				     struct qos_info *qos,
+				     __u32 max_sdu_size,
+				     __u8 max_header_size, 
+				     struct sk_buff *skb)
 {
 	struct irlan_cb *self;
 	struct tsap_cb *tsap;
@@ -303,7 +318,7 @@ void irlan_connect_indication(void *instance, void *sap, struct qos_info *qos,
 	self->max_sdu_size = max_sdu_size;
 	self->max_header_size = max_header_size;
 
-	IRDA_DEBUG(0, "IrLAN, We are now connected!\n");
+	IRDA_DEBUG(0, "%s: We are now connected!\n", __FUNCTION__);
 
 	del_timer(&self->watchdog_timer);
 
@@ -329,9 +344,11 @@ void irlan_connect_indication(void *instance, void *sap, struct qos_info *qos,
 	netif_start_queue(self->dev); /* Clear reason */
 }
 
-void irlan_connect_confirm(void *instance, void *sap, struct qos_info *qos, 
-			   __u32 max_sdu_size, __u8 max_header_size, 
-			   struct sk_buff *skb) 
+static void irlan_connect_confirm(void *instance, void *sap,
+				  struct qos_info *qos, 
+				  __u32 max_sdu_size,
+				  __u8 max_header_size, 
+				  struct sk_buff *skb) 
 {
 	struct irlan_cb *self;
 
@@ -345,7 +362,7 @@ void irlan_connect_confirm(void *instance, void *sap, struct qos_info *qos,
 
 	/* TODO: we could set the MTU depending on the max_sdu_size */
 
-	IRDA_DEBUG(2, "IrLAN, We are now connected!\n");
+	IRDA_DEBUG(0, "%s: We are now connected!\n", __FUNCTION__);
 	del_timer(&self->watchdog_timer);
 
 	/* 
@@ -374,8 +391,9 @@ void irlan_connect_confirm(void *instance, void *sap, struct qos_info *qos,
  *    Callback function for the IrTTP layer. Indicates a disconnection of
  *    the specified connection (handle)
  */
-void irlan_disconnect_indication(void *instance, void *sap, LM_REASON reason, 
-				 struct sk_buff *userdata) 
+static void irlan_disconnect_indication(void *instance,
+					void *sap, LM_REASON reason, 
+					struct sk_buff *userdata) 
 {
 	struct irlan_cb *self;
 	struct tsap_cb *tsap;
@@ -451,7 +469,7 @@ void irlan_open_data_tsap(struct irlan_cb *self)
 	notify.udata_indication      = irlan_eth_receive;
 	notify.connect_indication    = irlan_connect_indication;
 	notify.connect_confirm       = irlan_connect_confirm;
- 	/*notify.flow_indication       = irlan_eth_flow_indication;*/
+ 	notify.flow_indication       = irlan_eth_flow_indication;
 	notify.disconnect_indication = irlan_disconnect_indication;
 	notify.instance              = self;
 	strlcpy(notify.name, "IrLAN data", sizeof(notify.name));
@@ -592,7 +610,7 @@ int irlan_run_ctrl_tx_queue(struct irlan_cb *self)
  *    This function makes sure that commands on the control channel is being
  *    sent in a command/response fashion
  */
-void irlan_ctrl_data_request(struct irlan_cb *self, struct sk_buff *skb)
+static void irlan_ctrl_data_request(struct irlan_cb *self, struct sk_buff *skb)
 {
 	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
 
@@ -712,7 +730,7 @@ void irlan_close_data_channel(struct irlan_cb *self)
  *    address.
  *
  */
-void irlan_open_unicast_addr(struct irlan_cb *self) 
+static void irlan_open_unicast_addr(struct irlan_cb *self)
 {
 	struct sk_buff *skb;
 	__u8 *frame;
@@ -829,7 +847,7 @@ void irlan_set_multicast_filter(struct irlan_cb *self, int status)
  *    can construct its packets.
  *
  */
-void irlan_get_unicast_addr(struct irlan_cb *self) 
+static void irlan_get_unicast_addr(struct irlan_cb *self)
 {
 	struct sk_buff *skb;
 	__u8 *frame;
@@ -1168,73 +1186,15 @@ static int irlan_seq_open(struct inode *inode, struct file *file)
 }
 #endif
 
-/*
- * Function print_ret_code (code)
- *
- *    Print return code of request to peer IrLAN layer.
- *
- */
-void print_ret_code(__u8 code) 
-{
-	switch(code) {
-	case 0:
-		printk(KERN_INFO "Success\n");
-		break;
-	case 1:
-		WARNING("IrLAN: Insufficient resources\n");
-		break;
-	case 2:
-		WARNING("IrLAN: Invalid command format\n");
-		break;
-	case 3:
-		WARNING("IrLAN: Command not supported\n");
-		break;
-	case 4:
-		WARNING("IrLAN: Parameter not supported\n");
-		break;
-	case 5:
-		WARNING("IrLAN: Value not supported\n");
-		break;
-	case 6:
-		WARNING("IrLAN: Not open\n");
-		break;
-	case 7:
-		WARNING("IrLAN: Authentication required\n");
-		break;
-	case 8:
-		WARNING("IrLAN: Invalid password\n");
-		break;
-	case 9:
-		WARNING("IrLAN: Protocol error\n");
-		break;
-	case 255:
-		WARNING("IrLAN: Asynchronous status\n");
-		break;
-	}
-}
-
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("The Linux IrDA LAN protocol"); 
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(eth, "i");
+module_param(eth, bool, 0);
 MODULE_PARM_DESC(eth, "Name devices ethX (0) or irlanX (1)");
-MODULE_PARM(access, "i");
+module_param(access, int, 0);
 MODULE_PARM_DESC(access, "Access type DIRECT=1, PEER=2, HOSTED=3");
 
-/*
- * Function init_module (void)
- *
- *    Initialize the IrLAN module, this function is called by the
- *    modprobe(1) program.
- */
 module_init(irlan_init);
-
-/*
- * Function cleanup_module (void)
- *
- *    Remove the IrLAN module, this function is called by the rmmod(1)
- *    program
- */
 module_exit(irlan_cleanup);
 

@@ -118,7 +118,7 @@ static void usb_mouse_close(struct input_dev *dev)
 	struct usb_mouse *mouse = dev->private;
 
 	if (!--mouse->open)
-		usb_unlink_urb(mouse->irq);
+		usb_kill_urb(mouse->irq);
 }
 
 static int usb_mouse_probe(struct usb_interface * intf, const struct usb_device_id * id)
@@ -131,7 +131,7 @@ static int usb_mouse_probe(struct usb_interface * intf, const struct usb_device_
 	char path[64];
 	char *buf;
 
-	interface = &intf->altsetting[intf->act_altsetting];
+	interface = intf->cur_altsetting;
 
 	if (interface->desc.bNumEndpoints != 1) 
 		return -ENODEV;
@@ -180,9 +180,10 @@ static int usb_mouse_probe(struct usb_interface * intf, const struct usb_device_
 	mouse->dev.name = mouse->name;
 	mouse->dev.phys = mouse->phys;
 	mouse->dev.id.bustype = BUS_USB;
-	mouse->dev.id.vendor = dev->descriptor.idVendor;
-	mouse->dev.id.product = dev->descriptor.idProduct;
-	mouse->dev.id.version = dev->descriptor.bcdDevice;
+	mouse->dev.id.vendor = le16_to_cpu(dev->descriptor.idVendor);
+	mouse->dev.id.product = le16_to_cpu(dev->descriptor.idProduct);
+	mouse->dev.id.version = le16_to_cpu(dev->descriptor.bcdDevice);
+	mouse->dev.dev = &intf->dev;
 
 	if (!(buf = kmalloc(63, GFP_KERNEL))) {
 		usb_buffer_free(dev, 8, mouse->data, mouse->data_dma);
@@ -222,7 +223,7 @@ static void usb_mouse_disconnect(struct usb_interface *intf)
 	
 	usb_set_intfdata(intf, NULL);
 	if (mouse) {
-		usb_unlink_urb(mouse->irq);
+		usb_kill_urb(mouse->irq);
 		input_unregister_device(&mouse->dev);
 		usb_free_urb(mouse->irq);
 		usb_buffer_free(interface_to_usbdev(intf), 8, mouse->data, mouse->data_dma);

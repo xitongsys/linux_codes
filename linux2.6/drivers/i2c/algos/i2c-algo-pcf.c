@@ -27,8 +27,6 @@
    messages, proper stop/repstart signaling during receive,
    added detect code */
 
-/* #define DEBUG 1 */		/* to pick up dev_dbg calls */
-
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/delay.h>
@@ -40,8 +38,6 @@
 #include "i2c-algo-pcf.h"
 
 
-/* ----- global defines ----------------------------------------------- */
-#define DEB(x) if (i2c_debug>=1) x
 #define DEB2(x) if (i2c_debug>=2) x
 #define DEB3(x) if (i2c_debug>=3) x /* print several statistical values*/
 #define DEBPROTO(x) if (i2c_debug>=9) x;
@@ -50,7 +46,7 @@
 
 /* module parameters:
  */
-static int i2c_debug=0;
+static int i2c_debug;
 
 /* --- setting states on the bus with the right timing: ---------------	*/
 
@@ -100,12 +96,6 @@ static int wait_for_bb(struct i2c_algo_pcf_data *adap) {
 	}
 	
 	return (timeout<=0);
-}
-
-
-static inline void pcf_sleep(unsigned long timeout)
-{
-	schedule_timeout( timeout * HZ);
 }
 
 
@@ -424,8 +414,8 @@ static int pcf_xfer(struct i2c_adapter *i2c_adap,
 
 static u32 pcf_func(struct i2c_adapter *adap)
 {
-	return I2C_FUNC_SMBUS_EMUL | I2C_FUNC_10BIT_ADDR | 
-	       I2C_FUNC_PROTOCOL_MANGLING; 
+	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL | 
+	       I2C_FUNC_10BIT_ADDR | I2C_FUNC_PROTOCOL_MANGLING; 
 }
 
 /* -----exported algorithm data: -------------------------------------	*/
@@ -474,6 +464,6 @@ MODULE_AUTHOR("Hans Berglund <hb@spacetec.no>");
 MODULE_DESCRIPTION("I2C-Bus PCF8584 algorithm");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(i2c_debug,"i");
+module_param(i2c_debug, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(i2c_debug,
         "debug level - 0 off; 1 normal; 2,3 more verbose; 9 pcf-protocol");

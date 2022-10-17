@@ -30,6 +30,8 @@
 
 #ifdef __KERNEL__
 
+#include <linux/init.h>
+#include <linux/numa.h>
 #include <asm/system.h>
 
 #define COMPILER_DEPENDENT_INT64	long
@@ -86,21 +88,24 @@ ia64_acpi_release_global_lock (unsigned int *lock)
 #define ACPI_RELEASE_GLOBAL_LOCK(GLptr, Acq)				\
 	((Acq) = ia64_acpi_release_global_lock((unsigned int *) GLptr))
 
+#define acpi_disabled 0	/* ACPI always enabled on IA64 */
+#define acpi_noirq 0	/* ACPI always enabled on IA64 */
+#define acpi_pci_disabled 0 /* ACPI PCI always enabled on IA64 */
+#define acpi_strict 1	/* no ACPI spec workarounds on IA64 */
+static inline void disable_acpi(void) { }
+
 const char *acpi_get_sysname (void);
 int acpi_request_vector (u32 int_type);
-int acpi_get_prt (struct pci_vector_struct **vectors, int *count);
-int acpi_get_interrupt_model (int *type);
-int acpi_register_irq (u32 gsi, u32 polarity, u32 trigger);
-int acpi_irq_to_vector (u32 irq);
-int acpi_get_addr_space (void *obj, u8 type, u64 *base, u64 *length,u64 *tra);
+int acpi_gsi_to_irq (u32 gsi, unsigned int *irq);
 
 #ifdef CONFIG_ACPI_NUMA
-#include <asm/numa.h>
 /* Proximity bitmap length; _PXM is at most 255 (8 bit)*/
 #define MAX_PXM_DOMAINS (256)
-extern int __initdata pxm_to_nid_map[MAX_PXM_DOMAINS];
+extern int __devinitdata pxm_to_nid_map[MAX_PXM_DOMAINS];
 extern int __initdata nid_to_pxm_map[MAX_NUMNODES];
 #endif
+
+extern u16 ia64_acpiid_to_sapicid[];
 
 #endif /*__KERNEL__*/
 

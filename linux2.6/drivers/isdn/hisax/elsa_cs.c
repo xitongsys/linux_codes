@@ -53,6 +53,7 @@
 #include <pcmcia/cistpl.h>
 #include <pcmcia/cisreg.h>
 #include <pcmcia/ds.h>
+#include "hisax_cfg.h"
 
 MODULE_DESCRIPTION("ISDN4Linux: PCMCIA client driver for Elsa PCM cards");
 MODULE_AUTHOR("Klaus Lichtenwalder");
@@ -68,10 +69,10 @@ MODULE_LICENSE("Dual MPL/GPL");
 
 #ifdef PCMCIA_DEBUG
 static int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
+module_param(pc_debug, int, 0);
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args);
 static char *version =
-"elsa_cs.c $Revision: 1.1.2.2 $ $Date: 2001/09/23 22:24:47 $ (K.Lichtenwalder)";
+"elsa_cs.c $Revision: 1.2.2.4 $ $Date: 2004/01/25 15:07:06 $ (K.Lichtenwalder)";
 #else
 #define DEBUG(n, args...)
 #endif
@@ -80,20 +81,8 @@ static char *version =
 
 /* Parameters that can be set with 'insmod' */
 
-/* Bit map of interrupts to choose from, the old way */
-/* This means pick from 15, 14, 12, 11, 10, 9, 7, 5, 4, 3 */
-static u_long irq_mask = 0xdeb8;
-
-/* Newer, simpler way of listing specific interrupts */
-static int irq_list[4] = { -1 };
-
-MODULE_PARM(irq_mask, "i");
-MODULE_PARM(irq_list, "1-4i");
-
 static int protocol = 2;        /* EURO-ISDN Default */
-MODULE_PARM(protocol, "i");
-
-extern int elsa_init_pcmcia(int, int, int*, int);
+module_param(protocol, int, 0);
 
 /*====================================================================*/
 
@@ -168,6 +157,7 @@ typedef struct local_info_t {
     dev_link_t          link;
     dev_node_t          node;
     int                 busy;
+    int			cardnr;
 } local_info_t;
 
 /*======================================================================
@@ -187,8 +177,7 @@ static dev_link_t *elsa_cs_attach(void)
     client_reg_t client_reg;
     dev_link_t *link;
     local_info_t *local;
-    int ret, i;
-    void elsa_interrupt(int, void *, struct pt_regs *);
+    int ret;
 
     DEBUG(0, "elsa_cs_attach()\n");
 
@@ -196,16 +185,12 @@ static dev_link_t *elsa_cs_attach(void)
     local = kmalloc(sizeof(local_info_t), GFP_KERNEL);
     if (!local) return NULL;
     memset(local, 0, sizeof(local_info_t));
+    local->cardnr = -1;
     link = &local->link; link->priv = local;
 
     /* Interrupt setup */
     link->irq.Attributes = IRQ_TYPE_DYNAMIC_SHARING|IRQ_FIRST_SHARED;
-    link->irq.IRQInfo1 = IRQ_INFO2_VALID|IRQ_LEVEL_ID|IRQ_SHARE_ID;
-    if (irq_list[0] == -1)
-        link->irq.IRQInfo2 = irq_mask;
-    else
-        for (i = 0; i < 4; i++)
-            link->irq.IRQInfo2 |= 1 << irq_list[i];
+    link->irq.IRQInfo1 = IRQ_LEVEL_ID|IRQ_SHARE_ID;
     link->irq.Handler = NULL;
 
     /*
@@ -227,7 +212,6 @@ static dev_link_t *elsa_cs_attach(void)
     link->next = dev_list;
     dev_list = link;
     client_reg.dev_info = &dev_info;
-    client_reg.Attributes = INFO_IO_CLIENT | INFO_CARD_SHARE;
     client_reg.EventMask =
         CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL |
         CS_EVENT_RESET_PHYSICAL | CS_EVENT_CARD_RESET |
@@ -235,7 +219,7 @@ static dev_link_t *elsa_cs_attach(void)
     client_reg.event_handler = &elsa_cs_event;
     client_reg.Version = 0x0210;
     client_reg.event_callback_args.client_data = link;
-    ret = CardServices(RegisterClient, &link->handle, &client_reg);
+    ret = pcmcia_register_client(&link->handle, &client_reg);
     if (ret != CS_SUCCESS) {
         cs_error(link->handle, RegisterClient, ret);
         elsa_cs_detach(link);
@@ -271,22 +255,9 @@ static void elsa_cs_detach(dev_link_t *link)
     if (link->state & DEV_CONFIG)
         elsa_cs_release(link);
 
-    /*
-       If the device is currently configured and active, we won't
-       actually delete it yet.  Instead, it is marked so that when
-       the release() function is called, that will trigger a proper
-       detach().
-    */
-    if (link->state & DEV_CONFIG) {
-      DEBUG(0, "elsa_cs: detach postponed, '%s' "
-               "still locked\n", link->dev->dev_name);
-        link->state |= DEV_STALE_LINK;
-        return;
-    }
-
     /* Break the link with Card Services */
     if (link->handle) {
-        ret = CardServices(DeregisterClient, link->handle);
+        ret = pcmcia_deregister_client(link->handle);
 	if (ret != CS_SUCCESS)
 	    cs_error(link->handle, DeregisterClient, ret);
     }
@@ -304,19 +275,29 @@ static void elsa_cs_detach(dev_link_t *link)
     device available to the system.
 
 ======================================================================*/
-static int get_tuple(int fn, client_handle_t handle, tuple_t *tuple,
+static int get_tuple(client_handle_t handle, tuple_t *tuple,
                      cisparse_t *parse)
 {
-    int i;
-    i = CardServices(fn, handle, tuple);
+    int i = pcmcia_get_tuple_data(handle, tuple);
     if (i != CS_SUCCESS) return i;
-    i = CardServices(GetTupleData, handle, tuple);
-    if (i != CS_SUCCESS) return i;
-    return CardServices(ParseTuple, handle, tuple, parse);
+    return pcmcia_parse_tuple(handle, tuple, parse);
 }
 
-#define first_tuple(a, b, c) get_tuple(GetFirstTuple, a, b, c)
-#define next_tuple(a, b, c) get_tuple(GetNextTuple, a, b, c)
+static int first_tuple(client_handle_t handle, tuple_t *tuple,
+                     cisparse_t *parse)
+{
+    int i = pcmcia_get_first_tuple(handle, tuple);
+    if (i != CS_SUCCESS) return i;
+    return get_tuple(handle, tuple, parse);
+}
+
+static int next_tuple(client_handle_t handle, tuple_t *tuple,
+                     cisparse_t *parse)
+{
+    int i = pcmcia_get_next_tuple(handle, tuple);
+    if (i != CS_SUCCESS) return i;
+    return get_tuple(handle, tuple, parse);
+}
 
 static void elsa_cs_config(dev_link_t *link)
 {
@@ -327,6 +308,7 @@ static void elsa_cs_config(dev_link_t *link)
     int i, j, last_fn;
     u_short buf[128];
     cistpl_cftable_entry_t *cf = &parse.cftable_entry;
+    IsdnCard_t icard;
 
     DEBUG(0, "elsa_config(0x%p)\n", link);
     handle = link->handle;
@@ -362,14 +344,14 @@ static void elsa_cs_config(dev_link_t *link)
             printk(KERN_INFO "(elsa_cs: looks like the 96 model)\n");
             link->conf.ConfigIndex = cf->index;
             link->io.BasePort1 = cf->io.win[0].base;
-            i = CardServices(RequestIO, link->handle, &link->io);
+            i = pcmcia_request_io(link->handle, &link->io);
             if (i == CS_SUCCESS) break;
         } else {
           printk(KERN_INFO "(elsa_cs: looks like the 97 model)\n");
           link->conf.ConfigIndex = cf->index;
           for (i = 0, j = 0x2f0; j > 0x100; j -= 0x10) {
             link->io.BasePort1 = j;
-            i = CardServices(RequestIO, link->handle, &link->io);
+            i = pcmcia_request_io(link->handle, &link->io);
             if (i == CS_SUCCESS) break;
           }
           break;
@@ -382,14 +364,14 @@ static void elsa_cs_config(dev_link_t *link)
 	goto cs_failed;
     }
 
-    i = CardServices(RequestIRQ, link->handle, &link->irq);
+    i = pcmcia_request_irq(link->handle, &link->irq);
     if (i != CS_SUCCESS) {
         link->irq.AssignedIRQ = 0;
 	last_fn = RequestIRQ;
         goto cs_failed;
     }
 
-    i = CardServices(RequestConfiguration, link->handle, &link->conf);
+    i = pcmcia_request_configuration(link->handle, &link->conf);
     if (i != CS_SUCCESS) {
       last_fn = RequestConfiguration;
       goto cs_failed;
@@ -420,9 +402,19 @@ static void elsa_cs_config(dev_link_t *link)
 
     link->state &= ~DEV_CONFIG_PENDING;
 
-    elsa_init_pcmcia(link->io.BasePort1, link->irq.AssignedIRQ,
-                     &(((local_info_t*)link->priv)->busy),
-                     protocol);
+    icard.para[0] = link->irq.AssignedIRQ;
+    icard.para[1] = link->io.BasePort1;
+    icard.protocol = protocol;
+    icard.typ = ISDN_CTYPE_ELSA_PCMCIA;
+    
+    i = hisax_init_pcmcia(link, &(((local_info_t*)link->priv)->busy), &icard);
+    if (i < 0) {
+    	printk(KERN_ERR "elsa_cs: failed to initialize Elsa PCMCIA %d at i/o %#x\n",
+    		i, link->io.BasePort1);
+    	elsa_cs_release(link);
+    } else
+    	((local_info_t*)link->priv)->cardnr = i;
+
     return;
 cs_failed:
     cs_error(link->handle, last_fn, i);
@@ -439,23 +431,26 @@ cs_failed:
 
 static void elsa_cs_release(dev_link_t *link)
 {
+    local_info_t *local = link->priv;
 
     DEBUG(0, "elsa_cs_release(0x%p)\n", link);
 
+    if (local) {
+    	if (local->cardnr >= 0) {
+    	    /* no unregister function with hisax */
+	    HiSax_closecard(local->cardnr);
+	}
+    }
     /* Unlink the device chain */
     link->dev = NULL;
 
     /* Don't bother checking to see if these succeed or not */
     if (link->win)
-        CardServices(ReleaseWindow, link->win);
-    CardServices(ReleaseConfiguration, link->handle);
-    CardServices(ReleaseIO, link->handle, &link->io);
-    CardServices(ReleaseIRQ, link->handle, &link->irq);
+        pcmcia_release_window(link->win);
+    pcmcia_release_configuration(link->handle);
+    pcmcia_release_io(link->handle, &link->io);
+    pcmcia_release_irq(link->handle, &link->irq);
     link->state &= ~DEV_CONFIG;
-
-    if (link->state & DEV_STALE_LINK)
-        elsa_cs_detach(link);
-
 } /* elsa_cs_release */
 
 /*======================================================================
@@ -499,14 +494,14 @@ static int elsa_cs_event(event_t event, int priority,
         /* Mark the device as stopped, to block IO until later */
         dev->busy = 1;
         if (link->state & DEV_CONFIG)
-            CardServices(ReleaseConfiguration, link->handle);
+            pcmcia_release_configuration(link->handle);
         break;
     case CS_EVENT_PM_RESUME:
         link->state &= ~DEV_SUSPEND;
         /* Fall through... */
     case CS_EVENT_CARD_RESET:
         if (link->state & DEV_CONFIG)
-            CardServices(RequestConfiguration, link->handle, &link->conf);
+            pcmcia_request_configuration(link->handle, &link->conf);
         dev->busy = 0;
         break;
     }
@@ -530,10 +525,7 @@ static int __init init_elsa_cs(void)
 static void __exit exit_elsa_cs(void)
 {
 	pcmcia_unregister_driver(&elsa_cs_driver);
-
-	/* XXX: this really needs to move into generic code.. */
-	while (dev_list != NULL)
-		elsa_cs_detach(dev_list);
+	BUG_ON(dev_list != NULL);
 }
 
 module_init(init_elsa_cs);

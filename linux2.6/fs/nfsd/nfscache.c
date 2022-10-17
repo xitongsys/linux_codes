@@ -41,14 +41,14 @@ static struct svc_cacherep *	lru_tail;
 static struct svc_cacherep *	nfscache;
 static int			cache_disabled = 1;
 
-static int	nfsd_cache_append(struct svc_rqst *rqstp, struct iovec *vec);
+static int	nfsd_cache_append(struct svc_rqst *rqstp, struct kvec *vec);
 
 /* 
  * locking for the reply cache:
  * A cache entry is "single use" if c_state == RC_INPROG
  * Otherwise, it when accessing _prev or _next, the lock must be held.
  */
-static spinlock_t cache_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(cache_lock);
 
 void
 nfsd_cache_init(void)
@@ -308,7 +308,7 @@ void
 nfsd_cache_update(struct svc_rqst *rqstp, int cachetype, u32 *statp)
 {
 	struct svc_cacherep *rp;
-	struct iovec	*resv = &rqstp->rq_res.head[0], *cachv;
+	struct kvec	*resv = &rqstp->rq_res.head[0], *cachv;
 	int		len;
 
 	if (!(rp = rqstp->rq_cacherep) || cache_disabled)
@@ -358,9 +358,9 @@ nfsd_cache_update(struct svc_rqst *rqstp, int cachetype, u32 *statp)
  * keep a refcount....
  */
 static int
-nfsd_cache_append(struct svc_rqst *rqstp, struct iovec *data)
+nfsd_cache_append(struct svc_rqst *rqstp, struct kvec *data)
 {
-	struct iovec	*vec = &rqstp->rq_res.head[0];
+	struct kvec	*vec = &rqstp->rq_res.head[0];
 
 	if (vec->iov_len + data->iov_len > PAGE_SIZE) {
 		printk(KERN_WARNING "nfsd: cached reply too large (%Zd).\n",

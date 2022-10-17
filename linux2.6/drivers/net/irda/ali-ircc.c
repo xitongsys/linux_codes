@@ -8,6 +8,8 @@
  * Created at:    2000/10/16 03:46PM
  * Modified at:   2001/1/3 02:55PM
  * Modified by:   Benjamin Kong <benjamin_kong@ali.com.tw>
+ * Modified at:   2003/11/6 and support for ALi south-bridge chipsets M1563
+ * Modified by:   Clear Zhang <clear_zhang@ali.com.tw>
  * 
  *     Copyright (c) 2000 Benjamin Kong <benjamin_kong@ali.com.tw>
  *     All Rights Reserved
@@ -31,6 +33,7 @@
 #include <linux/init.h>
 #include <linux/rtnetlink.h>
 #include <linux/serial_reg.h>
+#include <linux/dma-mapping.h>
 
 #include <asm/io.h>
 #include <asm/dma.h>
@@ -42,7 +45,7 @@
 #include <net/irda/irda.h>
 #include <net/irda/irda_device.h>
 
-#include <net/irda/ali-ircc.h>
+#include "ali-ircc.h"
 
 #define CHIP_IO_EXTENT 8
 #define BROKEN_DONGLE_ID
@@ -68,6 +71,7 @@ static ali_chip_t chips[] =
 {
 	{ "M1543", { 0x3f0, 0x370 }, 0x51, 0x23, 0x20, 0x43, ali_ircc_probe_53, ali_ircc_init_43 },
 	{ "M1535", { 0x3f0, 0x370 }, 0x51, 0x23, 0x20, 0x53, ali_ircc_probe_53, ali_ircc_init_53 },
+	{ "M1563", { 0x3f0, 0x370 }, 0x51, 0x23, 0x20, 0x63, ali_ircc_probe_53, ali_ircc_init_53 },
 	{ NULL }
 };
 
@@ -100,7 +104,7 @@ static struct net_device_stats *ali_ircc_net_get_stats(struct net_device *dev);
 
 /* SIR function */
 static int  ali_ircc_sir_hard_xmit(struct sk_buff *skb, struct net_device *dev);
-static void ali_ircc_sir_interrupt(int irq, struct ali_ircc_cb *self, struct pt_regs *regs);
+static irqreturn_t ali_ircc_sir_interrupt(struct ali_ircc_cb *self);
 static void ali_ircc_sir_receive(struct ali_ircc_cb *self);
 static void ali_ircc_sir_write_wakeup(struct ali_ircc_cb *self);
 static int  ali_ircc_sir_write(int iobase, int fifo_size, __u8 *buf, int len);
@@ -109,7 +113,7 @@ static void ali_ircc_sir_change_speed(struct ali_ircc_cb *priv, __u32 speed);
 /* FIR function */
 static int  ali_ircc_fir_hard_xmit(struct sk_buff *skb, struct net_device *dev);
 static void ali_ircc_fir_change_speed(struct ali_ircc_cb *priv, __u32 speed);
-static void ali_ircc_fir_interrupt(int irq, struct ali_ircc_cb *self, struct pt_regs *regs);
+static irqreturn_t ali_ircc_fir_interrupt(struct ali_ircc_cb *self);
 static int  ali_ircc_dma_receive(struct ali_ircc_cb *self); 
 static int  ali_ircc_dma_receive_complete(struct ali_ircc_cb *self);
 static int  ali_ircc_dma_xmit_complete(struct ali_ircc_cb *self);
@@ -130,7 +134,7 @@ static void SetCOMInterrupts(struct ali_ircc_cb *self , unsigned char enable);
  *    Initialize chip. Find out whay kinds of chips we are dealing with
  *    and their configuation registers address
  */
-int __init ali_ircc_init(void)
+static int __init ali_ircc_init(void)
 {
 	ali_chip_t *chip;
 	chipio_t info;
@@ -296,23 +300,23 @@ static int ali_ircc_open(int i, chipio_t *info)
 			
 	irda_qos_bits_to_value(&self->qos);
 	
-	self->flags = IFF_FIR|IFF_MIR|IFF_SIR|IFF_DMA|IFF_PIO; 	// benjamin 2000/11/8 05:27PM	
-
 	/* Max DMA buffer size needed = (data_size + 6) * (window_size) + 6; */
 	self->rx_buff.truesize = 14384; 
 	self->tx_buff.truesize = 14384;
 
 	/* Allocate memory if needed */
-	self->rx_buff.head = (__u8 *) kmalloc(self->rx_buff.truesize,
-					      GFP_KERNEL |GFP_DMA); 
+	self->rx_buff.head =
+		dma_alloc_coherent(NULL, self->rx_buff.truesize,
+				   &self->rx_buff_dma, GFP_KERNEL);
 	if (self->rx_buff.head == NULL) {
 		err = -ENOMEM;
 		goto err_out2;
 	}
 	memset(self->rx_buff.head, 0, self->rx_buff.truesize);
 	
-	self->tx_buff.head = (__u8 *) kmalloc(self->tx_buff.truesize, 
-					      GFP_KERNEL|GFP_DMA); 
+	self->tx_buff.head =
+		dma_alloc_coherent(NULL, self->tx_buff.truesize,
+				   &self->tx_buff_dma, GFP_KERNEL);
 	if (self->tx_buff.head == NULL) {
 		err = -ENOMEM;
 		goto err_out3;
@@ -361,9 +365,11 @@ static int ali_ircc_open(int i, chipio_t *info)
 	return 0;
 
  err_out4:
-	kfree(self->tx_buff.head);
+	dma_free_coherent(NULL, self->tx_buff.truesize,
+			  self->tx_buff.head, self->tx_buff_dma);
  err_out3:
-	kfree(self->rx_buff.head);
+	dma_free_coherent(NULL, self->rx_buff.truesize,
+			  self->rx_buff.head, self->rx_buff_dma);
  err_out2:
 	release_region(self->io.fir_base, self->io.fir_ext);
  err_out1:
@@ -397,10 +403,12 @@ static int __exit ali_ircc_close(struct ali_ircc_cb *self)
 	release_region(self->io.fir_base, self->io.fir_ext);
 
 	if (self->tx_buff.head)
-		kfree(self->tx_buff.head);
+		dma_free_coherent(NULL, self->tx_buff.truesize,
+				  self->tx_buff.head, self->tx_buff_dma);
 	
 	if (self->rx_buff.head)
-		kfree(self->rx_buff.head);
+		dma_free_coherent(NULL, self->rx_buff.truesize,
+				  self->rx_buff.head, self->rx_buff_dma);
 
 	dev_self[self->index] = NULL;
 	free_netdev(self->netdev);
@@ -632,6 +640,7 @@ static irqreturn_t ali_ircc_interrupt(int irq, void *dev_id,
 {
 	struct net_device *dev = (struct net_device *) dev_id;
 	struct ali_ircc_cb *self;
+	int ret;
 		
 	IRDA_DEBUG(2, "%s(), ---------------- Start ----------------\n", __FUNCTION__);
 		
@@ -646,22 +655,22 @@ static irqreturn_t ali_ircc_interrupt(int irq, void *dev_id,
 	
 	/* Dispatch interrupt handler for the current speed */
 	if (self->io.speed > 115200)
-		ali_ircc_fir_interrupt(irq, self, regs);
+		ret = ali_ircc_fir_interrupt(self);
 	else
-		ali_ircc_sir_interrupt(irq, self, regs);	
+		ret = ali_ircc_sir_interrupt(self);
 		
 	spin_unlock(&self->lock);
 	
 	IRDA_DEBUG(2, "%s(), ----------------- End ------------------\n", __FUNCTION__);
-	return IRQ_HANDLED;
+	return ret;
 }
 /*
- * Function ali_ircc_fir_interrupt(irq, struct ali_ircc_cb *self, regs)
+ * Function ali_ircc_fir_interrupt(irq, struct ali_ircc_cb *self)
  *
  *    Handle MIR/FIR interrupt
  *
  */
-static void ali_ircc_fir_interrupt(int irq, struct ali_ircc_cb *self, struct pt_regs *regs)
+static irqreturn_t ali_ircc_fir_interrupt(struct ali_ircc_cb *self)
 {
 	__u8 eir, OldMessageCount;
 	int iobase, tmp;
@@ -774,6 +783,7 @@ static void ali_ircc_fir_interrupt(int irq, struct ali_ircc_cb *self, struct pt_
 	SetCOMInterrupts(self, TRUE);	
 		
 	IRDA_DEBUG(1, "%s(), ----------------- End ---------------\n", __FUNCTION__);
+	return IRQ_RETVAL(eir);
 }
 
 /*
@@ -782,7 +792,7 @@ static void ali_ircc_fir_interrupt(int irq, struct ali_ircc_cb *self, struct pt_
  *    Handle SIR interrupt
  *
  */
-static void ali_ircc_sir_interrupt(int irq, struct ali_ircc_cb *self, struct pt_regs *regs)
+static irqreturn_t ali_ircc_sir_interrupt(struct ali_ircc_cb *self)
 {
 	int iobase;
 	int iir, lsr;
@@ -824,6 +834,8 @@ static void ali_ircc_sir_interrupt(int irq, struct ali_ircc_cb *self, struct pt_
 	
 	
 	IRDA_DEBUG(2, "%s(), ----------------- End ------------------\n", __FUNCTION__);	
+
+	return IRQ_RETVAL(iir);
 }
 
 
@@ -1331,7 +1343,7 @@ static int ali_ircc_net_open(struct net_device *dev)
 	}
 	
 	/* Turn on interrups */
-	outb(UART_IER_RLSI | UART_IER_RDI |UART_IER_THRI, iobase+UART_IER);
+	outb(UART_IER_RDI , iobase+UART_IER);
 
 	/* Ready to play! */
 	netif_start_queue(dev); //benjamin by irport
@@ -1566,10 +1578,11 @@ static void ali_ircc_dma_xmit(struct ali_ircc_cb *self)
 	
 	self->io.direction = IO_XMIT;
 	
-	setup_dma(self->io.dma, 
-		  self->tx_fifo.queue[self->tx_fifo.ptr].start, 
-		  self->tx_fifo.queue[self->tx_fifo.ptr].len, 
-		  DMA_TX_MODE);
+	irda_setup_dma(self->io.dma, 
+		       ((u8 *)self->tx_fifo.queue[self->tx_fifo.ptr].start -
+			self->tx_buff.head) + self->tx_buff_dma,
+		       self->tx_fifo.queue[self->tx_fifo.ptr].len, 
+		       DMA_TX_MODE);
 		
 	/* Reset Tx FIFO */
 	switch_bank(iobase, BANK0);
@@ -1719,8 +1732,8 @@ static int ali_ircc_dma_receive(struct ali_ircc_cb *self)
 	self->st_fifo.len = self->st_fifo.pending_bytes = 0;
 	self->st_fifo.tail = self->st_fifo.head = 0;
 		
-	setup_dma(self->io.dma, self->rx_buff.data, self->rx_buff.truesize, 
-		  DMA_RX_MODE);	
+	irda_setup_dma(self->io.dma, self->rx_buff_dma, self->rx_buff.truesize,
+		       DMA_RX_MODE);
 	 
 	/* Set Receive Mode,Brick Wall */
 	//switch_bank(iobase, BANK0);
@@ -2251,11 +2264,11 @@ MODULE_DESCRIPTION("ALi FIR Controller Driver");
 MODULE_LICENSE("GPL");
 
 
-MODULE_PARM(io,  "1-4i");
+module_param_array(io, int, NULL, 0);
 MODULE_PARM_DESC(io, "Base I/O addresses");
-MODULE_PARM(irq, "1-4i");
+module_param_array(irq, int, NULL, 0);
 MODULE_PARM_DESC(irq, "IRQ lines");
-MODULE_PARM(dma, "1-4i");
+module_param_array(dma, int, NULL, 0);
 MODULE_PARM_DESC(dma, "DMA channels");
 
 module_init(ali_ircc_init);

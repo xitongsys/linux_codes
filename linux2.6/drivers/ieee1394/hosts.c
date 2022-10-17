@@ -16,14 +16,47 @@
 #include <linux/list.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/pci.h>
+#include <linux/timer.h>
 
+#include "csr1212.h"
+#include "ieee1394.h"
 #include "ieee1394_types.h"
 #include "hosts.h"
 #include "ieee1394_core.h"
 #include "highlevel.h"
+#include "nodemgr.h"
+#include "csr.h"
+#include "config_roms.h"
 
-LIST_HEAD(hpsb_hosts);
-DECLARE_MUTEX(hpsb_hosts_lock);
+
+static void delayed_reset_bus(void * __reset_info)
+{
+	struct hpsb_host *host = (struct hpsb_host*)__reset_info;
+	int generation = host->csr.generation + 1;
+
+	/* The generation field rolls over to 2 rather than 0 per IEEE
+	 * 1394a-2000. */
+	if (generation > 0xf || generation < 2)
+		generation = 2;
+
+	CSR_SET_BUS_INFO_GENERATION(host->csr.rom, generation);
+	if (csr1212_generate_csr_image(host->csr.rom) != CSR1212_SUCCESS) {
+		/* CSR image creation failed, reset generation field and do not
+		 * issue a bus reset. */
+		CSR_SET_BUS_INFO_GENERATION(host->csr.rom, host->csr.generation);
+		return;
+	}
+
+	host->csr.generation = generation;
+
+	host->update_config_rom = 0;
+	if (host->driver->set_hw_config_rom)
+		host->driver->set_hw_config_rom(host, host->csr.rom->bus_info_data);
+
+	host->csr.gen_timestamp[host->csr.generation] = jiffies;
+	hpsb_reset_bus(host, SHORT_RESET);
+}
 
 static int dummy_transmit_packet(struct hpsb_host *h, struct hpsb_packet *p)
 {
@@ -46,54 +79,14 @@ static struct hpsb_host_driver dummy_driver = {
 	.isoctl =          dummy_isoctl
 };
 
-/**
- * hpsb_ref_host - increase reference count for host controller.
- * @host: the host controller
- *
- * Increase the reference count for the specified host controller.
- * When holding a reference to a host, the memory allocated for the
- * host struct will not be freed and the host is guaranteed to be in a
- * consistent state.  The driver may be unloaded or the controller may
- * be removed (PCMCIA), but the host struct will remain valid.
- */
-
-int hpsb_ref_host(struct hpsb_host *host)
+static int alloc_hostnum_cb(struct hpsb_host *host, void *__data)
 {
-        struct list_head *lh;
-        int retval = 0;
+	int *hostnum = __data;
 
-	down(&hpsb_hosts_lock);
-        list_for_each(lh, &hpsb_hosts) {
-                if (host == list_entry(lh, struct hpsb_host, host_list)) {
-			if (try_module_get(host->driver->owner)) {
-				atomic_inc(&host->refcount);
-				retval = 1;
-			}
-			break;
-        	}
-        }
-	up(&hpsb_hosts_lock);
+	if (host->id == *hostnum)
+		return 1;
 
-        return retval;
-}
-
-/**
- * hpsb_unref_host - decrease reference count for host controller.
- * @host: the host controller
- *
- * Decrease the reference count for the specified host controller.
- * When the reference count reaches zero, the memory allocated for the
- * &hpsb_host will be freed.
- */
-
-void hpsb_unref_host(struct hpsb_host *host)
-{
-	module_put(host->driver->owner);
-
-	down(&hpsb_hosts_lock);
-        if (atomic_dec_and_test(&host->refcount) && host->is_shutdown)
-		device_unregister(&host->device);
-	up(&hpsb_hosts_lock);
+	return 0;
 }
 
 /**
@@ -108,36 +101,44 @@ void hpsb_unref_host(struct hpsb_host *host)
  * driver specific parts, enable the controller and make it available
  * to the general subsystem using hpsb_add_host().
  *
- * The &hpsb_host is allocated with an single initial reference
- * belonging to the driver.  Once the driver is done with the struct,
- * for example, when the driver is unloaded, it should release this
- * reference using hpsb_unref_host().
- *
  * Return Value: a pointer to the &hpsb_host if succesful, %NULL if
  * no memory was available.
  */
+static DECLARE_MUTEX(host_num_alloc);
 
-struct hpsb_host *hpsb_alloc_host(struct hpsb_host_driver *drv, size_t extra)
+struct hpsb_host *hpsb_alloc_host(struct hpsb_host_driver *drv, size_t extra,
+				  struct device *dev)
 {
         struct hpsb_host *h;
 	int i;
+	int hostnum = 0;
 
         h = kmalloc(sizeof(struct hpsb_host) + extra, SLAB_KERNEL);
         if (!h) return NULL;
         memset(h, 0, sizeof(struct hpsb_host) + extra);
 
+	h->csr.rom = csr1212_create_csr(&csr_bus_ops, CSR_BUS_INFO_SIZE, h);
+	if (!h->csr.rom) {
+		kfree(h);
+		return NULL;
+	}
+
 	h->hostdata = h + 1;
         h->driver = drv;
-	atomic_set(&h->refcount, 1);
 
-        INIT_LIST_HEAD(&h->pending_packets);
-        spin_lock_init(&h->pending_pkt_lock);
+	skb_queue_head_init(&h->pending_packet_queue);
+	INIT_LIST_HEAD(&h->addr_space);
+
+	for (i = 2; i < 16; i++)
+		h->csr.gen_timestamp[i] = jiffies - 60 * HZ;
 
 	for (i = 0; i < ARRAY_SIZE(h->tpool); i++)
 		HPSB_TPOOL_INIT(&h->tpool[i]);
 
 	atomic_set(&h->generation, 0);
 
+	INIT_WORK(&h->delayed_reset, delayed_reset_bus, h);
+	
 	init_timer(&h->timeout);
 	h->timeout.data = (unsigned long) h;
 	h->timeout.function = abort_timedouts;
@@ -146,53 +147,87 @@ struct hpsb_host *hpsb_alloc_host(struct hpsb_host_driver *drv, size_t extra)
         h->topology_map = h->csr.topology_map + 3;
         h->speed_map = (u8 *)(h->csr.speed_map + 2);
 
+	down(&host_num_alloc);
+
+	while (nodemgr_for_each_host(&hostnum, alloc_hostnum_cb))
+		hostnum++;
+
+	h->id = hostnum;
+
+	memcpy(&h->device, &nodemgr_dev_template_host, sizeof(h->device));
+	h->device.parent = dev;
+	snprintf(h->device.bus_id, BUS_ID_SIZE, "fw-host%d", h->id);
+
+	h->class_dev.dev = &h->device;
+	h->class_dev.class = &hpsb_host_class;
+	snprintf(h->class_dev.class_id, BUS_ID_SIZE, "fw-host%d", h->id);
+
+	device_register(&h->device);
+	class_device_register(&h->class_dev);
+	get_device(&h->device);
+
+	up(&host_num_alloc);
+
 	return h;
 }
 
-static int alloc_hostnum(void)
+int hpsb_add_host(struct hpsb_host *host)
 {
-	int hostnum = 0;
+	if (hpsb_default_host_entry(host))
+		return -ENOMEM;
 
-	while (1) {
-		struct list_head *lh;
-		int found = 0;
+	hpsb_add_extra_config_roms(host);
 
-		list_for_each(lh, &hpsb_hosts) {
-			struct hpsb_host *host = list_entry(lh, struct hpsb_host, host_list);
-
-			if (host->id == hostnum) {
-				found = 1;
-				break;
-			}
-		}
-
-		if (!found)
-			return hostnum;
-
-		hostnum++;
-	}
+	highlevel_add_host(host);
 
 	return 0;
 }
 
-void hpsb_add_host(struct hpsb_host *host)
-{
-	down(&hpsb_hosts_lock);
-	host->id = alloc_hostnum();
-        list_add_tail(&host->host_list, &hpsb_hosts);
-	up(&hpsb_hosts_lock);
-
-        highlevel_add_host(host);
-        host->driver->devctl(host, RESET_BUS, LONG_RESET);
-}
-
 void hpsb_remove_host(struct hpsb_host *host)
 {
-	down(&hpsb_hosts_lock);
         host->is_shutdown = 1;
+
+	cancel_delayed_work(&host->delayed_reset);
+	flush_scheduled_work();
+
         host->driver = &dummy_driver;
-	list_del(&host->host_list);
-	up(&hpsb_hosts_lock);
 
         highlevel_remove_host(host);
+
+	hpsb_remove_extra_config_roms(host);
+
+	class_device_unregister(&host->class_dev);
+	device_unregister(&host->device);
+}
+
+int hpsb_update_config_rom_image(struct hpsb_host *host)
+{
+	unsigned long reset_delay;
+	int next_gen = host->csr.generation + 1;
+
+	if (!host->update_config_rom)
+		return -EINVAL;
+
+	if (next_gen > 0xf)
+		next_gen = 2;
+
+	/* Stop the delayed interrupt, we're about to change the config rom and
+	 * it would be a waste to do a bus reset twice. */
+	cancel_delayed_work(&host->delayed_reset);
+
+	/* IEEE 1394a-2000 prohibits using the same generation number
+	 * twice in a 60 second period. */
+	if (jiffies - host->csr.gen_timestamp[next_gen] < 60 * HZ)
+		/* Wait 60 seconds from the last time this generation number was
+		 * used. */
+		reset_delay = (60 * HZ) + host->csr.gen_timestamp[next_gen] - jiffies;
+	else
+		/* Wait 1 second in case some other code wants to change the
+		 * Config ROM in the near future. */
+		reset_delay = HZ;
+
+	PREPARE_WORK(&host->delayed_reset, delayed_reset_bus, host);
+	schedule_delayed_work(&host->delayed_reset, reset_delay);
+
+	return 0;
 }

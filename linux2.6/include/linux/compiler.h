@@ -1,15 +1,39 @@
 #ifndef __LINUX_COMPILER_H
 #define __LINUX_COMPILER_H
 
+#ifndef __ASSEMBLY__
+
 #ifdef __CHECKER__
 # define __user		__attribute__((noderef, address_space(1)))
 # define __kernel	/* default address space */
+# define __safe		__attribute__((safe))
+# define __force	__attribute__((force))
+# define __iomem	__attribute__((noderef, address_space(2)))
+# define __acquires(x)	__attribute__((context(0,1)))
+# define __releases(x)	__attribute__((context(1,0)))
+# define __acquire(x)	__context__(1)
+# define __release(x)	__context__(-1)
+# define __cond_lock(x)	((x) ? ({ __context__(1); 1; }) : 0)
+extern void __chk_user_ptr(void __user *);
+extern void __chk_io_ptr(void __iomem *);
 #else
 # define __user
 # define __kernel
+# define __safe
+# define __force
+# define __iomem
+# define __chk_user_ptr(x) (void)0
+# define __chk_io_ptr(x) (void)0
+# define __builtin_warning(x, y...) (1)
+# define __acquires(x)
+# define __releases(x)
+# define __acquire(x) (void)0
+# define __release(x) (void)0
+# define __cond_lock(x) (x)
 #endif
 
-#ifndef __ASSEMBLY__
+#ifdef __KERNEL__
+
 #if __GNUC__ > 3
 # include <linux/compiler-gcc+.h>	/* catch-all for GCC 4, 5, etc. */
 #elif __GNUC__ == 3
@@ -18,7 +42,6 @@
 # include <linux/compiler-gcc2.h>
 #else
 # error Sorry, your compiler is too old/not recognized.
-#endif
 #endif
 
 /* Intel compiler defines __GNUC__. So we will overwrite implementations
@@ -37,6 +60,22 @@
 #define likely(x)	__builtin_expect(!!(x), 1)
 #define unlikely(x)	__builtin_expect(!!(x), 0)
 
+/* Optimization barrier */
+#ifndef barrier
+# define barrier() __memory_barrier()
+#endif
+
+#ifndef RELOC_HIDE
+# define RELOC_HIDE(ptr, off)					\
+  ({ unsigned long __ptr;					\
+     __ptr = (unsigned long) (ptr);				\
+    (typeof(ptr)) (__ptr + (off)); })
+#endif
+
+#endif /* __ASSEMBLY__ */
+
+#endif /* __KERNEL__ */
+
 /*
  * Allow us to mark functions as 'deprecated' and have gcc emit a nice
  * warning for each use, in hopes of speeding the functions removal.
@@ -45,6 +84,10 @@
  */
 #ifndef __deprecated
 # define __deprecated		/* unimplemented */
+#endif
+
+#ifndef __must_check
+#define __must_check
 #endif
 
 /*
@@ -76,16 +119,30 @@
 # define __attribute_pure__	/* unimplemented */
 #endif
 
-/* Optimization barrier */
-#ifndef barrier
-# define barrier() __memory_barrier()
+/*
+ * From the GCC manual:
+ *
+ * Many functions do not examine any values except their arguments,
+ * and have no effects except the return value.  Basically this is
+ * just slightly more strict class than the `pure' attribute above,
+ * since function is not allowed to read global memory.
+ *
+ * Note that a function that has pointer arguments and examines the
+ * data pointed to must _not_ be declared `const'.  Likewise, a
+ * function that calls a non-`const' function usually must not be
+ * `const'.  It does not make sense for a `const' function to return
+ * `void'.
+ */
+#ifndef __attribute_const__
+# define __attribute_const__	/* unimplemented */
 #endif
 
-#ifndef RELOC_HIDE
-# define RELOC_HIDE(ptr, off)					\
-  ({ unsigned long __ptr;					\
-     __ptr = (unsigned long) (ptr);				\
-    (typeof(ptr)) (__ptr + (off)); })
+#ifndef noinline
+#define noinline
+#endif
+
+#ifndef __always_inline
+#define __always_inline inline
 #endif
 
 #endif /* __LINUX_COMPILER_H */

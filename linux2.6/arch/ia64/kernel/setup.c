@@ -1,7 +1,7 @@
 /*
  * Architecture-specific setup.
  *
- * Copyright (C) 1998-2001, 2003 Hewlett-Packard Co
+ * Copyright (C) 1998-2001, 2003-2004 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  *	Stephane Eranian <eranian@hpl.hp.com>
  * Copyright (C) 2000, Rohit Seth <rohit.seth@intel.com>
@@ -17,6 +17,7 @@
  * 06/24/99 W.Drummond	added boot_cpu_data.
  */
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/init.h>
 
 #include <linux/acpi.h>
@@ -46,6 +47,7 @@
 #include <asm/sal.h>
 #include <asm/sections.h>
 #include <asm/serial.h>
+#include <asm/setup.h>
 #include <asm/smp.h>
 #include <asm/system.h>
 #include <asm/unistd.h>
@@ -56,6 +58,7 @@
 
 #ifdef CONFIG_SMP
 unsigned long __per_cpu_offset[NR_CPUS];
+EXPORT_SYMBOL(__per_cpu_offset);
 #endif
 
 DEFINE_PER_CPU(struct cpuinfo_ia64, cpu_info);
@@ -67,7 +70,9 @@ struct screen_info screen_info;
 
 unsigned long ia64_max_cacheline_size;
 unsigned long ia64_iobase;	/* virtual address for I/O accesses */
+EXPORT_SYMBOL(ia64_iobase);
 struct io_space io_space[MAX_IO_SPACES];
+EXPORT_SYMBOL(io_space);
 unsigned int num_io_spaces;
 
 unsigned char aux_device_present = 0xaa;        /* XXX remove this when legacy I/O is gone */
@@ -82,10 +87,7 @@ unsigned char aux_device_present = 0xaa;        /* XXX remove this when legacy I
  * page-size of 2^64.
  */
 unsigned long ia64_max_iommu_merge_mask = ~0UL;
-
-#define COMMAND_LINE_SIZE	512
-
-char saved_command_line[COMMAND_LINE_SIZE]; /* used in proc filesystem */
+EXPORT_SYMBOL(ia64_max_iommu_merge_mask);
 
 /*
  * We use a special marker for the end of memory and it uses the extra (+1) slot
@@ -224,60 +226,11 @@ find_initrd (void)
 #endif
 }
 
-#ifdef CONFIG_SERIAL_8250_CONSOLE
 static void __init
-setup_serial_legacy (void)
-{
-	struct uart_port port;
-	unsigned int i, iobase[] = {0x3f8, 0x2f8};
-
-	printk(KERN_INFO "Registering legacy COM ports for serial console\n");
-	memset(&port, 0, sizeof(port));
-	port.iotype = SERIAL_IO_PORT;
-	port.uartclk = BASE_BAUD * 16;
-	for (i = 0; i < ARRAY_SIZE(iobase); i++) {
-		port.line = i;
-		port.iobase = iobase[i];
-		early_serial_setup(&port);
-	}
-}
-#endif
-
-void __init
-setup_arch (char **cmdline_p)
+io_port_init (void)
 {
 	extern unsigned long ia64_iobase;
 	unsigned long phys_iobase;
-
-	unw_init();
-
-	ia64_patch_vtop((u64) __start___vtop_patchlist, (u64) __end___vtop_patchlist);
-
-	*cmdline_p = __va(ia64_boot_param->command_line);
-	strlcpy(saved_command_line, *cmdline_p, sizeof(saved_command_line));
-
-	efi_init();
-
-#ifdef CONFIG_ACPI_BOOT
-	/* Initialize the ACPI boot-time table parser */
-	acpi_table_init();
-# ifdef CONFIG_ACPI_NUMA
-	acpi_numa_init();
-# endif
-#else
-# ifdef CONFIG_SMP
-	smp_build_cpu_map();	/* happens, e.g., with the Ski simulator */
-# endif
-#endif /* CONFIG_APCI_BOOT */
-
-	find_memory();
-
-	/* process SAL system table: */
-	ia64_sal_init(efi.sal_systab);
-
-#ifdef CONFIG_IA64_GENERIC
-	machvec_init(acpi_get_sysname());
-#endif
 
 	/*
 	 *  Set `iobase' to the appropriate address in region 6 (uncached access range).
@@ -303,6 +256,105 @@ setup_arch (char **cmdline_p)
 	io_space[0].mmio_base = ia64_iobase;
 	io_space[0].sparse = 1;
 	num_io_spaces = 1;
+}
+
+/**
+ * early_console_setup - setup debugging console
+ *
+ * Consoles started here require little enough setup that we can start using
+ * them very early in the boot process, either right after the machine
+ * vector initialization, or even before if the drivers can detect their hw.
+ *
+ * Returns non-zero if a console couldn't be setup.
+ */
+static inline int __init
+early_console_setup (char *cmdline)
+{
+#ifdef CONFIG_SERIAL_SGI_L1_CONSOLE
+	{
+		extern int sn_serial_console_early_setup(void);
+		if (!sn_serial_console_early_setup())
+			return 0;
+	}
+#endif
+#ifdef CONFIG_EFI_PCDP
+	if (!efi_setup_pcdp_console(cmdline))
+		return 0;
+#endif
+#ifdef CONFIG_SERIAL_8250_CONSOLE
+	if (!early_serial_console_init(cmdline))
+		return 0;
+#endif
+
+	return -1;
+}
+
+static inline void
+mark_bsp_online (void)
+{
+#ifdef CONFIG_SMP
+	/* If we register an early console, allow CPU 0 to printk */
+	cpu_set(smp_processor_id(), cpu_online_map);
+#endif
+}
+
+void __init
+setup_arch (char **cmdline_p)
+{
+	unw_init();
+
+	ia64_patch_vtop((u64) __start___vtop_patchlist, (u64) __end___vtop_patchlist);
+
+	*cmdline_p = __va(ia64_boot_param->command_line);
+	strlcpy(saved_command_line, *cmdline_p, COMMAND_LINE_SIZE);
+
+	efi_init();
+	io_port_init();
+
+#ifdef CONFIG_IA64_GENERIC
+	{
+		const char *mvec_name = strstr (*cmdline_p, "machvec=");
+		char str[64];
+
+		if (mvec_name) {
+			const char *end;
+			size_t len;
+
+			mvec_name += 8;
+			end = strchr (mvec_name, ' ');
+			if (end)
+				len = end - mvec_name;
+			else
+				len = strlen (mvec_name);
+			len = min(len, sizeof (str) - 1);
+			strncpy (str, mvec_name, len);
+			str[len] = '\0';
+			mvec_name = str;
+		} else
+			mvec_name = acpi_get_sysname();
+		machvec_init(mvec_name);
+	}
+#endif
+
+	if (early_console_setup(*cmdline_p) == 0)
+		mark_bsp_online();
+
+#ifdef CONFIG_ACPI_BOOT
+	/* Initialize the ACPI boot-time table parser */
+	acpi_table_init();
+# ifdef CONFIG_ACPI_NUMA
+	acpi_numa_init();
+# endif
+#else
+# ifdef CONFIG_SMP
+	smp_build_cpu_map();	/* happens, e.g., with the Ski simulator */
+# endif
+#endif /* CONFIG_APCI_BOOT */
+
+	find_memory();
+
+	/* process SAL system table: */
+	ia64_sal_init(efi.sal_systab);
 
 #ifdef CONFIG_SMP
 	cpu_physical_id(0) = hard_smp_processor_id();
@@ -313,47 +365,28 @@ setup_arch (char **cmdline_p)
 #ifdef CONFIG_ACPI_BOOT
 	acpi_boot_init();
 #endif
-#ifdef CONFIG_SERIAL_8250_HCDP
-	if (efi.hcdp) {
-		void setup_serial_hcdp(void *);
-		setup_serial_hcdp(efi.hcdp);
-	}
-#endif
-#ifdef CONFIG_SERIAL_8250_CONSOLE
-	/*
-	 * Without HCDP, we won't discover any serial ports until the serial driver looks
-	 * in the ACPI namespace.  If ACPI claims there are some legacy devices, register
-	 * the legacy COM ports so serial console works earlier.  This is slightly dangerous
-	 * because we don't *really* know whether there's anything there, but we hope that
-	 * all new boxes will implement HCDP.
-	 */
-	{
-		extern unsigned char acpi_legacy_devices;
-		if (!efi.hcdp && acpi_legacy_devices)
-			setup_serial_legacy();
-	}
-#endif
 
 #ifdef CONFIG_VT
+	if (!conswitchp) {
 # if defined(CONFIG_DUMMY_CONSOLE)
-	conswitchp = &dummy_con;
+		conswitchp = &dummy_con;
 # endif
 # if defined(CONFIG_VGA_CONSOLE)
-	/*
-	 * Non-legacy systems may route legacy VGA MMIO range to system
-	 * memory.  vga_con probes the MMIO hole, so memory looks like
-	 * a VGA device to it.  The EFI memory map can tell us if it's
-	 * memory so we can avoid this problem.
-	 */
-	if (efi_mem_type(0xA0000) != EFI_CONVENTIONAL_MEMORY)
-		conswitchp = &vga_con;
+		/*
+		 * Non-legacy systems may route legacy VGA MMIO range to system
+		 * memory.  vga_con probes the MMIO hole, so memory looks like
+		 * a VGA device to it.  The EFI memory map can tell us if it's
+		 * memory so we can avoid this problem.
+		 */
+		if (efi_mem_type(0xA0000) != EFI_CONVENTIONAL_MEMORY)
+			conswitchp = &vga_con;
 # endif
+	}
 #endif
 
-#ifdef CONFIG_IA64_MCA
-	/* enable IA-64 Machine Check Abort Handling */
-	ia64_mca_init();
-#endif
+	/* enable IA-64 Machine Check Abort Handling unless disabled */
+	if (!strstr(saved_command_line, "nomca"))
+		ia64_mca_init();
 
 	platform_setup(cmdline_p);
 	paging_init();
@@ -516,8 +549,6 @@ identify_cpu (struct cpuinfo_ia64 *c)
 		impl_va_msb = vm2.pal_vm_info_2_s.impl_va_msb;
 		phys_addr_size = vm1.pal_vm_info_1_s.phys_add_size;
 	}
-	printk(KERN_INFO "CPU %d: %lu virtual and %lu physical address bits\n",
-	       smp_processor_id(), impl_va_msb + 1, phys_addr_size);
 	c->unimpl_va_mask = ~((7L<<61) | ((1L << (impl_va_msb + 1)) - 1));
 	c->unimpl_pa_mask = ~((1L<<63) | ((1L << phys_addr_size) - 1));
 }
@@ -569,7 +600,7 @@ get_max_cacheline_size (void)
 void
 cpu_init (void)
 {
-	extern void __init ia64_mmu_init (void *);
+	extern void __devinit ia64_mmu_init (void *);
 	unsigned long num_phys_stacked;
 	pal_vm_info_2_u_t vmi;
 	unsigned int max_ctx;
@@ -577,6 +608,14 @@ cpu_init (void)
 	void *cpu_data;
 
 	cpu_data = per_cpu_init();
+
+	/*
+	 * We set ar.k3 so that assembly code in MCA handler can compute
+	 * physical addresses of per cpu variables with a simple:
+	 *   phys = ar.k3 + &per_cpu_var
+	 */
+	ia64_set_kr(IA64_KR_PER_CPU_DATA,
+		    ia64_tpa(cpu_data) - (long) __per_cpu_start);
 
 	get_max_cacheline_size();
 
@@ -624,10 +663,14 @@ cpu_init (void)
 		BUG();
 
 	ia64_mmu_init(ia64_imva(cpu_data));
+	ia64_mca_cpu_init(ia64_imva(cpu_data));
 
 #ifdef CONFIG_IA32_SUPPORT
 	ia32_cpu_init();
 #endif
+
+	/* Clear ITC to eliminiate sched_clock() overflows in human time.  */
+	ia64_set_itc(0);
 
 	/* disable all local interrupt sources: */
 	ia64_set_itv(1 << 16);
@@ -655,7 +698,7 @@ cpu_init (void)
 			break;
 	}
 
-	if (ia64_pal_rse_info(&num_phys_stacked, 0) != 0) {
+	if (ia64_pal_rse_info(&num_phys_stacked, NULL) != 0) {
 		printk(KERN_WARNING "cpu_init: PAL RSE info failed; assuming 96 physical "
 		       "stacked regs\n");
 		num_phys_stacked = 96;

@@ -37,33 +37,16 @@
 #define RGN_MAP_LIMIT	((1UL << (4*PAGE_SHIFT - 12)) - PAGE_SIZE)	/* per region addr limit */
 
 #ifdef CONFIG_HUGETLB_PAGE
+# define REGION_HPAGE		(4UL)	/* note: this is hardcoded in reload_context()!*/
+# define REGION_SHIFT		61
+# define HPAGE_REGION_BASE	(REGION_HPAGE << REGION_SHIFT)
+# define HPAGE_SHIFT		hpage_shift
+# define HPAGE_SHIFT_DEFAULT	28	/* check ia64 SDM for architecture supported size */
+# define HPAGE_SIZE		(__IA64_UL_CONST(1) << HPAGE_SHIFT)
+# define HPAGE_MASK		(~(HPAGE_SIZE - 1))
 
-# if defined(CONFIG_HUGETLB_PAGE_SIZE_4GB)
-#  define HPAGE_SHIFT	32
-# elif defined(CONFIG_HUGETLB_PAGE_SIZE_1GB)
-#  define HPAGE_SHIFT	30
-# elif defined(CONFIG_HUGETLB_PAGE_SIZE_256MB)
-#  define HPAGE_SHIFT	28
-# elif defined(CONFIG_HUGETLB_PAGE_SIZE_64MB)
-#  define HPAGE_SHIFT	26
-# elif defined(CONFIG_HUGETLB_PAGE_SIZE_16MB)
-#  define HPAGE_SHIFT	24
-# elif defined(CONFIG_HUGETLB_PAGE_SIZE_4MB)
-#  define HPAGE_SHIFT	22
-# elif defined(CONFIG_HUGETLB_PAGE_SIZE_1MB)
-#  define HPAGE_SHIFT	20
-# elif defined(CONFIG_HUGETLB_PAGE_SIZE_256KB)
-#  define HPAGE_SHIFT	18
-# else
-#  error Unsupported IA-64 HugeTLB Page Size!
-# endif
-
-# define REGION_HPAGE	(4UL)	/* note: this is hardcoded in mmu_context.h:reload_context()!*/
-# define REGION_SHIFT	61
-# define HPAGE_SIZE	(__IA64_UL_CONST(1) << HPAGE_SHIFT)
-# define HPAGE_MASK	(~(HPAGE_SIZE - 1))
 # define HAVE_ARCH_HUGETLB_UNMAPPED_AREA
-# define ARCH_HAS_VALID_HUGEPAGE_RANGE
+# define ARCH_HAS_HUGEPAGE_ONLY_RANGE
 #endif /* CONFIG_HUGETLB_PAGE */
 
 #ifdef __ASSEMBLY__
@@ -92,6 +75,17 @@ do {						\
 	flush_dcache_page(page);		\
 } while (0)
 
+
+#define alloc_zeroed_user_highpage(vma, vaddr) \
+({						\
+	struct page *page = alloc_page_vma(GFP_HIGHUSER | __GFP_ZERO, vma, vaddr); \
+	if (page)				\
+ 		flush_dcache_page(page);	\
+	page;					\
+})
+
+#define __HAVE_ARCH_ALLOC_ZEROED_USER_HIGHPAGE
+
 #define virt_addr_valid(kaddr)	pfn_valid(__pa(kaddr) >> PAGE_SHIFT)
 
 #ifdef CONFIG_VIRTUAL_MEM_MAP
@@ -101,10 +95,16 @@ extern int ia64_pfn_valid (unsigned long pfn);
 #endif
 
 #ifndef CONFIG_DISCONTIGMEM
-#define pfn_valid(pfn)		(((pfn) < max_mapnr) && ia64_pfn_valid(pfn))
-#define page_to_pfn(page)	((unsigned long) (page - mem_map))
-#define pfn_to_page(pfn)	(mem_map + (pfn))
-#endif /* CONFIG_DISCONTIGMEM */
+# define pfn_valid(pfn)		(((pfn) < max_mapnr) && ia64_pfn_valid(pfn))
+# define page_to_pfn(page)	((unsigned long) (page - mem_map))
+# define pfn_to_page(pfn)	(mem_map + (pfn))
+#else
+extern struct page *vmem_map;
+extern unsigned long max_low_pfn;
+# define pfn_valid(pfn)		(((pfn) < max_low_pfn) && ia64_pfn_valid(pfn))
+# define page_to_pfn(page)	((unsigned long) (page - vmem_map))
+# define pfn_to_page(pfn)	(vmem_map + (pfn))
+#endif
 
 #define page_to_phys(page)	(page_to_pfn(page) << PAGE_SHIFT)
 #define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
@@ -134,16 +134,19 @@ typedef union ia64_va {
 #define REGION_KERNEL		7
 
 #ifdef CONFIG_HUGETLB_PAGE
-# define htlbpage_to_page(x)	((REGION_NUMBER(x) << 61)				\
+# define htlbpage_to_page(x)	(((unsigned long) REGION_NUMBER(x) << 61)			\
 				 | (REGION_OFFSET(x) >> (HPAGE_SHIFT-PAGE_SHIFT)))
 # define HUGETLB_PAGE_ORDER	(HPAGE_SHIFT - PAGE_SHIFT)
-extern int  check_valid_hugepage_range(unsigned long addr, unsigned long len);
+# define is_hugepage_only_range(addr, len)		\
+	 (REGION_NUMBER(addr) == REGION_HPAGE &&	\
+	  REGION_NUMBER((addr)+(len)) == REGION_HPAGE)
+extern unsigned int hpage_shift;
 #endif
 
 static __inline__ int
 get_order (unsigned long size)
 {
-	double d = size - 1;
+	long double d = size - 1;
 	long order;
 
 	order = ia64_getf_exp(d);
@@ -194,11 +197,11 @@ get_order (unsigned long size)
 # define __pgprot(x)	(x)
 #endif /* !STRICT_MM_TYPECHECKS */
 
-#define PAGE_OFFSET			0xe000000000000000
+#define PAGE_OFFSET			__IA64_UL_CONST(0xe000000000000000)
 
 #define VM_DATA_DEFAULT_FLAGS		(VM_READ | VM_WRITE |					\
 					 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC |		\
-					 (((current->thread.flags & IA64_THREAD_XSTACK) != 0)	\
+					 (((current->personality & READ_IMPLIES_EXEC) != 0)	\
 					  ? VM_EXEC : 0))
 
 #endif /* _ASM_IA64_PAGE_H */

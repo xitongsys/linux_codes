@@ -25,6 +25,7 @@
  ********************************************************************/
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/skbuff.h>
 #include <linux/string.h>
@@ -61,8 +62,6 @@ static const char *ias_charset_types[] = {
 static hashbin_t *iriap = NULL;
 static void *service_handle;
 
-extern char *lmp_reasons[];
-
 static void __iriap_close(struct iriap_cb *self);
 static int iriap_register_lsap(struct iriap_cb *self, __u8 slsap_sel, int mode);
 static void iriap_disconnect_indication(void *instance, void *sap,
@@ -77,6 +76,15 @@ static void iriap_connect_confirm(void *instance, void *sap,
 				  struct sk_buff *skb);
 static int iriap_data_indication(void *instance, void *sap,
 				 struct sk_buff *skb);
+
+static void iriap_watchdog_timer_expired(void *data);
+
+static inline void iriap_start_watchdog_timer(struct iriap_cb *self, 
+					      int timeout) 
+{
+	irda_start_timer(&self->watchdog_timer, timeout, self, 
+			 iriap_watchdog_timer_expired);
+}
 
 /*
  * Function iriap_init (void)
@@ -200,6 +208,7 @@ struct iriap_cb *iriap_open(__u8 slsap_sel, int mode, void *priv,
 
 	return self;
 }
+EXPORT_SYMBOL(iriap_open);
 
 /*
  * Function __iriap_close (self)
@@ -248,6 +257,7 @@ void iriap_close(struct iriap_cb *self)
 
 	__iriap_close(self);
 }
+EXPORT_SYMBOL(iriap_close);
 
 static int iriap_register_lsap(struct iriap_cb *self, __u8 slsap_sel, int mode)
 {
@@ -288,7 +298,7 @@ static void iriap_disconnect_indication(void *instance, void *sap,
 {
 	struct iriap_cb *self;
 
-	IRDA_DEBUG(4, "%s(), reason=%s\n", __FUNCTION__, lmp_reasons[reason]);
+	IRDA_DEBUG(4, "%s(), reason=%s\n", __FUNCTION__, irlmp_reasons[reason]);
 
 	self = (struct iriap_cb *) instance;
 
@@ -327,7 +337,7 @@ static void iriap_disconnect_indication(void *instance, void *sap,
 /*
  * Function iriap_disconnect_request (handle)
  */
-void iriap_disconnect_request(struct iriap_cb *self)
+static void iriap_disconnect_request(struct iriap_cb *self)
 {
 	struct sk_buff *tx_skb;
 
@@ -349,31 +359,6 @@ void iriap_disconnect_request(struct iriap_cb *self)
 	skb_reserve(tx_skb, LMP_MAX_HEADER);
 
 	irlmp_disconnect_request(self->lsap, tx_skb);
-}
-
-void iriap_getinfobasedetails_request(void)
-{
-	IRDA_DEBUG(0, "%s(), Not implemented!\n", __FUNCTION__);
-}
-
-void iriap_getinfobasedetails_confirm(void)
-{
-	IRDA_DEBUG(0, "%s(), Not implemented!\n", __FUNCTION__);
-}
-
-void iriap_getobjects_request(void)
-{
-	IRDA_DEBUG(0, "%s(), Not implemented!\n", __FUNCTION__);
-}
-
-void iriap_getobjects_confirm(void)
-{
-	IRDA_DEBUG(0, "%s(), Not implemented!\n", __FUNCTION__);
-}
-
-void iriap_getvalue(void)
-{
-	IRDA_DEBUG(0, "%s(), Not implemented!\n", __FUNCTION__);
 }
 
 /*
@@ -435,6 +420,7 @@ int iriap_getvaluebyclass_request(struct iriap_cb *self,
 
 	return 0;
 }
+EXPORT_SYMBOL(iriap_getvaluebyclass_request);
 
 /*
  * Function iriap_getvaluebyclass_confirm (self, skb)
@@ -443,7 +429,8 @@ int iriap_getvaluebyclass_request(struct iriap_cb *self,
  *    to service user.
  *
  */
-void iriap_getvaluebyclass_confirm(struct iriap_cb *self, struct sk_buff *skb)
+static void iriap_getvaluebyclass_confirm(struct iriap_cb *self,
+					  struct sk_buff *skb)
 {
 	struct ias_value *value;
 	int charset;
@@ -550,8 +537,10 @@ void iriap_getvaluebyclass_confirm(struct iriap_cb *self, struct sk_buff *skb)
  *    Send answer back to remote LM-IAS
  *
  */
-void iriap_getvaluebyclass_response(struct iriap_cb *self, __u16 obj_id,
-				    __u8 ret_code, struct ias_value *value)
+static void iriap_getvaluebyclass_response(struct iriap_cb *self,
+					   __u16 obj_id,
+					   __u8 ret_code,
+					   struct ias_value *value)
 {
 	struct sk_buff *tx_skb;
 	int n;
@@ -639,8 +628,8 @@ void iriap_getvaluebyclass_response(struct iriap_cb *self, __u16 obj_id,
  *    getvaluebyclass is requested from peer LM-IAS
  *
  */
-void iriap_getvaluebyclass_indication(struct iriap_cb *self,
-				      struct sk_buff *skb)
+static void iriap_getvaluebyclass_indication(struct iriap_cb *self,
+					     struct sk_buff *skb)
 {
 	struct ias_object *obj;
 	struct ias_attrib *attrib;
@@ -674,7 +663,7 @@ void iriap_getvaluebyclass_indication(struct iriap_cb *self,
 	if (obj == NULL) {
 		IRDA_DEBUG(2, "LM-IAS: Object %s not found\n", name);
 		iriap_getvaluebyclass_response(self, 0x1235, IAS_CLASS_UNKNOWN,
-					       &missing);
+					       &irias_missing);
 		return;
 	}
 	IRDA_DEBUG(4, "LM-IAS: found %s, id=%d\n", obj->name, obj->id);
@@ -683,7 +672,8 @@ void iriap_getvaluebyclass_indication(struct iriap_cb *self,
 	if (attrib == NULL) {
 		IRDA_DEBUG(2, "LM-IAS: Attribute %s not found\n", attr);
 		iriap_getvaluebyclass_response(self, obj->id,
-					       IAS_ATTRIB_UNKNOWN, &missing);
+					       IAS_ATTRIB_UNKNOWN, 
+					       &irias_missing);
 		return;
 	}
 
@@ -959,7 +949,7 @@ void iriap_call_indication(struct iriap_cb *self, struct sk_buff *skb)
  *    Query has taken too long time, so abort
  *
  */
-void iriap_watchdog_timer_expired(void *data)
+static void iriap_watchdog_timer_expired(void *data)
 {
 	struct iriap_cb *self = (struct iriap_cb *) data;
 
@@ -1090,7 +1080,7 @@ struct file_operations irias_seq_fops = {
 	.open           = irias_seq_open,
 	.read           = seq_read,
 	.llseek         = seq_lseek,
-	.release	= seq_release_private,
+	.release	= seq_release,
 };
 
 #endif /* PROC_FS */

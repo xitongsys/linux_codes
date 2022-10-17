@@ -1,6 +1,10 @@
 /*
  * This code largely moved from arch/i386/kernel/time.c.
  * See comments there for proper credits.
+ *
+ * 2004-06-25    Jesper Juhl
+ *      moved mark_offset_tsc below cpufreq_delayed_get to avoid gcc 3.4
+ *      failing to inline.
  */
 
 #include <linux/spinlock.h>
@@ -24,13 +28,14 @@
 #ifdef CONFIG_HPET_TIMER
 static unsigned long hpet_usec_quotient;
 static unsigned long hpet_last;
-struct timer_opts timer_tsc;
+static struct timer_opts timer_tsc;
 #endif
+
+static inline void cpufreq_delayed_get(void);
 
 int tsc_disable __initdata = 0;
 
 extern spinlock_t i8253_lock;
-extern volatile unsigned long jiffies;
 
 static int use_tsc;
 /* Number of usecs that the last interrupt was delayed */
@@ -68,7 +73,6 @@ static inline unsigned long long cycles_2_ns(unsigned long long cyc)
 {
 	return (cyc * cyc2ns_scale) >> CYC2NS_SCALE_FACTOR;
 }
-
 
 static int count2; /* counter for mark_offset_tsc() */
 
@@ -141,107 +145,14 @@ unsigned long long sched_clock(void)
 #ifndef CONFIG_NUMA
 	if (!use_tsc)
 #endif
-		return (unsigned long long)jiffies * (1000000000 / HZ);
+		/* no locking but a rare wrong value is not a big deal */
+		return jiffies_64 * (1000000000 / HZ);
 
 	/* Read the Time Stamp Counter */
 	rdtscll(this_offset);
 
 	/* return the value in ns */
 	return cycles_2_ns(this_offset);
-}
-
-
-static void mark_offset_tsc(void)
-{
-	unsigned long lost,delay;
-	unsigned long delta = last_tsc_low;
-	int count;
-	int countmp;
-	static int count1 = 0;
-	unsigned long long this_offset, last_offset;
-	static int lost_count = 0;
-	
-	write_seqlock(&monotonic_lock);
-	last_offset = ((unsigned long long)last_tsc_high<<32)|last_tsc_low;
-	/*
-	 * It is important that these two operations happen almost at
-	 * the same time. We do the RDTSC stuff first, since it's
-	 * faster. To avoid any inconsistencies, we need interrupts
-	 * disabled locally.
-	 */
-
-	/*
-	 * Interrupts are just disabled locally since the timer irq
-	 * has the SA_INTERRUPT flag set. -arca
-	 */
-	
-	/* read Pentium cycle counter */
-
-	rdtsc(last_tsc_low, last_tsc_high);
-
-	spin_lock(&i8253_lock);
-	outb_p(0x00, PIT_MODE);     /* latch the count ASAP */
-
-	count = inb_p(PIT_CH0);    /* read the latched count */
-	count |= inb(PIT_CH0) << 8;
-	spin_unlock(&i8253_lock);
-
-	if (pit_latch_buggy) {
-		/* get center value of last 3 time lutch */
-		if ((count2 >= count && count >= count1)
-		    || (count1 >= count && count >= count2)) {
-			count2 = count1; count1 = count;
-		} else if ((count1 >= count2 && count2 >= count)
-			   || (count >= count2 && count2 >= count1)) {
-			countmp = count;count = count2;
-			count2 = count1;count1 = countmp;
-		} else {
-			count2 = count1; count1 = count; count = count1;
-		}
-	}
-
-	/* lost tick compensation */
-	delta = last_tsc_low - delta;
-	{
-		register unsigned long eax, edx;
-		eax = delta;
-		__asm__("mull %2"
-		:"=a" (eax), "=d" (edx)
-		:"rm" (fast_gettimeoffset_quotient),
-		 "0" (eax));
-		delta = edx;
-	}
-	delta += delay_at_last_interrupt;
-	lost = delta/(1000000/HZ);
-	delay = delta%(1000000/HZ);
-	if (lost >= 2) {
-		jiffies += lost-1;
-
-		/* sanity check to ensure we're not always losing ticks */
-		if (lost_count++ > 100) {
-			printk(KERN_WARNING "Losing too many ticks!\n");
-			printk(KERN_WARNING "TSC cannot be used as a timesource."
-					" (Are you running with SpeedStep?)\n");
-			printk(KERN_WARNING "Falling back to a sane timesource.\n");
-			clock_fallback();
-		}
-	} else
-		lost_count = 0;
-	/* update the monotonic base value */
-	this_offset = ((unsigned long long)last_tsc_high<<32)|last_tsc_low;
-	monotonic_base += cycles_2_ns(this_offset - last_offset);
-	write_sequnlock(&monotonic_lock);
-
-	/* calculate delay_at_last_interrupt */
-	count = ((LATCH-1) - count) * TICK_SIZE;
-	delay_at_last_interrupt = (count + LATCH/2) / LATCH;
-
-	/* catch corner case where tick rollover occured 
-	 * between tsc and pit reads (as noted when 
-	 * usec delta is > 90% # of usecs/tick)
-	 */
-	if (lost && abs(delay - delay_at_last_interrupt) > (900000/HZ))
-		jiffies++;
 }
 
 static void delay_tsc(unsigned long loops)
@@ -283,7 +194,7 @@ static void mark_offset_tsc_hpet(void)
 	offset = hpet_readl(HPET_T0_CMP) - hpet_tick;
 	if (unlikely(((offset - hpet_last) > hpet_tick) && (hpet_last != 0))) {
 		int lost_ticks = (offset - hpet_last) / hpet_tick;
-		jiffies += lost_ticks;
+		jiffies_64 += lost_ticks;
 	}
 	hpet_last = hpet_current;
 
@@ -306,7 +217,40 @@ static void mark_offset_tsc_hpet(void)
 }
 #endif
 
+
 #ifdef CONFIG_CPU_FREQ
+#include <linux/workqueue.h>
+
+static unsigned int cpufreq_delayed_issched = 0;
+static unsigned int cpufreq_init = 0;
+static struct work_struct cpufreq_delayed_get_work;
+
+static void handle_cpufreq_delayed_get(void *v)
+{
+	unsigned int cpu;
+	for_each_online_cpu(cpu) {
+		cpufreq_get(cpu);
+	}
+	cpufreq_delayed_issched = 0;
+}
+
+/* if we notice lost ticks, schedule a call to cpufreq_get() as it tries
+ * to verify the CPU frequency the timing core thinks the CPU is running
+ * at is still correct.
+ */
+static inline void cpufreq_delayed_get(void) 
+{
+	if (cpufreq_init && !cpufreq_delayed_issched) {
+		cpufreq_delayed_issched = 1;
+		printk(KERN_DEBUG "Losing some ticks... checking if CPU frequency changed.\n");
+		schedule_work(&cpufreq_delayed_get_work);
+	}
+}
+
+/* If the CPU frequency is scaled, TSC-based delays will need a different
+ * loops_per_jiffy value to function properly.
+ */
+
 static unsigned int  ref_freq = 0;
 static unsigned long loops_per_jiffy_ref = 0;
 
@@ -321,7 +265,8 @@ time_cpufreq_notifier(struct notifier_block *nb, unsigned long val,
 {
 	struct cpufreq_freqs *freq = data;
 
-	write_seqlock_irq(&xtime_lock);
+	if (val != CPUFREQ_RESUMECHANGE)
+		write_seqlock_irq(&xtime_lock);
 	if (!ref_freq) {
 		ref_freq = freq->old;
 		loops_per_jiffy_ref = cpu_data[freq->cpu].loops_per_jiffy;
@@ -332,17 +277,24 @@ time_cpufreq_notifier(struct notifier_block *nb, unsigned long val,
 	}
 
 	if ((val == CPUFREQ_PRECHANGE  && freq->old < freq->new) ||
-	    (val == CPUFREQ_POSTCHANGE && freq->old > freq->new)) {
-		cpu_data[freq->cpu].loops_per_jiffy = cpufreq_scale(loops_per_jiffy_ref, ref_freq, freq->new);
+	    (val == CPUFREQ_POSTCHANGE && freq->old > freq->new) ||
+	    (val == CPUFREQ_RESUMECHANGE)) {
+		if (!(freq->flags & CPUFREQ_CONST_LOOPS))
+			cpu_data[freq->cpu].loops_per_jiffy = cpufreq_scale(loops_per_jiffy_ref, ref_freq, freq->new);
 #ifndef CONFIG_SMP
-		if (use_tsc) {
-			fast_gettimeoffset_quotient = cpufreq_scale(fast_gettimeoffset_ref, freq->new, ref_freq);
+		if (cpu_khz)
 			cpu_khz = cpufreq_scale(cpu_khz_ref, ref_freq, freq->new);
-			set_cyc2ns_scale(cpu_khz/1000);
+		if (use_tsc) {
+			if (!(freq->flags & CPUFREQ_CONST_LOOPS)) {
+				fast_gettimeoffset_quotient = cpufreq_scale(fast_gettimeoffset_ref, freq->new, ref_freq);
+				set_cyc2ns_scale(cpu_khz/1000);
+			}
 		}
 #endif
 	}
-	write_sequnlock_irq(&xtime_lock);
+
+	if (val != CPUFREQ_RESUMECHANGE)
+		write_sequnlock_irq(&xtime_lock);
 
 	return 0;
 }
@@ -350,8 +302,135 @@ time_cpufreq_notifier(struct notifier_block *nb, unsigned long val,
 static struct notifier_block time_cpufreq_notifier_block = {
 	.notifier_call	= time_cpufreq_notifier
 };
-#endif
 
+
+static int __init cpufreq_tsc(void)
+{
+	int ret;
+	INIT_WORK(&cpufreq_delayed_get_work, handle_cpufreq_delayed_get, NULL);
+	ret = cpufreq_register_notifier(&time_cpufreq_notifier_block,
+					CPUFREQ_TRANSITION_NOTIFIER);
+	if (!ret)
+		cpufreq_init = 1;
+	return ret;
+}
+core_initcall(cpufreq_tsc);
+
+#else /* CONFIG_CPU_FREQ */
+static inline void cpufreq_delayed_get(void) { return; }
+#endif 
+
+static void mark_offset_tsc(void)
+{
+	unsigned long lost,delay;
+	unsigned long delta = last_tsc_low;
+	int count;
+	int countmp;
+	static int count1 = 0;
+	unsigned long long this_offset, last_offset;
+	static int lost_count = 0;
+
+	write_seqlock(&monotonic_lock);
+	last_offset = ((unsigned long long)last_tsc_high<<32)|last_tsc_low;
+	/*
+	 * It is important that these two operations happen almost at
+	 * the same time. We do the RDTSC stuff first, since it's
+	 * faster. To avoid any inconsistencies, we need interrupts
+	 * disabled locally.
+	 */
+
+	/*
+	 * Interrupts are just disabled locally since the timer irq
+	 * has the SA_INTERRUPT flag set. -arca
+	 */
+
+	/* read Pentium cycle counter */
+
+	rdtsc(last_tsc_low, last_tsc_high);
+
+	spin_lock(&i8253_lock);
+	outb_p(0x00, PIT_MODE);     /* latch the count ASAP */
+
+	count = inb_p(PIT_CH0);    /* read the latched count */
+	count |= inb(PIT_CH0) << 8;
+
+	/*
+	 * VIA686a test code... reset the latch if count > max + 1
+	 * from timer_pit.c - cjb
+	 */
+	if (count > LATCH) {
+		outb_p(0x34, PIT_MODE);
+		outb_p(LATCH & 0xff, PIT_CH0);
+		outb(LATCH >> 8, PIT_CH0);
+		count = LATCH - 1;
+	}
+
+	spin_unlock(&i8253_lock);
+
+	if (pit_latch_buggy) {
+		/* get center value of last 3 time lutch */
+		if ((count2 >= count && count >= count1)
+		    || (count1 >= count && count >= count2)) {
+			count2 = count1; count1 = count;
+		} else if ((count1 >= count2 && count2 >= count)
+			   || (count >= count2 && count2 >= count1)) {
+			countmp = count;count = count2;
+			count2 = count1;count1 = countmp;
+		} else {
+			count2 = count1; count1 = count; count = count1;
+		}
+	}
+
+	/* lost tick compensation */
+	delta = last_tsc_low - delta;
+	{
+		register unsigned long eax, edx;
+		eax = delta;
+		__asm__("mull %2"
+		:"=a" (eax), "=d" (edx)
+		:"rm" (fast_gettimeoffset_quotient),
+		 "0" (eax));
+		delta = edx;
+	}
+	delta += delay_at_last_interrupt;
+	lost = delta/(1000000/HZ);
+	delay = delta%(1000000/HZ);
+	if (lost >= 2) {
+		jiffies_64 += lost-1;
+
+		/* sanity check to ensure we're not always losing ticks */
+		if (lost_count++ > 100) {
+			printk(KERN_WARNING "Losing too many ticks!\n");
+			printk(KERN_WARNING "TSC cannot be used as a timesource.  \n");
+			printk(KERN_WARNING "Possible reasons for this are:\n");
+			printk(KERN_WARNING "  You're running with Speedstep,\n");
+			printk(KERN_WARNING "  You don't have DMA enabled for your hard disk (see hdparm),\n");
+			printk(KERN_WARNING "  Incorrect TSC synchronization on an SMP system (see dmesg).\n");
+			printk(KERN_WARNING "Falling back to a sane timesource now.\n");
+
+			clock_fallback();
+		}
+		/* ... but give the TSC a fair chance */
+		if (lost_count > 25)
+			cpufreq_delayed_get();
+	} else
+		lost_count = 0;
+	/* update the monotonic base value */
+	this_offset = ((unsigned long long)last_tsc_high<<32)|last_tsc_low;
+	monotonic_base += cycles_2_ns(this_offset - last_offset);
+	write_sequnlock(&monotonic_lock);
+
+	/* calculate delay_at_last_interrupt */
+	count = ((LATCH-1) - count) * TICK_SIZE;
+	delay_at_last_interrupt = (count + LATCH/2) / LATCH;
+
+	/* catch corner case where tick rollover occured
+	 * between tsc and pit reads (as noted when
+	 * usec delta is > 90% # of usecs/tick)
+	 */
+	if (lost && abs(delay - delay_at_last_interrupt) > (900000/HZ))
+		jiffies_64++;
+}
 
 static int __init init_tsc(char* override)
 {
@@ -392,10 +471,6 @@ static int __init init_tsc(char* override)
  	 *	some CPU's have a TSC. Thats never worked and nobody has
  	 *	moaned if you have the only one in the world - you fix it!
  	 */
- 
-#ifdef CONFIG_CPU_FREQ
-	cpufreq_register_notifier(&time_cpufreq_notifier_block, CPUFREQ_TRANSITION_NOTIFIER);
-#endif
 
 	count2 = LATCH; /* initialize counter for mark_offset_tsc() */
 
@@ -471,10 +546,15 @@ __setup("notsc", tsc_setup);
 /************************************************************/
 
 /* tsc timer_opts struct */
-struct timer_opts timer_tsc = {
-	.init =		init_tsc,
-	.mark_offset =	mark_offset_tsc, 
-	.get_offset =	get_offset_tsc,
-	.monotonic_clock =	monotonic_clock_tsc,
+static struct timer_opts timer_tsc = {
+	.name = "tsc",
+	.mark_offset = mark_offset_tsc, 
+	.get_offset = get_offset_tsc,
+	.monotonic_clock = monotonic_clock_tsc,
 	.delay = delay_tsc,
+};
+
+struct init_timer_opts __initdata timer_tsc_init = {
+	.init = init_tsc,
+	.opts = &timer_tsc,
 };

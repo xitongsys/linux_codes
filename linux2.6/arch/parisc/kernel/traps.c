@@ -38,11 +38,16 @@
 #include <asm/smp.h>
 #include <asm/pdc.h>
 #include <asm/pdc_chassis.h>
+#include <asm/unwind.h>
 
 #include "../math-emu/math-emu.h"	/* for handle_fpe() */
 
 #define PRINT_USER_FAULTS /* (turn this on if you want user faults to be */
 			  /*  dumped to the console via printk)          */
+
+#if defined(CONFIG_SMP) || defined(CONFIG_DEBUG_SPINLOCK)
+DEFINE_SPINLOCK(pa_dbit_lock);
+#endif
 
 int printbinary(char *buf, unsigned long x, int nbits)
 {
@@ -125,73 +130,24 @@ void show_regs(struct pt_regs *regs)
 
 void dump_stack(void)
 {
-	unsigned long stack;
-	show_trace(current, &stack);
+	show_stack(NULL, NULL);
 }
 
 EXPORT_SYMBOL(dump_stack);
 
-#ifndef __LP64__
-static int kstack_depth_to_print = 64 * 4;
-#else
-static int kstack_depth_to_print = 128 * 4;
-#endif
-
-void show_stack(struct task_struct *task, unsigned long *sp)
+static void do_show_stack(struct unwind_frame_info *info)
 {
-	unsigned long *stack;
-	int i;
+	int i = 1;
 
-	/*
-	 * debugging aid: "show_stack(NULL);" prints the
-	 * back trace for this cpu.
-	 */
-	if (task==NULL)
-		sp = (unsigned long*)&sp;
-	else if(sp == NULL)
-		sp = (unsigned long*)task->thread.regs.ksp;
-
-	stack = sp;
-	printk("\n" KERN_CRIT "Stack Dump:\n");
-	printk(KERN_CRIT " " RFMT ":  ", (unsigned long) stack);
-	for (i=0; i < kstack_depth_to_print; i++) {
-		if (((long) stack & (THREAD_SIZE-1)) == 0)
+	printk("Backtrace:\n");
+	while (i <= 16) {
+		if (unwind_once(info) < 0 || info->ip == 0)
 			break;
-		if (i && ((i & 0x03) == 0))
-			printk("\n" KERN_CRIT " " RFMT ":  ",
-				(unsigned long) stack);
-		printk(RFMT " ", *stack--);
-	}
-	printk("\n" KERN_CRIT "\n");
-	show_trace(task, sp);
-}
 
-
-void show_trace(struct task_struct *task, unsigned long *stack)
-{
-	unsigned long *startstack;
-	unsigned long addr;
-	int i;
-
-	startstack = (unsigned long *)((unsigned long)stack & ~(THREAD_SIZE - 1));
-	i = 1;
-	stack = (long *)((long)(stack + 32) &~ (FRAME_SIZE-1)); /* Align */
-	printk("Kernel addresses on the stack:\n");
-	while (stack > startstack) {
-		stack -= 16;	/* Stack frames are a multiple of 16 words */
-		addr = stack[16 - RP_OFFSET / sizeof(long)];
-		/*
-		 * If the address is either in the text segment of the
-		 * kernel, or in the region which contains vmalloc'ed
-		 * memory, it *may* be the address of a calling
-		 * routine; if so, print it so that someone tracing
-		 * down the cause of the crash will be able to figure
-		 * out the call path that was taken.
-		 */
-		if (kernel_text_address(addr)) {
-			printk(" [<" RFMT ">] ", addr);
+		if (__kernel_text_address(info->ip)) {
+			printk(" [<" RFMT ">] ", info->ip);
 #ifdef CONFIG_KALLSYMS
-			print_symbol("%s\n", addr);
+			print_symbol("%s\n", info->ip);
 #else
 			if ((i & 0x03) == 0)
 				printk("\n");
@@ -202,9 +158,23 @@ void show_trace(struct task_struct *task, unsigned long *stack)
 	printk("\n");
 }
 
-void show_trace_task(struct task_struct *tsk)
+void show_stack(struct task_struct *task, unsigned long *s)
 {
-	show_trace(tsk, (unsigned long *)tsk->thread.regs.ksp);
+	struct unwind_frame_info info;
+
+	if (!task) {
+		unsigned long sp, ip, rp;
+
+HERE:
+		asm volatile ("copy %%r30, %0" : "=r"(sp));
+		ip = (unsigned long)&&HERE;
+		rp = (unsigned long)__builtin_return_address(0);
+		unwind_frame_init(&info, current, sp, ip, rp);
+	} else {
+		unwind_frame_init_from_blocked_task(&info, task);
+	}
+
+	do_show_stack(&info);
 }
 
 void die_if_kernel(char *str, struct pt_regs *regs, long err)
@@ -409,13 +379,13 @@ void transfer_pim_to_trap_frame(struct pt_regs *regs)
 
 
 /*
- * This routine handles page faults.  It determines the address,
- * and the problem, and then passes it off to one of the appropriate
- * routines.
+ * This routine is called as a last resort when everything else
+ * has gone clearly wrong. We get called for faults in kernel space,
+ * and HPMC's.
  */
 void parisc_terminate(char *msg, struct pt_regs *regs, int code, unsigned long offset)
 {
-	static spinlock_t terminate_lock = SPIN_LOCK_UNLOCKED;
+	static DEFINE_SPINLOCK(terminate_lock);
 
 	oops_in_progress = 1;
 
@@ -430,10 +400,25 @@ void parisc_terminate(char *msg, struct pt_regs *regs, int code, unsigned long o
 	if (!console_drivers)
 		pdc_console_restart();
 
-	if (code == 1)
-	    transfer_pim_to_trap_frame(regs);
+	/* Not all paths will gutter the processor... */
+	switch(code){
 
-	show_stack(NULL, (unsigned long *)regs->gr[30]);
+	case 1:
+		transfer_pim_to_trap_frame(regs);
+		break;
+
+	default:
+		/* Fall through */
+		break;
+
+	}
+	    
+	{
+		/* show_stack(NULL, (unsigned long *)regs->gr[30]); */
+		struct unwind_frame_info info;
+		unwind_frame_init(&info, current, regs->gr[30], regs->iaoq[0], regs->gr[2]);
+		do_show_stack(&info);
+	}
 
 	printk("\n");
 	printk(KERN_CRIT "%s: Code=%d regs=%p (Addr=" RFMT ")\n",
@@ -447,8 +432,16 @@ void parisc_terminate(char *msg, struct pt_regs *regs, int code, unsigned long o
 	 * system will shut down immediately right here. */
 	pdc_soft_power_button(0);
 	
-	for(;;)
-	    ;
+	/* Call kernel panic() so reboot timeouts work properly 
+	 * FIXME: This function should be on the list of
+	 * panic notifiers, and we should call panic
+	 * directly from the location that we wish. 
+	 * e.g. We should not call panic from
+	 * parisc_terminate, but rather the oter way around.
+	 * This hack works, prints the panic message twice,
+	 * and it enables reboot timers!
+	 */
+	panic(msg);
 }
 
 void handle_interruption(int code, struct pt_regs *regs)
@@ -462,6 +455,36 @@ void handle_interruption(int code, struct pt_regs *regs)
 	else
 	    local_irq_enable();
 
+	/* Security check:
+	 * If the priority level is still user, and the
+	 * faulting space is not equal to the active space
+	 * then the user is attempting something in a space
+	 * that does not belong to them. Kill the process.
+	 *
+	 * This is normally the situation when the user
+	 * attempts to jump into the kernel space at the
+	 * wrong offset, be it at the gateway page or a
+	 * random location.
+	 *
+	 * We cannot normally signal the process because it
+	 * could *be* on the gateway page, and processes
+	 * executing on the gateway page can't have signals
+	 * delivered.
+	 * 
+	 * We merely readjust the address into the users
+	 * space, at a destination address of zero, and
+	 * allow processing to continue.
+	 */
+	if (((unsigned long)regs->iaoq[0] & 3) &&
+	    ((unsigned long)regs->iasq[0] != (unsigned long)regs->sr[7])) { 
+	  	/* Kill the user process later */
+	  	regs->iaoq[0] = 0 | 3;
+		regs->iaoq[1] = regs->iaoq[0] + 4;
+	 	regs->iasq[0] = regs->iasq[0] = regs->sr[7];
+		regs->gr[0] &= ~PSW_B;
+		return;
+	}
+	
 #if 0
 	printk(KERN_CRIT "Interruption # %d\n", code);
 #endif
@@ -486,7 +509,7 @@ void handle_interruption(int code, struct pt_regs *regs)
 	case  3:
 		/* Recovery counter trap */
 		regs->gr[0] &= ~PSW_R;
-		if (regs->iasq[0])
+		if (user_space(regs))
 			handle_gdb_break(regs, TRAP_TRACE);
 		/* else this must be the start of a syscall - just let it run */
 		return;
@@ -557,20 +580,52 @@ void handle_interruption(int code, struct pt_regs *regs)
 		si.si_addr = (void *) regs->iaoq[0];
 		force_sig_info(SIGFPE, &si, current);
 		return;
-
+		
+	case 13:
+		/* Conditional Trap
+		   The condition succees in an instruction which traps 
+		   on condition  */
+		if(user_mode(regs)){
+			si.si_signo = SIGFPE;
+			/* Set to zero, and let the userspace app figure it out from
+		   	   the insn pointed to by si_addr */
+			si.si_code = 0;
+			si.si_addr = (void __user *) regs->iaoq[0];
+			force_sig_info(SIGFPE, &si, current);
+			return;
+		} 
+		/* The kernel doesn't want to handle condition codes */
+		break;
+		
 	case 14:
 		/* Assist Exception Trap, i.e. floating point exception. */
 		die_if_kernel("Floating point exception", regs, 0); /* quiet */
 		handle_fpe(regs);
 		return;
-
+		
+	case 15:
+		/* Data TLB miss fault/Data page fault */
+		/* Fall through */
+	case 16:
+		/* Non-access instruction TLB miss fault */
+		/* The instruction TLB entry needed for the target address of the FIC
+		   is absent, and hardware can't find it, so we get to cleanup */
+		/* Fall through */
 	case 17:
 		/* Non-access data TLB miss fault/Non-access data page fault */
-		/* TODO: Still need to add slow path emulation code here */
-		pdc_chassis_send_status(PDC_CHASSIS_DIRECT_PANIC);
-		
+		/* FIXME: 
+		 	 Still need to add slow path emulation code here!
+		         If the insn used a non-shadow register, then the tlb
+			 handlers could not have their side-effect (e.g. probe
+			 writing to a target register) emulated since rfir would
+			 erase the changes to said register. Instead we have to
+			 setup everything, call this function we are in, and emulate
+			 by hand. Technically we need to emulate:
+			 fdc,fdce,pdc,"fic,4f",prober,probeir,probew, probeiw
+		*/			  
 		fault_address = regs->ior;
-		parisc_terminate("Non access data tlb fault!",regs,code,fault_address);
+		fault_space = regs->isr;
+		break;
 
 	case 18:
 		/* PCXS only -- later cpu's split this into types 26,27 & 28 */
@@ -580,9 +635,8 @@ void handle_interruption(int code, struct pt_regs *regs)
 			return;
 		}
 		/* Fall Through */
-
-	case 15: /* Data TLB miss fault/Data page fault */
-	case 26: /* PCXL: Data memory access rights trap */
+	case 26: 
+		/* PCXL: Data memory access rights trap */
 		fault_address = regs->ior;
 		fault_space   = regs->isr;
 		break;
@@ -599,7 +653,7 @@ void handle_interruption(int code, struct pt_regs *regs)
 	case 25:
 		/* Taken branch trap */
 		regs->gr[0] &= ~PSW_T;
-		if (regs->iasq[0])
+		if (user_space(regs))
 			handle_gdb_break(regs, TRAP_BRANCH);
 		/* else this must be the start of a syscall - just let it
 		 * run.
@@ -638,7 +692,6 @@ void handle_interruption(int code, struct pt_regs *regs)
 			up_read(&current->mm->mmap_sem);
 		}
 		/* Fall Through */
-
 	case 27: 
 		/* Data memory protection ID trap */
 		die_if_kernel("Protection id trap", regs, code);

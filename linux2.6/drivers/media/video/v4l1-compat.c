@@ -21,7 +21,6 @@
 
 #include <linux/config.h>
 
-#include <linux/version.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/types.h>
@@ -45,14 +44,14 @@
 #endif
 
 static unsigned int debug  = 0;
-MODULE_PARM(debug,"i");
+module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug,"enable debug messages");
 MODULE_AUTHOR("Bill Dirks");
 MODULE_DESCRIPTION("v4l(1) compatibility layer for v4l2 drivers.");
 MODULE_LICENSE("GPL");
 
 #define dprintk(fmt, arg...)	if (debug) \
-	printk(KERN_DEBUG "v4l1-compat: " fmt, ## arg)
+	printk(KERN_DEBUG "v4l1-compat: " fmt , ## arg)
 
 /*
  *	I O C T L   T R A N S L A T I O N
@@ -80,8 +79,10 @@ get_v4l_control(struct inode            *inode,
 	{
 		ctrl2.id = qctrl2.id;
 		err = drv(inode, file, VIDIOC_G_CTRL, &ctrl2);
-		if (err < 0)
+		if (err < 0) {
 			dprintk("VIDIOC_G_CTRL: %d\n",err);
+			return 0;
+		}
 		return ((ctrl2.value - qctrl2.minimum) * 65535
 			 + (qctrl2.maximum - qctrl2.minimum) / 2)
 			/ (qctrl2.maximum - qctrl2.minimum);
@@ -115,7 +116,7 @@ set_v4l_control(struct inode            *inode,
 		if (value && qctrl2.type == V4L2_CTRL_TYPE_BOOLEAN)
 			value = 65535;
 		ctrl2.id = qctrl2.id;
-		ctrl2.value = 
+		ctrl2.value =
 			(value * (qctrl2.maximum - qctrl2.minimum)
 			 + 32767)
 			/ 65535;
@@ -207,17 +208,10 @@ static int poll_one(struct file *file)
 {
 	int retval = 1;
 	poll_table *table;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,48)
-	poll_table wait_table;
-
-	poll_initwait(&wait_table);
-	table = &wait_table;
-#else
 	struct poll_wqueues pwq;
 
 	poll_initwait(&pwq);
 	table = &pwq.pt;
-#endif
 	for (;;) {
 		int mask;
 		set_current_state(TASK_INTERRUPTIBLE);
@@ -231,12 +225,8 @@ static int poll_one(struct file *file)
 		}
 		schedule();
 	}
-	current->state = TASK_RUNNING;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,48)
-	poll_freewait(&wait_table);
-#else
+	set_current_state(TASK_RUNNING);
 	poll_freewait(&pwq);
-#endif
 	return retval;
 }
 
@@ -266,7 +256,7 @@ static int check_size(struct inode         *inode,
 
 	memset(&desc2,0,sizeof(desc2));
 	memset(&fmt2,0,sizeof(fmt2));
-	
+
 	desc2.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (0 != drv(inode,file,VIDIOC_ENUM_FMT, &desc2))
 		goto done;
@@ -299,6 +289,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 {
 	struct v4l2_capability  *cap2 = NULL;
 	struct v4l2_format	*fmt2 = NULL;
+	enum v4l2_buf_type      captype = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
 	struct v4l2_framebuffer fbuf2;
 	struct v4l2_input	input2;
@@ -335,7 +326,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 			err = 0;
 		}
 
-		memcpy(cap->name, cap2->card, 
+		memcpy(cap->name, cap2->card,
 		       min(sizeof(cap->name), sizeof(cap2->card)));
 		cap->name[sizeof(cap->name) - 1] = 0;
 		if (cap2->capabilities & V4L2_CAP_VIDEO_CAPTURE)
@@ -392,7 +383,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		if (0 != fbuf2.fmt.bytesperline)
 			buffer->bytesperline = fbuf2.fmt.bytesperline;
 		else {
-			buffer->bytesperline = 
+			buffer->bytesperline =
 				(buffer->width * buffer->depth + 7) & 7;
 			buffer->bytesperline >>= 3;
 		}
@@ -475,6 +466,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		fmt2 = kmalloc(sizeof(*fmt2),GFP_KERNEL);
 		memset(fmt2,0,sizeof(*fmt2));
 		fmt2->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		drv(inode, file, VIDIOC_STREAMOFF, &fmt2->type);
 		err1 = drv(inode, file, VIDIOC_G_FMT, fmt2);
 		if (err1 < 0)
 			dprintk("VIDIOCSWIN / VIDIOC_G_FMT: %d\n",err);
@@ -482,6 +474,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 			fmt2->fmt.pix.width  = win->width;
 			fmt2->fmt.pix.height = win->height;
 			fmt2->fmt.pix.field  = V4L2_FIELD_ANY;
+			fmt2->fmt.pix.bytesperline = 0;
 			err = drv(inode, file, VIDIOC_S_FMT, fmt2);
 			if (err < 0)
 				dprintk("VIDIOCSWIN / VIDIOC_S_FMT #1: %d\n",
@@ -497,7 +490,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		fmt2->fmt.win.w.width   = win->width;
 		fmt2->fmt.win.w.height  = win->height;
 		fmt2->fmt.win.chromakey = win->chromakey;
-		fmt2->fmt.win.clips     = (void *)win->clips;
+		fmt2->fmt.win.clips     = (void __user *)win->clips;
 		fmt2->fmt.win.clipcount = win->clipcount;
 		err2 = drv(inode, file, VIDIOC_S_FMT, fmt2);
 		if (err2 < 0)
@@ -509,6 +502,14 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	}
 	case VIDIOCCAPTURE: /*  turn on/off preview  */
 	{
+		int *on = arg;
+
+		if (0 == *on) {
+			/* dirty hack time.  But v4l1 has no STREAMOFF
+			 * equivalent in the API, and this one at
+			 * least comes close ... */
+			drv(inode, file, VIDIOC_STREAMOFF, &captype);
+		}
 		err = drv(inode, file, VIDIOC_OVERLAY, arg);
 		if (err < 0)
 			dprintk("VIDIOCCAPTURE / VIDIOC_PREVIEW: %d\n",err);
@@ -632,7 +633,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		err = drv(inode, file, VIDIOC_G_FMT, fmt2);
 		if (err < 0)
 			dprintk("VIDIOCSPICT / VIDIOC_G_FMT: %d\n",err);
-		if (fmt2->fmt.pix.pixelformat != 
+		if (fmt2->fmt.pix.pixelformat !=
 		    palette_to_pixelformat(pict->palette)) {
 			fmt2->fmt.pix.pixelformat = palette_to_pixelformat(
 				pict->palette);
@@ -719,7 +720,8 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	case VIDIOCGFREQ: /*  get frequency  */
 	{
 		int *freq = arg;
-		
+
+		freq2.tuner = 0;
 		err = drv(inode, file, VIDIOC_G_FREQUENCY, &freq2);
 		if (err < 0)
 			dprintk("VIDIOCGFREQ / VIDIOC_G_FREQUENCY: %d\n",err);
@@ -731,6 +733,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	{
 		int *freq = arg;
 
+		freq2.tuner = 0;
 		drv(inode, file, VIDIOC_G_FREQUENCY, &freq2);
 		freq2.frequency = *freq;
 		err = drv(inode, file, VIDIOC_S_FREQUENCY, &freq2);
@@ -804,7 +807,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 
 		memset(&aud2,0,sizeof(aud2));
 		memset(&tun2,0,sizeof(tun2));
-		
+
 		aud2.index = aud->audio;
 		err = drv(inode, file, VIDIOC_S_AUDIO, &aud2);
 		if (err < 0) {
@@ -812,7 +815,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 			break;
 		}
 
-		set_v4l_control(inode, file, V4L2_CID_AUDIO_VOLUME, 
+		set_v4l_control(inode, file, V4L2_CID_AUDIO_VOLUME,
 				aud->volume, drv);
 		set_v4l_control(inode, file, V4L2_CID_AUDIO_BASS,
 				aud->bass, drv);
@@ -860,16 +863,16 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		fmt2 = kmalloc(sizeof(*fmt2),GFP_KERNEL);
 		memset(&buf2,0,sizeof(buf2));
 		memset(fmt2,0,sizeof(*fmt2));
-		
+
 		fmt2->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		err = drv(inode, file, VIDIOC_G_FMT, fmt2);
 		if (err < 0) {
 			dprintk("VIDIOCMCAPTURE / VIDIOC_G_FMT: %d\n",err);
 			break;
 		}
-		if (mm->width   != fmt2->fmt.pix.width  || 
+		if (mm->width   != fmt2->fmt.pix.width  ||
 		    mm->height  != fmt2->fmt.pix.height ||
-		    palette_to_pixelformat(mm->format) != 
+		    palette_to_pixelformat(mm->format) !=
 		    fmt2->fmt.pix.pixelformat)
 		{/* New capture format...  */
 			fmt2->fmt.pix.width = mm->width;
@@ -877,6 +880,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 			fmt2->fmt.pix.pixelformat =
 				palette_to_pixelformat(mm->format);
 			fmt2->fmt.pix.field = V4L2_FIELD_ANY;
+			fmt2->fmt.pix.bytesperline = 0;
 			err = drv(inode, file, VIDIOC_S_FMT, fmt2);
 			if (err < 0) {
 				dprintk("VIDIOCMCAPTURE / VIDIOC_S_FMT: %d\n",err);
@@ -895,7 +899,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 			dprintk("VIDIOCMCAPTURE / VIDIOC_QBUF: %d\n",err);
 			break;
 		}
-		err = drv(inode, file, VIDIOC_STREAMON, &buf2.type);
+		err = drv(inode, file, VIDIOC_STREAMON, &captype);
 		if (err < 0)
 			dprintk("VIDIOCMCAPTURE / VIDIOC_STREAMON: %d\n",err);
 		break;
@@ -915,6 +919,13 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		if (!(buf2.flags & V4L2_BUF_FLAG_MAPPED)) {
 			/* Buffer is not mapped  */
 			err = -EINVAL;
+			break;
+		}
+
+		/* make sure capture actually runs so we don't block forever */
+		err = drv(inode, file, VIDIOC_STREAMON, &captype);
+		if (err < 0) {
+			dprintk("VIDIOCSYNC / VIDIOC_STREAMON: %d\n",err);
 			break;
 		}
 
@@ -944,11 +955,11 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	case VIDIOCGVBIFMT: /* query VBI data capture format */
 	{
 		struct vbi_format      *fmt = arg;
-		
+
 		fmt2 = kmalloc(sizeof(*fmt2),GFP_KERNEL);
 		memset(fmt2, 0, sizeof(*fmt2));
 		fmt2->type = V4L2_BUF_TYPE_VBI_CAPTURE;
-		
+
 		err = drv(inode, file, VIDIOC_G_FMT, fmt2);
 		if (err < 0) {
 			dprintk("VIDIOCGVBIFMT / VIDIOC_G_FMT: %d\n", err);
@@ -968,7 +979,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 	case VIDIOCSVBIFMT:
 	{
 		struct vbi_format      *fmt = arg;
-		
+
 		fmt2 = kmalloc(sizeof(*fmt2),GFP_KERNEL);
 		memset(fmt2, 0, sizeof(*fmt2));
 
@@ -976,10 +987,10 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 		fmt2->fmt.vbi.samples_per_line = fmt->samples_per_line;
 		fmt2->fmt.vbi.sampling_rate    = fmt->sampling_rate;
 		fmt2->fmt.vbi.sample_format    = V4L2_PIX_FMT_GREY;
-		fmt2->fmt.vbi.start[0]         = fmt->start[0]; 
-		fmt2->fmt.vbi.count[0]         = fmt->count[0]; 
-		fmt2->fmt.vbi.start[1]         = fmt->start[1]; 
-		fmt2->fmt.vbi.count[1]         = fmt->count[1]; 
+		fmt2->fmt.vbi.start[0]         = fmt->start[0];
+		fmt2->fmt.vbi.count[0]         = fmt->count[0];
+		fmt2->fmt.vbi.start[1]         = fmt->start[1];
+		fmt2->fmt.vbi.count[1]         = fmt->count[1];
 		fmt2->fmt.vbi.flags            = fmt->flags;
 		err = drv(inode, file, VIDIOC_TRY_FMT, fmt2);
 		if (err < 0) {
@@ -989,7 +1000,7 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 
 		if (fmt2->fmt.vbi.samples_per_line != fmt->samples_per_line ||
 		    fmt2->fmt.vbi.sampling_rate    != fmt->sampling_rate    ||
-		    fmt2->fmt.vbi.sample_format    != V4L2_PIX_FMT_GREY     ||
+		    VIDEO_PALETTE_RAW              != fmt->sample_format    ||
 		    fmt2->fmt.vbi.start[0]         != fmt->start[0]         ||
 		    fmt2->fmt.vbi.count[0]         != fmt->count[0]         ||
 		    fmt2->fmt.vbi.start[1]         != fmt->start[1]         ||
@@ -999,12 +1010,11 @@ v4l_compat_translate_ioctl(struct inode         *inode,
 			break;
 		}
 		err = drv(inode, file, VIDIOC_S_FMT, fmt2);
-		if (err < 0) {
+		if (err < 0)
 			dprintk("VIDIOCSVBIFMT / VIDIOC_S_FMT: %d\n", err);
-			break;
-		}
+		break;
 	}
-	
+
 	default:
 		err = -ENOIOCTLCMD;
 		break;

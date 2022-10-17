@@ -55,23 +55,15 @@
 
 #include <asm/uaccess.h>
 
-DEFINE_SNMP_STAT(struct ipv6_mib, ipv6_statistics);
+DEFINE_SNMP_STAT(struct ipstats_mib, ipv6_statistics);
 
 static struct packet_type ipv6_packet_type = {
 	.type = __constant_htons(ETH_P_IPV6), 
 	.func = ipv6_rcv,
 };
 
-/*
- *	addrconf module should be notified of a device going up
- */
-static struct notifier_block ipv6_dev_notf = {
-	.notifier_call = addrconf_notify,
-	.priority = 0
-};
-
 struct ip6_ra_chain *ip6_ra_chain;
-rwlock_t ip6_ra_lock = RW_LOCK_UNLOCKED;
+DEFINE_RWLOCK(ip6_ra_lock);
 
 int ip6_ra_control(struct sock *sk, int sel, void (*destructor)(struct sock *))
 {
@@ -121,11 +113,11 @@ extern int ip6_mc_source(int add, int omode, struct sock *sk,
 	struct group_source_req *pgsr);
 extern int ip6_mc_msfilter(struct sock *sk, struct group_filter *gsf);
 extern int ip6_mc_msfget(struct sock *sk, struct group_filter *gsf,
-	struct group_filter *optval, int *optlen);
+	struct group_filter __user *optval, int __user *optlen);
 
 
-int ipv6_setsockopt(struct sock *sk, int level, int optname, char *optval, 
-		    int optlen)
+int ipv6_setsockopt(struct sock *sk, int level, int optname,
+		    char __user *optval, int optlen)
 {
 	struct ipv6_pinfo *np = inet6_sk(sk);
 	int val, valbool;
@@ -139,7 +131,7 @@ int ipv6_setsockopt(struct sock *sk, int level, int optname, char *optval,
 
 	if (optval == NULL)
 		val=0;
-	else if (get_user(val, (int *) optval))
+	else if (get_user(val, (int __user *) optval))
 		return -EFAULT;
 
 	valbool = (val!=0);
@@ -172,7 +164,7 @@ int ipv6_setsockopt(struct sock *sk, int level, int optname, char *optval,
 			ipv6_sock_mc_close(sk);
 
 			if (sk->sk_protocol == IPPROTO_TCP) {
-				struct tcp_opt *tp = tcp_sk(sk);
+				struct tcp_sock *tp = tcp_sk(sk);
 
 				local_bh_disable();
 				sock_prot_dec_use(sk->sk_prot);
@@ -238,11 +230,6 @@ int ipv6_setsockopt(struct sock *sk, int level, int optname, char *optval,
 		retv = 0;
 		break;
 
-	case IPV6_AUTHHDR:
-		np->rxopt.bits.authhdr = valbool;
-		retv = 0;
-		break;
-
 	case IPV6_DSTOPTS:
 		np->rxopt.bits.dstopts = valbool;
 		retv = 0;
@@ -294,7 +281,7 @@ update:
 		retv = 0;
 		if (sk->sk_type == SOCK_STREAM) {
 			if (opt) {
-				struct tcp_opt *tp = tcp_sk(sk);
+				struct tcp_sock *tp = tcp_sk(sk);
 				if (!((1 << sk->sk_state) &
 				      (TCPF_LISTEN | TCPF_CLOSE))
 				    && inet_sk(sk)->daddr != LOOPBACK4_IPV6) {
@@ -449,10 +436,16 @@ done:
 	}
 	case MCAST_MSFILTER:
 	{
+		extern int sysctl_optmem_max;
+		extern int sysctl_mld_max_msf;
 		struct group_filter *gsf;
 
 		if (optlen < GROUP_FILTER_SIZE(0))
 			goto e_inval;
+		if (optlen > sysctl_optmem_max) {
+			retv = -ENOBUFS;
+			break;
+		}
 		gsf = (struct group_filter *)kmalloc(optlen,GFP_KERNEL);
 		if (gsf == 0) {
 			retv = -ENOBUFS;
@@ -461,6 +454,18 @@ done:
 		retv = -EFAULT;
 		if (copy_from_user(gsf, optval, optlen)) {
 			kfree(gsf);
+			break;
+		}
+		/* numsrc >= (4G-140)/128 overflow in 32 bits */
+		if (gsf->gf_numsrc >= 0x1ffffffU ||
+		    gsf->gf_numsrc > sysctl_mld_max_msf) {
+			kfree(gsf);
+			retv = -ENOBUFS;
+			break;
+		}
+		if (GROUP_FILTER_SIZE(gsf->gf_numsrc) > optlen) {
+			kfree(gsf);
+			retv = -EINVAL;
 			break;
 		}
 		retv = ip6_mc_msfilter(sk, gsf);
@@ -519,8 +524,8 @@ e_inval:
 	return -EINVAL;
 }
 
-int ipv6_getsockopt(struct sock *sk, int level, int optname, char *optval, 
-		    int *optlen)
+int ipv6_getsockopt(struct sock *sk, int level, int optname,
+		    char __user *optval, int __user *optlen)
 {
 	struct ipv6_pinfo *np = inet6_sk(sk);
 	int len;
@@ -552,7 +557,7 @@ int ipv6_getsockopt(struct sock *sk, int level, int optname, char *optval,
 			return -EFAULT;
 		lock_sock(sk);
 		err = ip6_mc_msfget(sk, &gsf,
-			(struct group_filter *)optval, optlen);
+			(struct group_filter __user *)optval, optlen);
 		release_sock(sk);
 		return err;
 	}
@@ -631,10 +636,6 @@ int ipv6_getsockopt(struct sock *sk, int level, int optname, char *optval,
 		val = np->rxopt.bits.hopopts;
 		break;
 
-	case IPV6_AUTHHDR:
-		val = np->rxopt.bits.authhdr;
-		break;
-
 	case IPV6_DSTOPTS:
 		val = np->rxopt.bits.dstopts;
 		break;
@@ -692,34 +693,12 @@ int ipv6_getsockopt(struct sock *sk, int level, int optname, char *optval,
 	return 0;
 }
 
-#if defined(MODULE) && defined(CONFIG_SYSCTL)
-
-/*
- *	sysctl registration functions defined in sysctl_net_ipv6.c
- */
-
-extern void ipv6_sysctl_register(void);
-extern void ipv6_sysctl_unregister(void);
-#endif
-
 void __init ipv6_packet_init(void)
 {
 	dev_add_pack(&ipv6_packet_type);
 }
 
-void __init ipv6_netdev_notif_init(void)
-{
-	register_netdevice_notifier(&ipv6_dev_notf);
-}
-
-#ifdef MODULE
-void ipv6_packet_cleanup(void)
+void __exit ipv6_packet_cleanup(void)
 {
 	dev_remove_pack(&ipv6_packet_type);
 }
-
-void ipv6_netdev_notif_cleanup(void)
-{
-	unregister_netdevice_notifier(&ipv6_dev_notf);
-}
-#endif

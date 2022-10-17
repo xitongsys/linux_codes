@@ -30,6 +30,10 @@
  */
 
 #include <linux/config.h>
+#include <scsi/scsi.h>
+#include <scsi/scsi_cmnd.h>
+#include <scsi/scsi_device.h>
+
 #include "transport.h"
 #include "protocol.h"
 #include "usb.h"
@@ -41,7 +45,7 @@
  * Transport for the Microtech DPCM-USB
  *
  */
-int dpcm_transport(Scsi_Cmnd *srb, struct us_data *us)
+int dpcm_transport(struct scsi_cmnd *srb, struct us_data *us)
 {
   int ret;
 
@@ -56,7 +60,8 @@ int dpcm_transport(Scsi_Cmnd *srb, struct us_data *us)
     /*
      * LUN 0 corresponds to the CompactFlash card reader.
      */
-    return usb_stor_CB_transport(srb, us);
+    ret = usb_stor_CB_transport(srb, us);
+    break;
 
 #ifdef CONFIG_USB_STORAGE_SDDR09
   case 1:
@@ -71,12 +76,14 @@ int dpcm_transport(Scsi_Cmnd *srb, struct us_data *us)
     srb->device->lun = 0; us->srb->device->lun = 0;
     ret = sddr09_transport(srb, us);
     srb->device->lun = 1; us->srb->device->lun = 1;
+    break;
 
-    return ret;
 #endif
 
   default:
     US_DEBUGP("dpcm_transport: Invalid LUN %d\n", srb->device->lun);
-    return USB_STOR_TRANSPORT_ERROR;
+    ret = USB_STOR_TRANSPORT_ERROR;
+    break;
   }
+  return ret;
 }

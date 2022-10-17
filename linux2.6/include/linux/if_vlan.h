@@ -18,10 +18,10 @@
 /* externally defined structs */
 struct vlan_group;
 struct net_device;
-struct sk_buff;
 struct packet_type;
 struct vlan_collection;
 struct vlan_dev_info;
+struct hlist_node;
 
 #include <linux/proc_fs.h> /* for proc_dir_entry */
 #include <linux/netdevice.h>
@@ -47,6 +47,13 @@ struct vlan_ethhdr {
    unsigned short	h_vlan_encapsulated_proto; /* packet type ID field (or len) */
 };
 
+#include <linux/skbuff.h>
+
+static inline struct vlan_ethhdr *vlan_eth_hdr(const struct sk_buff *skb)
+{
+	return (struct vlan_ethhdr *)skb->mac.raw;
+}
+
 struct vlan_hdr {
    unsigned short       h_vlan_TCI;                /* Encapsulates priority and VLAN ID */
    unsigned short       h_vlan_encapsulated_proto; /* packet type ID field (or len) */
@@ -55,7 +62,7 @@ struct vlan_hdr {
 #define VLAN_VID_MASK	0xfff
 
 /* found in socket.c */
-extern void vlan_ioctl_set(int (*hook)(unsigned long));
+extern void vlan_ioctl_set(int (*hook)(void __user *));
 
 #define VLAN_NAME "vlan"
 
@@ -67,9 +74,9 @@ extern void vlan_ioctl_set(int (*hook)(unsigned long));
 
 struct vlan_group {
 	int real_dev_ifindex; /* The ifindex of the ethernet(like) device the vlan is attached to. */
+	struct hlist_node	hlist;	/* linked list */
 	struct net_device *vlan_devices[VLAN_GROUP_ARRAY_LEN];
-
-	struct vlan_group *next; /* the next in the list */
+	struct rcu_head		rcu;
 };
 
 struct vlan_priority_tci_mapping {
@@ -151,7 +158,7 @@ static inline int __vlan_hwaccel_rx(struct sk_buff *skb,
 	skb->real_dev = skb->dev;
 	skb->dev = grp->vlan_devices[vlan_tag & VLAN_VID_MASK];
 	if (skb->dev == NULL) {
-		kfree_skb(skb);
+		dev_kfree_skb_any(skb);
 
 		/* Not NET_RX_DROP, this is not being dropped
 		 * due to congestion.
@@ -179,7 +186,7 @@ static inline int __vlan_hwaccel_rx(struct sk_buff *skb,
 		 * This allows the VLAN to have a different MAC than the underlying
 		 * device, and still route correctly.
 		 */
-		if (!memcmp(skb->mac.ethernet->h_dest, skb->dev->dev_addr, ETH_ALEN))
+		if (!memcmp(eth_hdr(skb)->h_dest, skb->dev->dev_addr, ETH_ALEN))
 			skb->pkt_type = PACKET_HOST;
 		break;
 	};
@@ -200,6 +207,152 @@ static inline int vlan_hwaccel_receive_skb(struct sk_buff *skb,
 {
 	return __vlan_hwaccel_rx(skb, grp, vlan_tag, 1);
 }
+
+/**
+ * __vlan_put_tag - regular VLAN tag inserting
+ * @skb: skbuff to tag
+ * @tag: VLAN tag to insert
+ *
+ * Inserts the VLAN tag into @skb as part of the payload
+ * Returns a VLAN tagged skb. If a new skb is created, @skb is freed.
+ * 
+ * Following the skb_unshare() example, in case of error, the calling function
+ * doesn't have to worry about freeing the original skb.
+ */
+static inline struct sk_buff *__vlan_put_tag(struct sk_buff *skb, unsigned short tag)
+{
+	struct vlan_ethhdr *veth;
+
+	if (skb_headroom(skb) < VLAN_HLEN) {
+		struct sk_buff *sk_tmp = skb;
+		skb = skb_realloc_headroom(sk_tmp, VLAN_HLEN);
+		kfree_skb(sk_tmp);
+		if (!skb) {
+			printk(KERN_ERR "vlan: failed to realloc headroom\n");
+			return NULL;
+		}
+	} else {
+		skb = skb_unshare(skb, GFP_ATOMIC);
+		if (!skb) {
+			printk(KERN_ERR "vlan: failed to unshare skbuff\n");
+			return NULL;
+		}
+	}
+
+	veth = (struct vlan_ethhdr *)skb_push(skb, VLAN_HLEN);
+
+	/* Move the mac addresses to the beginning of the new header. */
+	memmove(skb->data, skb->data + VLAN_HLEN, 2 * VLAN_ETH_ALEN);
+
+	/* first, the ethernet type */
+	veth->h_vlan_proto = __constant_htons(ETH_P_8021Q);
+
+	/* now, the tag */
+	veth->h_vlan_TCI = htons(tag);
+
+	skb->protocol = __constant_htons(ETH_P_8021Q);
+	skb->mac.raw -= VLAN_HLEN;
+	skb->nh.raw -= VLAN_HLEN;
+
+	return skb;
+}
+
+/**
+ * __vlan_hwaccel_put_tag - hardware accelerated VLAN inserting
+ * @skb: skbuff to tag
+ * @tag: VLAN tag to insert
+ *
+ * Puts the VLAN tag in @skb->cb[] and lets the device do the rest
+ */
+static inline struct sk_buff *__vlan_hwaccel_put_tag(struct sk_buff *skb, unsigned short tag)
+{
+	struct vlan_skb_tx_cookie *cookie;
+
+	cookie = VLAN_TX_SKB_CB(skb);
+	cookie->magic = VLAN_TX_COOKIE_MAGIC;
+	cookie->vlan_tag = tag;
+
+	return skb;
+}
+
+#define HAVE_VLAN_PUT_TAG
+
+/**
+ * vlan_put_tag - inserts VLAN tag according to device features
+ * @skb: skbuff to tag
+ * @tag: VLAN tag to insert
+ *
+ * Assumes skb->dev is the target that will xmit this frame.
+ * Returns a VLAN tagged skb.
+ */
+static inline struct sk_buff *vlan_put_tag(struct sk_buff *skb, unsigned short tag)
+{
+	if (skb->dev->features & NETIF_F_HW_VLAN_TX) {
+		return __vlan_hwaccel_put_tag(skb, tag);
+	} else {
+		return __vlan_put_tag(skb, tag);
+	}
+}
+
+/**
+ * __vlan_get_tag - get the VLAN ID that is part of the payload
+ * @skb: skbuff to query
+ * @tag: buffer to store vlaue
+ * 
+ * Returns error if the skb is not of VLAN type
+ */
+static inline int __vlan_get_tag(struct sk_buff *skb, unsigned short *tag)
+{
+	struct vlan_ethhdr *veth = (struct vlan_ethhdr *)skb->data;
+
+	if (veth->h_vlan_proto != __constant_htons(ETH_P_8021Q)) {
+		return -EINVAL;
+	}
+
+	*tag = ntohs(veth->h_vlan_TCI);
+
+	return 0;
+}
+
+/**
+ * __vlan_hwaccel_get_tag - get the VLAN ID that is in @skb->cb[]
+ * @skb: skbuff to query
+ * @tag: buffer to store vlaue
+ * 
+ * Returns error if @skb->cb[] is not set correctly
+ */
+static inline int __vlan_hwaccel_get_tag(struct sk_buff *skb, unsigned short *tag)
+{
+	struct vlan_skb_tx_cookie *cookie;
+
+	cookie = VLAN_TX_SKB_CB(skb);
+	if (cookie->magic == VLAN_TX_COOKIE_MAGIC) {
+		*tag = cookie->vlan_tag;
+		return 0;
+	} else {
+		*tag = 0;
+		return -EINVAL;
+	}
+}
+
+#define HAVE_VLAN_GET_TAG
+
+/**
+ * vlan_get_tag - get the VLAN ID from the skb
+ * @skb: skbuff to query
+ * @tag: buffer to store vlaue
+ * 
+ * Returns error if the skb is not VLAN tagged
+ */
+static inline int vlan_get_tag(struct sk_buff *skb, unsigned short *tag)
+{
+	if (skb->dev->features & NETIF_F_HW_VLAN_TX) {
+		return __vlan_hwaccel_get_tag(skb, tag);
+	} else {
+		return __vlan_get_tag(skb, tag);
+	}
+}
+
 #endif /* __KERNEL__ */
 
 /* VLAN IOCTLs are found in sockios.h */
@@ -213,7 +366,9 @@ enum vlan_ioctl_cmds {
 	GET_VLAN_INGRESS_PRIORITY_CMD,
 	GET_VLAN_EGRESS_PRIORITY_CMD,
 	SET_VLAN_NAME_TYPE_CMD,
-	SET_VLAN_FLAG_CMD
+	SET_VLAN_FLAG_CMD,
+	GET_VLAN_REALDEV_NAME_CMD, /* If this works, you know it's a VLAN device, btw */
+	GET_VLAN_VID_CMD /* Get the VID of this VLAN (specified by name) */
 };
 
 enum vlan_name_types {

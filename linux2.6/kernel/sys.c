@@ -5,7 +5,6 @@
  */
 
 #include <linux/config.h>
-#include <linux/compat.h>
 #include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/utsname.h>
@@ -19,10 +18,15 @@
 #include <linux/fs.h>
 #include <linux/workqueue.h>
 #include <linux/device.h>
+#include <linux/key.h>
 #include <linux/times.h>
 #include <linux/security.h>
 #include <linux/dcookies.h>
 #include <linux/suspend.h>
+#include <linux/tty.h>
+
+#include <linux/compat.h>
+#include <linux/syscalls.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -85,7 +89,7 @@ int cad_pid = 1;
  */
 
 static struct notifier_block *reboot_notifier_list;
-rwlock_t notifier_lock = RW_LOCK_UNLOCKED;
+DEFINE_RWLOCK(notifier_lock);
 
 /**
  *	notifier_chain_register	- Add notifier to a notifier chain
@@ -212,46 +216,6 @@ int unregister_reboot_notifier(struct notifier_block * nb)
 }
 
 EXPORT_SYMBOL(unregister_reboot_notifier);
-
-asmlinkage long sys_ni_syscall(void)
-{
-	return -ENOSYS;
-}
-
-cond_syscall(sys_nfsservctl)
-cond_syscall(sys_quotactl)
-cond_syscall(sys_acct)
-cond_syscall(sys_lookup_dcookie)
-cond_syscall(sys_swapon)
-cond_syscall(sys_swapoff)
-cond_syscall(sys_init_module)
-cond_syscall(sys_delete_module)
-cond_syscall(sys_socketpair)
-cond_syscall(sys_bind)
-cond_syscall(sys_listen)
-cond_syscall(sys_accept)
-cond_syscall(sys_connect)
-cond_syscall(sys_getsockname)
-cond_syscall(sys_getpeername)
-cond_syscall(sys_sendto)
-cond_syscall(sys_send)
-cond_syscall(sys_recvfrom)
-cond_syscall(sys_recv)
-cond_syscall(sys_socket)
-cond_syscall(sys_setsockopt)
-cond_syscall(sys_getsockopt)
-cond_syscall(sys_shutdown)
-cond_syscall(sys_sendmsg)
-cond_syscall(sys_recvmsg)
-cond_syscall(sys_socketcall)
-cond_syscall(sys_futex)
-cond_syscall(compat_sys_futex)
-cond_syscall(sys_epoll_create)
-cond_syscall(sys_epoll_ctl)
-cond_syscall(sys_epoll_wait)
-cond_syscall(sys_pciconfig_read)
-cond_syscall(sys_pciconfig_write)
-
 static int set_one_prio(struct task_struct *p, int niceval, int error)
 {
 	int no_nice;
@@ -281,8 +245,6 @@ asmlinkage long sys_setpriority(int which, int who, int niceval)
 {
 	struct task_struct *g, *p;
 	struct user_struct *user;
-	struct pid *pid;
-	struct list_head *l;
 	int error = -EINVAL;
 
 	if (which > 2 || which < 0)
@@ -307,22 +269,24 @@ asmlinkage long sys_setpriority(int which, int who, int niceval)
 		case PRIO_PGRP:
 			if (!who)
 				who = process_group(current);
-			for_each_task_pid(who, PIDTYPE_PGID, p, l, pid)
+			do_each_task_pid(who, PIDTYPE_PGID, p) {
 				error = set_one_prio(p, niceval, error);
+			} while_each_task_pid(who, PIDTYPE_PGID, p);
 			break;
 		case PRIO_USER:
+			user = current->user;
 			if (!who)
-				user = current->user;
+				who = current->uid;
 			else
-				user = find_user(who);
-
-			if (!user)
-				goto out_unlock;
+				if ((who != current->uid) && !(user = find_user(who)))
+					goto out_unlock;	/* No processes for this user */
 
 			do_each_thread(g, p)
 				if (p->uid == who)
 					error = set_one_prio(p, niceval, error);
 			while_each_thread(g, p);
+			if (who != current->uid)
+				free_uid(user);		/* For find_user() */
 			break;
 	}
 out_unlock:
@@ -340,8 +304,6 @@ out:
 asmlinkage long sys_getpriority(int which, int who)
 {
 	struct task_struct *g, *p;
-	struct list_head *l;
-	struct pid *pid;
 	struct user_struct *user;
 	long niceval, retval = -ESRCH;
 
@@ -363,20 +325,19 @@ asmlinkage long sys_getpriority(int which, int who)
 		case PRIO_PGRP:
 			if (!who)
 				who = process_group(current);
-			for_each_task_pid(who, PIDTYPE_PGID, p, l, pid) {
+			do_each_task_pid(who, PIDTYPE_PGID, p) {
 				niceval = 20 - task_nice(p);
 				if (niceval > retval)
 					retval = niceval;
-			}
+			} while_each_task_pid(who, PIDTYPE_PGID, p);
 			break;
 		case PRIO_USER:
+			user = current->user;
 			if (!who)
-				user = current->user;
+				who = current->uid;
 			else
-				user = find_user(who);
-
-			if (!user)
-				goto out_unlock;
+				if ((who != current->uid) && !(user = find_user(who)))
+					goto out_unlock;	/* No processes for this user */
 
 			do_each_thread(g, p)
 				if (p->uid == who) {
@@ -385,6 +346,8 @@ asmlinkage long sys_getpriority(int which, int who)
 						retval = niceval;
 				}
 			while_each_thread(g, p);
+			if (who != current->uid)
+				free_uid(user);		/* for find_user() */
 			break;
 	}
 out_unlock:
@@ -422,7 +385,7 @@ asmlinkage long sys_reboot(int magic1, int magic2, unsigned int cmd, void __user
 	switch (cmd) {
 	case LINUX_REBOOT_CMD_RESTART:
 		notifier_call_chain(&reboot_notifier_list, SYS_RESTART, NULL);
-		system_running = 0;
+		system_state = SYSTEM_RESTART;
 		device_shutdown();
 		printk(KERN_EMERG "Restarting system.\n");
 		machine_restart(NULL);
@@ -438,7 +401,7 @@ asmlinkage long sys_reboot(int magic1, int magic2, unsigned int cmd, void __user
 
 	case LINUX_REBOOT_CMD_HALT:
 		notifier_call_chain(&reboot_notifier_list, SYS_HALT, NULL);
-		system_running = 0;
+		system_state = SYSTEM_HALT;
 		device_shutdown();
 		printk(KERN_EMERG "System halted.\n");
 		machine_halt();
@@ -448,7 +411,7 @@ asmlinkage long sys_reboot(int magic1, int magic2, unsigned int cmd, void __user
 
 	case LINUX_REBOOT_CMD_POWER_OFF:
 		notifier_call_chain(&reboot_notifier_list, SYS_POWER_OFF, NULL);
-		system_running = 0;
+		system_state = SYSTEM_POWER_OFF;
 		device_shutdown();
 		printk(KERN_EMERG "Power down.\n");
 		machine_power_off();
@@ -464,7 +427,7 @@ asmlinkage long sys_reboot(int magic1, int magic2, unsigned int cmd, void __user
 		buffer[sizeof(buffer) - 1] = '\0';
 
 		notifier_call_chain(&reboot_notifier_list, SYS_RESTART, buffer);
-		system_running = 0;
+		system_state = SYSTEM_RESTART;
 		device_shutdown();
 		printk(KERN_EMERG "Restarting system with command '%s'.\n", buffer);
 		machine_restart(buffer);
@@ -472,13 +435,11 @@ asmlinkage long sys_reboot(int magic1, int magic2, unsigned int cmd, void __user
 
 #ifdef CONFIG_SOFTWARE_SUSPEND
 	case LINUX_REBOOT_CMD_SW_SUSPEND:
-		if (!software_suspend_enabled) {
+		{
+			int ret = software_suspend();
 			unlock_kernel();
-			return -EAGAIN;
+			return ret;
 		}
-		software_suspend();
-		do_exit(0);
-		break;
 #endif
 
 	default:
@@ -570,6 +531,7 @@ asmlinkage long sys_setregid(gid_t rgid, gid_t egid)
 	current->fsgid = new_egid;
 	current->egid = new_egid;
 	current->gid = new_rgid;
+	key_fsgid_changed(current);
 	return 0;
 }
 
@@ -607,6 +569,8 @@ asmlinkage long sys_setgid(gid_t gid)
 	}
 	else
 		return -EPERM;
+
+	key_fsgid_changed(current);
 	return 0;
 }
   
@@ -619,7 +583,7 @@ static int set_user(uid_t new_ruid, int dumpclear)
 		return -EAGAIN;
 
 	if (atomic_read(&new_user->processes) >=
-				current->rlim[RLIMIT_NPROC].rlim_cur &&
+				current->signal->rlim[RLIMIT_NPROC].rlim_cur &&
 			new_user != &root_user) {
 		free_uid(new_user);
 		return -EAGAIN;
@@ -695,6 +659,8 @@ asmlinkage long sys_setreuid(uid_t ruid, uid_t euid)
 		current->suid = current->euid;
 	current->fsuid = current->euid;
 
+	key_fsuid_changed(current);
+
 	return security_task_post_setuid(old_ruid, old_euid, old_suid, LSM_SETID_RE);
 }
 
@@ -739,6 +705,8 @@ asmlinkage long sys_setuid(uid_t uid)
 	}
 	current->fsuid = current->euid = uid;
 	current->suid = new_suid;
+
+	key_fsuid_changed(current);
 
 	return security_task_post_setuid(old_ruid, old_euid, old_suid, LSM_SETID_ID);
 }
@@ -786,10 +754,12 @@ asmlinkage long sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 	if (suid != (uid_t) -1)
 		current->suid = suid;
 
+	key_fsuid_changed(current);
+
 	return security_task_post_setuid(old_ruid, old_euid, old_suid, LSM_SETID_RES);
 }
 
-asmlinkage long sys_getresuid(uid_t *ruid, uid_t *euid, uid_t *suid)
+asmlinkage long sys_getresuid(uid_t __user *ruid, uid_t __user *euid, uid_t __user *suid)
 {
 	int retval;
 
@@ -835,10 +805,12 @@ asmlinkage long sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 		current->gid = rgid;
 	if (sgid != (gid_t) -1)
 		current->sgid = sgid;
+
+	key_fsgid_changed(current);
 	return 0;
 }
 
-asmlinkage long sys_getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid)
+asmlinkage long sys_getresgid(gid_t __user *rgid, gid_t __user *egid, gid_t __user *sgid)
 {
 	int retval;
 
@@ -876,6 +848,8 @@ asmlinkage long sys_setfsuid(uid_t uid)
 		current->fsuid = uid;
 	}
 
+	key_fsuid_changed(current);
+
 	security_task_post_setuid(old_fsuid, (uid_t)-1, (uid_t)-1, LSM_SETID_FS);
 
 	return old_fsuid;
@@ -902,6 +876,7 @@ asmlinkage long sys_setfsgid(gid_t gid)
 			wmb();
 		}
 		current->fsgid = gid;
+		key_fsgid_changed(current);
 	}
 	return old_fsgid;
 }
@@ -916,10 +891,39 @@ asmlinkage long sys_times(struct tms __user * tbuf)
 	 */
 	if (tbuf) {
 		struct tms tmp;
-		tmp.tms_utime = jiffies_to_clock_t(current->utime);
-		tmp.tms_stime = jiffies_to_clock_t(current->stime);
-		tmp.tms_cutime = jiffies_to_clock_t(current->cutime);
-		tmp.tms_cstime = jiffies_to_clock_t(current->cstime);
+		struct task_struct *tsk = current;
+		struct task_struct *t;
+		cputime_t utime, stime, cutime, cstime;
+
+		read_lock(&tasklist_lock);
+		utime = tsk->signal->utime;
+		stime = tsk->signal->stime;
+		t = tsk;
+		do {
+			utime = cputime_add(utime, t->utime);
+			stime = cputime_add(stime, t->stime);
+			t = next_thread(t);
+		} while (t != tsk);
+
+		/*
+		 * While we have tasklist_lock read-locked, no dying thread
+		 * can be updating current->signal->[us]time.  Instead,
+		 * we got their counts included in the live thread loop.
+		 * However, another thread can come in right now and
+		 * do a wait call that updates current->signal->c[us]time.
+		 * To make sure we always see that pair updated atomically,
+		 * we take the siglock around fetching them.
+		 */
+		spin_lock_irq(&tsk->sighand->siglock);
+		cutime = tsk->signal->cutime;
+		cstime = tsk->signal->cstime;
+		spin_unlock_irq(&tsk->sighand->siglock);
+		read_unlock(&tasklist_lock);
+
+		tmp.tms_utime = cputime_to_clock_t(utime);
+		tmp.tms_stime = cputime_to_clock_t(stime);
+		tmp.tms_cutime = cputime_to_clock_t(cutime);
+		tmp.tms_cstime = cputime_to_clock_t(cstime);
 		if (copy_to_user(tbuf, &tmp, sizeof(struct tms)))
 			return -EFAULT;
 	}
@@ -967,7 +971,7 @@ asmlinkage long sys_setpgid(pid_t pid, pid_t pgid)
 
 	if (p->parent == current || p->real_parent == current) {
 		err = -EPERM;
-		if (p->session != current->session)
+		if (p->signal->session != current->signal->session)
 			goto out;
 		err = -EACCES;
 		if (p->did_exec)
@@ -979,17 +983,16 @@ asmlinkage long sys_setpgid(pid_t pid, pid_t pgid)
 	}
 
 	err = -EPERM;
-	if (p->leader)
+	if (p->signal->leader)
 		goto out;
 
 	if (pgid != pid) {
 		struct task_struct *p;
-		struct pid *pid;
-		struct list_head *l;
 
-		for_each_task_pid(pgid, PIDTYPE_PGID, p, l, pid)
-			if (p->session == current->session)
+		do_each_task_pid(pgid, PIDTYPE_PGID, p) {
+			if (p->signal->session == current->signal->session)
 				goto ok_pgid;
+		} while_each_task_pid(pgid, PIDTYPE_PGID, p);
 		goto out;
 	}
 
@@ -1000,7 +1003,7 @@ ok_pgid:
 
 	if (process_group(p) != pgid) {
 		detach_pid(p, PIDTYPE_PGID);
-		p->group_leader->__pgrp = pgid;
+		p->signal->pgrp = pgid;
 		attach_pid(p, PIDTYPE_PGID, pgid);
 	}
 
@@ -1033,16 +1036,20 @@ asmlinkage long sys_getpgid(pid_t pid)
 	}
 }
 
+#ifdef __ARCH_WANT_SYS_GETPGRP
+
 asmlinkage long sys_getpgrp(void)
 {
 	/* SMP - assuming writes are word atomic this is fine */
 	return process_group(current);
 }
 
+#endif
+
 asmlinkage long sys_getsid(pid_t pid)
 {
 	if (!pid) {
-		return current->session;
+		return current->signal->session;
 	} else {
 		int retval;
 		struct task_struct *p;
@@ -1054,7 +1061,7 @@ asmlinkage long sys_getsid(pid_t pid)
 		if(p) {
 			retval = security_task_getsid(p);
 			if (!retval)
-				retval = p->session;
+				retval = p->signal->session;
 		}
 		read_unlock(&tasklist_lock);
 		return retval;
@@ -1069,29 +1076,203 @@ asmlinkage long sys_setsid(void)
 	if (!thread_group_leader(current))
 		return -EINVAL;
 
+	down(&tty_sem);
 	write_lock_irq(&tasklist_lock);
 
 	pid = find_pid(PIDTYPE_PGID, current->pid);
 	if (pid)
 		goto out;
 
-	current->leader = 1;
+	current->signal->leader = 1;
 	__set_special_pids(current->pid, current->pid);
-	current->tty = NULL;
-	current->tty_old_pgrp = 0;
+	current->signal->tty = NULL;
+	current->signal->tty_old_pgrp = 0;
 	err = process_group(current);
 out:
 	write_unlock_irq(&tasklist_lock);
+	up(&tty_sem);
 	return err;
 }
 
 /*
  * Supplementary group IDs
  */
-asmlinkage long sys_getgroups(int gidsetsize, gid_t __user *grouplist)
+
+/* init to 2 - one for init_task, one to ensure it is never freed */
+struct group_info init_groups = { .usage = ATOMIC_INIT(2) };
+
+struct group_info *groups_alloc(int gidsetsize)
+{
+	struct group_info *group_info;
+	int nblocks;
+	int i;
+
+	nblocks = (gidsetsize + NGROUPS_PER_BLOCK - 1) / NGROUPS_PER_BLOCK;
+	/* Make sure we always allocate at least one indirect block pointer */
+	nblocks = nblocks ? : 1;
+	group_info = kmalloc(sizeof(*group_info) + nblocks*sizeof(gid_t *), GFP_USER);
+	if (!group_info)
+		return NULL;
+	group_info->ngroups = gidsetsize;
+	group_info->nblocks = nblocks;
+	atomic_set(&group_info->usage, 1);
+
+	if (gidsetsize <= NGROUPS_SMALL) {
+		group_info->blocks[0] = group_info->small_block;
+	} else {
+		for (i = 0; i < nblocks; i++) {
+			gid_t *b;
+			b = (void *)__get_free_page(GFP_USER);
+			if (!b)
+				goto out_undo_partial_alloc;
+			group_info->blocks[i] = b;
+		}
+	}
+	return group_info;
+
+out_undo_partial_alloc:
+	while (--i >= 0) {
+		free_page((unsigned long)group_info->blocks[i]);
+	}
+	kfree(group_info);
+	return NULL;
+}
+
+EXPORT_SYMBOL(groups_alloc);
+
+void groups_free(struct group_info *group_info)
+{
+	if (group_info->blocks[0] != group_info->small_block) {
+		int i;
+		for (i = 0; i < group_info->nblocks; i++)
+			free_page((unsigned long)group_info->blocks[i]);
+	}
+	kfree(group_info);
+}
+
+EXPORT_SYMBOL(groups_free);
+
+/* export the group_info to a user-space array */
+static int groups_to_user(gid_t __user *grouplist,
+    struct group_info *group_info)
 {
 	int i;
-	
+	int count = group_info->ngroups;
+
+	for (i = 0; i < group_info->nblocks; i++) {
+		int cp_count = min(NGROUPS_PER_BLOCK, count);
+		int off = i * NGROUPS_PER_BLOCK;
+		int len = cp_count * sizeof(*grouplist);
+
+		if (copy_to_user(grouplist+off, group_info->blocks[i], len))
+			return -EFAULT;
+
+		count -= cp_count;
+	}
+	return 0;
+}
+
+/* fill a group_info from a user-space array - it must be allocated already */
+static int groups_from_user(struct group_info *group_info,
+    gid_t __user *grouplist)
+ {
+	int i;
+	int count = group_info->ngroups;
+
+	for (i = 0; i < group_info->nblocks; i++) {
+		int cp_count = min(NGROUPS_PER_BLOCK, count);
+		int off = i * NGROUPS_PER_BLOCK;
+		int len = cp_count * sizeof(*grouplist);
+
+		if (copy_from_user(group_info->blocks[i], grouplist+off, len))
+			return -EFAULT;
+
+		count -= cp_count;
+	}
+	return 0;
+}
+
+/* a simple shell-metzner sort */
+static void groups_sort(struct group_info *group_info)
+{
+	int base, max, stride;
+	int gidsetsize = group_info->ngroups;
+
+	for (stride = 1; stride < gidsetsize; stride = 3 * stride + 1)
+		; /* nothing */
+	stride /= 3;
+
+	while (stride) {
+		max = gidsetsize - stride;
+		for (base = 0; base < max; base++) {
+			int left = base;
+			int right = left + stride;
+			gid_t tmp = GROUP_AT(group_info, right);
+
+			while (left >= 0 && GROUP_AT(group_info, left) > tmp) {
+				GROUP_AT(group_info, right) =
+				    GROUP_AT(group_info, left);
+				right = left;
+				left -= stride;
+			}
+			GROUP_AT(group_info, right) = tmp;
+		}
+		stride /= 3;
+	}
+}
+
+/* a simple bsearch */
+static int groups_search(struct group_info *group_info, gid_t grp)
+{
+	int left, right;
+
+	if (!group_info)
+		return 0;
+
+	left = 0;
+	right = group_info->ngroups;
+	while (left < right) {
+		int mid = (left+right)/2;
+		int cmp = grp - GROUP_AT(group_info, mid);
+		if (cmp > 0)
+			left = mid + 1;
+		else if (cmp < 0)
+			right = mid;
+		else
+			return 1;
+	}
+	return 0;
+}
+
+/* validate and set current->group_info */
+int set_current_groups(struct group_info *group_info)
+{
+	int retval;
+	struct group_info *old_info;
+
+	retval = security_task_setgroups(group_info);
+	if (retval)
+		return retval;
+
+	groups_sort(group_info);
+	get_group_info(group_info);
+
+	task_lock(current);
+	old_info = current->group_info;
+	current->group_info = group_info;
+	task_unlock(current);
+
+	put_group_info(old_info);
+
+	return 0;
+}
+
+EXPORT_SYMBOL(set_current_groups);
+
+asmlinkage long sys_getgroups(int gidsetsize, gid_t __user *grouplist)
+{
+	int i = 0;
+
 	/*
 	 *	SMP: Nobody else can change our grouplist. Thus we are
 	 *	safe.
@@ -1099,54 +1280,53 @@ asmlinkage long sys_getgroups(int gidsetsize, gid_t __user *grouplist)
 
 	if (gidsetsize < 0)
 		return -EINVAL;
-	i = current->ngroups;
+
+	/* no need to grab task_lock here; it cannot change */
+	get_group_info(current->group_info);
+	i = current->group_info->ngroups;
 	if (gidsetsize) {
-		if (i > gidsetsize)
-			return -EINVAL;
-		if (copy_to_user(grouplist, current->groups, sizeof(gid_t)*i))
-			return -EFAULT;
+		if (i > gidsetsize) {
+			i = -EINVAL;
+			goto out;
+		}
+		if (groups_to_user(grouplist, current->group_info)) {
+			i = -EFAULT;
+			goto out;
+		}
 	}
+out:
+	put_group_info(current->group_info);
 	return i;
 }
 
 /*
- *	SMP: Our groups are not shared. We can copy to/from them safely
+ *	SMP: Our groups are copy-on-write. We can set them safely
  *	without another task interfering.
  */
  
 asmlinkage long sys_setgroups(int gidsetsize, gid_t __user *grouplist)
 {
-	gid_t groups[NGROUPS];
+	struct group_info *group_info;
 	int retval;
 
 	if (!capable(CAP_SETGID))
 		return -EPERM;
-	if ((unsigned) gidsetsize > NGROUPS)
+	if ((unsigned)gidsetsize > NGROUPS_MAX)
 		return -EINVAL;
-	if (copy_from_user(groups, grouplist, gidsetsize * sizeof(gid_t)))
-		return -EFAULT;
-	retval = security_task_setgroups(gidsetsize, groups);
-	if (retval)
+
+	group_info = groups_alloc(gidsetsize);
+	if (!group_info)
+		return -ENOMEM;
+	retval = groups_from_user(group_info, grouplist);
+	if (retval) {
+		put_group_info(group_info);
 		return retval;
-	memcpy(current->groups, groups, gidsetsize * sizeof(gid_t));
-	current->ngroups = gidsetsize;
-	return 0;
-}
-
-static int supplemental_group_member(gid_t grp)
-{
-	int i = current->ngroups;
-
-	if (i) {
-		gid_t *groups = current->groups;
-		do {
-			if (*groups == grp)
-				return 1;
-			groups++;
-			i--;
-		} while (i);
 	}
-	return 0;
+
+	retval = set_current_groups(group_info);
+	put_group_info(group_info);
+
+	return retval;
 }
 
 /*
@@ -1155,8 +1335,11 @@ static int supplemental_group_member(gid_t grp)
 int in_group_p(gid_t grp)
 {
 	int retval = 1;
-	if (grp != current->fsgid)
-		retval = supplemental_group_member(grp);
+	if (grp != current->fsgid) {
+		get_group_info(current->group_info);
+		retval = groups_search(current->group_info, grp);
+		put_group_info(current->group_info);
+	}
 	return retval;
 }
 
@@ -1165,8 +1348,11 @@ EXPORT_SYMBOL(in_group_p);
 int in_egroup_p(gid_t grp)
 {
 	int retval = 1;
-	if (grp != current->egid)
-		retval = supplemental_group_member(grp);
+	if (grp != current->egid) {
+		get_group_info(current->group_info);
+		retval = groups_search(current->group_info, grp);
+		put_group_info(current->group_info);
+	}
 	return retval;
 }
 
@@ -1207,6 +1393,8 @@ asmlinkage long sys_sethostname(char __user *name, int len)
 	return errno;
 }
 
+#ifdef __ARCH_WANT_SYS_GETHOSTNAME
+
 asmlinkage long sys_gethostname(char __user *name, int len)
 {
 	int i, errno;
@@ -1223,6 +1411,8 @@ asmlinkage long sys_gethostname(char __user *name, int len)
 	up_read(&uts_sem);
 	return errno;
 }
+
+#endif
 
 /*
  * Only setdomainname; getdomainname can be implemented by calling
@@ -1253,12 +1443,16 @@ asmlinkage long sys_getrlimit(unsigned int resource, struct rlimit __user *rlim)
 {
 	if (resource >= RLIM_NLIMITS)
 		return -EINVAL;
-	else
-		return copy_to_user(rlim, current->rlim + resource, sizeof(*rlim))
-			? -EFAULT : 0;
+	else {
+		struct rlimit value;
+		task_lock(current->group_leader);
+		value = current->signal->rlim[resource];
+		task_unlock(current->group_leader);
+		return copy_to_user(rlim, &value, sizeof(*rlim)) ? -EFAULT : 0;
+	}
 }
 
-#if defined(COMPAT_RLIM_OLD_INFINITY) || !(defined(CONFIG_IA64) || defined(CONFIG_V850))
+#ifdef __ARCH_WANT_SYS_OLD_GETRLIMIT
 
 /*
  *	Back compatibility for getrlimit. Needed for some apps.
@@ -1270,7 +1464,9 @@ asmlinkage long sys_old_getrlimit(unsigned int resource, struct rlimit __user *r
 	if (resource >= RLIM_NLIMITS)
 		return -EINVAL;
 
-	memcpy(&x, current->rlim + resource, sizeof(*rlim));
+	task_lock(current->group_leader);
+	x = current->signal->rlim[resource];
+	task_unlock(current->group_leader);
 	if(x.rlim_cur > 0x7FFFFFFF)
 		x.rlim_cur = 0x7FFFFFFF;
 	if(x.rlim_max > 0x7FFFFFFF)
@@ -1291,21 +1487,20 @@ asmlinkage long sys_setrlimit(unsigned int resource, struct rlimit __user *rlim)
 		return -EFAULT;
        if (new_rlim.rlim_cur > new_rlim.rlim_max)
                return -EINVAL;
-	old_rlim = current->rlim + resource;
-	if (((new_rlim.rlim_cur > old_rlim->rlim_max) ||
-	     (new_rlim.rlim_max > old_rlim->rlim_max)) &&
+	old_rlim = current->signal->rlim + resource;
+	if ((new_rlim.rlim_max > old_rlim->rlim_max) &&
 	    !capable(CAP_SYS_RESOURCE))
 		return -EPERM;
-	if (resource == RLIMIT_NOFILE) {
-		if (new_rlim.rlim_cur > NR_OPEN || new_rlim.rlim_max > NR_OPEN)
+	if (resource == RLIMIT_NOFILE && new_rlim.rlim_max > NR_OPEN)
 			return -EPERM;
-	}
 
 	retval = security_task_setrlimit(resource, &new_rlim);
 	if (retval)
 		return retval;
 
+	task_lock(current->group_leader);
 	*old_rlim = new_rlim;
+	task_unlock(current->group_leader);
 	return 0;
 }
 
@@ -1317,49 +1512,86 @@ asmlinkage long sys_setrlimit(unsigned int resource, struct rlimit __user *rlim)
  * a lot simpler!  (Which we're not doing right now because we're not
  * measuring them yet).
  *
- * This is SMP safe.  Either we are called from sys_getrusage on ourselves
- * below (we know we aren't going to exit/disappear and only we change our
- * rusage counters), or we are called from wait4() on a process which is
- * either stopped or zombied.  In the zombied case the task won't get
- * reaped till shortly after the call to getrusage(), in both cases the
- * task being examined is in a frozen state so the counters won't change.
+ * This expects to be called with tasklist_lock read-locked or better,
+ * and the siglock not locked.  It may momentarily take the siglock.
  *
- * FIXME! Get the fault counts properly!
+ * When sampling multiple threads for RUSAGE_SELF, under SMP we might have
+ * races with threads incrementing their own counters.  But since word
+ * reads are atomic, we either get new values or old values and we don't
+ * care which for the sums.  We always take the siglock to protect reading
+ * the c* fields from p->signal from races with exit.c updating those
+ * fields when reaping, so a sample either gets all the additions of a
+ * given child after it's reaped, or none so this sample is before reaping.
  */
+
+void k_getrusage(struct task_struct *p, int who, struct rusage *r)
+{
+	struct task_struct *t;
+	unsigned long flags;
+	cputime_t utime, stime;
+
+	memset((char *) r, 0, sizeof *r);
+
+	if (unlikely(!p->signal))
+		return;
+
+	switch (who) {
+		case RUSAGE_CHILDREN:
+			spin_lock_irqsave(&p->sighand->siglock, flags);
+			utime = p->signal->cutime;
+			stime = p->signal->cstime;
+			r->ru_nvcsw = p->signal->cnvcsw;
+			r->ru_nivcsw = p->signal->cnivcsw;
+			r->ru_minflt = p->signal->cmin_flt;
+			r->ru_majflt = p->signal->cmaj_flt;
+			spin_unlock_irqrestore(&p->sighand->siglock, flags);
+			cputime_to_timeval(utime, &r->ru_utime);
+			cputime_to_timeval(stime, &r->ru_stime);
+			break;
+		case RUSAGE_SELF:
+			spin_lock_irqsave(&p->sighand->siglock, flags);
+			utime = stime = cputime_zero;
+			goto sum_group;
+		case RUSAGE_BOTH:
+			spin_lock_irqsave(&p->sighand->siglock, flags);
+			utime = p->signal->cutime;
+			stime = p->signal->cstime;
+			r->ru_nvcsw = p->signal->cnvcsw;
+			r->ru_nivcsw = p->signal->cnivcsw;
+			r->ru_minflt = p->signal->cmin_flt;
+			r->ru_majflt = p->signal->cmaj_flt;
+		sum_group:
+			utime = cputime_add(utime, p->signal->utime);
+			stime = cputime_add(stime, p->signal->stime);
+			r->ru_nvcsw += p->signal->nvcsw;
+			r->ru_nivcsw += p->signal->nivcsw;
+			r->ru_minflt += p->signal->min_flt;
+			r->ru_majflt += p->signal->maj_flt;
+			t = p;
+			do {
+				utime = cputime_add(utime, t->utime);
+				stime = cputime_add(stime, t->stime);
+				r->ru_nvcsw += t->nvcsw;
+				r->ru_nivcsw += t->nivcsw;
+				r->ru_minflt += t->min_flt;
+				r->ru_majflt += t->maj_flt;
+				t = next_thread(t);
+			} while (t != p);
+			spin_unlock_irqrestore(&p->sighand->siglock, flags);
+			cputime_to_timeval(utime, &r->ru_utime);
+			cputime_to_timeval(stime, &r->ru_stime);
+			break;
+		default:
+			BUG();
+	}
+}
+
 int getrusage(struct task_struct *p, int who, struct rusage __user *ru)
 {
 	struct rusage r;
-
-	memset((char *) &r, 0, sizeof(r));
-	switch (who) {
-		case RUSAGE_SELF:
-			jiffies_to_timeval(p->utime, &r.ru_utime);
-			jiffies_to_timeval(p->stime, &r.ru_stime);
-			r.ru_nvcsw = p->nvcsw;
-			r.ru_nivcsw = p->nivcsw;
-			r.ru_minflt = p->min_flt;
-			r.ru_majflt = p->maj_flt;
-			r.ru_nswap = p->nswap;
-			break;
-		case RUSAGE_CHILDREN:
-			jiffies_to_timeval(p->cutime, &r.ru_utime);
-			jiffies_to_timeval(p->cstime, &r.ru_stime);
-			r.ru_nvcsw = p->cnvcsw;
-			r.ru_nivcsw = p->cnivcsw;
-			r.ru_minflt = p->cmin_flt;
-			r.ru_majflt = p->cmaj_flt;
-			r.ru_nswap = p->cnswap;
-			break;
-		default:
-			jiffies_to_timeval(p->utime + p->cutime, &r.ru_utime);
-			jiffies_to_timeval(p->stime + p->cstime, &r.ru_stime);
-			r.ru_nvcsw = p->nvcsw + p->cnvcsw;
-			r.ru_nivcsw = p->nivcsw + p->cnivcsw;
-			r.ru_minflt = p->min_flt + p->cmin_flt;
-			r.ru_majflt = p->maj_flt + p->cmaj_flt;
-			r.ru_nswap = p->nswap + p->cnswap;
-			break;
-	}
+	read_lock(&tasklist_lock);
+	k_getrusage(p, who, &r);
+	read_unlock(&tasklist_lock);
 	return copy_to_user(ru, &r, sizeof(r)) ? -EFAULT : 0;
 }
 
@@ -1379,7 +1611,7 @@ asmlinkage long sys_umask(int mask)
 asmlinkage long sys_prctl(int option, unsigned long arg2, unsigned long arg3,
 			  unsigned long arg4, unsigned long arg5)
 {
-	int error;
+	long error;
 	int sig;
 
 	error = security_task_prctl(option, arg2, arg3, arg4, arg5);
@@ -1449,6 +1681,26 @@ asmlinkage long sys_prctl(int option, unsigned long arg2, unsigned long arg3,
 			}
 			current->keep_capabilities = arg2;
 			break;
+		case PR_SET_NAME: {
+			struct task_struct *me = current;
+			unsigned char ncomm[sizeof(me->comm)];
+
+			ncomm[sizeof(me->comm)-1] = 0;
+			if (strncpy_from_user(ncomm, (char __user *)arg2,
+						sizeof(me->comm)-1) < 0)
+				return -EFAULT;
+			set_task_comm(me, ncomm);
+			return 0;
+		}
+		case PR_GET_NAME: {
+			struct task_struct *me = current;
+			unsigned char tcomm[sizeof(me->comm)];
+
+			get_task_comm(tcomm, me);
+			if (copy_to_user((char __user *)arg2, tcomm, sizeof(tcomm)))
+				return -EFAULT;
+			return 0;
+		}
 		default:
 			error = -EINVAL;
 			break;

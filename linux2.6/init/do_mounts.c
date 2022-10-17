@@ -6,6 +6,7 @@
 #include <linux/suspend.h>
 #include <linux/root_dev.h>
 #include <linux/security.h>
+#include <linux/delay.h>
 
 #include <linux/nfs_fs.h>
 #include <linux/nfs_fs_sb.h>
@@ -66,11 +67,11 @@ static dev_t __init try_name(char *name, int part)
 	/* read device number from .../dev */
 
 	sprintf(path, "/sys/block/%s/dev", name);
-	fd = open(path, 0, 0);
+	fd = sys_open(path, 0, 0);
 	if (fd < 0)
 		goto fail;
-	len = read(fd, buf, 32);
-	close(fd);
+	len = sys_read(fd, buf, 32);
+	sys_close(fd);
 	if (len <= 0 || len == 32 || buf[len - 1] != '\n')
 		goto fail;
 	buf[len - 1] = '\0';
@@ -96,11 +97,11 @@ static dev_t __init try_name(char *name, int part)
 
 	/* otherwise read range from .../range */
 	sprintf(path, "/sys/block/%s/range", name);
-	fd = open(path, 0, 0);
+	fd = sys_open(path, 0, 0);
 	if (fd < 0)
 		goto fail;
-	len = read(fd, buf, 32);
-	close(fd);
+	len = sys_read(fd, buf, 32);
+	sys_close(fd);
 	if (len <= 0 || len == 32 || buf[len - 1] != '\n')
 		goto fail;
 	buf[len - 1] = '\0';
@@ -130,20 +131,22 @@ fail:
  *	Driverfs is used to check if something is a disk name - it has
  *	all known disks under bus/block/devices.  If the disk name
  *	contains slashes, name of driverfs node has them replaced with
- *	dots.  try_name() does the actual checks, assuming that driverfs
+ *	bangs.  try_name() does the actual checks, assuming that driverfs
  *	is mounted on rootfs /sys.
  */
 
-dev_t name_to_dev_t(char *name)
+dev_t __init name_to_dev_t(char *name)
 {
 	char s[32];
 	char *p;
 	dev_t res = 0;
 	int part;
 
-	sys_mkdir("/sys", 0700);
+#ifdef CONFIG_SYSFS
+	int mkdir_err = sys_mkdir("/sys", 0700);
 	if (sys_mount("sysfs", "/sys", "sysfs", 0, NULL) < 0)
 		goto out;
+#endif
 
 	if (strncmp(name, "/dev/", 5) != 0) {
 		unsigned maj, min;
@@ -163,13 +166,16 @@ dev_t name_to_dev_t(char *name)
 	res = Root_NFS;
 	if (strcmp(name, "nfs") == 0)
 		goto done;
+	res = Root_RAM0;
+	if (strcmp(name, "ram") == 0)
+		goto done;
 
 	if (strlen(name) > 31)
 		goto fail;
 	strcpy(s, name);
 	for (p = s; *p; p++)
 		if (*p == '/')
-			*p = '.';
+			*p = '!';
 	res = try_name(s, 0);
 	if (res)
 		goto done;
@@ -189,9 +195,12 @@ dev_t name_to_dev_t(char *name)
 	p[-1] = '\0';
 	res = try_name(s, part);
 done:
+#ifdef CONFIG_SYSFS
 	sys_umount("/sys", 0);
 out:
-	sys_rmdir("/sys");
+	if (!mkdir_err)
+		sys_rmdir("/sys");
+#endif
 	return res;
 fail:
 	res = 0;
@@ -220,8 +229,16 @@ static int __init fs_names_setup(char *str)
 	return 1;
 }
 
+static unsigned int __initdata root_delay;
+static int __init root_delay_setup(char *str)
+{
+	root_delay = simple_strtoul(str, NULL, 0);
+	return 1;
+}
+
 __setup("rootflags=", root_data_setup);
 __setup("rootfstype=", fs_names_setup);
+__setup("rootdelay=", root_delay_setup);
 
 static void __init get_fs_names(char *page)
 {
@@ -285,7 +302,7 @@ retry:
 				continue;
 		}
 	        /*
-		 * Allow the user to distinguish between failed open
+		 * Allow the user to distinguish between failed sys_open
 		 * and bad superblock on root device.
 		 */
 		__bdevname(ROOT_DEV, b);
@@ -324,21 +341,21 @@ void __init change_floppy(char *fmt, ...)
 	va_start(args, fmt);
 	vsprintf(buf, fmt, args);
 	va_end(args);
-	fd = open("/dev/root", O_RDWR | O_NDELAY, 0);
+	fd = sys_open("/dev/root", O_RDWR | O_NDELAY, 0);
 	if (fd >= 0) {
 		sys_ioctl(fd, FDEJECT, 0);
-		close(fd);
+		sys_close(fd);
 	}
 	printk(KERN_NOTICE "VFS: Insert %s and press ENTER\n", buf);
-	fd = open("/dev/console", O_RDWR, 0);
+	fd = sys_open("/dev/console", O_RDWR, 0);
 	if (fd >= 0) {
 		sys_ioctl(fd, TCGETS, (long)&termios);
 		termios.c_lflag &= ~ICANON;
 		sys_ioctl(fd, TCSETSF, (long)&termios);
-		read(fd, &c, 1);
+		sys_read(fd, &c, 1);
 		termios.c_lflag |= ICANON;
 		sys_ioctl(fd, TCSETSF, (long)&termios);
-		close(fd);
+		sys_close(fd);
 	}
 }
 #endif
@@ -378,6 +395,12 @@ void __init prepare_namespace(void)
 	int is_floppy;
 
 	mount_devfs();
+
+	if (root_delay) {
+		printk(KERN_INFO "Waiting %dsec before mounting root device...\n",
+		       root_delay);
+		ssleep(root_delay);
+	}
 
 	md_run_setup();
 

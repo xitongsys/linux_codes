@@ -132,6 +132,7 @@ struct ccw1 {
 #define CCW_CMD_SENSE_PGID	0x34
 #define CCW_CMD_SUSPEND_RECONN	0x5B
 #define CCW_CMD_RDC		0x64
+#define CCW_CMD_RELEASE		0x94
 #define CCW_CMD_SET_PGID	0xAF
 #define CCW_CMD_SENSE_ID	0xE4
 #define CCW_CMD_DCTL		0xF3
@@ -247,6 +248,14 @@ struct ciw {
 #define DOIO_DENY_PREFETCH	 0x0002 /* don't allow for CCW prefetch */
 #define DOIO_SUPPRESS_INTER	 0x0004 /* suppress intermediate inter. */
 					/* ... for suspended CCWs */
+/* Device or subchannel gone. */
+#define CIO_GONE       0x0001
+/* No path to device. */
+#define CIO_NO_PATH    0x0002
+/* Device has appeared. */
+#define CIO_OPER       0x0004
+/* Sick revalidation of device. */
+#define CIO_REVALIDATE 0x0008
 
 struct diag210 {
 	__u16 vrdcdvno : 16;   /* device number (input) */
@@ -264,6 +273,8 @@ struct diag210 {
 extern int diag210(struct diag210 *addr);
 
 extern void wait_cons_dev(void);
+
+extern void clear_all_subchannels(void);
 
 #endif
 

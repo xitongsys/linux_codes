@@ -26,41 +26,33 @@
  *
  */
 #include <linux/config.h>
-#include <linux/module.h>
-#include <linux/tty.h>
-#include <linux/ioport.h>
-#include <linux/init.h>
-#include <linux/serial.h>
-#include <linux/console.h>
-#include <linux/sysrq.h>
-#include <linux/spinlock.h>
-
-#include <asm/hardware.h>
-#include <asm/io.h>
-#include <asm/irq.h>
 
 #if defined(CONFIG_SERIAL_CLPS711X_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
 #define SUPPORT_SYSRQ
 #endif
 
+#include <linux/module.h>
+#include <linux/ioport.h>
+#include <linux/init.h>
+#include <linux/console.h>
+#include <linux/sysrq.h>
+#include <linux/spinlock.h>
+#include <linux/device.h>
+#include <linux/tty.h>
+#include <linux/tty_flip.h>
 #include <linux/serial_core.h>
+#include <linux/serial.h>
 
+#include <asm/hardware.h>
+#include <asm/io.h>
+#include <asm/irq.h>
 #include <asm/hardware/clps7111.h>
 
 #define UART_NR		2
 
-#ifndef CONFIG_SERIAL_CLPS711X_OLD_NAME
 #define SERIAL_CLPS711X_MAJOR	204
 #define SERIAL_CLPS711X_MINOR	40
 #define SERIAL_CLPS711X_NR	UART_NR
-
-#else
-#warning The old names/device number for this driver if compatabity is needed
-#define SERIAL_CLPS711X_MAJOR   204
-#define SERIAL_CLPS711X_MINOR   16
-#define SERIAL_CLPS711X_NR      UART_NR
-
-#endif
 
 /*
  * We use the relevant SYSCON register as a base address for these ports.
@@ -131,9 +123,7 @@ static irqreturn_t clps711xuart_int_rx(int irq, void *dev_id, struct pt_regs *re
 			goto ignore_char;
 
 	error_return:
-		*tty->flip.flag_buf_ptr++ = flg;
-		*tty->flip.char_buf_ptr++ = ch;
-		tty->flip.count++;
+		tty_insert_flip_char(tty, ch, flg);
 	ignore_char:
 		status = clps_readl(SYSFLG(port));
 	}
@@ -166,11 +156,7 @@ static irqreturn_t clps711xuart_int_rx(int irq, void *dev_id, struct pt_regs *re
 		 * CHECK: does overrun affect the current character?
 		 * ASSUMPTION: it does not.
 		 */
-		*tty->flip.flag_buf_ptr++ = flg;
-		*tty->flip.char_buf_ptr++ = ch;
-		tty->flip.count++;
-		if (tty->flip.count >= TTY_FLIPBUF_SIZE)
-			goto ignore_char;
+		tty_insert_flip_char(tty, ch, flg);
 		ch = 0;
 		flg = TTY_OVERRUN;
 	}
@@ -620,3 +606,4 @@ module_exit(clps711xuart_exit);
 MODULE_AUTHOR("Deep Blue Solutions Ltd");
 MODULE_DESCRIPTION("CLPS-711x generic serial driver $Revision: 1.42 $");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_CHARDEV(SERIAL_CLPS711X_MAJOR, SERIAL_CLPS711X_MINOR);

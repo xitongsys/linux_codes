@@ -29,7 +29,7 @@
 #include <asm/rtas.h>
 #include <asm/prom.h>
 
-#define MODULE_VERSION "1.0"
+#define MODULE_VERS "1.0"
 #define MODULE_NAME "scanlog"
 
 /* Status returns from ibm,scan-log-dump */
@@ -43,16 +43,13 @@ static int scanlog_debug;
 static unsigned int ibm_scan_log_dump;			/* RTAS token */
 static struct proc_dir_entry *proc_ppc64_scan_log_dump;	/* The proc file */
 
-extern struct proc_dir_entry *proc_rtas;
-
-
 static ssize_t scanlog_read(struct file *file, char *buf,
 			    size_t count, loff_t *ppos)
 {
         struct inode * inode = file->f_dentry->d_inode;
 	struct proc_dir_entry *dp;
 	unsigned int *data;
-	unsigned long status;
+	int status;
 	unsigned long len, off;
 	unsigned int wait_time;
 
@@ -84,11 +81,11 @@ static ssize_t scanlog_read(struct file *file, char *buf,
 		spin_lock(&rtas_data_buf_lock);
 		memcpy(rtas_data_buf, data, RTAS_DATA_BUF_SIZE);
 		status = rtas_call(ibm_scan_log_dump, 2, 1, NULL,
-				   __pa(rtas_data_buf), count);
+				   (u32) __pa(rtas_data_buf), (u32) count);
 		memcpy(data, rtas_data_buf, RTAS_DATA_BUF_SIZE);
 		spin_unlock(&rtas_data_buf_lock);
 
-		DEBUG("status=%ld, data[0]=%x, data[1]=%x, data[2]=%x\n",
+		DEBUG("status=%d, data[0]=%x, data[1]=%x, data[2]=%x\n",
 		      status, data[0], data[1], data[2]);
 		switch (status) {
 		    case SCANLOG_COMPLETE:
@@ -121,7 +118,7 @@ static ssize_t scanlog_read(struct file *file, char *buf,
 				wait_time = ms / (1000000/HZ); /* round down is fine */
 				/* Fall through to sleep */
 			} else {
-				printk(KERN_ERR "scanlog: unknown error from rtas: %ld\n", status);
+				printk(KERN_ERR "scanlog: unknown error from rtas: %d\n", status);
 				return -EIO;
 			}
 		}
@@ -135,17 +132,24 @@ static ssize_t scanlog_read(struct file *file, char *buf,
 static ssize_t scanlog_write(struct file * file, const char * buf,
 			     size_t count, loff_t *ppos)
 {
-	unsigned long status;
+	char stkbuf[20];
+	int status;
+
+	if (count > 19) count = 19;
+	if (copy_from_user (stkbuf, buf, count)) {
+		return -EFAULT;
+	}
+	stkbuf[count] = 0;
 
 	if (buf) {
-		if (strncmp(buf, "reset", 5) == 0) {
+		if (strncmp(stkbuf, "reset", 5) == 0) {
 			DEBUG("reset scanlog\n");
-			status = rtas_call(ibm_scan_log_dump, 2, 1, NULL, NULL, 0);
-			DEBUG("rtas returns %ld\n", status);
-		} else if (strncmp(buf, "debugon", 7) == 0) {
+			status = rtas_call(ibm_scan_log_dump, 2, 1, NULL, 0, 0);
+			DEBUG("rtas returns %d\n", status);
+		} else if (strncmp(stkbuf, "debugon", 7) == 0) {
 			printk(KERN_ERR "scanlog: debug on\n");
 			scanlog_debug = 1;
-		} else if (strncmp(buf, "debugoff", 8) == 0) {
+		} else if (strncmp(stkbuf, "debugoff", 8) == 0) {
 			printk(KERN_ERR "scanlog: debug off\n");
 			scanlog_debug = 0;
 		}
@@ -207,15 +211,7 @@ int __init scanlog_init(void)
 		return -EIO;
 	}
 
-	if (proc_rtas == NULL)
-                proc_rtas = proc_mkdir("rtas", 0);
-
-	if (proc_rtas == NULL) {
-		printk(KERN_ERR "Failed to create /proc/rtas in scanlog_init\n");
-		return -EIO;
-	}
-
-        ent = create_proc_entry("scan-log-dump",  S_IRUSR, proc_rtas);
+        ent = create_proc_entry("ppc64/rtas/scan-log-dump",  S_IRUSR, NULL);
 	if (ent) {
 		ent->proc_fops = &scanlog_fops;
 		/* Ideally we could allocate a buffer < 4G */

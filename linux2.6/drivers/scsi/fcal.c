@@ -21,7 +21,7 @@
 #include <asm/irq.h>
 
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 #include "../fc4/fcp_impl.h"
 #include "fcal.h"
 
@@ -315,4 +315,6 @@ static Scsi_Host_Template driver_template = {
 	.eh_host_reset_handler	= fcp_scsi_host_reset,
 };
 #include "scsi_module.c"
+
+MODULE_LICENSE("GPL");
 

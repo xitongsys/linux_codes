@@ -47,7 +47,7 @@
 #include <asm/io.h>
 
 #include "scsi.h"
-#include "hosts.h"
+#include <scsi/scsi_host.h>
 #include "aha1542.h"
 
 #define SCSI_BUF_PA(address)	isa_virt_to_bus(address)
@@ -67,10 +67,10 @@ static void BAD_SG_DMA(Scsi_Cmnd * SCpnt,
 		       int nseg,
 		       int badseg)
 {
-	printk(KERN_CRIT "sgpnt[%d:%d] page %p/0x%x length %u\n",
+	printk(KERN_CRIT "sgpnt[%d:%d] page %p/0x%llx length %u\n",
 	       badseg, nseg,
 	       page_address(sgpnt[badseg].page) + sgpnt[badseg].offset,
-	       SCSI_SG_PA(&sgpnt[badseg]),
+	       (unsigned long long)SCSI_SG_PA(&sgpnt[badseg]),
 	       sgpnt[badseg].length);
 
 	/*
@@ -129,10 +129,10 @@ static int setup_dmaspeed[MAXBOARDS] __initdata = { -1, -1, -1, -1 };
  */
 
 #if defined(MODULE)
-int isapnp = 0;
-int aha1542[] = {0x330, 11, 4, -1};
-MODULE_PARM(aha1542, "1-4i");
-MODULE_PARM(isapnp, "i");
+static int isapnp = 0;
+static int aha1542[] = {0x330, 11, 4, -1};
+module_param_array(aha1542, int, NULL, 0);
+module_param(isapnp, bool, 0);
 
 static struct isapnp_device_id id_table[] __initdata = {
 	{
@@ -167,7 +167,7 @@ struct aha1542_hostdata {
 
 static struct Scsi_Host *aha_host[7];	/* One for each IRQ level (9-15) */
 
-static spinlock_t aha1542_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(aha1542_lock);
 
 
 
@@ -545,7 +545,7 @@ static void aha1542_intr_handle(struct Scsi_Host *shost, void *dev_id, struct pt
 		my_done = SCtmp->scsi_done;
 		if (SCtmp->host_scribble) {
 			kfree(SCtmp->host_scribble);
-			SCtmp->host_scribble = 0;
+			SCtmp->host_scribble = NULL;
 		}
 		/* Fetch the sense data, and tuck it away, in the required slot.  The
 		   Adaptec automatically fetches it, and there is no guarantee that
@@ -704,11 +704,14 @@ static int aha1542_queuecommand(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 #endif
 		int i;
 		ccb[mbo].op = 2;	/* SCSI Initiator Command  w/scatter-gather */
-		SCpnt->host_scribble = (unsigned char *) kmalloc(512, GFP_DMA);
+		SCpnt->host_scribble = (unsigned char *) kmalloc(512, GFP_KERNEL | GFP_DMA);
 		sgpnt = (struct scatterlist *) SCpnt->request_buffer;
 		cptr = (struct chain *) SCpnt->host_scribble;
-		if (cptr == NULL)
-			panic("aha1542.c: unable to allocate DMA memory\n");
+		if (cptr == NULL) {
+			/* free the claimed mailbox slot */
+			HOSTDATA(SCpnt->device->host)->SCint[mbo] = NULL;
+			return SCSI_MLQUEUE_HOST_BUSY;
+		}
 		for (i = 0; i < SCpnt->use_sg; i++) {
 			if (sgpnt[i].length == 0 || SCpnt->use_sg > 16 ||
 			    (((int) sgpnt[i].offset) & 1) || (sgpnt[i].length & 1)) {
@@ -948,7 +951,7 @@ fail:
 static char *setup_str[MAXBOARDS] __initdata;
 static int setup_idx = 0;
 
-void __init aha1542_setup(char *str, int *ints)
+static void __init aha1542_setup(char *str, int *ints)
 {
 	const char *ahausage = "aha1542: usage: aha1542=<PORTBASE>[,<BUSON>,<BUSOFF>[,<DMASPEED>]]\n";
 	int setup_portbase;
@@ -1066,7 +1069,7 @@ static int __init aha1542_detect(Scsi_Host_Template * tpnt)
 	/*
 	 *	Find MicroChannel cards (AHA1640)
 	 */
-#ifdef CONFIG_MCA
+#ifdef CONFIG_MCA_LEGACY
 	if(MCA_bus) {
 		int slot = 0;
 		int pos = 0;
@@ -1476,7 +1479,7 @@ static int aha1542_bus_reset(Scsi_Cmnd * SCpnt)
 	 * we are pretty desperate anyways.
 	 */
 	spin_unlock_irq(SCpnt->device->host->host_lock);
-	scsi_sleep(4 * HZ);
+	ssleep(4);
 	spin_lock_irq(SCpnt->device->host->host_lock);
 
 	WAIT(STATUS(SCpnt->device->host->io_port),
@@ -1540,7 +1543,7 @@ static int aha1542_host_reset(Scsi_Cmnd * SCpnt)
 	 * we are pretty desperate anyways.
 	 */
 	spin_unlock_irq(SCpnt->device->host->host_lock);
-	scsi_sleep(4 * HZ);
+	ssleep(4);
 	spin_lock_irq(SCpnt->device->host->host_lock);
 
 	WAIT(STATUS(SCpnt->device->host->io_port),

@@ -10,6 +10,7 @@ obj-$(CONFIG_SOUND_CS4232)	+= cs4232.o ad1848.o
 
 # Please leave it as is, cause the link order is significant !
 
+obj-$(CONFIG_SOUND_SH_DAC_AUDIO)	+= sh_dac_audio.o
 obj-$(CONFIG_SOUND_HAL2)	+= hal2.o
 obj-$(CONFIG_SOUND_AEDSP16)	+= aedsp16.o
 obj-$(CONFIG_SOUND_PSS)		+= pss.o ad1848.o mpu401.o
@@ -54,9 +55,17 @@ obj-$(CONFIG_SOUND_NM256)	+= nm256_audio.o ac97.o
 obj-$(CONFIG_SOUND_ICH)		+= i810_audio.o ac97_codec.o
 obj-$(CONFIG_SOUND_SONICVIBES)	+= sonicvibes.o
 obj-$(CONFIG_SOUND_CMPCI)	+= cmpci.o
+ifeq ($(CONFIG_SOUND_CMPCI_FM),y)
+  obj-$(CONFIG_SOUND_CMPCI)     += sound.o opl3.o
+endif
+ifeq ($(CONFIG_SOUND_CMPCI_MIDI),y)
+  obj-$(CONFIG_SOUND_CMPCI)     += sound.o mpu401.o
+endif
 obj-$(CONFIG_SOUND_ES1370)	+= es1370.o
 obj-$(CONFIG_SOUND_ES1371)	+= es1371.o ac97_codec.o
 obj-$(CONFIG_SOUND_VRC5477)	+= nec_vrc5477.o ac97_codec.o
+obj-$(CONFIG_SOUND_AU1000)	+= au1000.o ac97_codec.o
+obj-$(CONFIG_SOUND_AU1550_AC97)	+= au1550_ac97.o ac97_codec.o
 obj-$(CONFIG_SOUND_ESSSOLO1)	+= esssolo1.o
 obj-$(CONFIG_SOUND_FUSION)	+= cs46xx.o ac97_codec.o
 obj-$(CONFIG_SOUND_MAESTRO)	+= maestro.o
@@ -64,11 +73,12 @@ obj-$(CONFIG_SOUND_MAESTRO3)	+= maestro3.o ac97_codec.o
 obj-$(CONFIG_SOUND_TRIDENT)	+= trident.o ac97_codec.o
 obj-$(CONFIG_SOUND_HARMONY)	+= harmony.o
 obj-$(CONFIG_SOUND_EMU10K1)	+= ac97_codec.o
+obj-$(CONFIG_SOUND_BCM_CS4297A)	+= swarm_cs4297a.o
 obj-$(CONFIG_SOUND_RME96XX)     += rme96xx.o
 obj-$(CONFIG_SOUND_BT878)	+= btaudio.o
 obj-$(CONFIG_SOUND_ALI5455)	+= ali5455.o ac97_codec.o
 obj-$(CONFIG_SOUND_IT8172)	+= ite8172.o ac97_codec.o
-obj-$(CONFIG_SOUND_FORTE)	+= forte.o
+obj-$(CONFIG_SOUND_FORTE)	+= forte.o ac97_codec.o
 
 obj-$(CONFIG_SOUND_AD1980)	+= ac97_plugin_ad1980.o
 obj-$(CONFIG_SOUND_WM97XX)	+= ac97_plugin_wm97xx.o
@@ -96,7 +106,7 @@ sb_lib-objs	:= sb_common.o sb_audio.o sb_midi.o sb_mixer.o sb_ess.o
 vidc_mod-objs	:= vidc.o vidc_fill.o
 wavefront-objs  := wavfront.o wf_midi.o yss225.o
 
-host-progs	:= bin2hex hex2hex
+hostprogs-y	:= bin2hex hex2hex
 
 # Files generated that shall be removed upon make clean
 clean-files := maui_boot.h msndperm.c msndinit.c pndsperm.c pndspini.c \
